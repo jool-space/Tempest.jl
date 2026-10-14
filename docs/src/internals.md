@@ -29,7 +29,8 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | Implementation reverse rules | `src/implementations/reverse_rules.jl` | `reverse_rule`, `prepare_reverse_rules` |
 | CPU kernels | `src/implementations/cpu.jl` | `scalar_eval`, `build_implementation` |
 | Reference decomposition | `src/compiler/lowering.jl` | `resolve_semantics`, `lower_call!`, `lower_graph!` |
-| Semantic graph regions | `src/compiler/graph_regions.jl` | `GraphRequest`, `select_graph_regions`, `region_boundary` |
+| Semantic graph regions | `src/compiler/graph_regions.jl` | `GraphRequest`, `select_graph_regions`, `region_boundary`, `standard_numbering` |
+| Proposed regions | `src/compiler/proposals.jl` | `propose_regions`, `ProposedRequest`, `select_proposed_regions`, `proposal_benefit` |
 | Region and storage planning | `src/compiler/planning.jl` | `plan`, `explain` |
 | Implementation selection and grouping | `src/compiler/selection.jl` | `select_schedule`, `GroupedRequest` |
 | Runtime hooks | `src/runtime/hooks.jl` | `make_runtime`, `capture_runtime!`, `replay_runtime!` |
@@ -106,11 +107,16 @@ not establish vendor support.
 
 ## Planning decisions
 
-Preparation first offers connected semantic graph candidates through
-`GraphRequest`. Selection retains original value IDs and checks that contracting
-all selected regions leaves an acyclic graph. Providers see shapes and types
-before allocation. The current boundary requires dense logical arrays; layouts
-outside the selected region preserve their own alias relationships.
+Preparation first collects the regions implementations propose
+(`propose_regions`) and selects a non-overlapping, acyclic subset in candidate
+order, then by the memory traffic each saves against the default partition
+(`proposal_benefit`). It then offers connected semantic graph candidates
+through `GraphRequest`, around the claimed proposals. Selection retains
+original value IDs and checks that contracting all selected regions leaves an
+acyclic graph. Providers see shapes and types before allocation. The boundary
+requires dense logical arrays, except that a proposed region's input read only
+by matrix products keeps its native transpose; layouts outside the selected
+region preserve their own alias relationships.
 
 `plan` then exposes these stages:
 
@@ -128,14 +134,20 @@ Materializations at those boundaries are explicit schedule steps. A returned
 alias keeps its storage root alive past the last launch. Sibling call outputs
 cannot reuse one another's slots because they are written at the same step.
 
+A proposal that its implementation declines in `support` leaves the next one in
+order, often a nested alternative, eligible in the same pass; one that fails
+construction is excluded like a graph region. See
+[proposed regions](proposed-regions.md).
+
 Graph candidates grow from reductions, bounded to 64 members. A complete structural
 candidate is tried first. On metadata rejection, growth consults provider support
 at each addition and leaves declined neighbors outside that attempt. Private
 literals enter together with their consumers. If all constructions reject a
-selected graph region, preparation excludes that exact member set and replans; smaller overlapping
-regions remain eligible. Rewriting the semantic graph discards these exclusions
+selected graph region, preparation excludes that exact member set and replans,
+once for all regions that failed in the pass; smaller overlapping regions
+remain eligible. Rewriting the semantic graph discards these exclusions
 because node IDs belong to one graph snapshot. Selection is deterministic and
-greedy, without a cost model. `fuse_regions=false` bypasses it.
+greedy, without a cost model. `fuse_regions=false` bypasses it, proposals included.
 
 The cuTile graph provider (`ext/cuTileExt/graph/`) separates domain and phase
 analysis (`schedule.jl`), generated tile code (`codegen.jl`), the generated kernel
@@ -146,9 +158,10 @@ at most 4096 rows, packing several columns of at most 128 rows into one tile;
 longer columns stream bounded tiles. Second-axis reductions stream within a
 block. A single-axis reduction with too few kept tiles splits its reduced axis
 across blocks, and full reductions likewise use staged partial sums with shared
-workspace. Region values are numbered in a standard form (a walk from the
-outputs, with commutative binary operands ordered by structure), so equivalent
-regions share one compiled kernel. It retains actual Julia callables and
+workspace. Region values are numbered in a standard form (`standard_numbering`:
+a walk from the outputs, with commutative binary operands ordered by
+structure), so equivalent regions share one compiled kernel; cuDNN keys its
+execution plans for proposed regions on the same numbering. It retains actual Julia callables and
 requires `recomputable` permission before reevaluating their producers. See [graph regions](graph-regions.md) and
 [the implementation guide](implementations.md).
 

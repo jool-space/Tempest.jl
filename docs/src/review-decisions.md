@@ -4,6 +4,42 @@ Dated review decisions, newest first. Each entry records priorities at that
 date, not promises that every proposal survives implementation and measurement;
 "next step" language in older entries describes the state at that time.
 
+## Implementation-proposed regions — 14 October 2026
+
+Tempest partitioned programs itself, and no implementation could fuse across a
+matrix product: graph regions stop at contractions, and `support` can only
+accept or decline what it is offered. Implementations now also propose regions
+(`propose_regions`), in the style of XLA's and TVM's partitioners. The design
+and its answers are in [proposed regions](proposed-regions.md). Decisions:
+
+- **Proposals before growth.** Proposals are made on the prepared program, after
+  differentiation, and claim their nodes before growth-based graph regions
+  form around them. Rejected and failed proposals keep the default partition.
+- **Priority, then benefit.** Candidate order ranks implementations. Within
+  one, proposals rank by the bytes they keep out of memory against the default
+  partition, computed by Tempest from fusion roots and escaping values. Plain
+  size ranked a forward epilogue that swallowed the activation derivative above
+  the backward product's epilogue; benefit ranks them the other way.
+- **Feasibility in support.** A decline in `support` costs nothing; a
+  construction failure costs a replan. cuDNN builds its graph (without buffers)
+  in `support`, and all construction failures of one pass are excluded before a
+  single replan.
+- **Deterministic, measured policy.** cuDNN declines products where its fused
+  engines were slower on GB10 (right operand beyond three quarters of L2, inner
+  dimension above 4096). Selection by timing was rejected because the same
+  program must give the same partition.
+- **Shared numbering.** `standard_numbering` moved into Tempest; cuTile kernels
+  and cuDNN execution plans are both shared between equivalent regions.
+- **Half-precision cuBLAS.** The default plan had no Float16 or BFloat16
+  product, so there was no baseline; `CuBLASGemm` now uses `cublasGemmEx` with
+  Float32 accumulation.
+
+First consumer: `CuDNNKernels` fuses Float16 and BFloat16 products with their
+bias, activation, activation derivative and bias gradient. On an MLP block it
+was 1.3 to 2.3 times faster than the default plan forward and 1.2 to 1.8 times
+in training. Float32 cuDNN products round to TF32 without saying so, and are
+proposed only under `matmul_precision = :tf32`.
+
 ## Pruning — 14 October 2026
 
 Research code that no current page or test depends on was removed. The git tag

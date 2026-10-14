@@ -25,6 +25,7 @@ makedocs(;
         "Compiler" => [
             "Implementations" => "implementations.md",
             "Graph regions" => "graph-regions.md",
+            "Proposed regions" => "proposed-regions.md",
             "Layouts" => "layouts.md",
             "Source guide" => "internals.md",
             "Direction" => "compiler-direction.md",

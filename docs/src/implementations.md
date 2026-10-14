@@ -103,6 +103,22 @@ Recomputation additionally needs the public `recomputable(f)` promise; device
 compilability alone does not establish it. See [graph regions](graph-regions.md)
 for an ordinary-code example, current cuTile coverage, and selection limits.
 
+## Regions an implementation proposes
+
+Growth-based graph regions stop at matrix products. An implementation that
+fuses across them proposes its own regions instead:
+`propose_regions(implementation, request::ProposalRequest)` returns
+`RegionProposal`s, sets of value IDs on the prepared program that may include
+matrix products. Tempest computes each proposal's boundary, ranks proposals by
+candidate order and then by the memory traffic they save against the default
+partition, and accepts those that do not overlap, keep the partition acyclic,
+and pass `support(implementation, ::ProposedRequest)`. Only the proposing
+implementation builds a selected region, with the same tuple contract as
+`GraphRequest`, except that an input read only by matrix products may arrive as
+a `Transpose`. Declines and construction failures fall back to the default
+partition. [Proposed regions](proposed-regions.md) records the design and the
+cuDNN consumer.
+
 ## Shared workspace
 
 When construction knows its temporary storage requirements, return an
@@ -216,7 +232,11 @@ Rejections and their reasons:
 cuDNN is never offered lone reductions or pointwise regions. With cuDNN 9.26 on
 GB10, a sum alone, or pointwise work followed by a sum, had no engine. A sum
 built only after a matrix product. `CuDNNKernels` defines no `GraphRequest`
-method, so it stays out of graph-region selection.
+method, so it stays out of growth-based graph-region selection. It proposes
+regions around matrix products instead: Float16 and BFloat16 products with
+their pointwise epilogue and the sums after them, forward and backward. See
+[proposed regions](proposed-regions.md#cuDNN:-matrix-products-with-epilogues)
+for coverage, precision and measurements.
 
 ### Execution and workspace
 
@@ -270,16 +290,15 @@ the table without being profiled.
 
 Norms are the next cuDNN pattern: `norm_fwd!`/`norm_bwd!` with saved statistics,
 once Tempest has a normalization verb. They would follow the attention rule's
-shape. Matrix products with epilogues, and normalization fused into a matrix
-product, need an implementation to propose the region it covers. That requires
-a request carrying a candidate subgraph around a matrix product, which
-`GraphRequest` does not form today because it stops at contractions. Verbs such
-as attention need none of this.
+shape. Normalization fused into a matrix product would be another proposal
+around the product, like the epilogues `CuDNNKernels` proposes now.
 
 ## How fusion works today
 
-First, supported `GraphRequest` candidates can cover connected semantic nodes
-around reductions, before layouts and storage are assigned. Their original
+First, implementations propose regions of their own, such as a matrix product
+with its epilogue, and the selected proposals claim their nodes. Then supported
+`GraphRequest` candidates can cover connected semantic nodes around reductions,
+before layouts and storage are assigned. Their original
 operations and escaping outputs remain visible to the selected provider. This
 lets a provider compile several reduction phases and their pointwise consumers.
 

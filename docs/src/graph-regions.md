@@ -65,7 +65,8 @@ terms differently. Return `BuiltImplementation`, `ImplementationPlan`, or
 `Unsupported(reason)` through the [usual implementation protocol](implementations.md).
 
 Views, reshapes, matrix products, scatter, and opaque semantic calls remain
-outside the primitive region. Their results can be boundary inputs. Layout
+outside the primitive region. An implementation that fuses across a matrix
+product proposes that region itself; see [proposed regions](proposed-regions.md). Their results can be boundary inputs. Layout
 planning materializes dense presentations where the selected provider needs
 them, while preserving required aliases and lifetimes outside the region.
 Graph regions currently have no direct in-place donation contract; functional
@@ -94,7 +95,9 @@ nor guarantees cuTile compilation.
 
 ## Selection and fallback
 
-The current selector grows connected candidates from reductions, bounded to 64 members.
+Implementation-proposed regions are selected first, and growth treats their
+members as claimed. The current selector grows connected candidates from
+reductions, bounded to 64 members.
 It checks that selected regions remain jointly acyclic and first offers the
 complete structural candidate. If that is declined, it starts from a supported
 anchor and asks providers about each proposed addition. Declined neighbors stay
@@ -109,7 +112,8 @@ only when several nodes enter together can still be missed.
 
 Metadata rejection permits alternative smaller candidates. If construction returns
 `Unsupported`, preparation excludes that exact member set and replans; shared
-nodes remain eligible for smaller regions. Unexpected exceptions propagate.
+nodes remain eligible for smaller regions. Every selected region that fails to
+build in one pass is excluded before the single replan. Unexpected exceptions propagate.
 `explain` reports selected members, logical inputs, escaping outputs, and
 rejection reasons. If a semantic reverse-rule pair is rolled back, region IDs
 from the discarded graph are cleared before selection resumes.
