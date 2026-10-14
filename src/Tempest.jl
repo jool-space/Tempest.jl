@@ -25,6 +25,7 @@ export trace,
     LinearAlgebraGemm,
     CUDAKernels,
     CuTileKernels,
+    CuDNNKernels,
     CuBLASGemm
 
 public Implementation,

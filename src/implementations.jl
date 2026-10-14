@@ -166,11 +166,34 @@ struct CuTileKernels <: Implementation end
 """CUDA matrix multiplication through an owned cuBLAS handle and workspace."""
 struct CuBLASGemm <: Implementation end
 
+"""
+    CuDNNKernels(; float32_cast = nothing)
+
+Semantic verbs realized as cuDNN graphs; load CUDACore and cuDNN. Currently
+scaled dot-product attention, forward and backward. cuDNN's attention engines
+take Float16 or BFloat16 operands. Float32 attention is rejected unless
+`float32_cast` names one of those types. Then q, k, v and the output cotangent
+are rounded to it, scores, softmax statistics and accumulation stay Float32, and
+results return as Float32. The rounding is opt-in, like TF32 through
+`CUDATarget(matmul_precision = :tf32)`, and `explain` reports it.
+"""
+struct CuDNNKernels <: Implementation
+    float32_cast::Union{Nothing, DataType}
+
+    function CuDNNKernels(; float32_cast = nothing)
+        if !(float32_cast === nothing || float32_cast in (Float16, Core.BFloat16))
+            throw(ArgumentError("float32_cast must be nothing, Float16 or BFloat16"))
+        end
+        new(float32_cast)
+    end
+end
+
 implementation_name(::CPUKernels) = :cpu
 implementation_name(::LinearAlgebraGemm) = :LinearAlgebra
 implementation_name(::CUDAKernels) = :cuda
 implementation_name(::CuTileKernels) = :cutile
 implementation_name(::CuBLASGemm) = :cuBLAS
+implementation_name(::CuDNNKernels) = :cuDNN
 
 """
     default_implementations(target) -> Tuple

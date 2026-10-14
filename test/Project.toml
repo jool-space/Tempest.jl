@@ -7,6 +7,7 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
+cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
 
 [sources]

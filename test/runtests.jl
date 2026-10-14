@@ -66,6 +66,13 @@ if CUDACore.functional()
     include("cuda/graph_training.jl")
     include("cuda/transformer.jl")
     include("cuda/reverse_rules.jl")
+    # Loaded last, so the tests above run without the cuDNN extension.
+    import cuDNN
+    if cuDNN.functional()
+        include("cuda/cudnn.jl")
+    else
+        @info "cuDNN unavailable; cuDNN tests skipped"
+    end
 else
     @info "CUDA unavailable; GPU tests skipped"
 end
