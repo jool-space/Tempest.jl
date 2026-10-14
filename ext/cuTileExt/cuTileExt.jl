@@ -29,9 +29,13 @@ end
 tile_expression_support(::Read) = Supported()
 
 function tile_expression_support(x::ScalarCall)
-    # cuTile 1.0 has no overlays for these Base implementations. Their scalar
+    # cuTile has no overlays for these Base implementations. Their scalar
     # branches do not lower correctly to tile-shaped values. Keep Julia's CUDA
     # implementations rather than replacing log1p/expm1 with less accurate formulas.
+    # Still so on cuTile main (86b1f83): log1p, expm1, asin and acos fail to
+    # compile, comparing a 0-D tile with a 256-lane one; one-argument atan needs
+    # a copysign without a Tile IR equivalent; sign compiles over one-axis tiles
+    # but not over the two-axis tiles of column reductions (see graph_codegen.jl).
     if x.f in (log1p, expm1, asin, acos, sign) || (x.f === atan && length(x.args) == 1)
         return Unsupported(
             "cuTile has no verified lowering for $(x.f) with $(length(x.args)) argument(s)",

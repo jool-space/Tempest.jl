@@ -27,7 +27,7 @@ end
 reduced_extent(extent, dims) = ntuple(i -> i in dims ? 1 : extent[i], length(extent))
 
 # A scalar callable over same-extent lanes. Operands are flattened first, as for
-# pointwise callables: cuTile 1.0 can reverse multi-axis shapes otherwise. A
+# pointwise callables: cuTile can reverse multi-axis shapes otherwise. A
 # result independent of its lanes, such as the `one(x)` of a logsumexp lift,
 # comes back as a scalar and is broadcast again.
 function lane_map(callable, operands, extent)
@@ -177,9 +177,12 @@ function emit_graph_value!(
             )
         end
         extent = ntuple(i -> matrix_shape(shape)[i] == 1 ? 1 : tile[i], 2)
-        # cuTile 1.0 scalar-call broadcasting reverses some multi-axis tile
-        # shapes when the callable contains scalar constants. Expand Julia's
-        # singleton axes first, then use its working vector broadcast path.
+        # cuTile scalar-call broadcasting reverses some multi-axis tile shapes
+        # when the callable contains scalar constants. Expand Julia's singleton
+        # axes first, then use its working vector broadcast path. This still
+        # reproduces on cuTile main (86b1f83): `ifelse(x > zero(x), x, zero(x))`
+        # over a 64×4 tile fails to compile, comparing against a 4×64 tile.
+        # Over 256 lanes it compiles and is exact.
         flattened = map(operands) do operand
             :(reshape(ct.broadcast_to(ct.Tile($operand), $extent), ($(prod(extent)),)))
         end

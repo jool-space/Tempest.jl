@@ -107,3 +107,32 @@ end
     # The rule table is target-independent: no rule, no derivative.
     @test_throws ArgumentError prepare(x -> sum(Tempest.fold(range_fold, x; dims = 1)), CuArray(randn(Float32, 8, 3)))
 end
+
+@testset "Infinite slices and ties in cuTile folds" begin
+    # An all -Inf column gives -Inf and a +Inf element +Inf, on the resident,
+    # packed, streamed, split and full schedules.
+    for (shape, dims) in (((300, 4), 1), ((50, 300), 1), ((5000, 40), 1), ((5000, 4), 1), ((300, 37), :))
+        x = 3.0f0 .* sin.(reshape(Float32.(1:prod(shape)), shape))
+        x[:, 2] .= -Inf32
+        x[7, 3] = Inf32
+        f(x) = (lse = Tempest.fold(LogSumExpFold(), x; dims), max = maximum(x; dims), min = minimum(x; dims))
+        ex = prepare_forward(f, CuArray(x))
+        @test all(==(:cutile), ex.providers)
+        got = map(Array, execute!(ex))
+        expected = (lse = Tempest.logsumexp(x; dims), max = maximum(x; dims), min = minimum(x; dims))
+        for key in keys(expected)
+            g, r = got[key], expected[key]
+            g, r = r isa Number ? (vec(g), [r]) : (g, r)
+            @test isequal(isfinite.(g), isfinite.(r))
+            @test isequal(g[.!isfinite.(g)], r[.!isfinite.(r)])
+            @test g[isfinite.(g)] ≈ r[isfinite.(r)] rtol = 1e-5
+        end
+    end
+    # Tied extrema share the cotangent equally on the GPU as well.
+    x = Float32[1 2 5; 3 2 5; 3 0 5]
+    for f in (x -> sum(maximum(x; dims = 1)), x -> sum(minimum(x; dims = 2)), maximum)
+        p = differentiate(trace(f, x))
+        _, (expected,) = value_and_gradient(p, x)
+        @test Array(execute!(prepare(p, CuArray(x)))[2]) ≈ expected
+    end
+end

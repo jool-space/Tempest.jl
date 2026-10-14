@@ -87,11 +87,10 @@ fold_name(::LogSumExpFold) = :logsumexp
 fold_init(::LogSumExpFold, T) = (T(-Inf), zero(T))
 fold_lift(::LogSumExpFold, x) = (x, one(x))
 
-# Clamping keeps an infinite maximum from producing -Inf - -Inf = NaN: an empty
-# slice keeps a zero sum, and +Inf stays infinite. A clamp rather than a select:
-# cuTile 1.0.0 rejects selects with a constant arm inside lane-mapped functions
-# (fixed by cuTile.jl#316, not yet released).
-lse_shift(m) = min(max(m, -floatmax(m)), floatmax(m))
+# Exponentials are shifted by the maximum, or by zero when it is infinite, as in
+# the reference: an empty slice keeps a zero sum instead of -Inf - -Inf = NaN,
+# and a +Inf element keeps the sum infinite.
+lse_shift(m) = ifelse(isfinite(m), m, zero(m))
 
 function fold_combine(::LogSumExpFold, a, b)
     m = max(a[1], b[1])
@@ -132,12 +131,11 @@ fold_observe(f::GenericFold, state) = f.observe(state)
 struct FoldLift{K, F <: Fold} end
 (::FoldLift{K, F})(x) where {K, F} = fold_lift(F.instance, x)[K]
 
-# Static indices: cuTile 1.0 cannot lower the branches of `ntuple` here.
 struct FoldMerge{K, W, F <: Fold} end
-@generated function (::FoldMerge{K, W, F})(xs...) where {K, W, F}
-    a = [:(xs[$i]) for i = 1:W]
-    b = [:(xs[$(W + i)]) for i = 1:W]
-    :(fold_combine(F.instance, ($(a...),), ($(b...),))[$K])
+function (::FoldMerge{K, W, F})(xs...) where {K, W, F}
+    a = ntuple(i -> xs[i], Val(W))
+    b = ntuple(i -> xs[W + i], Val(W))
+    fold_combine(F.instance, a, b)[K]
 end
 
 struct FoldObserve{F <: Fold} end
@@ -167,7 +165,7 @@ has_resident_lowering(::LogSumExpFold) = true
 function fold_resident(::LogSumExpFold, x, valid, dims)
     T = eltype(x)
     peak = maximum(ifelse.(valid, x, T(-Inf)); dims)
-    shift = min.(max.(peak, -floatmax(T)), floatmax(T))
+    shift = lse_shift.(peak)
     shift .+ log.(sum(ifelse.(valid, exp.(x .- shift), zero(T)); dims))
 end
 
@@ -258,8 +256,6 @@ fold_pullback(::LogSumExpFold, x, y, g, axes) = g .* exp.(x .- y)
 
 """Indicator of `x == y`, in the element type of `x`."""
 struct Tie end
-# A conversion rather than a select: cuTile 1.0.0 rejects selects between scalar
-# constants over tile lanes (fixed by cuTile.jl#316, not yet released).
 (::Tie)(x, y) = oftype(x, x == y)
 recomputable(::Tie) = true
 local_partials(::Tie, xs, y) = map(x -> constant(x.nodes, zero(eltype(x))), xs)
