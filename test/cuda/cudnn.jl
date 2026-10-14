@@ -190,3 +190,151 @@ end
         @test all(relative_error(got[i + 1], gradients[i]) < 1e-2 for i = 1:3)
     end
 end
+
+## Matrix products with their epilogues, proposed as regions
+
+using Tempest: ProposedRegion, ProposedRequest, MatMul, SumReduction
+
+proposed_regions(ex) = [step.region for step in ex.storage.steps if step.region isa ProposedRegion]
+
+# A feed-forward block as in a transformer, with deterministic operands.
+epilogue_block(w1, b1, w2, b2, x) = w2 * tanh.(w1 * x .+ b1) .+ b2
+epilogue_loss(w1, b1, w2, b2, x) = sum(abs2, epilogue_block(w1, b1, w2, b2, x))
+
+function block_operands(T, d, n)
+    shaped(s, dims...) = T.(reshape(Float32.(sin.((1:prod(dims)) .* s)), dims...) ./ sqrt(Float32(dims[end])))
+    (shaped(0.3, 4d, d), shaped(0.5, 4d), shaped(0.7, d, 4d), shaped(1.1, d), shaped(1.3, d, n))
+end
+
+wide(arrays) = map(x -> Float64.(x), arrays)
+
+@testset "cuDNN matrix products with bias and activation epilogues" begin
+    for T in (Float16, Core.BFloat16)
+        tolerance = T === Float16 ? 2e-3 : 2e-2
+        args = block_operands(T, 32, 96)
+        ex = prepare_forward(epilogue_block, CuArray.(args)...; implementations = (CuDNNKernels(),))
+        regions = proposed_regions(ex)
+        @test length(regions) == 2
+        @test ex.providers == [:cuDNN, :cuDNN]
+        text = explanation(ex)
+        @test occursin("cuDNN matmul → +, tanh", text)
+        @test occursin("selected as region 1", text)
+        @test occursin("$(nameof(T)) operands, Float32 accumulation", text)
+        y = execute!(ex)
+        @test eltype(y) === T
+        @test relative_error(y, epilogue_block(wide(args)...)) < tolerance
+        # Every value rounds where Tempest rounds it: the default plan (cuBLAS
+        # with Float32 accumulation, then the epilogue kernels) agrees closely.
+        default = prepare_forward(epilogue_block, CuArray.(args)...)
+        @test :cuDNN ∉ default.providers
+        @test relative_error(y, Float64.(Array(execute!(default)))) < tolerance
+
+        capture!(ex)
+        for scale in (0.5f0, 1.5f0)
+            changed = (T.(scale .* args[1]), args[2:4]..., T.(scale .* args[5]))
+            bind!(ex, changed...)
+            @test relative_error(replay!(ex), epilogue_block(wide(changed)...)) < tolerance
+        end
+    end
+end
+
+@testset "cuDNN epilogues in training: derivative and bias gradient after the product" begin
+    for T in (Float16, Core.BFloat16)
+        args = block_operands(T, 32, 64)
+        ex = prepare(epilogue_loss, CuArray.(args)...; implementations = (CuDNNKernels(),))
+        nodes = ex.storage.program.nodes
+        primal = length(ex.storage.program.primal.nodes)
+        regions = proposed_regions(ex)
+        # The backward product W2' * dy carries tanh's derivative and the first
+        # bias gradient, a sum after the product; its result escapes to the
+        # weight gradients.
+        backward = only(filter(r -> all(>(primal), filter(id -> nodes[id].op isa MatMul, r.members)), regions))
+        @test any(id -> nodes[id].op isa SumReduction, backward.members)
+        @test length(backward.outputs) == 2
+        text = explanation(ex)
+        @test occursin("sums written in Float32 and rounded to $(nameof(T))", text)
+        # Half-precision training differs from the Float64 reference by more
+        # than its rounding: the first weight's gradient cancels. Measure the
+        # default plan's error and require no more than that, within rounding.
+        got = execute!(ex)
+        expected = execute!(prepare(epilogue_loss, CuArray.(args)...))
+        value, gradients = reference_gradients(epilogue_loss, args...)
+        loss_error(result) = abs(Float64(Array(result[1])[]) - value) / abs(value)
+        @test loss_error(got) <= 1.1 * loss_error(expected) + 1e-3
+        for i = 1:5
+            @test relative_error(got[i + 1], gradients[i]) <=
+                  1.1 * relative_error(expected[i + 1], gradients[i]) + 1e-3
+        end
+    end
+end
+
+@testset "cuDNN sums after a product" begin
+    w, x = CuArray.(block_operands(Float16, 16, 40)[[1, 5]])
+    for dims in (1, 2, :)
+        f(w, x) = sum(w * x; dims)
+        ex = prepare_forward(f, w, x; implementations = (CuDNNKernels(),))
+        @test ex.providers == [:cuDNN]
+        @test occursin("sums written in Float32", explanation(ex))
+        y = execute!(ex)
+        @test eltype(y) === Float16
+        expected = f(Float64.(Array(w)), Float64.(Array(x)))
+        @test relative_error(y, expected) < 4e-3
+    end
+end
+
+@testset "cuDNN epilogue proposals decline with reasons" begin
+    args = block_operands(Float32, 16, 24)
+    layer(w, b, x) = tanh.(w * x .+ b)
+    operands = CuArray.(args[[1, 2, 5]])
+    expected = layer(wide(args[[1, 2, 5]])...)
+
+    # Float32 engines round to TF32, which the target must permit.
+    ex = prepare_forward(layer, operands...; implementations = (CuDNNKernels(),))
+    @test :cuDNN ∉ ex.providers
+    @test relative_error(execute!(ex), expected) < 1e-6
+    tf32 = CUDATarget(matmul_precision = :tf32)
+    ex = prepare_forward(layer, operands...; target = tf32, implementations = (CuDNNKernels(),))
+    @test ex.providers == [:cuDNN]
+    @test relative_error(execute!(ex), expected) < 2e-3
+
+    # Float64 is not proposed.
+    ex = prepare_forward(layer, map(x -> CuArray(Float64.(x)), args[[1, 2, 5]])...; implementations = (CuDNNKernels(),))
+    @test :cuDNN ∉ ex.providers
+
+    # Long inner dimensions ran faster on cuBLAS; the product stays there.
+    w = CuArray(Float16.(reshape(sin.(1:(8 * 4608)), 8, 4608) ./ 64))
+    x = CuArray(Float16.(reshape(cos.(1:(4608 * 8)), 4608, 8) ./ 64))
+    ex = prepare_forward((w, x) -> tanh.(w * x), w, x; implementations = (CuDNNKernels(),))
+    @test :cuDNN ∉ ex.providers
+    @test occursin("declined: cuDNN's fused engines were slower than cuBLAS", explanation(ex))
+    @test relative_error(execute!(ex), tanh.(Float64.(Array(w)) * Float64.(Array(x)))) < 2e-3
+
+    # Construction declines buffers that are less aligned than the engines
+    # assume, so preparation replans instead of failing.
+    half = CuArray.(block_operands(Float16, 16, 24)[[1, 2, 5]])
+    ex = prepare_forward(layer, half...; implementations = (CuDNNKernels(),))
+    region = only(proposed_regions(ex))
+    request = Tempest.proposed_request(ex.runtime.target, region)
+    function shifted(spec)
+        buffer = CuArray{spec.dtype}(undef, prod(spec.dims) + 1)
+        reshape(view(buffer, 2:(prod(spec.dims) + 1)), spec.dims)
+    end
+    outputs = map(spec -> CuArray{spec.dtype}(undef, spec.dims), request.outputs)
+    built = Tempest.build_implementation(CuDNNKernels(), request, ex.runtime, outputs, map(shifted, request.inputs))
+    @test built isa Unsupported
+    @test occursin("aligned", built.reason)
+end
+
+@testset "Equivalent epilogue regions share one cuDNN plan" begin
+    w, b, x = CuArray.(block_operands(Float16, 16, 64)[[3, 4, 5]])
+    w = w[:, 1:16]
+    twice(w, b, x) = tanh.(w * tanh.(w * x .+ b) .+ b)
+    ex = prepare_forward(twice, w, b, x; implementations = (CuDNNKernels(),))
+    @test length(proposed_regions(ex)) == 2
+    @test ex.calls[1].launch.graph === ex.calls[2].launch.graph
+    @test ex.calls[1].launch.pack !== ex.calls[2].launch.pack
+    again = prepare_forward(twice, w, b, x; implementations = (CuDNNKernels(),))
+    @test [r.members for r in proposed_regions(again)] == [r.members for r in proposed_regions(ex)]
+    expected = twice(Float64.(Array(w)), Float64.(Array(b)), Float64.(Array(x)))
+    @test relative_error(execute!(ex), expected) < 2e-3
+end

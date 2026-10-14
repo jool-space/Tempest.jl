@@ -176,6 +176,10 @@ take Float16 or BFloat16 operands. Float32 attention is rejected unless
 are rounded to it, scores, softmax statistics and accumulation stay Float32, and
 results return as Float32. The rounding is opt-in, like TF32 through
 `CUDATarget(matmul_precision = :tf32)`, and `explain` reports it.
+
+It also proposes regions around Float16 and BFloat16 matrix products: the
+product with its pointwise epilogue and the sums after it, forward and backward
+(Float32 products only under TF32). `float32_cast` does not apply to them.
 """
 struct CuDNNKernels <: Implementation
     float32_cast::Union{Nothing, DataType}

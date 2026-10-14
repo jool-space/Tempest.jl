@@ -80,10 +80,11 @@ function support(implementation::CuDNNKernels, request::CallRequest)
     Unsupported("no cuDNN implementation of $f")
 end
 
-# cuDNN is offered whole semantic verbs only. Scalar regions are not cuDNN
-# patterns: with cuDNN 9.26 on GB10 a lone sum had no engine, and pointwise
-# regions belong to the scalar-fusion providers. Without a GraphRequest method,
-# cuDNN does not take part in graph-region selection.
+# cuDNN is offered whole semantic verbs, and proposes regions around matrix
+# products itself (matmul.jl). Scalar regions are not cuDNN patterns: with
+# cuDNN 9.26 on GB10 a lone sum had no engine, and pointwise regions belong to
+# the scalar-fusion providers. Without a GraphRequest method, cuDNN does not
+# take part in growth-based graph-region selection.
 function support(::CuDNNKernels, ::Tempest.RegionRequest)
     Unsupported("cuDNN implements semantic verbs, not scalar regions")
 end
