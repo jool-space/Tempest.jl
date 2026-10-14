@@ -24,7 +24,7 @@ A reduction without a schedule. `fold_lift(f, x)` maps one element to a state
 tuple, `fold_combine(f, a, b)` merges two states, `fold_observe(f, state)` maps
 a final state to the result, and `fold_init(f, T)` is the identity state for
 elements of type `T`. Backends group elements in any fixed order, so combine
-must be associative and commutative up to rounding. See `src/folds.jl`.
+must be associative and commutative up to rounding. See `src/frontend/folds.jl`.
 """
 abstract type Fold end
 

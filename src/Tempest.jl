@@ -77,26 +77,42 @@ public Implementation,
     fold_resident,
     has_resident_lowering
 
-include("layout.jl")
-include("graph_ir.jl")
-include("tensor.jl")
-include("broadcast.jl")
-include("operations.jl")
-include("verbs.jl")
-include("primitives.jl")
-include("reverse.jl")
-include("reference.jl")
-include("folds.jl")
-include("planning.jl")
-include("runtime.jl")
-include("implementations.jl")
-include("graph_regions.jl")
-include("reverse_rules.jl")
-include("semantic_lowering.jl")
-include("cpu.jl")
-include("state.jl")
-include("execution.jl")
-include("selection.jl")
-include("preparation.jl")
+# Graph IR: index mappings, operations and nodes, the schedule a plan is made
+# of, and the reference interpreter.
+include("ir/layout.jl")
+include("ir/graph.jl")
+include("ir/schedule.jl")
+include("ir/interpret.jl")
+
+# Array frontend: tracing Julia array code into the graph.
+include("frontend/tensor.jl")
+include("frontend/broadcast.jl")
+include("frontend/operations.jl")
+include("frontend/folds.jl")
+
+# Semantic verbs: the call contract and the built-in verbs.
+include("verbs/contract.jl")
+include("verbs/builtin.jl")
+
+# Program transformations.
+include("transforms/reverse.jl")
+
+# Implementations: targets, the provider protocol, and the CPU provider.
+include("implementations/targets.jl")
+include("implementations/protocol.jl")
+include("implementations/reverse_rules.jl")
+include("implementations/cpu.jl")
+
+# Compiler: semantic lowering, graph regions, planning, selection.
+include("compiler/lowering.jl")
+include("compiler/graph_regions.jl")
+include("compiler/planning.jl")
+include("compiler/selection.jl")
+
+# Preparing and running executables.
+include("runtime/hooks.jl")
+include("runtime/state.jl")
+include("runtime/execution.jl")
+include("runtime/preparation.jl")
 
 end

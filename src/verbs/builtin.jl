@@ -454,5 +454,3 @@ function reference(::typeof(causal_fill), x::AbstractArray; value)
 end
 
 verb_pullback(::typeof(causal_fill), (x,), y, dy; value) = (causal_fill(dy; value = 0.0f0),)
-
-const ATTENTION_VERBS = (attention_forward, attention_backward, causal_fill)

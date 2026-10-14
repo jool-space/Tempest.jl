@@ -78,33 +78,3 @@ function infer_target(args)
     end
     target === nothing ? CPUTarget() : target
 end
-
-abstract type AbstractRuntime end
-
-struct CPURuntime <: AbstractRuntime end
-
-function make_runtime(::ExecutionTarget, storage, args)
-    throw(ArgumentError("target is unavailable; for CUDATarget load CUDACore and cuBLAS"))
-end
-
-make_runtime(::CPUTarget, storage, args) = CPURuntime()
-allocate(::CPURuntime, T, dims) = Array{T}(undef, dims)
-check_runtime(::CPURuntime) = nothing
-
-function capture_runtime!(runtime, ex)
-    throw(ArgumentError("capture is unsupported by this execution target"))
-end
-
-function replay_runtime!(runtime)
-    throw(ArgumentError("call capture! on a capture-capable executable first"))
-end
-
-explain_runtime(io, ::CPURuntime) = println(io, "Target: CPU")
-
-needs_indexing(::Literal) = false
-
-function needs_indexing(x::Read)
-    !linear_identity(x.mapping) || (prod(x.dims) != 1 && prod(x.dims) != prod(x.shape))
-end
-
-needs_indexing(x::ScalarCall) = any(needs_indexing, x.args)

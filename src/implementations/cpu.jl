@@ -1,6 +1,6 @@
 # The CPU provider executes the same scalar expression trees as generated GPU
 # kernels. These loops are also useful for checking scheduling independently of
-# the allocating graph interpreter in reference.jl.
+# the allocating graph interpreter in ir/interpret.jl.
 scalar_eval(x::Literal, arrays, i) = x.value
 
 @inline function scalar_eval(x::Read{I}, arrays, i) where {I}

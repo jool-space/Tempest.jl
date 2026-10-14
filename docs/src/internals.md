@@ -1,37 +1,47 @@
 # Reading and changing Tempest
 
-Start at `prepare` in `src/preparation.jl`. It validates the input contract,
+Start at `prepare` in `src/runtime/preparation.jl`. It validates the input contract,
 resolves semantic calls, and prepares a schedule. If an opaque implementation
 passes its metadata check but cannot be built, preparation expands that call's
 reference and replans. The original trace remains available for inspection.
 
 ## Source map
 
+`src/Tempest.jl` lists every file in load order. The directories group the
+pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
+(semantic calls), `transforms/`, `implementations/` (the provider protocol),
+`compiler/` (from a trace to a storage plan) and `runtime/` (preparing and running).
+
 | Responsibility | Files | Main entry points |
 | --- | --- | --- |
-| Graph IR | `src/graph_ir.jl` | `Operation` payload types, `Node`, `TensorProgram`, `TrainingProgram`, `ForwardProgram`, `live_nodes` |
-| Symbolic array frontend | `src/tensor.jl` | `TracedArray`, `TracedScalar`, `trace`, `validate` |
-| Array frontend | `src/broadcast.jl`, `src/operations.jl` | `pointwise`, `trace_broadcast`, Base methods |
-| Index mappings | `src/layout.jl` | `native_layout`, `map_index` |
-| Derivatives | `src/reverse.jl` | `differentiate`, `pullback`, `local_partials`, `call_pullback` |
-| Semantic contracts | `src/verbs.jl` | `record_call`, `check_verb_result` |
-| Built-in verbs | `src/primitives.jl` | `batched_mul`, `logsumexp`, column gathers, `take_rows`, `dropout` |
-| Reference decomposition | `src/semantic_lowering.jl` | `resolve_semantics`, `lower_call!`, `lower_graph!` |
-| Semantic graph regions | `src/graph_regions.jl` | `GraphRequest`, `select_graph_regions`, `region_boundary` |
-| Region and storage planning | `src/planning.jl` | `plan` |
-| Implementation contract | `src/implementations.jl` | `support`, `build_implementation`, `choose_implementation` |
-| Placement and runtime hooks | `src/runtime.jl` | `infer_target`, `make_runtime` |
-| Concrete preparation | `src/preparation.jl` | `prepare_schedule`, `allocate_storage` |
-| Functional state | `src/state.jl` | `validate_donation`, `prepare_state!`, `commit_state!` |
-| Execution lifecycle | `src/execution.jl` | `Prepared`, `bind!`, `execute!`, `capture!`, `replay!`, `profile` |
-| CPU kernels | `src/cpu.jl` | `scalar_eval`, `build_implementation` |
-| Independent graph execution | `src/reference.jl` | `interpret`, `value_and_gradient` |
+| Index mappings | `src/ir/layout.jl` | `native_layout`, `map_index` |
+| Graph IR | `src/ir/graph.jl` | `Operation` payload types, `Node`, `TensorProgram`, `TrainingProgram`, `ForwardProgram`, `live_nodes` |
+| Schedule IR | `src/ir/schedule.jl` | scalar expressions (`Read`, `ScalarCall`), regions, `Step`, `StoragePlan`, `needs_indexing` |
+| Independent graph execution | `src/ir/interpret.jl` | `interpret`, `evaluate`, `value_and_gradient` |
+| Symbolic array frontend | `src/frontend/tensor.jl` | `TracedArray`, `TracedScalar`, `trace`, `validate` |
+| Array frontend | `src/frontend/broadcast.jl`, `src/frontend/operations.jl` | `pointwise`, `trace_broadcast`, Base methods |
+| Folds | `src/frontend/folds.jl` | `Fold`, `fold`, `fold_pullback`, `fold_resident` |
+| Semantic contracts | `src/verbs/contract.jl` | `record_call`, `check_verb_result` |
+| Built-in verbs | `src/verbs/builtin.jl` | `batched_mul`, `logsumexp`, column gathers, `take_rows`, `dropout`, `attention` |
+| Derivatives | `src/transforms/reverse.jl` | `differentiate`, `pullback`, `local_partials`, `call_pullback`, `with_update` |
+| Placement | `src/implementations/targets.jl` | `CPUTarget`, `CUDATarget`, `infer_target` |
+| Implementation contract | `src/implementations/protocol.jl` | `support`, `build_implementation`, `choose_implementation` |
+| Implementation reverse rules | `src/implementations/reverse_rules.jl` | `reverse_rule`, `prepare_reverse_rules` |
+| CPU kernels | `src/implementations/cpu.jl` | `scalar_eval`, `build_implementation` |
+| Reference decomposition | `src/compiler/lowering.jl` | `resolve_semantics`, `lower_call!`, `lower_graph!` |
+| Semantic graph regions | `src/compiler/graph_regions.jl` | `GraphRequest`, `select_graph_regions`, `region_boundary` |
+| Region and storage planning | `src/compiler/planning.jl` | `plan`, `explain` |
+| Implementation selection and grouping | `src/compiler/selection.jl` | `select_schedule`, `GroupedRequest` |
+| Runtime hooks | `src/runtime/hooks.jl` | `make_runtime`, `capture_runtime!`, `replay_runtime!` |
+| Functional state | `src/runtime/state.jl` | `validate_donation`, `prepare_state!`, `commit_state!` |
+| Execution lifecycle | `src/runtime/execution.jl` | `Prepared`, `bind!`, `execute!`, `capture!`, `replay!`, `profile` |
+| Concrete preparation | `src/runtime/preparation.jl` | `prepare`, `prepare_schedule`, `allocate_storage` |
 | Shared scalar rules | `ext/ChainRulesCoreExt.jl` | `trace_scalar_rule`, `lift_partials` |
-| Device and vendor integration | `ext/` | CUDA and cuTile extensions |
+| Device and vendor integration | `ext/` | CUDA, cuTile and cuDNN extensions |
 
 ## Folds
 
-Every reduction is a `FoldReduction` (`src/folds.jl`): a fold's identity state,
+Every reduction is a `FoldReduction` (`src/frontend/folds.jl`): a fold's identity state,
 element lift, associative and commutative combine, and observer, applied over
 `axes`. `SumReduction` is the alias for `FoldReduction{SumFold}`; backends keep
 their dedicated sum kernels behind it. The state is a tuple inside kernels
@@ -210,7 +220,7 @@ including direct destinations, are saved and restored around capture.
 snapshots. Returned old-state roots stay live and therefore prevent direct writes.
 Snapshots finish before commits, preserving swaps and observations.
 
-`src/selection.jl` chooses implementations and groups neighboring compatible elementwise regions after physical
+`src/compiler/selection.jl` chooses implementations and groups neighboring compatible elementwise regions after physical
 storage is assigned. Both output/output and output/input overlap checks are
 required: logical independence alone does not exclude hazards caused by temporary
 slot reuse. `GroupedRequest` uses ordinary support/build selection, with fallback
