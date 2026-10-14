@@ -23,6 +23,7 @@ cuTileExt = ["CUDACore", "cuTile"]
 [compat]
 ChainRulesCore = "1.25"
 CUDACore = "6.3.0"
+LinearAlgebra = "1.11"
 cuBLAS = "6.3.0"
 cuTile = "1.0.0"
 julia = "1.11"
