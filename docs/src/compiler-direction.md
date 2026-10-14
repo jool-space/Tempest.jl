@@ -1,9 +1,10 @@
-# Compiler direction after the backend experiments
+# Compiler direction
 
-21 September 2026. This note records the architectural conclusions from the
-compiler survey, the TensorIR execution experiment, and a small graph-boundary
-probe. The final section records the resulting production integration. No
-external compiler dependency was added.
+The architectural conclusions from the September compiler survey, the TensorIR
+execution experiment, and the graph-boundary probes, as principles for changing
+Tempest. The experiments themselves and the integration that followed are
+recorded in the [decision log](review-decisions.md); their code is kept by the
+git tag `research-2026-09`. No external compiler dependency was added.
 
 ## Current priorities — 23 September 2026
 
@@ -146,8 +147,8 @@ The broader references remain useful at different points:
   and inspect for domain analysis, tiling, and reduction lowering.
 
 These are complementary lessons. They do not require adding four dependencies.
-Source findings and links are recorded in the [compiler landscape](compiler-landscape.md)
-and [scheduler investigation](scheduler-investigation.md).
+The source survey behind these lessons (the compiler landscape and scheduler
+investigation reports) is kept by the git tag `research-2026-09`.
 
 ## Julia expressivity requires explicit dependencies and permissions
 
@@ -240,202 +241,3 @@ cuTile or an external compiler.
 The current graph carries useful dtype and cast information, but the complete
 numerical policy is still informal. Settle it through concrete mixed-precision
 and reduction cases before inventing a broad public policy hierarchy.
-
-## Boundary probe completed in this iteration
-
-`examples/research/graph_regions.jl` references the existing graph directly. It
-collects inputs and escaping outputs, preserves logical mappings, keeps all
-results of a semantic call in one execution unit, and verifies that collapsing
-a candidate leaves an acyclic dependency graph.
-
-Its CPU interpreter exposes only the declared inputs to the selected unit and
-exports only the declared outputs. This catches omitted dependencies and escapes.
-It evaluates the existing operations with ordinary arrays; it does not generate
-a GPU kernel or demonstrate fewer allocations.
-
-The accompanying tests cover unfamiliar formulas, a custom scalar callable,
-orthogonal reductions, nonadjacent but independent nodes, a rejected path that
-leaves and re-enters a candidate, outside consumers, escaping views with internal
-roots, atomic multi-result calls inside and outside the candidate, mixed casts,
-runtime scalars, duplicate result leaves, and backward plus a functional update.
-The probe passed **209 CPU assertions** on Julia 1.13. It establishes structural
-boundary accounting and reference execution, not automatic candidate selection,
-physical allocation correctness, or a general fusion schedule.
-
-Run without CUDA or TensorIR dependencies:
-
-```sh
-julia --project=. examples/research/graph_regions_tests.jl
-```
-
-## Native region experiment completed
-
-The follow-up now selects structural candidates automatically and lowers the
-accepted matrix family to a native cuTile kernel. Its schedule comes from
-reduction dependencies, including several dependent or independent sums. The
-custom scalar callable remains a Julia callable inside the kernel. Irregular
-259-row and long 8193-row cases pass capture and changed-input replay checks.
-
-See [Native cuTile sweeps](cutile-sweeps.md) for the experiment, measurements,
-and restrictions. This established that the semantic graph could support both
-external compilation and native Julia scheduling.
-
-## Production integration
-
-`prepare` and `prepare_forward` now select semantic `GraphRegion`s before layout
-and storage planning. `GraphRequest` uses the existing support/build protocol;
-loading cuTile supplies a native streaming implementation. There is no second
-provider registry or dependency on the research driver.
-
-The selector tries connected candidates with up to 64 members. After a complete
-candidate is declined, growth consults provider support at each addition and
-keeps declined neighbors outside the current attempt. Construction rejection excludes
-the exact member set and replans. Alias roots, saved backward values, and staged
-state commits participate in ordinary lifetime planning. `explain` prints the
-selected boundary and rejection reasons. Custom scalar callables require explicit
-`recomputable` permission for this schedule.
-
-Validation on Julia 1.13 / GB10 passed all 4,343 CPU/CUDA assertions, including
-306 production cuTile graph checks. The normalized-MLP example also passed
-captured replay with changed scalar inputs and CPU gradient comparisons.
-The forward fixtures at 259 and 8193 rows each captured one kernel.
-
-See [Graph regions](graph-regions.md) for usage and limits. This completes the
-boundary integration, not schedule search or a full training performance claim.
-The integration review changed the next priority. The existing MLP exposes
-fragmentation from unsupported neighbors, second-axis and full reductions, and
-mixed intermediate precision in backward. A second leading-axis schedule would
-leave those coverage gaps in place. Bring a small transformer training harness
-forward as a diagnostic workload, and widen reduction coverage before schedule
-competition. Physical ownership and saved backward values must remain visible
-through those changes. See the review and revised sequence below.
-
-## Experiments that discriminate between the options
-
-1. **Automatic regions on the existing graph.** Grow bounded candidates from
-   ordinary traced expressions, preserve escapes through backward, and compare
-   automatic boundaries against the explicit TensorIR fixture. Exercise a
-   deliberate rejection and a smaller valid alternative. Use the existing
-   native decomposition as the control.
-2. **A native cuTile schedule beyond the current family.** Generate whole-column
-   and streamed schedules for centered LayerNorm with a custom Julia functor,
-   a shared residual, and returned statistics. Use 259 and 8193 rows, an explicit
-   purity declaration, and a functor containing supported `ifelse` computation
-   without adding a primitive export rule. Compare aligned controls with TensorIR
-   where accepted. Measure compilation, finite numerical agreement, launches,
-   storage, and captured replay separately.
-3. **A training workload that needs both generated and authored kernels.** Add
-   an independently validated attention forward/backward pair to a small
-   transformer step. Check complete state transitions and retained memory before
-   interpreting speed results. This is a subsequent workload gate, not evidence
-   supplied by the normalization microbenchmarks.
-
-Keep the first two experiments bounded and avoid a production IR rewrite until
-they expose a requirement the present graph cannot express. Do not build a
-universal autotuner, a TensorIR/cuTile fragment linker, or an e-graph system as a
-prerequisite. The immediate question is whether one truthful region contract can
-support both general Julia tile schedules and external graph compilation.
-
-
-## Integration review and revised priorities
-
-The review correctly identified a flaw in prefix-only fallback. An undeclared
-activation before centered normalization split its supported body into a bare
-sum and an 11-node region. The same activation after normalization preserved all
-12 supported nodes. Support-guided growth now retains the complete 12-node
-normalization in either position. It also preserves supported epilogues when
-neighboring second-axis or full reductions are declined.
-
-This does not remove all order dependence. Growth is still greedy. A provider
-can accept a complete formula while rejecting fragments, which is why the
-complete structural candidate is still tested first. Private literals must be
-considered with their consumers to avoid artificial scalar boundaries. Late
-construction rejection remains keyed to the exact member set.
-
-The 111-node MLP originally generated 53 rejection notes. Its final input-gradient
-fusion has another barrier besides reduction axes: integer division in the
-reverse recipe creates a Float64 reciprocal and multiply, followed by a Float32
-cast. The cuTile region provider rejects that intermediate precision. Changing
-region growth cannot safely erase the conversion; numeric policy and the reverse
-recipe need a separate decision and validation.
-
-On that same MLP, the growth change enlarges the backward region from seven to
-nine members. It still has 24 scheduled launches, 35 captured kernels, and
-435,864 bytes of value storage. Capture/replay and CPU gradient comparisons pass.
-This improves fusion coverage without establishing an MLP performance gain.
-The revised full CPU/CUDA suite passed 4,426 assertions, and the docs build passed.
-Metadata support queries increase from 46 to 50 while rejection notes fall from
-53 to 49; checking support during growth is not itself a query-count optimization.
-
-Earlier timing ratios compare with Tempest's untuned decomposition. They do not
-establish competitive normalization performance. The unexplained 256/259-row
-timing reversal and the roughly 19-second initial kernel compilation remain
-open issues. A tuned implementation is a comparison point, not a proven
-performance bound.
-
-Revised work order:
-
-1. Fix support-guided growth and preserve legality, constants, complete-formula
-   support, and construction fallback in regression tests.
-2. Use the existing MLP and a small transformer step as coverage diagnostics now.
-   Include ordinary forward/backward/update code and record unsupported domains,
-   precision conversions, saved activation bytes, and preparation time.
-3. Add second-axis and full reductions, then rank-three domains. Start with
-   separate valid regions; fusing orthogonal reductions can require a different
-   block decomposition or multiple launches.
-4. Establish matched benchmarks before comparing schedule families: the same
-   RMSNorm formula, dtype, epsilon, outputs, and capture conditions across cuTile,
-   Stiletto's named RMSNorm, and TensorIR where supported. Keep the custom-callable
-   fixture as a separate expressivity experiment. Report preparation separately,
-   repeat warm measurements in alternating order, count physical kernels, and
-   compare traffic with a device bandwidth measurement.
-5. Compare retention, streaming, and staged schedules using those workloads and
-   measurements. Include compilation cost and values moved earlier across the
-   forward/backward boundary in the tradeoff.
-
-The planner has scalar fusion for the decomposed schedule and graph regions.
-The earlier scalar-binding reduction selector was retired on 22 September 2026
-after the graph provider's resident schedule matched it. Scalar expressions
-remain useful as a kernel representation, but region-boundary policy should
-converge on one path; pointwise-only regions belong in that consolidation.
-
-Escaping intermediates are currently recomputed between sweeps and stored at the
-end. Storing an already required output in an earlier sweep may avoid expensive
-recomputation, but subsequent loads add memory traffic and ordering requirements.
-Treat that as a scheduling alternative, not a free transformation. Similarly,
-early computation of backward-only values is legal but can extend activation
-lifetimes; correctness checks alone do not establish a profitable placement.
-
-## Broader reduction domains
-
-The production cuTile graph provider now handles second-axis and full reductions
-in addition to leading-axis sums, without recognizing named normalization
-formulas. The same dependency analysis produces phases for all three schedules.
-Axis reductions stay within a block; full reductions declare partial-sum and
-statistic workspace through the existing `ImplementationPlan` interface.
-
-The normalized MLP now selects six graph regions and uses 20 scheduled calls,
-33 captured kernels, and 435,476 value bytes. Its CPU/GPU loss and gradient checks
-pass under capture and scalar rebinding. The preceding plan used 24 calls,
-35 kernels, and 435,864 value bytes. This improves backward coverage but does not
-establish end-to-end training performance.
-
-`explain` now reports reduction axes, tile shape, dependency phases, and physical
-kernel counts. The implementation is split between schedule analysis, tile code
-emission, and runtime construction. Mixed axes still form separate regions;
-rank-three and mixed-precision graph domains remain unsupported.
-
-The [reduction-domain report](reduction-domains.md) records the independent `sum!`
-comparison and its limitations. It is a focused reduction baseline; matched
-RMSNorm comparisons with Stiletto and TensorIR, a trustworthy bandwidth reference,
-and the small-transformer workload remain outstanding. Before expanding search,
-use those measurements to choose schedules and avoid profitable-looking fusion
-that only reduces the number of scheduled calls.
-
-The first independent reduction measurements reinforce that distinction. On
-512×1024 Float32 inputs, the current full-reduction schedule takes roughly
-113 microseconds versus 39 for GPUArrays `sum!`, including the latter's captured
-temporary allocation. Second-axis sums are much closer, around 75 versus 73
-microseconds. Use this evidence to improve block/tile policy and cost selection
-before claiming competitive fusion performance. Full validation covers 4,970
-assertions across the suite and final targeted rerun, plus MLP replay and docs.

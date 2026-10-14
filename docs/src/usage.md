@@ -10,9 +10,8 @@ CUDA graph replay. Model code contains neither allocation spaces nor launch logi
 [Source guide](internals.md) describes the current compiler stages and invariants.
 [Contributing](https://github.com/jool-space/Tempest.jl/blob/main/CONTRIBUTING.md) describes expectations for maintainable changes.
 
-[Working design notes](design-notes.md) are hypotheses, not a specification.
-[First experiment report](first-experiment.md) records observations and measurements.
-[Array frontend report](array-frontend.md) describes the next experiment.
+The [decision log](review-decisions.md) records dated priorities and what each
+experiment showed.
 
 ## A forward/backward executable
 

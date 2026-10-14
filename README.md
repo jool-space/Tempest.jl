@@ -91,4 +91,4 @@ gradients, alias lifetimes, storage reuse, and repeated replay with rebound inpu
 - [A transformer training step](docs/src/transformer-step.md) and
   [cuTile issues found along the way](docs/src/cutile-issues.md)
 - [Contributing](CONTRIBUTING.md)
-- [Design notes](docs/src/design-notes.md) and [experiment reports](docs/src/first-experiment.md)
+- [Compiler direction](docs/src/compiler-direction.md) and the [decision log](docs/src/review-decisions.md)
