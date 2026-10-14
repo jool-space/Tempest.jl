@@ -181,9 +181,6 @@ heterogeneous; concrete types matter particularly in generated kernel paths.
   Replacing every branch mechanically is not the objective. New operations still
   need mathematical, differentiation, layout, and lowering behavior. Keep layout
   transformations' distinct semantics until a common representation proves useful.
-- **Readable Julia takes precedence over formatter transformations.** Disable
-  forced expansion of short methods, short-circuit expressions, and ternaries.
-  Keep explicit blocks where they help a reader follow control flow.
 - **Names and execution convenience are secondary.** `Executable` is a clearer
   name than `Prepared`. A callable executable could bind and run, but retain the
   explicit execution/replay methods for inspection and timing. A name shared with
