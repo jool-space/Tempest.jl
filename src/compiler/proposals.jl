@@ -165,15 +165,35 @@ function check_proposal(program, live, proposal, implementation)
     proposal
 end
 
+# Bytes of memory traffic a region saves against the default partition: the
+# values the default schedule writes to memory (its fusion roots) that the
+# region keeps internal, minus values the default would have inlined that the
+# region must write because they escape it. This is the only benefit estimate;
+# it compares proposals without a cost model of their implementations.
+function proposal_benefit(program, members, live, roots)
+    outputs = region_boundary(program, members, live).outputs
+    bytes(id) = sizeof(program.nodes[id].dtype) * prod(program.nodes[id].dims; init = 1)
+    saved = sum(id -> roots[id] && id ∉ outputs ? bytes(id) : 0, members; init = 0)
+    added = sum(id -> roots[id] ? 0 : bytes(id), outputs; init = 0)
+    saved - added
+end
+
+function default_roots(program, live)
+    (; layouts, materialized) = plan_layouts(program, live)
+    fusion_roots(program.nodes, live, materialized, layouts, program.results)
+end
+
 """
     select_proposed_regions(program, target, implementations, blocked, records)
 
 Collect every implementation's proposals and choose a non-overlapping, acyclic
-subset. Implementations keep their candidate order as priority; within one
-implementation larger proposals come first, then lower value IDs. Each proposal
-is then accepted when it is not blocked by an earlier construction failure,
-overlaps no accepted proposal, keeps the partition acyclic, and its proposer
-supports the complete request. Every outcome is appended to `records`.
+subset. Implementations keep their candidate order as priority. Within one
+implementation, proposals that save more memory traffic against the default
+partition come first (`proposal_benefit`, in bytes), then larger ones, then
+lower value IDs. Each proposal is then accepted when it is not blocked by an
+earlier construction failure, overlaps no accepted proposal, keeps the
+partition acyclic, and its proposer supports the complete request. Every
+outcome is appended to `records`.
 """
 function select_proposed_regions(program, target, implementations, blocked, records)
     proposers = proposal_implementations(implementations)
@@ -194,7 +214,12 @@ function select_proposed_regions(program, target, implementations, blocked, reco
             push!(candidates, (priority, implementation, proposal))
         end
     end
-    sort!(candidates; by = ((priority, _, p),) -> (priority, -length(p.members), p.members))
+    roots = default_roots(program, live)
+    benefit(proposal) = proposal_benefit(program, proposal.members, live, roots)
+    sort!(
+        candidates;
+        by = ((priority, _, p),) -> (priority, -benefit(p), -length(p.members), p.members),
+    )
 
     claimed = zeros(Int, length(program.nodes))
     regions = ProposedRegion[]

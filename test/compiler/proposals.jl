@@ -10,14 +10,19 @@ mutable struct ProposingTestImplementation <: Implementation
     name::Symbol
     mode::Symbol
     member_limit::Int
+    pick::Any # program -> member vectors to propose instead of matching
     rounds::Int
     proposals::Vector{Vector{Int}}
     supported::Vector{Any}
     built::Vector{Any}
 end
 
-ProposingTestImplementation(; name = :proposing_test, mode = :accept, member_limit = typemax(Int)) =
-    ProposingTestImplementation(name, mode, member_limit, 0, Vector{Int}[], Any[], Any[])
+ProposingTestImplementation(;
+    name = :proposing_test,
+    mode = :accept,
+    member_limit = typemax(Int),
+    pick = nothing,
+) = ProposingTestImplementation(name, mode, member_limit, pick, 0, Vector{Int}[], Any[], Any[])
 Tempest.implementation_name(impl::ProposingTestImplementation) = impl.name
 
 epilogue_operation(op) = op isa Union{Tempest.Pointwise, Tempest.SumReduction}
@@ -27,6 +32,9 @@ epilogue_operation(op) = op isa Union{Tempest.Pointwise, Tempest.SumReduction}
 function Tempest.propose_regions(impl::ProposingTestImplementation, request::ProposalRequest)
     nodes = request.program.nodes
     impl.rounds += 1
+    if impl.pick !== nothing
+        return [RegionProposal(members; label = "picked") for members in impl.pick(request.program)]
+    end
     proposals = RegionProposal[]
     for (anchor, node) in enumerate(nodes)
         request.live[anchor] && node.op isa Tempest.MatMul || continue
@@ -245,6 +253,38 @@ end
     ex = prepare_forward(crossing, w, x; implementations = (impl,))
     check_graph_test_outputs(execute!(ex), crossing(w, x))
     @test occursin("conflict: would create a dependency cycle", sprint(explain, ex))
+end
+
+@testset "Proposals that save more traffic win overlaps" begin
+    # h feeds a product of its own and s, which only t reads. A claims h's
+    # product and s; s then escapes to t, a write the default plan avoids by
+    # inlining s into t. B claims t's product with s and t, keeping the product
+    # internal. A has more members; B saves more traffic, so B is selected.
+    function traffic(w, x, v, y)
+        h = tanh.(2.0 .* (w * x))
+        s = 1.0 .- h
+        (h, (v * y) .* s)
+    end
+    w, x, v, y = (reshape(collect(range(-0.5, 0.5; length = 9)) .* k, 3, 3) for k in 1:4)
+    function pick(program)
+        nodes = program.nodes
+        products = findall(n -> n.op isa Tempest.MatMul, nodes)
+        operation(f) = findfirst(n -> n.op isa Tempest.Pointwise && n.op.f === f && length(n.inputs) == 2, nodes)
+        scale, s = operation(*), operation(-)
+        t = findlast(n -> n.op isa Tempest.Pointwise && n.op.f === (*), nodes)
+        tanh_id = findfirst(n -> n.op isa Tempest.Pointwise && n.op.f === tanh, nodes)
+        [[products[1], scale, tanh_id, s], [products[2], s, t]]
+    end
+    impl = ProposingTestImplementation(; pick)
+    ex = prepare_forward(traffic, w, x, v, y; implementations = (impl,))
+    check_graph_test_outputs(execute!(ex), traffic(w, x, v, y))
+    region = only(proposed_steps(ex)).region
+    nodes = ex.storage.program.nodes
+    products = findall(n -> n.op isa Tempest.MatMul, nodes)
+    @test products[2] in region.members
+    @test products[1] ∉ region.members
+    @test length(region.outputs) == 1
+    @test occursin("conflict: overlaps selected proposal", sprint(explain, ex))
 end
 
 @testset "Partitions are deterministic" begin
