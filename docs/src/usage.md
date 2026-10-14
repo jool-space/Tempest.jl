@@ -55,7 +55,8 @@ For updates and persistent optimizer buffers, see [Training state](state.md).
 Core Tempest depends only on LinearAlgebra. Tracing, differentiation, planning,
 and CPU execution require no CUDA packages. Install `CUDACore` and `cuBLAS` in
 an application environment and load both to enable the CUDA extension. Loading
-`cuTile` additionally enables tiled implementations of eligible regions.
+`cuTile` additionally enables tiled implementations of eligible regions. Loading
+`cuDNN` enables the opt-in `CuDNNKernels()`, see below.
 
 `prepare(f, args...)` infers placement from all array arguments, including wrappers
 such as views and transposes. Floating scalars do not choose a device; scalar-only
@@ -80,6 +81,15 @@ Pass implementations to `prepare` to try them before the defaults:
 ```julia
 ex = prepare(f, args...; implementations = (MyImplementation(),))
 ```
+
+Tempest ships one opt-in implementation: `CuDNNKernels()`, available once
+`cuDNN` is loaded alongside `CUDACore`. It runs attention, forward and backward,
+on cuDNN's SDPA engines. Those engines take Float16 or BFloat16 operands only.
+Float32 attention needs an explicit
+`CuDNNKernels(float32_cast = Core.BFloat16)` or `Float16`; otherwise
+cuDNN declines it and cuTile or the reference runs it. See
+[cuDNN](implementations.md#cuDNN) for the precision table, rejections and
+measurements.
 
 `support` returns `Supported()` or `Unsupported(reason)`; construction can also
 reject a region. `explain(ex)` reports selections, rejection reasons, and owned
@@ -257,7 +267,7 @@ Tanh's backward consumes the forward output rather than recomputing tanh.
 - Exact-size/dtype slot reuse with alias-aware last-use accounting. Returned values
   stay live; shared reduction scratch is separate. `reuse=false` is a checkable baseline.
 - CPU interpretation of the same schedule; optional CUDA kernels and cuBLAS, with
-  optional cuTile implementations.
+  optional cuTile implementations and opt-in cuDNN attention.
 - `CUDATarget(kernels=:cuda)` explicitly selects generated CUDA scalar kernels instead.
   Mapped broadcast/layout reads use CUDA indexing. Dense leading-axis matrix
   reductions have a cuTile schedule; other axis reductions use a general CUDA

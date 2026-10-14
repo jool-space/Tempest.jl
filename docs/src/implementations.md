@@ -12,7 +12,8 @@ not the required semantic interface.
 first, then `default_implementations(target)`. Every candidate uses the same
 `support` and `build_implementation` methods. CPU defaults are `CPUKernels()` and
 `LinearAlgebraGemm()`. CUDA defaults are eligible loaded `CuTileKernels()`, then
-`CUDAKernels()` and `CuBLASGemm()`. `CUDATarget(kernels=:cuda)` omits cuTile;
+`CUDAKernels()` and `CuBLASGemm()`. `CuDNNKernels()` is opt-in
+([cuDNN](#cuDNN)). `CUDATarget(kernels=:cuda)` omits cuTile;
 `:cutile` requires it to be loaded but still permits CUDA indexing/reduction fallback.
 
 Resolve the candidate list once during preparation. Loading an extension later
@@ -131,28 +132,149 @@ fallback. Existing wrappers returning `BuiltImplementation` directly still work.
 Its `workspace_bytes` counts privately owned device workspace, excluding shared
 slots so `explain` does not double-count them.
 
-CUDA/cuTile reductions, attention and cuBLAS all use this common pool. Vendor
+CUDA/cuTile reductions, cuTile and cuDNN attention, and cuBLAS all use this common pool. Vendor
 handles and descriptors retain fixed workspace pointers, installed or bound
 outside capture; reuse is safe because the schedule executes sequentially on one
 stream. General multi-stream workspace sharing is not implemented.
 
 ## cuDNN
 
-There is no cuDNN implementation yet. An opt-in Stiletto bridge offered cuDNN
-the pointwise and sum regions Tempest had already formed; it was removed on
-14 October 2026. Probed through `Stiletto.compile` with cuDNN 9.26 on GB10,
-pointwise-only graphs build, but a sum alone, or pointwise work followed by a
-sum, has no engine. A sum builds only after a matrix product
-(`sum(tanh.(w * x); dims = 1)`). The bridge never received matrix products, so it
-competed with cuTile for elementwise regions and paid a failed cuDNN build for
-every reduction region.
+`CuDNNKernels()` realizes semantic verbs as cuDNN graphs, built directly with
+cuDNN.jl's graph API. Load `CUDACore` and `cuDNN` to enable it. It is opt-in, so
+pass it explicitly:
 
-cuDNN is a library of fusable patterns: a matrix product with its epilogue,
-normalization, scaled dot-product attention, convolution. A cuDNN implementation
-should claim such patterns from the semantic graph and build them directly with
-cuDNN.jl's graph API, rather than accept regions formed for scalar fusion. Verbs
-such as attention can use cuDNN through `CallRequest` today; matrix-product
-epilogues need implementations that can propose the region they cover.
+```julia
+ex = prepare(loss, args...; implementations = (CuDNNKernels(float32_cast = Core.BFloat16),))
+```
+
+At present it covers scaled dot-product attention:
+
+- **Forward-only programs.** It runs the public `attention_forward` call and
+  returns `o` and `lse` in the operand dtype and in Tempest's order.
+- **Training.** A reverse rule replaces the forward/backward pair with two
+  private calls. `sdpa_forward` saves cuDNN's Float32 statistic, packed
+  `(1, queries, heads, batch)` as the backward reads it. `sdpa_backward` is
+  cuDNN.jl's composite `sdpa_bwd!`, the form the fMHA backward engines match.
+
+cuDNN's statistic is Tempest's `lse`: the natural-log log-sum-exp of the scaled
+scores. A forward from either provider therefore pairs with a backward from the
+other. Grouped-query attention and causal masks map directly onto cuDNN's
+attention.
+
+cuDNN's backward has no input for a log-sum-exp cotangent. `Tempest.attention`
+discards `lse`, so its cotangent is the symbolic zero and the private backward
+applies. If a program uses `lse`, the rule passes the public
+`attention_backward` to the next provider: cuTile under TF32. If no provider
+accepts it, the pair is rejected, and the cuDNN forward pairs with the reference
+pullback.
+
+### Precision
+
+These results were probed with cuDNN 9.27 (CUDNN_jll 9.27, cuDNN.jl 6.4) on
+GB10 (sm_121), for every math mode:
+
+| Operands | Result |
+| --- | --- |
+| Float32 | no engine, forward or backward |
+| Float32 I/O around in-graph casts to Float16/BFloat16 | no engine |
+| Float16/BFloat16 inputs with a Float32 output | no engine |
+| Float16 or BFloat16 | builds. The forward takes up to 256 features and the backward up to 128. Any sequence length works, with grouped queries and causal masks. |
+
+Graphs are built with `DEFAULT_MATH`, which allows tensor cores but excludes
+engines that down-convert inputs, and with `deterministic = true`.
+`PEDANTIC_MATH` finds no engine: cuDNN.jl excludes every tensor-core engine
+whenever a Float32 tensor, here the statistic, is graph I/O.
+
+Half-precision operands run natively. **Float32 is rejected** unless the
+implementation is constructed with `float32_cast = BFloat16` or `Float16`. This
+mirrors `CUDATarget(matmul_precision = :tf32)`: rounding is an explicit request,
+never a fallback.
+
+With the cast:
+
+- q, k, v and the output cotangent are rounded to the cast type.
+- Scores, softmax, the statistic and accumulation stay Float32.
+- The probabilities enter the second product in the half type.
+- Results return as Float32.
+
+In training, the casts are ordinary graph operations, so they can fuse with the
+operations that produce or consume them. In a forward-only call, they are
+conversion kernels around the cuDNN launch. `explain` names the rounding, for
+example `cuDNN attention forward: Float32 operands rounded to BFloat16`.
+
+Rejections and their reasons:
+
+| Request | Reason shown by `explain` |
+| --- | --- |
+| Float32 without `float32_cast` | `cuDNN has no Float32 attention engine; ...` |
+| Float64 or other types | `cuDNN attention takes Float16 or BFloat16 operands, not Float64` |
+| Features not a multiple of 8, or `dv != d` | layout requirement |
+| No engine at construction, e.g. backward with 160 features on GB10 | `cuDNN has no engine for attention backward ...`; the training pair is rejected |
+| Public `attention_backward` | no log-sum-exp cotangent input |
+| Scalar regions | `cuDNN implements semantic verbs, not scalar regions` |
+
+cuDNN is never offered lone reductions or pointwise regions. With cuDNN 9.26 on
+GB10, a sum alone, or pointwise work followed by a sum, had no engine. A sum
+built only after a matrix product. `CuDNNKernels` defines no `GraphRequest`
+method, so it stays out of graph-region selection.
+
+### Execution and workspace
+
+Each executable runtime owns one cuDNN handle. Plans and variant packs are
+built outside capture with the final buffer pointers. A launch sets the stream
+and calls `cudnnBackendExecute`, which CUDA graph capture records.
+
+The shared workspace pool provides several buffers:
+
+- the engine workspace;
+- the backward's Float32 softmax row sums;
+- its Float32 dQ accumulator;
+- with grouped heads, per-query-head dK and dV.
+
+The engine writes each of these before reading it. Buffers filled with NaN gave
+correct gradients, so shared slots are safe. Forward-only Float32 calls take
+their half-precision copies from the same pool.
+
+### Measured against cuTile
+
+`examples/research/attention_benchmark.jl` times causal attention on GB10 with
+cuDNN 9.27, on 14 October 2026, with no other GPU process running. Each figure
+is the median device time per step, in μs, over CUDA graphs of 20 back-to-back
+executions. TFLOP/s follows in parentheses, counting 4·b·h·t²·d per forward,
+3.5 times that for forward + backward, and halved for the mask. "Cast" runs
+Float32 data with `float32_cast`, so its time includes the rounding. "bf16"
+runs BFloat16 data, the engines alone.
+
+| pass | d×heads×seq×batch | cuTile TF32 | cuDNN bf16 cast | cuDNN fp16 cast | cuDNN bf16 |
+| --- | --- | --- | --- | --- | --- |
+| fwd | 64×12×1024×8 | 647 (19.9) | 943 (13.7) | 947 (13.6) | 297 (43.3) |
+| fwd | 64×12×2048×4 | 1184 (21.8) | 1041 (24.8) | 1075 (24.0) | 405 (63.6) |
+| fwd | 128×12×1024×8 | 2523 (10.2) | 1826 (14.1) | 1823 (14.1) | 500 (51.6) |
+| fwd | 128×12×2048×4 | 4730 (10.9) | 1970 (26.2) | 2013 (25.6) | 642 (80.2) |
+| fwd+bwd | 64×12×1024×8 | 4035 (11.2) | 3031 (14.9) | 2950 (15.3) | 1768 (25.5) |
+| fwd+bwd | 64×12×2048×4 | 6787 (13.3) | 3506 (25.7) | 3513 (25.7) | 2267 (39.8) |
+| fwd+bwd | 128×12×1024×8 | 34668 (2.6) | 6125 (14.7) | 6146 (14.7) | 3606 (25.0) |
+| fwd+bwd | 128×12×2048×4 | 62061 (2.9) | 6951 (26.0) | 6905 (26.1) | 4433 (40.7) |
+
+The cuDNN engines are 2.2 to 7.4 times faster than cuTile's forward, and 2.3
+to 14 times faster than its forward + backward. Two observations follow from
+the table without being profiled.
+
+- **Casts cost the most at short sequences.** A forward-only cast converts q,
+  k, v and o. At 64×12×1024×8 that is about 150 MB of traffic, which costs more
+  than the attention itself on GB10's memory. In training, the casts are graph
+  operations that fuse with their neighbors.
+- **cuTile's 128-feature backward collapses** to about 3 TFLOP/s.
+
+### Next
+
+Norms are the next cuDNN pattern: `norm_fwd!`/`norm_bwd!` with saved statistics,
+once Tempest has a normalization verb. They would follow the attention rule's
+shape. Matrix products with epilogues, and normalization fused into a matrix
+product, need an implementation to propose the region it covers. That requires
+a request carrying a candidate subgraph around a matrix product, which
+`GraphRequest` does not form today because it stops at contractions. Verbs such
+as attention need none of this.
 
 ## How fusion works today
 
