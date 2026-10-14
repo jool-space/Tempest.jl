@@ -38,6 +38,14 @@ their dedicated sum kernels behind it. The state is a tuple inside kernels
 only: the observer is part of the node, so a fold node is one ordinary value.
 Fold functions are scalar Julia functions; tile backends map them over lanes.
 
+The array frontend records folds for `sum`, `prod`, `maximum` and `minimum`
+(`SumFold`, `ProdFold`, `MaxFold`, `MinFold`), and `reduce`/`mapreduce` map `+`,
+`*`, `max` and `min` to them, combining a given `init` with the result once.
+Another operator needs `init`, its identity, and becomes a one-value
+`GenericFold`. That fold is zero-size when the operator is a singleton and `init`
+is zero, one, `typemin` or `typemax` of the element type, which it rebuilds from
+the type; another `init` is captured, and the fold runs on CUDA kernels.
+
 Forward execution is general. The reference interpreter and CPU kernels fold
 with the fold's functions; CUDA runs a deterministic warp and block fold for
 any bits state; cuTile graph regions handle zero-size folds with Float32 or
@@ -46,9 +54,11 @@ buffers of split and full reductions hold unobserved states, one column per
 component. A fold may add a lowering for slices held in registers
 (`fold_resident`); logsumexp uses it as a maximum then a shifted sum.
 
-Derivatives are a rule table: `fold_pullback` methods for sum, maximum/minimum
-and logsumexp, user methods for their own fold types, or a `pullback` passed to
+Derivatives are a rule table: `fold_pullback` methods for sum, product,
+maximum/minimum and logsumexp, user methods for their own fold types, or a `pullback` passed to
 `GenericFold`. A fold without a rule runs forward and fails at `differentiate`.
+The product rule counts each slice's zeros and multiplies its nonzero elements,
+so it needs no division by an element that may be zero.
 
 ## Graph invariants
 

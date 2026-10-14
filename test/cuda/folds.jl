@@ -136,3 +136,36 @@ end
         @test Array(execute!(prepare(p, CuArray(x)))[2]) ≈ expected
     end
 end
+
+@testset "Products and Base reductions on CUDA" begin
+    shape = (300, 37)
+    x = 1.0f0 .+ 0.01f0 .* sin.(reshape(Float32.(1:prod(shape)), shape))
+    x[5, 2] = 0                  # one zero in a column
+    x[7, 3] = x[9, 3] = 0        # two zeros in a column
+    for dims in (:, (1,), (2,))
+        result(got) = dims isa Colon ? only(Array(got)) : Array(got)
+        f(x) = (
+            prod = prod(x; dims),
+            max = reduce(max, x; dims),
+            sum = mapreduce(abs2, +, x; dims, init = 1.0f0),
+            norm = mapreduce(abs, norm_combine, x; dims, init = 0.0f0),
+        )
+        ex = prepare_forward(f, CuArray(x))
+        @test all(==(:cutile), ex.providers)
+        got = execute!(ex)
+        @test result(got.prod) ≈ prod(x; dims) rtol = 1e-4
+        @test result(got.max) == maximum(x; dims)
+        @test result(got.sum) ≈ mapreduce(abs2, +, x; dims, init = 1.0f0) rtol = 1e-5
+        @test result(got.norm) ≈ mapreduce(abs, norm_combine, x; dims, init = 0.0f0) rtol = 1e-5
+        # An identity the element type cannot rebuild is captured: CUDA kernels.
+        g(x) = reduce(smaller, x; dims, init = 2.0f0)
+        ex = prepare_forward(g, CuArray(x))
+        @test ex.providers == [:cuda]
+        @test result(execute!(ex)) == minimum(x; dims)
+        # Gradients through the product and maximum rules match the CPU.
+        loss(x) = sum(sin, prod(x; dims)) + sum(abs2, reduce(max, x; dims))
+        _, (expected,) = value_and_gradient(differentiate(trace(loss, Float64.(x))), Float64.(x))
+        got = execute!(prepare(differentiate(trace(loss, x)), CuArray(x)))
+        @test Array(got[2]) ≈ expected rtol = 1e-3 atol = 1e-4
+    end
+end

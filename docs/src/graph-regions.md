@@ -119,8 +119,9 @@ from the discarded graph are cleared before selection resumes.
 The provider handles nonempty Float32 domains of rank zero, one, or two. Each
 region uses one reduction domain and one set of axes. Singleton broadcasts,
 scalar inputs, irregular tile tails, several independent or dependent folds
-(sums, maxima, logsumexp, and zero-size user folds with Float32 or Int32 state),
-and multiple escaping outputs are supported.
+(sums, products, maxima, logsumexp, and zero-size user folds with Float32 or
+Int32 state, among them `reduce` by a singleton operator), and multiple escaping
+outputs are supported.
 
 | Axes | Execution | Shared workspace |
 | --- | --- | --- |

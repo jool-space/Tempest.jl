@@ -247,7 +247,9 @@ Tanh's backward consumes the forward output rather than recomputing tanh.
   composed mapping otherwise. View pullbacks accumulate into the parent, including
   repeated indices; CUDA uses deterministic source-order accumulation.
 - Lazy scalar broadcasts with Julia's leading-axis singleton expansion; unary
-  `map`; full and axis sums, including `sum(f,x)` and `mapreduce(f,+,x)`.
+  `map`; full and axis sums, products, maxima and minima, including `sum(f,x)`,
+  `prod(f,x)` and `reduce`/`mapreduce` with any associative operator (`init` is
+  required beyond `+`, `*`, `max` and `min`), and user folds through `Tempest.fold`.
 - Explicit reverse operations, broadcast cotangent reductions back to each
   operand's shape, repeated-use accumulation, and zeros for unused inputs.
 - Dead-work elimination and conservative scalar-region fusion. GEMMs remain

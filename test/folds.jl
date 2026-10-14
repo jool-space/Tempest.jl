@@ -1,4 +1,4 @@
-using Tempest: Fold, LogSumExpFold, MaxFold, MinFold, GenericFold
+using Tempest: Fold, LogSumExpFold, MaxFold, MinFold, ProdFold, GenericFold
 
 # A user-defined tuple-state fold: Welford's population variance, combined with
 # Chan's update. Its derivative rule is registered by defining a method.
@@ -141,4 +141,71 @@ end
     h(y) = sum(Tempest.fold(ruled, y; dims = 2))
     _, (dh,) = value_and_gradient(trace(h, y), y)
     @test dh ≈ 2 .* y
+end
+
+# Associative and commutative for nonnegative values, with identity zero: the
+# 2-norm of a slice of absolute values. (Base's Float32 `hypot` computes in
+# Float64, which cuTile cannot lower.)
+const norm_combine = (a, b) -> sqrt(a * a + b * b)
+# Not associative: valid only on backends that fold left in index order.
+const skewed_combine = (a, b) -> a + 2b
+# `min` outside the built-in table, with identity typemax.
+const smaller = (a, b) -> min(a, b)
+
+@testset "Products and Base reductions" begin
+    x = reshape(0.9 .+ 0.3 .* sin.(1.0:20.0), 4, 5)
+    with_zeros = copy(x)
+    with_zeros[2, 2] = 0             # one zero in column 2 and row 2
+    with_zeros[1, 3] = with_zeros[4, 3] = 0  # two zeros in column 3
+    with_zeros[4, 5] = 0             # row 4: zeros in columns 3 and 5
+    for dims in (:, (1,), (2,)), y in (x, with_zeros)
+        run(f) = (got = execute!(prepare_forward(f, y)); dims isa Colon ? only(got) : got)
+        @test run(x -> prod(x; dims)) ≈ prod(y; dims)
+        @test run(x -> prod(abs2, x; dims)) ≈ prod(abs2, y; dims)
+        for (op, reference) in ((+, sum), (*, prod), (max, maximum), (min, minimum))
+            @test run(x -> reduce(op, x; dims)) ≈ reference(y; dims)
+            # A given `init` combines once with the result, as in Base.
+            @test run(x -> mapreduce(abs2, op, x; dims, init = 0.5)) ≈
+                  mapreduce(abs2, op, y; dims, init = 0.5)
+        end
+        # Gradients through the product and maximum rules, against finite
+        # differences, with no zero, one zero, or several zeros in a slice.
+        for f in (y -> sum(sin, prod(y; dims)), y -> sum(sin, reduce(max, y; dims)))
+            loss, (dy,) = value_and_gradient(trace(f, y), y)
+            @test loss ≈ f(y)
+            @test dy ≈ finite_difference(f, (copy(y),), 1) atol = 1e-6
+        end
+    end
+    @test Tempest.fold(ProdFold(), with_zeros; dims = 1) ≈ prod(with_zeros; dims = 1)
+    # Small integers widen as in Base.
+    indices = Int32[3 1; 4 2]
+    p = trace(i -> prod(i; dims = 1), indices)
+    @test only(Tempest.interpret(Tempest.ForwardProgram(p), indices)) == prod(indices; dims = 1)
+
+    # Other operators need `init`; with it they run forward as a fold.
+    error = try
+        trace(x -> reduce(skewed_combine, x), x)
+        nothing
+    catch e
+        e
+    end
+    @test error isa ArgumentError
+    @test occursin("needs `init`", sprint(showerror, error))
+    @test_throws ArgumentError trace(x -> mapreduce(abs, norm_combine, x; dims = 1), x)
+    for dims in (:, (1,), (2,))
+        run(f) = (got = execute!(prepare_forward(f, x)); dims isa Colon ? only(got) : got)
+        # CPU kernels fold left in index order, like Base.
+        @test run(x -> reduce(skewed_combine, x; dims, init = 0.0)) ≈
+              reduce(skewed_combine, x; dims, init = 0.0)
+        @test run(x -> mapreduce(abs, norm_combine, x; dims, init = 0.0)) ≈
+              mapreduce(abs, norm_combine, x; dims, init = 0.0)
+    end
+    # Folds from a singleton operator and a common identity are zero-size; an
+    # identity that the element type cannot rebuild is captured.
+    reduction_fold(f) = only(node.op.fold for node in trace(f, x).nodes if node.op isa Tempest.FoldReduction)
+    @test Base.issingletontype(typeof(reduction_fold(x -> reduce(norm_combine, x; init = 0))))
+    @test Base.issingletontype(typeof(reduction_fold(x -> reduce(smaller, x; init = Inf))))
+    @test !Base.issingletontype(typeof(reduction_fold(x -> reduce(norm_combine, x; init = 0.5))))
+    # The integer `init` promotes as in Base; the fold state keeps the element type.
+    @test trace(x -> reduce(norm_combine, x; init = 0), Float32.(x)).nodes[end].dtype == Float32
 end

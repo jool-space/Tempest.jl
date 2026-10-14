@@ -188,7 +188,6 @@ end
 
 Base.sum(f, v::TracedArray; dims = :) = sum(pointwise(f, v); dims)
 Base.map(f, v::TracedArray) = pointwise(f, v)
-Base.mapreduce(f, ::typeof(+), v::TracedArray; dims = :) = sum(f, v; dims)
 Base.sum(v::TracedScalar) = v
 Base.sum(f, v::TracedScalar) = f(v)
 

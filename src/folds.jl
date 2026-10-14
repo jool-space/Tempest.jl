@@ -74,6 +74,19 @@ fold_combine(::MinFold, a, b) = (min(a[1], b[1]),)
 fold_observe(::Union{MaxFold, MinFold}, state) = state[1]
 
 """
+    ProdFold()
+
+The product of the elements.
+"""
+struct ProdFold <: Fold end
+
+fold_name(::ProdFold) = :prod
+fold_init(::ProdFold, T) = (one(T),)
+fold_lift(::ProdFold, x) = (x,)
+fold_combine(::ProdFold, a, b) = (a[1] * b[1],)
+fold_observe(::ProdFold, state) = state[1]
+
+"""
     LogSumExpFold()
 
 `log(sum(exp, x))` in one pass. The state is the running maximum and the sum of
@@ -221,6 +234,88 @@ Base.minimum(v::TracedArray; dims = :) = fold(MinFold(), v; dims)
 Base.maximum(f, v::TracedArray; dims = :) = maximum(pointwise(f, v); dims)
 Base.minimum(f, v::TracedArray; dims = :) = minimum(pointwise(f, v); dims)
 
+# Products widen small integers as Base's `prod` does.
+function Base.prod(v::TracedArray; dims = :)
+    T = Base.promote_op(Base.mul_prod, eltype(v), eltype(v))
+    fold(ProdFold(), pointwise(T, v); dims)
+end
+
+Base.prod(f, v::TracedArray; dims = :) = prod(pointwise(f, v); dims)
+
+# Operators with a built-in reduction, and the operator that combines `init`
+# with its result. Base's own `sum` and `prod` pass `add_sum` and `mul_prod`.
+builtin_reduction(::Union{typeof(+), typeof(Base.add_sum)}) = (sum, +)
+builtin_reduction(::Union{typeof(*), typeof(Base.mul_prod)}) = (prod, *)
+builtin_reduction(::typeof(max)) = (maximum, max)
+builtin_reduction(::typeof(min)) = (minimum, min)
+builtin_reduction(op) = nothing
+
+struct NoInit end
+
+"""
+    reduce(op, v::TracedArray; dims = :, init)
+    mapreduce(f, op, v::TracedArray; dims = :, init)
+
+`+`, `*`, `max` and `min` record their built-in reductions. A given `init` is
+combined once with each result, `op(init, result)`, as Base does.
+
+Another operator becomes a `GenericFold` and needs `init`, its identity: every
+slice, and every padded lane of a parallel backend, starts from it. As for every
+fold, `op` must be associative and commutative up to rounding, since backends
+regroup and reorder its applications. The fold is zero-size, which cuTile graph
+regions require, when `op` is a singleton and `init` equals zero, one, `typemin`
+or `typemax` of the element type; another `init` is captured, and the fold runs
+on the CUDA kernels. Such a fold has no derivative rule.
+"""
+# Real elements keep this method apart from Base's `reduce(vcat or hcat, vector
+# of arrays)`, which would otherwise be ambiguous with it.
+Base.reduce(op, v::TracedArray{<:Real}; dims = :, init = NoInit()) =
+    mapreduce(identity, op, v; dims, init)
+
+function Base.mapreduce(f, op, v::TracedArray; dims = :, init = NoInit())
+    x = pointwise(f, v)
+    builtin = builtin_reduction(op)
+    if builtin !== nothing
+        reduction, combine = builtin
+        y = reduction(x; dims)
+        return init isa NoInit ? y : pointwise(combine, init, y)
+    end
+    init isa NoInit && throw(
+        ArgumentError(
+            "reducing a traced array by an operator other than +, *, max and min " *
+            "needs `init`, the identity of the operator; got $op",
+        ),
+    )
+    init isa Real || throw(ArgumentError("`init` must be a real number, got $(typeof(init))"))
+    T = promote_type(eltype(x), typeof(init))
+    operator_fold = GenericFold(; init = element_identity(init, T), combine = OperatorCombine(op))
+    fold(operator_fold, pointwise(T, x); dims)
+end
+
+# The combine of a fold whose state is one running value.
+struct OperatorCombine{O}
+    op::O
+end
+
+(c::OperatorCombine)(a, b) = (c.op(a[1], b[1]),)
+
+# An identity rebuilt from the element type keeps the fold zero-size.
+struct ElementIdentity{K} end
+
+(::ElementIdentity{:zero})(T) = (zero(T),)
+(::ElementIdentity{:one})(T) = (one(T),)
+(::ElementIdentity{:typemin})(T) = (typemin(T),)
+(::ElementIdentity{:typemax})(T) = (typemax(T),)
+
+function element_identity(init, T)
+    value = convert(T, init)
+    for kind in (:zero, :one, :typemin, :typemax)
+        candidate = ElementIdentity{kind}()
+        isequal(only(candidate(T)), value) && return candidate
+    end
+    (value,)
+end
+
 """
     fold_pullback(f::Fold, x, y, g, axes) -> cotangent of x
 
@@ -266,4 +361,21 @@ function fold_pullback(::Union{MaxFold, MinFold}, x, y, g, axes)
     ties = pointwise(Tie(), x, y)
     count = axes isa Colon ? sum(ties) : sum(ties; dims = axes)
     ties .* (g ./ count)
+end
+
+# The derivative of a product by one element is the product of the others.
+# Dividing the result by the element fails at zeros, so the rule counts each
+# slice's zeros and multiplies its nonzero elements: with no zero the partial is
+# that product over the element; with one zero it is that product at the zero
+# and zero elsewhere; with more zeros it vanishes.
+function fold_pullback(::ProdFold, x, y, g, axes)
+    T = eltype(x)
+    is_zero = pointwise(Tie(), x, zero(T))
+    count = axes isa Colon ? sum(is_zero) : sum(is_zero; dims = axes)
+    # Zeros replaced by one, so the product and quotients below stay finite.
+    factors = x .+ is_zero
+    nonzero_product = fold(ProdFold(), factors; dims = axes)
+    no_zero = pointwise(Tie(), count, zero(T))
+    one_zero = pointwise(Tie(), count, one(T))
+    g .* nonzero_product .* (no_zero ./ factors .+ one_zero .* is_zero)
 end
