@@ -11,7 +11,7 @@
 # each figure is the median of `samples` samples. Compilation is excluded.
 # TFLOP/s counts 4·b·h·t²·d for a forward and 3.5 times that for forward +
 # backward, halved for the causal mask.
-# Run: julia --project=examples examples/research/attention_benchmark.jl
+# Run: julia --project=examples examples/benchmarks/attention.jl
 using Tempest, CUDACore, Statistics
 import cuBLAS, cuTile, cuDNN
 using Tempest: attention

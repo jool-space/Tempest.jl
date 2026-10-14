@@ -6,7 +6,7 @@
 # A tuple parameter puts both arrays in one alias class; the only change in the
 # Tile IR is a `join_tokens` of the load's token into the store's, and the same
 # kernel uses about 25 registers and runs several times faster.
-# Run: julia --project=examples examples/research/cutile_issues/store_ordering_registers.jl
+# Run: julia --project=examples examples/cutile_issues/store_ordering_registers.jl
 using CUDACore
 import cuTile as ct
 

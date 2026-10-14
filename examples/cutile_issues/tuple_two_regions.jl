@@ -6,7 +6,7 @@
 #
 # The same kernel with separate array parameters compiles. Prints `true` when
 # the kernel compiles and its result is correct.
-# Run: julia --project=examples examples/research/cutile_issues/tuple_two_regions.jl
+# Run: julia --project=examples examples/cutile_issues/tuple_two_regions.jl
 using CUDACore
 import cuTile as ct
 

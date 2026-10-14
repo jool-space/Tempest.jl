@@ -12,7 +12,7 @@
 # Effective bandwidth is minimum traffic over cold time, and is compared with a
 # device copy measured in the same run. Compilation is excluded; each figure is
 # the median of `samples` samples.
-# Run: julia --project=examples examples/research/normalization_schedules_benchmark.jl
+# Run: julia --project=examples examples/benchmarks/normalization_schedules.jl
 include("roofline.jl")
 
 using .Roofline

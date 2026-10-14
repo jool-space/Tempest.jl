@@ -237,7 +237,7 @@ their half-precision copies from the same pool.
 
 ### Measured against cuTile
 
-`examples/research/attention_benchmark.jl` times causal attention on GB10 with
+`examples/benchmarks/attention.jl` times causal attention on GB10 with
 cuDNN 9.27, on 14 October 2026, with no other GPU process running. Each figure
 is the median device time per step, in μs, over CUDA graphs of 20 back-to-back
 executions. TFLOP/s follows in parentheses, counting 4·b·h·t²·d per forward,
@@ -301,9 +301,9 @@ Reductions with their pointwise producers and consumers are handled by graph
 regions; see [Graph regions](graph-regions.md). The earlier scalar-binding
 reduction path and its `fuse_reductions` flag were retired once the graph
 provider's resident schedule matched its measured performance. Two standalone
-compiler probes from that work remain: `examples/cutile_wrapped_reduction.jl`
+compiler probes from that work remain: `examples/cutile_issues/wrapped_reduction.jl`
 reproduces cuTile 1.0's loop failure with wrapped kernel arguments, and
-`examples/cutile_scalar_derivative.jl` reproduces an FMA type-verification
+`examples/cutile_issues/scalar_derivative.jl` reproduces an FMA type-verification
 failure for the polynomial derivative `x -> 1 + 3x*x`. Metadata acceptance does
 not prove scalar compilation; compiler errors propagate.
 

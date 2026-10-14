@@ -1,4 +1,4 @@
-# Run: julia --project=examples examples/research/cutile_padding_probe.jl
+# Run: julia --project=examples examples/cutile_issues/padding_probe.jl
 # Reproduce an eager cuTile mapreduce tail issue without changing its package.
 # This is a diagnostic: it prints matches and mismatches rather than expecting
 # an upstream bug to remain present in future releases.

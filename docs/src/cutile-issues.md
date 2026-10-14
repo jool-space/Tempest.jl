@@ -4,7 +4,7 @@
 workspace manifest, GB10 (sm_121), Julia 1.13. Two separate problems, both
 reached through the kernel entry the graph-region provider generates, and a
 third found by an older reproducer. The repro scripts are in
-`examples/research/cutile_issues/` and `examples/cutile_scalar_derivative.jl`.
+`examples/cutile_issues/` and `examples/cutile_issues/scalar_derivative.jl`.
 
 ## 1. Tuple argument read from two regions: invalid bytecode (fixed locally)
 
@@ -83,7 +83,7 @@ pipeline:
 
 The last column is an experiment in cuTile's token-order pass (a store also
 joins the `LAST_OP` token of every other alias class; loads unchanged;
-`examples/research/cutile_issues/stores_after_all.patch`, enabled by
+`examples/cutile_issues/stores_after_all.patch`, enabled by
 `CUTILE_EXPERIMENT=stores_after_all`). It
 recovers the resident kernels completely but still slows the streamed one
 2.4×. The streamed kernel uses 255 registers with separate parameters and
@@ -109,7 +109,7 @@ registers and restores their earlier times
 
 ## 3. FMA fusion with a scalar addend: invalid bytecode (fixed locally)
 
-`examples/cutile_scalar_derivative.jl` broadcasts `v -> 1 + 3v * v` over a
+`examples/cutile_issues/scalar_derivative.jl` broadcasts `v -> 1 + 3v * v` over a
 tile. cuTile's FMA fusion rewrites `addf(mulf(x, y), z)` into `fma(x, y, z)`.
 Here `z` is the constant `1`, a 0-D tile that `addf` would have broadcast, but
 the `fma` emitter passed it through, and `tileiras` rejected the module:

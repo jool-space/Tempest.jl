@@ -1,5 +1,5 @@
 # Matched sum reductions against CUDACore/GPUArrays' public sum! interface.
-# Run: julia --project=examples examples/research/reduction_domains_benchmark.jl
+# Run: julia --project=examples examples/benchmarks/reduction_domains.jl
 using Tempest
 using CUDACore
 using Statistics

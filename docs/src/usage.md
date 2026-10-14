@@ -325,7 +325,7 @@ and a mixed scalar/tile FMA verifier failure for some scalar expressions. Dense
 regions use tiled loads/stores; transposed reads use CUDA scalar indexing. Some
 derivatives are factored to avoid the FMA issue. Regions containing Float64
 literals use CUDA because cuTile scalar/tile promotion can otherwise narrow
-intermediate arithmetic. `examples/cutile_diagnostics.jl`
+intermediate arithmetic. `examples/cutile_issues/diagnostics.jl`
 contains standalone reproducers. Compilation failures are not silently hidden;
 `CUDATarget(kernels=:cuda)` is an explicit alternative for scalar expressions.
 

@@ -163,7 +163,7 @@ The padding concern reproduced on the GB10 with the installed cuTile 1.0.0:
 returned 512 in each column instead of 259. The aligned eight-row control
 returned eight. The installed implementation pads loads with the reduction
 identity before applying the map; exp turns those padded zeros into ones.
-`examples/research/cutile_padding_probe.jl` preserves the diagnostic. This is an
+`examples/cutile_issues/padding_probe.jl` preserves the diagnostic. This is an
 upstream eager-mapreduce result, not a failure measured in Tempest's native
 reduction provider. Dependencies were not modified.
 

@@ -225,7 +225,7 @@ Run from the repository root with the examples environment available:
 ```sh
 julia --project=. examples/research/graph_candidates_tests.jl
 julia --project=examples examples/research/cutile_sweeps_tests.jl
-julia --project=examples examples/research/cutile_streaming_abi_probe.jl
+julia --project=examples examples/cutile_issues/streaming_abi_probe.jl
 julia --project=examples examples/research/cutile_sweeps_benchmark.jl
 ```
 

@@ -53,7 +53,7 @@ bytes after reuse. This is a coverage result, not an MLP speed claim.
 
 ## Independent measurement
 
-`examples/research/reduction_domains_benchmark.jl` compares the same Float32 sum
+`examples/benchmarks/reduction_domains.jl` compares the same Float32 sum
 and output shape with CUDACore/GPUArrays' public `sum!`. Each path is compiled and
 warmed before timing. A CUDA graph contains 100 repetitions, so Julia submission
 per operation cannot starve the measurement. Nine trials alternate measurement
@@ -155,9 +155,9 @@ stores. See [cuTile issues](cutile-issues.md). With these changes the graph prov
 the older path at every shape, and the older path, its `fuse_reductions` flag,
 and its separate selector were removed.
 
-`examples/research/normalization_schedules_benchmark.jl` repeats the
+`examples/benchmarks/normalization_schedules.jl` repeats the
 graph-region and decomposed measurements across these shapes and places each
-against the memory-traffic bound, using `examples/research/roofline.jl`. Both
+against the memory-traffic bound, using `examples/benchmarks/roofline.jl`. Both
 paths are prepared and checked before anything is timed and are measured in
 alternating order. Device times are per step from one CUDA graph of 200
 back-to-back executions, so host submission gaps are excluded. *Warm* repeats

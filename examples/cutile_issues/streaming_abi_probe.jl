@@ -1,4 +1,4 @@
-# Run with: julia --project=examples examples/research/cutile_streaming_abi_probe.jl
+# Run with: julia --project=examples examples/cutile_issues/streaming_abi_probe.jl
 # Research diagnostic for cuTile 1.0.0: streamed loads from tuple kernel arguments
 # can produce invalid Tile IR. A flat entry wrapper can reconstruct those tuples
 # inside the kernel. This checks the workaround without requiring the bug to stay.

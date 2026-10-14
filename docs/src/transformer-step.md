@@ -139,7 +139,7 @@ variance.
 ## Where the difference comes from
 
 Both steps were traced with Nsight Systems on the afternoon of 23 September
-(scripts in `examples/research/xla_comparison`),
+(scripts in `examples/benchmarks/xla_comparison`),
 minutes apart, with the SM clock logged every 0.5 s. Steps are delimited by
 the per-step batch upload; the tables cover the steady steps of each run.
 The GB10 was power-capped the whole time: 650–950 MHz under load against its

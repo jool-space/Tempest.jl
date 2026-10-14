@@ -49,7 +49,7 @@ On GB10, Julia 1.12.7, and cuTile 1.0.0, dynamically formed indices in a
 gather/scatter path showed an off-by-one. Dense tile loads/stores avoid this path;
 transposed reads lower through CUDA scalar indexing. Some scalar expressions also
 triggered a mixed-shape FMA verifier error. Factored derivative expressions worked.
-Standalone reproducers are in `examples/cutile_diagnostics.jl` so these workarounds
+Standalone reproducers are in `examples/cutile_issues/diagnostics.jl` so these workarounds
 can be re-examined rather than fossilized into architecture.
 
 Backend compile errors remain visible. An explicit `scalar_backend=:cuda` permits

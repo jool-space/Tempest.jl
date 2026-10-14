@@ -13,7 +13,7 @@ mkdir -p "$S"
 NSYS="nsys profile -t cuda --cuda-graph-trace=node --sample=none --cpuctxsw=none --force-overwrite=true --export=sqlite"
 GPT2X="NANOGPT_HIDDEN=768 NANOGPT_LAYERS=12 NANOGPT_HEADS=12 NANOGPT_KV_HEADS=12 NANOGPT_FFN=3072 NANOGPT_T=256 NANOGPT_B=16"
 GPT2T="TEMPEST_GPT_HIDDEN=768 TEMPEST_GPT_LAYERS=12 TEMPEST_GPT_HEADS=12 TEMPEST_GPT_KV_HEADS=12 TEMPEST_GPT_FFN=3072 TEMPEST_GPT_T=256 TEMPEST_GPT_B=16"
-DRIVER=$ROOT/examples/research/xla_comparison/tempest_driver.jl
+DRIVER=$ROOT/examples/benchmarks/xla_comparison/tempest_driver.jl
 
 xla() { (cd "$NANOGPT/gpuenv" && env JULIA_PKG_OFFLINE=true NANOGPT_FRONTEND=vanilla NANOGPT_TEXT=$TEXT "$@"); }
 tempest() { (cd "$ROOT" && env TEMPEST_GPT_TEXT=$TEXT "$@"); }
