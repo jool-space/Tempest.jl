@@ -30,13 +30,18 @@ function BlasResources(workspace_bytes, precision = :full)
     resource
 end
 
+# Half-precision products accumulate in Float32, as in cuDNN and the usual
+# framework default, and round once to the output type.
+const HALF_GEMM_TYPES = (Float16, Core.BFloat16)
+
 function gemm_call(resources::BlasResources, y, a, b, workspace)
     T = eltype(y)
     if !(eltype(a) == eltype(b) == T)
         throw(ArgumentError("CUDA GEMM operands must have matching dtypes"))
     end
-    alpha, beta = get!(resources.coefficients, T) do
-        (CUDACore.CuRef(one(T)), CUDACore.CuRef(zero(T)))
+    C = T in HALF_GEMM_TYPES ? Float32 : T
+    alpha, beta = get!(resources.coefficients, C) do
+        (CUDACore.CuRef(one(C)), CUDACore.CuRef(zero(C)))
     end
     ta, aa = a isa Transpose ? ('T', parent(a)) : ('N', a)
     tb, bb = b isa Transpose ? ('T', parent(b)) : ('N', b)
@@ -49,6 +54,11 @@ function gemm_call(resources::BlasResources, y, a, b, workspace)
         cuBLAS.cublasSgemm_v2
     elseif T === Float64
         cuBLAS.cublasDgemm_v2
+    elseif T in HALF_GEMM_TYPES
+        (handle, ta, tb, m, n, k, alpha, aa, lda, bb, ldb, beta, y, ldc) -> cuBLAS.cublasGemmEx(
+            handle, ta, tb, m, n, k, alpha, aa, T, lda, bb, T, ldb, beta, y, T, ldc,
+            cuBLAS.CUBLAS_COMPUTE_32F, cuBLAS.CUBLAS_GEMM_DEFAULT,
+        )
     else
         throw(ArgumentError("unsupported GEMM dtype $T"))
     end
@@ -100,8 +110,11 @@ function support(::CuBLASGemm, request::RegionRequest)
     if !(request.step.region isa GemmRegion)
         return Unsupported("requires a matrix product")
     end
-    if !(request.dtype in (Float32, Float64)) || !all(==(request.dtype), request.input_types)
-        return Unsupported("CUDA GEMM operands must have matching Float32/Float64 dtypes")
+    if !(request.dtype in (Float32, Float64, HALF_GEMM_TYPES...)) ||
+       !all(==(request.dtype), request.input_types)
+        return Unsupported(
+            "CUDA GEMM operands must have matching Float16, BFloat16, Float32 or Float64 dtypes",
+        )
     end
     if max(request.dims..., request.input_dims[1][2]) > typemax(Int32)
         return Unsupported("GEMM dimensions exceed Int32")

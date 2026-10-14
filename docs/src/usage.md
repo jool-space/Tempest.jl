@@ -285,9 +285,11 @@ GPU gather indices and repeated-index accumulation schedules are prepared once,
 owned by the runtime, and reported separately as layout indices. Host allocations
 and driver/library metadata are not included in those byte counts.
 
-CUDA scalar kernels require bits element types; cuBLAS GEMM currently requires
-matching Float32 or Float64 operands. Float32/Float64 paths are covered by the
-GPU regression suite. Cotangent storage follows each logical primal's dtype. This is a provisional
+CUDA scalar kernels require bits element types; cuBLAS GEMM requires matching
+Float16, BFloat16, Float32 or Float64 operands. Half-precision products
+accumulate in Float32 and round once to their output type. Float32/Float64 paths
+are covered by the GPU regression suite, and half-precision products by the
+cuDNN tests that compare against them. Cotangent storage follows each logical primal's dtype. This is a provisional
 policy, **not mixed-precision or MXFP8 training support**.
 
 ## Run the composed examples

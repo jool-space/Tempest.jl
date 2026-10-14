@@ -67,3 +67,22 @@ end
     @test :cutile ∉ plain.candidates
     @test plain.providers == [:cuda]
 end
+
+@testset "cuBLAS half-precision products accumulate in Float32" begin
+    a = reshape(Float32.(sin.(1:(24 * 40))), 24, 40) ./ 8
+    b = reshape(Float32.(cos.(1:(40 * 16))), 40, 16) ./ 8
+    for T in (Float16, Core.BFloat16)
+        f(a, b) = a * b
+        g(a, b) = transpose(a) * b
+        ex = prepare_forward(f, CuArray(T.(a)), CuArray(T.(b)))
+        @test ex.providers == [:cuBLAS]
+        y = execute!(ex)
+        @test eltype(y) === T
+        # One rounding of a Float32 accumulation.
+        expected = T.(Float32.(T.(a)) * Float32.(T.(b)))
+        @test maximum(abs.(Float32.(Array(y)) .- Float32.(expected))) <= 2 * eps(T(1))
+        at = Matrix(transpose(a))
+        ex = prepare_forward(g, CuArray(T.(at)), CuArray(T.(b)))
+        @test maximum(abs.(Float32.(Array(execute!(ex))) .- Float32.(expected))) <= 2 * eps(T(1))
+    end
+end
