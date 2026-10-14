@@ -51,9 +51,12 @@ region that requires recomputation.
 recomputable(f) = f in (+, -, *, /, sin, cos, exp, log, sqrt, inv, abs2, tanh)
 recomputable(::LiteralPower) = true
 
+# Construction rejected a selected region, growth-based or proposed. Preparation
+# excludes this exact member set and replans.
 struct RejectedGraphRegion
     members::Vector{Int}
     reasons::Vector{String}
+    proposed::Bool
 end
 
 graph_operation(op) = op isa Union{Pointwise, Constant, FoldReduction}
@@ -268,14 +271,17 @@ function graph_implementations(implementations)
     end
 end
 
-function select_graph_regions(program, target, implementations, blocked, notes)
+# Growth starts after proposals are selected: their members are already claimed
+# and take part in the acyclicity check of every growth candidate.
+function select_graph_regions(program, target, implementations, blocked, notes; selected = ())
     candidates = graph_implementations(implementations)
     isempty(candidates) && return GraphRegion[]
     live = live_nodes(program.nodes, program.results)
     (; neighbors, users) = graph_adjacency(program, live)
     claimed = falses(length(program.nodes))
     regions = GraphRegion[]
-    groups = Vector{Int}[]
+    groups = Vector{Int}[region.members for region in selected]
+    foreach(region -> claimed[region.members] .= true, selected)
     verdicts = Dict{Tuple, Bool}()
     function accepted(members)
         get!(verdicts, Tuple(members)) do
@@ -304,7 +310,7 @@ function select_graph_regions(program, target, implementations, blocked, notes)
         # A construction rejection excludes this exact set, not its nodes. Keep
         # growing through it, then select the largest unblocked supported prefix.
         for members in Iterators.reverse(history)
-            Tuple(members) in blocked && continue
+            haskey(blocked, Tuple(members)) && continue
             accepted(members) || continue
             push!(regions, region_boundary(program, members, live))
             push!(groups, members)
@@ -316,9 +322,64 @@ function select_graph_regions(program, target, implementations, blocked, notes)
 end
 
 function order_graph_steps(steps)
-    anchor(step) = step.region isa GraphRegion ? first(step.region.members) : step.output
+    anchor(step) = step.region isa SelectedRegion ? first(step.region.members) : step.output
     steps = sort(steps; by = anchor)
     order = dependency_order([s.outputs for s in steps], [s.dependencies for s in steps])
     order === nothing && error("selected graph regions produced a cyclic storage schedule")
     steps[order]
+end
+
+# Swapping the operands of these binary calls leaves every floating-point result
+# unchanged. Wider calls keep their order: `+(a, b, c)` rounds left to right.
+commutative(::Pointwise{typeof(+)}, arity) = arity == 2
+commutative(::Pointwise{typeof(*)}, arity) = arity == 2
+commutative(operation, arity) = false
+
+"""
+    standard_numbering(region) -> (; local_id, operands)
+
+Number a selected region's values locally in a standard form, so equivalent
+regions can share one compiled implementation: the same computation in every
+layer or in the backward pass, whichever of its inputs the graph created first,
+and with commutative operands in either order. `local_id` maps original value
+IDs to local numbers, which order every value after its operands; `operands(id)`
+returns a member's operands in the order the numbering visited them.
+
+Numbering is a depth-first walk from the outputs. Commutative operands are
+visited in the order of a structural hash of their producers, which ignores
+graph IDs. A hash collision or an unusual sharing pattern can only cost a missed
+reuse, provided an implementation computes with the operand order `operands`
+reports.
+"""
+function standard_numbering(region::Region)
+    nodes = region.program.nodes
+    structure = Dict{Int, UInt}()
+    function structural_hash(id)
+        haskey(structure, id) && return structure[id]
+        node = nodes[id]
+        structure[id] = if id in region.inputs
+            hash((Argument, node.dims, node.dtype))
+        else
+            producers = map(structural_hash, node.inputs)
+            if commutative(node.op, length(producers))
+                producers = Tuple(sort!(collect(producers)))
+            end
+            hash((node.op, node.dims, node.dtype, producers))
+        end
+    end
+    function operands(id)
+        node = nodes[id]
+        commutative(node.op, length(node.inputs)) || return node.inputs
+        Tuple(sort!(collect(node.inputs); by = structural_hash))
+    end
+    local_id = Dict{Int, Int}()
+    function visit(id)
+        haskey(local_id, id) && return
+        id in region.inputs || foreach(visit, operands(id))
+        local_id[id] = length(local_id) + 1
+    end
+    foreach(visit, region.outputs)
+    foreach(visit, sort(region.members))
+    foreach(visit, region.inputs)
+    (; local_id, operands)
 end

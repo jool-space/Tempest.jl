@@ -34,13 +34,16 @@ function native_requirements(program, live, regions)
             end
         end
     end
-    for region in regions
-        native[region.inputs] .= true
-        dense[region.inputs] .= true
+    for region in regions, id in region.inputs
+        native[id] = true
+        dense[id] |= dense_region_input(region, id)
     end
     native[program.results] .= true
     (; native, dense)
 end
+
+dense_region_input(::GraphRegion, id) = true
+dense_region_input(region::ProposedRegion, id) = !native_region_input(region, id)
 
 function plan_layouts(program, live, regions = ())
     nodes = program.nodes
@@ -283,17 +286,18 @@ function explain(io::IO, plan::StoragePlan; providers = nothing)
 
     for (index, step) in enumerate(plan.steps)
         provider = providers === nothing ? "" : " [$(providers[index])]"
-        if step.region isa GraphRegion
+        if step.region isa SelectedRegion
             region = step.region
+            label = region isa ProposedRegion ? " $(region.label)" : ""
             println(
                 io,
-                "  $index: $(step.outputs) = graph_region$provider",
+                "  $index: $(step.outputs) = $(region_name(region))$provider$label",
                 " covers $(region.members); reads $(step.dependencies)",
             )
             println(
                 io,
                 "    logical inputs $(region.inputs); escaping outputs $(region.outputs)",
-                "; dense boundary buffers",
+                region isa GraphRegion ? "; dense boundary buffers" : "",
             )
         elseif step.region isa OpaqueCall
             slots = [plan.slots[id] for id in step.outputs]

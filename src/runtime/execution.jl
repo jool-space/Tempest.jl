@@ -16,6 +16,7 @@ mutable struct Prepared{R <: AbstractRuntime}
     workspace_slots::Vector{Vector{Int}}
     state::StateBindings
     groups::Vector{Vector{Int}}
+    proposals::Vector{ProposalRecord}
 end
 
 """Copy new input contents into the executable's stable buffers (outside capture)."""
@@ -89,6 +90,7 @@ reasons, and owned input/workspace bytes. This is a plan report, not a profiler.
 function explain(io::IO, ex::Prepared)
     explain_runtime(io, ex.runtime)
     foreach(note -> println(io, "  semantic ", note), ex.semantic_notes)
+    explain_proposals(io, ex.proposals, ex.storage.steps)
     explain(io, ex.storage; providers = ex.providers)
     scratchbytes = sum(a -> sizeof(eltype(a)) * length(a), ex.scratch; init = 0)
     inputbytes = sum(a -> sizeof(eltype(a)) * length(a), ex.inputs; init = 0)

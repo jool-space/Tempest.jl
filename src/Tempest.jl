@@ -32,6 +32,12 @@ public Implementation,
     RegionRequest,
     GraphRegion,
     GraphRequest,
+    RegionProposal,
+    ProposalRequest,
+    propose_regions,
+    ProposedRegion,
+    ProposedRequest,
+    standard_numbering,
     InPlaceRequest,
     GroupedRequest,
     CallRequest,
@@ -106,6 +112,7 @@ include("implementations/cpu.jl")
 # Compiler: semantic lowering, graph regions, planning, selection.
 include("compiler/lowering.jl")
 include("compiler/graph_regions.jl")
+include("compiler/proposals.jl")
 include("compiler/planning.jl")
 include("compiler/selection.jl")
 

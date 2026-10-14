@@ -77,6 +77,9 @@ function select_schedule(implementations, target, program, storage, runtime, bin
     ]
     chosen = Any[]
     groups = Vector{Int}[]
+    # Selected regions that fail to build are collected, so one replan excludes
+    # them all; other rejections return at once.
+    rejected = RejectedGraphRegion[]
     index = 1
     while index <= length(storage.steps)
         indices = grouped ? consecutive_group(storage, bindings, index) : [index]
@@ -97,8 +100,10 @@ function select_schedule(implementations, target, program, storage, runtime, bin
         if selected === nothing
             indices = [index]
             binding = bindings[index]
+            region = storage.steps[index].region
+            # A proposed region is built only by the implementation that proposed it.
             selected = choose_implementation(
-                implementations,
+                region isa ProposedRegion ? (region.implementation,) : implementations,
                 requests[index],
                 runtime,
                 binding.output,
@@ -108,8 +113,11 @@ function select_schedule(implementations, target, program, storage, runtime, bin
         end
         if selected === nothing
             step = storage.steps[index]
-            if step.region isa GraphRegion
-                return RejectedGraphRegion(step.region.members, notes[index])
+            if step.region isa SelectedRegion
+                region = step.region
+                push!(rejected, RejectedGraphRegion(region.members, notes[index], region isa ProposedRegion))
+                index += 1
+                continue
             elseif haskey(storage.donations, step.output)
                 return RejectedDonation(storage.donations[step.output], notes[index])
             elseif step.region isa OpaqueCall
@@ -125,5 +133,6 @@ function select_schedule(implementations, target, program, storage, runtime, bin
         push!(groups, indices)
         index = last(indices) + 1
     end
+    isempty(rejected) || return rejected
     (; chosen, groups, notes)
 end

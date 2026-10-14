@@ -13,8 +13,8 @@ owned input groups 1 and 2. Shapes, element types, and structures must match.
 Safe elementwise results can write directly into donated input storage; other
 state commits follow the kernels. Use `inplace=false` to retain staged copies and
 `grouped=false` to disable independent-array grouping. Implementations can accept
-semantic graph regions before storage planning; `fuse_regions=false` retains the
-ordinary scalar-region planner. Rejection tries smaller graph candidates and then
+semantic graph regions, or propose regions of their own, before storage planning;
+`fuse_regions=false` retains the ordinary scalar-region planner. Rejection tries smaller graph candidates and then
 the ordinary decomposition. Repeated execution advances state. `bind_argument!`
 can replace a batch without resetting other groups.
 Results (including scalar gradients) are borrowed arrays, overwritten by the next
@@ -86,7 +86,7 @@ Base.@nospecializeinfer function prepare(
     rejected_rules = IdDict{Any, Set{Int}}()
     current, rule_owners = prepare_reverse_rules(p, target, candidates, rejected_rules, notes)
     blocked = Set{Int}()
-    blocked_regions = Set{Tuple}()
+    blocked_regions = Dict{Tuple, String}()
     current = resolve_semantics(current, target, candidates, excluded, notes)
     while true
         result = prepare_schedule(
@@ -103,13 +103,16 @@ Base.@nospecializeinfer function prepare(
             blocked_regions,
             fusion_notes = notes,
         )
-        if result isa RejectedGraphRegion
-            push!(blocked_regions, Tuple(result.members))
-            push!(
-                notes,
-                "graph region $(result.members) declined after construction: " *
-                join(result.reasons, "; "),
-            )
+        if result isa Vector{RejectedGraphRegion}
+            for rejection in result
+                reason = join(rejection.reasons, "; ")
+                blocked_regions[Tuple(rejection.members)] = reason
+                # A proposal's outcome is reported with the other proposals.
+                rejection.proposed || push!(
+                    notes,
+                    "graph region $(rejection.members) declined after construction: $reason",
+                )
+            end
             continue
         end
         if result isa RejectedDonation
@@ -185,7 +188,7 @@ end
 # Opaque calls see logical arrays and their declared result tree. GEMM retains
 # native transpose wrappers. Scalar kernels use flat storage and explicit maps.
 function bind_step(program, step, lookup)
-    if step.region isa GraphRegion
+    if step.region isa SelectedRegion
         output = Tuple(lookup(id) for id in step.region.outputs)
         inputs = Tuple(lookup(id) for id in step.region.inputs)
     elseif step.region isa OpaqueCall
@@ -205,6 +208,9 @@ function implementation_request(target, program, step, inputs)
     node = program.nodes[step.output]
     if step.region isa GraphRegion
         return graph_request(target, step.region)
+    end
+    if step.region isa ProposedRegion
+        return proposed_request(target, step.region)
     end
     if step.region isa OpaqueCall
         specs = map(node.inputs) do id
@@ -230,14 +236,25 @@ Base.@nospecializeinfer function prepare_schedule(
     blocked = Set{Int}(),
     grouped = true,
     fuse_regions = true,
-    blocked_regions = Set{Tuple}(),
+    blocked_regions = Dict{Tuple, String}(),
     fusion_notes = String[],
 )
     @nospecialize args
-    regions = if fuse_regions
-        select_graph_regions(program, target, implementations, blocked_regions, fusion_notes)
-    else
-        GraphRegion[]
+    # Proposals claim their members first; growth-based regions form around them.
+    records = ProposalRecord[]
+    regions = Region[]
+    if fuse_regions
+        proposed =
+            select_proposed_regions(program, target, implementations, blocked_regions, records)
+        grown = select_graph_regions(
+            program,
+            target,
+            implementations,
+            blocked_regions,
+            fusion_notes;
+            selected = proposed,
+        )
+        append!(regions, proposed, grown)
     end
     storage = plan(
         program;
@@ -254,7 +271,7 @@ Base.@nospecializeinfer function prepare_schedule(
     bindings = map(step -> bind_step(program, step, lookup), storage.steps)
     selection =
         select_schedule(implementations, target, program, storage, runtime, bindings; grouped)
-    if selection isa Union{RejectedCall, RejectedDonation, RejectedGraphRegion}
+    if selection isa Union{RejectedCall, RejectedDonation, Vector{RejectedGraphRegion}}
         return selection
     end
     bound = bind_implementations(runtime, selection.chosen)
@@ -281,6 +298,7 @@ Base.@nospecializeinfer function prepare_schedule(
         workspace_slots,
         StateBindings(),
         selection.groups,
+        records,
     )
     bind!(executable, args...)
 end

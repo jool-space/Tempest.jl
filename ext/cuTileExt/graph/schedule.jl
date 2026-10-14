@@ -278,55 +278,10 @@ function tile_description(schedule::GraphReductionSchedule)
     end
 end
 
-# Swapping the operands of these binary calls leaves every Float32 result
-# unchanged. Wider calls keep their order: `+(a, b, c)` rounds left to right.
-commutative(::Pointwise{typeof(+)}, arity) = arity == 2
-commutative(::Pointwise{typeof(*)}, arity) = arity == 2
-commutative(operation, arity) = false
-
-# Region values are numbered locally in a standard form, so equivalent regions
-# share one program type and one compiled kernel: the same computation in every
-# layer or in the backward pass, whichever of its inputs the graph created
-# first, and with commutative operands in either order. Numbering is a
-# depth-first walk from the outputs. Commutative operands are visited in the
-# order of a structural hash of their producers, which ignores graph IDs. A
-# hash collision or an unusual sharing pattern can only cost a missed reuse:
-# the program records the operand order it computes with.
-function standard_numbering(region::GraphRegion)
-    nodes = region.program.nodes
-    structure = Dict{Int, UInt}()
-    function structural_hash(id)
-        haskey(structure, id) && return structure[id]
-        node = nodes[id]
-        structure[id] = if id in region.inputs
-            hash((Argument, node.dims, node.dtype))
-        else
-            producers = map(structural_hash, node.inputs)
-            if commutative(node.op, length(producers))
-                producers = Tuple(sort!(collect(producers)))
-            end
-            hash((node.op, node.dims, node.dtype, producers))
-        end
-    end
-    function operands(id)
-        node = nodes[id]
-        commutative(node.op, length(node.inputs)) || return node.inputs
-        sort!(collect(node.inputs); by = structural_hash)
-    end
-    local_id = Dict{Int, Int}()
-    function visit(id)
-        haskey(local_id, id) && return
-        id in region.inputs || foreach(visit, operands(id))
-        local_id[id] = length(local_id) + 1
-    end
-    foreach(visit, region.outputs)
-    foreach(visit, sort(region.members))
-    foreach(visit, region.inputs)
-    (; local_id, operands)
-end
-
 # Returns the program and the order in which the kernel takes the region's
-# inputs; the caller passes input arrays in that order.
+# inputs; the caller passes input arrays in that order. Values use Tempest's
+# standard numbering, so equivalent regions share one program type and one
+# compiled kernel.
 function graph_sweep_program(region::GraphRegion, schedule)
     nodes = region.program.nodes
     (; local_id, operands) = standard_numbering(region)

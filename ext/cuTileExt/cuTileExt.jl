@@ -15,7 +15,8 @@ using Tempest:
     fold_init,
     fold_width,
     has_resident_lowering,
-    recomputable
+    recomputable,
+    standard_numbering
 import Tempest: support, build_implementation
 using CUDACore
 import cuTile as ct
