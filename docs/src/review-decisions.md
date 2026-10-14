@@ -18,6 +18,15 @@ Research code that no current page or test depends on was removed. The git tag
   regions, and it needs a separate tensor-ir build. Tempest's direction is a
   composition layer without a compiler binary dependency, and region selection
   is now graph regions. The report was `docs/src/tensor-ir-training.md`.
+- **Graph-region probes and native cuTile sweeps** (`graph_regions.jl`,
+  `graph_candidates.jl`, `reduction_scopes.jl`, `native_region_baseline.jl`,
+  `cutile_sweeps*.jl` and their test scripts). The CPU probes found region
+  boundaries and reduction phases on ordinary traced graphs; the sweeps compiled
+  a bounded family of them to one cuTile kernel, 3-20x faster than the
+  decomposed schedule of 21 September. Both became production code:
+  `src/compiler/graph_regions.jl` selects regions and `ext/cuTileExt/graph/`
+  schedules and compiles them, with their own tests. The reports were
+  `docs/src/cutile-sweeps.md` and `docs/src/scheduler-investigation.md`.
 
 ## Workload pass — 23 September 2026
 
