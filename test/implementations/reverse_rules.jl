@@ -1,4 +1,4 @@
-include("../examples/kernel_composition/rmsnorm.jl")
+include(joinpath(EXAMPLES, "kernel_composition", "rmsnorm.jl"))
 using .RMSNormExample
 
 struct NormRuleCPU <: Implementation

@@ -1,4 +1,5 @@
-@test Base.get_extension(Tempest, :ChainRulesCoreExt) === nothing
+# ChainRules changes how scalar rules are found; runtests.jl gives this file
+# its own worker so that does not reach other tests.
 using ChainRules
 import ChainRulesCore
 using ChainRulesCore: ProjectTo, @thunk, NoTangent, ZeroTangent, unthunk

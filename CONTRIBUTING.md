@@ -27,7 +27,9 @@ Use `.JuliaFormatter.toml` for spacing and wrapping. Review formatter output:
 formatting does not choose useful names, function boundaries, or abstractions.
 Do not compress a clear expression simply because it fits on one line.
 
-Run the relevant existing tests. Add regressions for changed contracts and failure
+Run the relevant existing tests: test/ mirrors src/, with GPU counterparts in
+test/cuda/ and test/cutile/, and `julia --project=test test/runtests.jl <prefix>`
+runs a subset. Add regressions for changed contracts and failure
 modes; avoid tests that merely restate a helper's implementation. Numerical
 correctness, alias lifetimes, and repeated GPU replay need independent checks.
 Passing tests establish behavior, not maintainability or performance. Report

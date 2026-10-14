@@ -335,10 +335,12 @@ contains standalone reproducers. Compilation failures are not silently hidden;
 # Run CPU tests and GPU tests when CUDA is functional
 julia --project -e 'using Pkg; Pkg.test()'
 
-# Optionally run both GPU provider configurations in the test environment
+# Optionally run both GPU provider configurations in the test environment,
+# or a subset by name prefix (`--list` shows the names)
 julia --project=test -e 'using Pkg; Pkg.instantiate()'
 julia --project=test test/runtests.jl
 TEMPEST_TEST_CUTILE=false julia --project=test test/runtests.jl
+julia --project=test test/runtests.jl cuda/ verbs/
 ```
 
 Tests cover finite-difference gradients, the explicit backward graph, custom scalar
@@ -347,8 +349,8 @@ reads, views/gathers and their finite-difference pullbacks, scalar versus
 zero-dimensional inputs, reduction tails, and repeated CUDA
 replay with changed inputs and stable pointers. GPU test dependencies are declared in `test/Project.toml`. GPU tests run when
 `CUDACore.functional()` is true and otherwise log a skip. cuTile is enabled by
-default; `TEMPEST_TEST_CUTILE=false` exercises the CUDA-only provider path.
-Core tests check that GPU packages have not loaded before the GPU test setup. GPU execution has been tested on NVIDIA GB10;
+default; `TEMPEST_TEST_CUTILE=false` exercises the CUDA-only provider path and
+skips `test/cutile/`. A fresh process checks that core use loads no GPU package. GPU execution has been tested on NVIDIA GB10;
 other architectures and Julia versions need validation. The manual **GPU validation**
 workflow runs both provider configurations on supplied CUDA runner labels; it needs
 an available GPU runner. Regular CI uses the same functional-CUDA gate.

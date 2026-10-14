@@ -1,3 +1,5 @@
+include("../fixtures/frontend.jl")
+
 @testset "CUDA array frontend, mapped broadcasts, and axis reductions" begin
     arr(dims, s) = reshape(s .* sin.(Float32.(1:prod(dims))), dims)
     x = arr((3, 5, 2), 0.4f0)

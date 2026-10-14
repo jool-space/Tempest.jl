@@ -1,3 +1,5 @@
+include("../fixtures/verbs.jl")
+
 @testset "State updates through opaque and expanded verbs" begin
     params = (x = [0.2, -0.3, 0.4],)
     batch = [0.7, -0.5, 0.1]

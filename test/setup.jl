@@ -65,21 +65,5 @@ function compare_prepared(
     ex
 end
 
-# Residual normalization fixture shared by the graph-region and training tests.
-fusion_activation(x) = x * x * x
-Tempest.scalar_partials(::typeof(fusion_activation)) = (x -> 3 * x * x,)
-
-function residual_normalization(x, residual, weight, bias, epsilon)
-    h = x .+ residual
-    rstd = inv.(sqrt.(sum(abs2, h; dims = 1) ./ eltype(x)(size(x, 1)) .+ epsilon))
-    y = fusion_activation.(h .* rstd .* weight .+ bias)
-    (; y, h, rstd)
-end
-
-function fusion_inputs(T, rows = 5, columns = 4)
-    x = reshape(T.(sin.(1:(rows * columns))), rows, columns)
-    residual = T(0.2) .* reverse(x; dims = 1)
-    weight = T.(range(0.3, 0.8; length = rows))
-    bias = reshape(T.(range(-0.2, 0.1; length = columns)), 1, columns)
-    (x, residual, weight, bias, T(0.03))
-end
+# Examples included by tests: rmsnorm kernels and the GPT training step.
+const EXAMPLES = joinpath(dirname(@__DIR__), "examples")

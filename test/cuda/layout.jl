@@ -1,3 +1,5 @@
+include("../fixtures/layout.jl")
+
 @testset "CUDA layouts and deterministic pullbacks" begin
     check_layout_cases(CUDATarget(); atol = 2e-4, rtol = 2e-4, gpu = true)
 end

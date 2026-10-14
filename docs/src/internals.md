@@ -86,7 +86,7 @@ structures. The tape remains heterogeneous host data.
 `schedule_region` lowers it to executable work. Layout operations additionally
 provide `transform_layout`. Unknown operations are fusion boundaries and fail at
 the missing lowering method. Native-input requirements and fusion policy have
-operation methods. `test/graph/ir.jl` demonstrates an external operation with
+operation methods. `test/ir/operations.jl` demonstrates an external operation with
 independent interpretation, differentiation, and lowering into an existing scalar
 region. These compiler methods are provisional; kernel authors should normally
 use semantic verbs and implementation candidates.
@@ -189,12 +189,20 @@ establishing faster kernels.
 
 ## Checking changes
 
-Run `julia --project=. -e 'using Pkg; Pkg.test()'`. The test environment contains the
-optional GPU packages; GPU execution is gated on `CUDACore.functional()`.
-`test/planning.jl` checks explicit derivatives, preparation, and storage reuse;
-`test/layout.jl` checks mappings and pullbacks; `test/verbs.jl` checks semantic
-contracts and construction fallback. Their CUDA counterparts check execution and
-replay.
+Run `julia --project=. -e 'using Pkg; Pkg.test()'`, or `julia --project=test
+test/runtests.jl [name prefixes...]` to run a subset. Every file below `test/`
+is one test, run in parallel by ParallelTestRunner; `runtests.jl` only selects
+files and sets up workers. Test directories mirror `src/`: `compiler/planning.jl`
+checks explicit derivatives, preparation, and storage reuse; `ir/layout.jl`
+checks mappings and pullbacks; `verbs/contract.jl` checks semantic contracts and
+construction fallback. `cuda/` holds their CUDA counterparts, which check
+execution and replay, and `cutile/` the tests that need cuTile. Helpers that a CPU
+test shares with its GPU counterpart live in `test/fixtures/`.
+
+Every worker loads the same packages: with a functional GPU, CUDACore, cuBLAS,
+cuDNN, and cuTile unless `TEMPEST_TEST_CUTILE=false`. What core use loads, and
+loading a provider after preparation, are checked in fresh processes
+(`test/extensions/loading.jl` runs the scripts in `test/isolated/`).
 
 For derivative changes, compare with finite differences, not only the interpreter
 that executes the same generated derivative graph. For scheduling changes, compare

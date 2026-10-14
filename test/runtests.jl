@@ -1,78 +1,52 @@
+# Each file below test/ runs as its own test, in parallel worker processes:
+# `julia --project=test test/runtests.jl [--jobs=N] [--list] [name prefixes...]`.
+# setup.jl is evaluated in every test's module. fixtures/ holds helpers that a
+# CPU test shares with its GPU counterpart, and isolated/ scripts that run in
+# fresh processes; neither runs as a test.
+using ParallelTestRunner
 using Tempest
-using Test
+import CUDACore
 
-include("common.jl")
-include("graph/ir.jl")
+const CUDA_FUNCTIONAL = CUDACore.functional()
+const CUTILE_ENABLED = CUDA_FUNCTIONAL && get(ENV, "TEMPEST_TEST_CUTILE", "true") == "true"
+const CUDNN_FUNCTIONAL = CUDA_FUNCTIONAL && (@eval(import cuDNN); cuDNN.functional())
+CUDA_FUNCTIONAL || @warn "CUDA unavailable; GPU tests skipped"
+CUDA_FUNCTIONAL && !CUDNN_FUNCTIONAL && @warn "cuDNN unavailable; cuDNN tests skipped"
 
-@testset "First tensor program" begin
-    f(x, w) = sum(abs2, tanh.(w' * x))
-    x = reshape(collect(range(-0.4, 0.5; length = 12)), 3, 4)
-    w = reshape(collect(range(-0.3, 0.6; length = 6)), 3, 2)
-    p = trace(f, x, w)
-    loss, (dx, dw) = value_and_gradient(p, x, w)
-    @test loss ≈ f(x, w)
-    @test dx ≈ finite_difference(f, (x, w), 1) atol=1e-8
-    @test dw ≈ finite_difference(f, (x, w), 2) atol=1e-8
-    @test occursin("matmul", sprint(show, MIME"text/plain"(), p))
-    @test value_and_gradient(p, 2x, w)[1] ≈ f(2x, w)
-    @test_throws ArgumentError value_and_gradient(p, Float32.(x), w)
-    @test_throws ArgumentError value_and_gradient(p, x)
-    @test_throws ArgumentError differentiate(trace(identity, x))
-    @test_throws DimensionMismatch trace(f, x, zeros(5, 2))
-    @test_throws ArgumentError trace(f, complex.(x), w)
+testsuite = find_tests(@__DIR__)
+filter!(testsuite) do (name, _)
+    name == "setup" && return false
+    startswith(name, "fixtures/") && return false
+    startswith(name, "isolated/") && return false
+    name == "cuda/cudnn" && return CUDNN_FUNCTIONAL
+    startswith(name, "cuda/") && return CUDA_FUNCTIONAL
+    startswith(name, "cutile/") && return CUTILE_ENABLED
+    true
 end
 
-@testset "Repeated and unused inputs" begin
-    f(x, unused) = sum(abs2, x' * x)
-    x = reshape([0.1, 0.4, -0.2, 0.3], 2, 2)
-    p = trace(f, x, x)
-    loss, (dx, unused) = value_and_gradient(p, x, x)
-    @test loss ≈ f(x, x)
-    @test dx ≈ finite_difference(f, (x, copy(x)), 1) atol=1e-8
-    @test all(iszero, unused)
+# Every worker loads the same packages, so no test sees an extension that an
+# earlier test on its worker happened to load.
+const init_code = quote
+    using Tempest, Test
+    const CUDA_FUNCTIONAL = $CUDA_FUNCTIONAL
+    const CUTILE_ENABLED = $CUTILE_ENABLED
+    $(CUDA_FUNCTIONAL ? :(using CUDACore; import cuBLAS, cuDNN) : nothing)
+    $(CUTILE_ENABLED ? :(import cuTile) : nothing)
+    include($(joinpath(@__DIR__, "setup.jl")))
 end
 
-include("planning.jl")
-include("frontend.jl")
-include("runtime.jl")
-include("layout.jl")
-include("implementations.jl")
-include("graph/regions.jl")
-include("verbs.jl")
-include("primitives.jl")
-include("folds.jl")
-include("reverse_rules.jl")
-include("state/updates.jl")
-include("state/verbs.jl")
-include("state/donation.jl")
-include("chainrules.jl")
-# Load GPU dependencies only after checking that core use does not load them.
-using CUDACore
-if CUDACore.functional()
-    import cuBLAS
-    if get(ENV, "TEMPEST_TEST_CUTILE", "true") == "true"
-        import cuTile
-    end
-    include("cuda/kernels.jl")
-    include("cuda/frontend.jl")
-    include("cuda/runtime.jl")
-    include("cuda/layout.jl")
-    include("cuda/verbs.jl")
-    include("cuda/chainrules.jl")
-    include("cuda/state.jl")
-    include("cuda/donation.jl")
-    include("cuda/graph_regions.jl")
-    include("cuda/folds.jl")
-    include("cuda/graph_training.jl")
-    include("cuda/transformer.jl")
-    include("cuda/reverse_rules.jl")
-    # Loaded last, so the tests above run without the cuDNN extension.
-    import cuDNN
-    if cuDNN.functional()
-        include("cuda/cudnn.jl")
-    else
-        @info "cuDNN unavailable; cuDNN tests skipped"
-    end
-else
-    @info "CUDA unavailable; GPU tests skipped"
+# ChainRules adds scalar rules for Base functions; keep it off the shared workers.
+const OWN_WORKER = ("extensions/chainrules", "cuda/chainrules")
+test_worker(name) = name in OWN_WORKER ? addworker() : nothing
+
+# Each worker holds a CUDA context and its own compiled kernels. The GPU's
+# free memory says little on a unified-memory device, so cap the default.
+args = parse_args(ARGS)
+if CUDA_FUNCTIONAL && args.jobs === nothing && !haskey(ENV, "PTR_NUM_JOBS")
+    jobs = min(ParallelTestRunner.default_njobs(), 12)
+    args = ParallelTestRunner.ParsedArgs(
+        Some(jobs), args.verbose, args.quickfail, args.list, args.custom, args.positionals,
+    )
 end
+
+runtests(Tempest, args; testsuite, init_code, test_worker)

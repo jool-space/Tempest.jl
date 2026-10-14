@@ -1,8 +1,9 @@
 # A small GPT training step from examples/gpt.jl: batched products, logsumexp,
 # runtime token indices, gathers inside permutations, packed and split
 # reductions, residual dropout, and Adam state with an advancing seed.
-# The CUDA schedule (cuTile, CUDA, cuBLAS) is checked against the CPU schedule.
-include(joinpath(@__DIR__, "..", "..", "examples", "gpt.jl"))
+# The CUDA schedule, on whichever providers are loaded, is checked against the
+# CPU schedule.
+include(joinpath(EXAMPLES, "gpt.jl"))
 
 @testset "Transformer training step on CUDA matches CPU" begin
     G = GPTExample

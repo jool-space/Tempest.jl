@@ -13,11 +13,4 @@
     @test_throws ArgumentError CUDATarget(kernels = :unknown)
     @test_throws ArgumentError CUDATarget(blas_workspace_bytes = -1)
     @test occursin("Target: CPU", sprint(explain, ex))
-    @test Base.get_extension(Tempest, :CUDAExt) === nothing
-    @test Base.get_extension(Tempest, :cuTileExt) === nothing
-    @test_throws ArgumentError prepare(f, x; target = CUDATarget())
-    @test !any(
-        id -> id.name in ("CUDACore", "cuBLAS", "cuTile"),
-        keys(Base.loaded_modules),
-    )
 end

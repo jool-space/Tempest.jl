@@ -1,4 +1,7 @@
-include("../../examples/kernel_composition/rmsnorm_cuda_reference.jl")
+include("../fixtures/state.jl")
+include(joinpath(EXAMPLES, "kernel_composition", "rmsnorm.jl"))
+using .RMSNormExample
+include(joinpath(EXAMPLES, "kernel_composition", "rmsnorm_cuda_reference.jl"))
 
 function check_cuda_norm(implementation, name)
 
@@ -126,6 +129,6 @@ end
 check_cuda_norm(ReferenceRMSNorm(), :reference_rmsnorm)
 
 if haskey(ENV, "TEMPEST_RMS_SOURCE")
-    include("../../examples/kernel_composition/rmsnorm_cuda.jl")
+    include(joinpath(EXAMPLES, "kernel_composition", "rmsnorm_cuda.jl"))
     check_cuda_norm(ArchivedRMSNorm(), :archived_rmsnorm)
 end

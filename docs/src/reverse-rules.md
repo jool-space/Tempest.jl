@@ -128,7 +128,7 @@ When a compatible compiler/kernel version is available, enable the same GPU
 contract tests for the archived adapter:
 
 ```sh
-TEMPEST_RMS_SOURCE=/path/to/archive/tile-kernels julia --project=test test/runtests.jl
+TEMPEST_RMS_SOURCE=/path/to/archive/tile-kernels julia --project=test test/runtests.jl cuda/reverse_rules
 ```
 
 This optional test is expected to fail on the currently recorded environment.

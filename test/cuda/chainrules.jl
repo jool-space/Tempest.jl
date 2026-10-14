@@ -1,3 +1,7 @@
+# ChainRules supplies the log1p, expm1 and atan rules; this file runs on its own
+# worker (see runtests.jl).
+using ChainRules
+
 @testset "Shared scalar rules in captured CUDA training" begin
     x = reshape(Float32.(range(0.2, 0.7; length = 6)), 2, 3)
     y = reshape(Float32[0.4, 0.6], 2, 1)

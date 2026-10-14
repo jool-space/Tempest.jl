@@ -1,3 +1,5 @@
+include("../fixtures/state.jl")
+
 @testset "Captured Adam preserves and advances owned state" begin
     kernels = Base.get_extension(Tempest, :cuTileExt) === nothing ? (:cuda,) : (:cuda, :auto)
     for provider in kernels

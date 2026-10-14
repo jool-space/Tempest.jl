@@ -1,3 +1,4 @@
+include("../fixtures/planning.jl")
 using CUDACore
 
 function node_types(graph)

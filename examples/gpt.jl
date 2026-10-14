@@ -25,7 +25,12 @@ module GPTExample
 using Tempest
 using CUDACore
 using Random
-import cuBLAS, cuTile
+import cuBLAS
+# Run as a script, the example loads cuTile for its fused kernels. Code that
+# includes it, such as the test suite, decides which providers are loaded.
+if abspath(PROGRAM_FILE) == @__FILE__
+    import cuTile
+end
 
 const logsumexp = Tempest.logsumexp
 

@@ -1,3 +1,5 @@
+include("../fixtures/implementations.jl")
+
 @testset "Direct donation proof and staged fallback" begin
     a, b = [1.0, 2.0], [3.0, 4.0]
     # Equal element counts alone do not prove that a broadcast reads its lane.
