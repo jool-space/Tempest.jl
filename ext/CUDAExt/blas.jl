@@ -92,3 +92,34 @@ function batched_gemm_call(resources::BlasResources, y, a, b, transpose_a, trans
         nothing
     end
 end
+
+function support(::CuBLASGemm, request::RegionRequest)
+    if !(request.target isa CUDATarget)
+        return Unsupported("requires a CUDA target")
+    end
+    if !(request.step.region isa GemmRegion)
+        return Unsupported("requires a matrix product")
+    end
+    if !(request.dtype in (Float32, Float64)) || !all(==(request.dtype), request.input_types)
+        return Unsupported("CUDA GEMM operands must have matching Float32/Float64 dtypes")
+    end
+    if max(request.dims..., request.input_dims[1][2]) > typemax(Int32)
+        return Unsupported("GEMM dimensions exceed Int32")
+    end
+    Supported()
+end
+
+function build_implementation(::CuBLASGemm, request::RegionRequest, runtime, out, arrays)
+    workspace = WorkspaceSpec(UInt8, runtime.target.blas_workspace_bytes)
+    ImplementationPlan((workspace,)) do buffers
+        if runtime.blas === nothing
+            runtime.blas = BlasResources(
+                runtime.target.blas_workspace_bytes,
+                runtime.target.matmul_precision,
+            )
+        end
+        work = only(buffers)
+        launch = gemm_call(runtime.blas, out, arrays..., work)
+        BuiltImplementation(launch, (runtime.blas, out, arrays, work), 0)
+    end
+end

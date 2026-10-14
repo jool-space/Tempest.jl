@@ -105,7 +105,7 @@ inside tuples their own alias classes: on cuTile main the tuple entry also uses
 255 registers. Since 14 October, every kernel takes separate parameters, and
 resident kernels compile with an occupancy hint of 4, which limits them to 64
 registers and restores their earlier times
-(`ext/cuTileExt/graph_regions.jl`).
+(`ext/cuTileExt/graph/build.jl`).
 
 ## 3. FMA fusion with a scalar addend: invalid bytecode (fixed locally)
 

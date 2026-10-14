@@ -137,9 +137,9 @@ regions remain eligible. Rewriting the semantic graph discards these exclusions
 because node IDs belong to one graph snapshot. Selection is deterministic and
 greedy, without a cost model. `fuse_regions=false` bypasses it.
 
-The cuTile graph provider separates domain and phase analysis
-(`graph_schedule.jl`), generated tile code (`graph_codegen.jl`), and construction
-(`graph_regions.jl`). A schedule is an execution representation of a selected
+The cuTile graph provider (`ext/cuTileExt/graph/`) separates domain and phase
+analysis (`schedule.jl`), generated tile code (`codegen.jl`), the generated kernel
+entry points (`kernels.jl`), and construction (`build.jl`). A schedule is an execution representation of a selected
 region: the original tensor operations and their value identities remain in the
 program. Leading-axis reductions keep a column resident in one tile when it has
 at most 4096 rows, packing several columns of at most 128 rows into one tile;
@@ -157,8 +157,9 @@ region against its iteration shape at build time. Dense reads use the linear
 index, affine and broadcast reads become strides over coordinates computed once
 per element with 32-bit division, and gathers keep their selection behind a
 strided logical index. Per-dimension helpers recurse over tuples, so index
-metadata stays in registers. `ext/CUDAExt/primitives.jl` implements the built-in
-verbs.
+metadata stays in registers. `ext/CUDAExt/verbs.jl` implements the built-in
+verbs, `ext/CUDAExt/kernels.jl` builds the generated scalar kernels, and
+`ext/CUDAExt/runtime.jl` owns device resources, capture and replay.
 
 ## Preparation and ownership
 

@@ -1,19 +1,3 @@
-using Tempest:
-    GraphRegion,
-    GraphRequest,
-    Argument,
-    Constant,
-    Pointwise,
-    FoldReduction,
-    SumFold,
-    fold_init,
-    fold_width,
-    has_resident_lowering,
-    recomputable
-
-include("graph_schedule.jl")
-include("graph_codegen.jl")
-
 function support(::CuTileKernels, request::GraphRequest)
     request.target isa CUDATarget || return Unsupported("requires a CUDA target")
     schedule = graph_reduction_schedule(request)
