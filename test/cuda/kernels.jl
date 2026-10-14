@@ -158,7 +158,10 @@ end
     check(y -> sum(abs2, sum(tanh.(y'); dims = 1)), y)
 
     # Index metadata stays in registers: a local-memory spill made these kernels
-    # two orders of magnitude slower than the traffic bound.
+    # two orders of magnitude slower than the traffic bound. `--check-bounds=yes`
+    # (the Pkg.test default) ignores `@inbounds`, and the bounds-error path then
+    # puts the indices on the stack, so the check only holds for normal builds.
+    forced_bounds_checks = Base.JLOptions().check_bounds == 1
     ext = Base.get_extension(Tempest, :CUDAExt)
     h = CuArray(y)
     ex = prepare_forward((h, b) -> tanh.(h .* sum(abs2, h; dims = 1) .+ b'), h, CuArray(b[:, 1:1]); target)
@@ -167,6 +170,6 @@ end
         runtime, out, arrays = call.owners
         e = ext.device_expression(runtime, step.region)
         kernel = CUDACore.@cuda launch=false ext.cuda_pointwise_kernel(out, e, arrays, length(out))
-        @test CUDACore.memory(kernel).var"local" == 0
+        @test CUDACore.memory(kernel).var"local" == 0 skip = forced_bounds_checks
     end
 end
