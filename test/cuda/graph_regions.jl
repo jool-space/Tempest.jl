@@ -473,20 +473,32 @@ end
             check_graph_outputs(execute!(ex), graph_normalization(inputs...))
         end
         # Few kept tiles and a long reduced axis split across blocks, with a
-        # dependent second phase (the variance reads the mean).
-        for (rows, columns) in ((8193, 5), (6000, 40))
+        # dependent second phase (the variance reads the mean). Split column
+        # tiles shorten from 1024 rows until the grid holds 128 blocks.
+        expected_summaries = Dict(
+            (8193, 5) => "cuTile reductions over axis 1 of 8193×5: streamed tile 256×1, " *
+                         "split 32 ways, grid 5×32; 2 phases, 5 kernels",
+            (16384, 8) => "cuTile reductions over axis 1 of 16384×8: streamed tile 1024×1, " *
+                          "split 16 ways, grid 8×16; 2 phases, 5 kernels",
+        )
+        for (rows, columns) in ((8193, 5), (16384, 8), (6000, 20))
             inputs = graph_test_inputs(rows, columns)
             ex = prepare_forward(graph_normalization, map(a -> a isa AbstractArray ? CuArray(a) : a, inputs)...)
             @test occursin("split", summaries(ex))
-            if (rows, columns) == (8193, 5)
-                @test summaries(ex) ==
-                      "cuTile reductions over axis 1 of 8193×5: streamed tile 256×1, " *
-                      "split 32 ways, grid 5×32; 2 phases, 5 kernels"
+            if haskey(expected_summaries, (rows, columns))
+                @test summaries(ex) == expected_summaries[(rows, columns)]
             end
             check_graph_outputs(execute!(ex), graph_normalization(inputs...))
             capture!(ex)
             check_graph_outputs(replay!(ex), graph_normalization(inputs...))
         end
+        # 32 or more columns stream unsplit, one block each.
+        inputs = graph_test_inputs(8193, 32)
+        ex = prepare_forward(graph_normalization, map(a -> a isa AbstractArray ? CuArray(a) : a, inputs)...)
+        @test summaries(ex) ==
+              "cuTile reductions over axis 1 of 8193×32: streamed tile 1024×1, grid 32; " *
+              "2 phases, 1 kernel"
+        check_graph_outputs(execute!(ex), graph_normalization(inputs...))
         for (rows, columns) in ((97, 1500), (128, 1024), (3, 7000))
             x = reshape(sin.(0.01f0 .* Float32.(1:(rows * columns))), rows, columns)
             bias = reshape(cos.(Float32.(1:rows)), rows, 1)

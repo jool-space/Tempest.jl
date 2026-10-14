@@ -124,13 +124,17 @@ and multiple escaping outputs are supported.
 
 | Axes | Execution | Shared workspace |
 | --- | --- | --- |
-| First axis | One block per column; a column of at most 4096 rows stays resident in one tile, longer columns stream 256 rows at a time | None |
+| First axis | One block per column; a column of at most 4096 rows stays resident in one tile, longer columns stream 1024 rows at a time | None |
 | Second axis | One block per row tile, streaming eight columns at a time | None |
 | All axes | Parallel partial sums (unobserved state tuples for other folds), then a finishing kernel for each dependency phase; a final kernel writes escaping outputs | Partial sums or states, and completed statistics |
 
 Second-axis tiles hold up to 32 rows. Full-reduction tiles contain 256 elements,
-with their shape chosen from the domain. These are fixed scheduling policies,
-not tuned choices. Independent sums share a phase; dependent sums start a later
+with their shape chosen from the domain. A first-axis reduction over fewer than
+32 streamed columns splits each column across blocks; its tiles shorten, down to
+256 rows, until the grid holds 128 blocks. The streamed tile height and the split
+thresholds were measured on GB10 (see
+[reduction domains](reduction-domains.md#Taller-streamed-tiles,-14-October-2026));
+the other tile shapes are fixed policies, not tuned choices. Independent sums share a phase; dependent sums start a later
 phase. A resident column loads and computes every value once and shares it
 across phases and outputs; a streamed schedule retains completed statistics in
 the block and recomputes permitted pointwise producers in each sweep.

@@ -34,6 +34,14 @@ end
 # bounded tiles and recompute pointwise producers in each sweep.
 const RESIDENT_ROWS = 4096
 
+# Streamed columns load 1024 rows per step. Measured on GB10 with the residual
+# RMSNorm fixture (warm/cold us), against 256-row tiles: 8192 x 64 took 12.0/40.5
+# instead of 25.4/46.9, 16384 x 32 10.6/39.9 instead of 13.6/42.4 (both unsplit
+# against split 8 ways). 2048-row tiles matched 1024 on power-of-two columns but
+# lost on ragged ones, which pad the last tile: 8193 x 32 took 10.6/28.0 against
+# 9.5/25.5, and 4096 rows 12.1/30.0.
+const STREAMED_ROWS = 1024
+
 resident_schedule(schedule) = schedule.axes == (1,) && schedule.tile[1] >= schedule.dims[1]
 
 # Short columns share a block: columns of at most PACKED_ROWS rows are packed
@@ -170,7 +178,7 @@ function graph_reduction_schedule(request::GraphRequest)
     )
     folds = map(group -> map(id -> nodes[id].op.fold, group), groups)
     tile = if axes == (1,)
-        domain[1] <= RESIDENT_ROWS ? resident_tile(domain) : (256, 1)
+        domain[1] <= RESIDENT_ROWS ? resident_tile(domain) : (STREAMED_ROWS, 1)
     elseif axes == (2,)
         (min(32, nextpow(2, domain[1])), 8)
     else
@@ -188,9 +196,24 @@ end
 # a second launch completes the statistics, and a fully parallel launch writes
 # the outputs. On GB10 the 128 x 1024 row sums of a transformer's norm-weight
 # gradients ran on 4 blocks and took 76 us.
-const SPLIT_KEPT_BLOCKS = 64
+#
+# Columns split below 32 kept blocks. With 1024-row tiles, 32 unsplit columns
+# already reach copy bandwidth on GB10's 48 SMs: residual RMSNorm at 8192 x 32
+# took 6.3/20.2 us warm/cold unsplit against 7.0/22.6 split 4 ways, and 8192 x 48
+# 7.7/30.1 against 10.0/34.7. Ragged columns lose a little: 8193 x 32 took
+# 9.4/25.1 unsplit against 8.5/24.6 split. At 16 columns splitting still pays
+# warm: 65536 x 16 took 34.8 us unsplit and 22 to 30 split 16 ways, with cold
+# times within noise of each other (84 to 88 us).
+const SPLIT_KEPT_BLOCKS = (32, 64)
 const SPLIT_TARGET_BLOCKS = 256
-const SPLIT_TILE = (256, 1), (32, 32)
+const SPLIT_TILE = (STREAMED_ROWS, 1), (32, 32)
+
+# A split column tile halves, down to SPLIT_MINIMUM_ROWS, until the grid holds
+# MINIMUM_BLOCKS blocks. At 8193 x 5, 1024-row tiles gave 8 chunks per column and
+# 40 blocks, 4.6 us warm; 256-row tiles gave 160 blocks and 3.7 us. Shortening
+# every split tile to reach SPLIT_TARGET_BLOCKS cost 32768 x 4 1.7 us warm (512
+# rows, 6.8 us), while 1024 rows and 128 blocks took 5.1 us.
+const SPLIT_MINIMUM_ROWS = 256
 
 function split_schedule(schedule)
     schedule.axes in ((1,), (2,)) && !resident_schedule(schedule) || return schedule
@@ -198,11 +221,22 @@ function split_schedule(schedule)
     tile = SPLIT_TILE[axis]
     tile = axis == 1 ? tile : (min(tile[1], nextpow(2, schedule.dims[1])), tile[2])
     kept = cld(schedule.dims[3 - axis], tile[3 - axis])
-    reduced = cld(schedule.dims[axis], tile[axis])
-    kept < SPLIT_KEPT_BLOCKS && reduced >= 4 || return schedule
-    splits = min(prevpow(2, reduced), nextpow(2, cld(SPLIT_TARGET_BLOCKS, kept)))
+    kept < SPLIT_KEPT_BLOCKS[axis] || return schedule
+    splits = split_count(schedule.dims[axis], tile[axis], kept)
+    while axis == 1 && kept * splits < MINIMUM_BLOCKS && tile[1] > SPLIT_MINIMUM_ROWS
+        tile = (tile[1] ÷ 2, 1)
+        splits = split_count(schedule.dims[1], tile[1], kept)
+    end
     splits > 1 || return schedule
     GraphReductionSchedule(schedule.dims, schedule.axes, tile, schedule.groups, splits, schedule.folds)
+end
+
+# Blocks sharing one kept tile: a power of two, at most one per tile of the
+# reduced axis, and none below four tiles.
+function split_count(extent, tile_extent, kept)
+    reduced = cld(extent, tile_extent)
+    reduced >= 4 || return 1
+    min(prevpow(2, reduced), nextpow(2, cld(SPLIT_TARGET_BLOCKS, kept)))
 end
 
 split_axis(schedule) = schedule.splits > 1 ? only(schedule.axes) : 0

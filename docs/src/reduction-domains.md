@@ -242,3 +242,48 @@ a strawman. Same benchmark, same method; copy measured at 221 GB/s in this run.
 
 The narrow shapes remain at half of copy bandwidth. A 4.2 MB working set on 48
 SMs leaves little to amortize the three launches.
+
+## Taller streamed tiles, 14 October 2026
+
+Streamed first-axis columns now load 1024 rows per step instead of 256. Columns
+split only below 32 kept blocks (previously 64), and a split tile shortens, down
+to 256 rows, until the grid holds 128 blocks. Resident kernels compile with
+occupancy 4 and streamed kernels with no hint, as before. Same benchmark (warm /
+cold μs, residual RMSNorm unless marked), median of 7 samples, before and after
+the change in one session; copy measured at 217–222 GB/s.
+
+| Shape | 256-row tiles | Schedule | 1024-row tiles | Schedule |
+| --- | ---: | --- | ---: | --- |
+| 8192 × 32 | 9.9 / 22.6 | split 8 | 6.3 / 20.1 | unsplit |
+| 8193 × 32 | 8.0 / 24.3 | split 8 | 9.2 / 24.8 | unsplit |
+| 16384 × 32 | 13.6 / 42.1 | split 8 | 10.7 / 39.5 | unsplit |
+| 8192 × 48 | 13.0 / 32.3 | split 8 | 7.6 / 29.7 | unsplit |
+| 8192 × 64 | 25.2 / 48.3 | unsplit | 11.9 / 43.0 | unsplit |
+| 4097 × 256 | 31.0 / 95.1 | unsplit | 25.7 / 93.4 | unsplit |
+| 32768 × 128 | 359.5 / 359.7 | unsplit | 355.3 / 355.3 | unsplit |
+| 16384 × 16 | 10.0 / 23.1 | split 16 | 7.0 / 23.7 | split 16 |
+| 65536 × 16 | 28.4 / 85.3 | split 16 | 26.4 / 84.6 | split 16 |
+| 16384 × 8 | 8.4 / 13.9 | split 32 | 5.1 / 13.1 | split 16 |
+| 131072 × 8 | 28.5 / 87.4 | split 32 | 28.0 / 86.6 | split 32 |
+| 32768 × 4 | 8.4 / 14.1 | split 64 | 5.1 / 13.9 | split 32 |
+| 8193 × 5 | 3.7 / — | split 32 | 3.7 / — | split 32, 256-row tiles |
+| LayerNorm 16384 × 32 | 20.2 / 46.9 | split 8 | 16.3 / 41.9 | unsplit |
+| LayerNorm 8192 × 64 | 35.5 / 55.3 | unsplit | 16.8 / 42.5 | unsplit |
+| LayerNorm 8193 × 32 | 11.7 / 27.5 | split 8 | 9.3 / 24.1 | unsplit |
+
+Resident and packed shapes (256 × 32 to 1024 × 1024, 128 × 4096) keep their
+schedules and times within 0.1 μs, except the noisy warm 1024 × 1024 (22.7 and
+20.5 μs). The domains of the benchmark at the top of this page are all resident
+or second-axis and did not move.
+
+- **Height.** 2048-row tiles matched 1024 on power-of-two columns but lost on
+  ragged ones, whose last tile is mostly padding: 8193 × 32 took 10.6 / 28.0 μs,
+  and 4096-row tiles 12.1 / 30.0 μs. 512-row splits sat between 256 and 1024.
+- **Splitting.** With tall tiles, 32 unsplit columns already reach copy
+  bandwidth on 48 SMs; splitting 8192 × 32 four ways cost 0.7 / 2.4 μs. At 16
+  columns splitting still helps warm times (65536 × 16: 34.8 μs unsplit), with
+  cold times within noise. The ragged 8193 × 32 RMSNorm is the one shape that
+  lost: 1.2 μs warm and 0.5 μs cold against the old split schedule.
+- **Short splits.** At 8193 × 5, 1024-row tiles left 8 chunks per column and 40
+  blocks (4.6 μs warm); halving the tile until 128 blocks restores 256 rows and
+  3.7 μs. Shortening further, to reach 256 blocks, cost 32768 × 4 1.7 μs warm.
