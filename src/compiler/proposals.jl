@@ -215,11 +215,10 @@ function select_proposed_regions(program, target, implementations, blocked, reco
         end
     end
     roots = default_roots(program, live)
-    benefit(proposal) = proposal_benefit(program, proposal.members, live, roots)
-    sort!(
-        candidates;
-        by = ((priority, _, p),) -> (priority, -benefit(p), -length(p.members), p.members),
-    )
+    ranks = map(candidates) do (priority, _, p)
+        (priority, -proposal_benefit(program, p.members, live, roots), -length(p.members), p.members)
+    end
+    candidates = candidates[sortperm(ranks)]
 
     claimed = zeros(Int, length(program.nodes))
     regions = ProposedRegion[]
@@ -230,10 +229,16 @@ function select_proposed_regions(program, target, implementations, blocked, reco
             push!(records, ProposalRecord(name, proposal.label, members, status, reason))
         owners = unique(filter(!iszero, claimed[members]))
         if !isempty(owners)
-            # Nested alternatives of a selected proposal are not conflicts.
-            any(owner -> regions[owner].implementation === implementation &&
-                    issubset(members, regions[owner].members), owners) && continue
-            record(:conflict, "overlaps selected proposal $(regions[first(owners)].members)")
+            selected = regions[first(owners)]
+            if selected.implementation === implementation
+                # A smaller alternative of a selected proposal is no conflict.
+                issubset(members, selected.members) && continue
+                if issubset(selected.members, members)
+                    record(:conflict, "its alternative $(selected.members) ranked higher")
+                    continue
+                end
+            end
+            record(:conflict, "overlaps selected proposal $(selected.members)")
             continue
         end
         if haskey(blocked, Tuple(members))

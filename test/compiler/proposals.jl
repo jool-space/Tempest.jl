@@ -161,6 +161,9 @@ end
     # The forward activation is an escaping output: backward reads it.
     @test any(s -> any(id -> id <= primal_count, s.region.members) && length(s.region.outputs) >= 1, steps)
     @test any(s -> all(id -> id > primal_count, s.region.members), steps)
+    # Larger alternatives of the forward product that claim backward work
+    # save less traffic than the backward product's own epilogue.
+    @test occursin("ranked higher", sprint(explain, ex))
     # The backward product reads a transposed weight natively; operands read by
     # pointwise members are dense buffers.
     @test any(((request, types),) -> any(T -> T <: Transpose, types), impl.built)
