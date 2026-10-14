@@ -6,4 +6,5 @@ cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
 cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
 
 [sources]
+Tempest = {path = ".."}
 cuTile = {url = "https://github.com/JuliaGPU/cuTile.jl", rev = "main"}
