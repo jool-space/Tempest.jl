@@ -4,6 +4,21 @@ Dated review decisions, newest first. Each entry records priorities at that
 date, not promises that every proposal survives implementation and measurement;
 "next step" language in older entries describes the state at that time.
 
+## Pruning — 14 October 2026
+
+Research code that no current page or test depends on was removed. The git tag
+`research-2026-09` keeps the last commit that contains it.
+
+- **TensorIR experiment** (`examples/research/tensor_ir_*`, a C bridge and an
+  MLIR fixture). On 21 September a residual RMSNorm training step compiled by
+  NVIDIA TensorIR v0.1.4 ran inside Tempest's semantic calls, saved-state reverse
+  rules, storage planning and capture: 345 integration assertions, and replay
+  7-11x faster than the generic CUDA kernels of the time. It established that an
+  external graph compiler can supply a call's realization, but not how to select
+  regions, and it needs a separate tensor-ir build. Tempest's direction is a
+  composition layer without a compiler binary dependency, and region selection
+  is now graph regions. The report was `docs/src/tensor-ir-training.md`.
+
 ## Workload pass — 23 September 2026
 
 Actions taken, each measured before it was kept:
