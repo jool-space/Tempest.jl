@@ -201,6 +201,7 @@ end
 
 # The backward's operands are the forward's arrays, declared (D, positions,
 # heads, batch) over the same memory.
+# Layout from Stiletto's SdpaBwd emission (Stiletto src/compiler/emission.jl).
 function backward_graph(H, qdims, kdims, causal)
     graph = Graph(; io_dtype = H, intermediate_dtype = Float32, compute_dtype = Float32)
     function operand(name, (D, heads, positions, batch); output = false)
@@ -302,6 +303,7 @@ function build_private_forward(request, runtime, out, inputs)
     q, k, v = inputs
     H = eltype(q)
     _, heads, queries, batch = size(q)
+    # Packing from Stiletto's Sdpa emission (Stiletto src/compiler/emission.jl).
     stats_strides = (1, queries, 1, queries * heads)
     graph = forward_graph(H, size(q), size(k), stats_strides, causal)
     built = build_graph(graph, "attention forward with $H operands")
