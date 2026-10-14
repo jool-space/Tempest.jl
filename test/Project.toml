@@ -12,3 +12,4 @@ Tempest = {path = ".."}
 
 [compat]
 ChainRulesCore = "1.26.1"
+Test = "1.11"
