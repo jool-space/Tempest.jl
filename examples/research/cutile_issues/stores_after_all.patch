@@ -1,0 +1,14 @@
+diff --git a/src/compiler/transform/token_order.jl b/src/compiler/transform/token_order.jl
+index 3a387a6..70af3c8 100644
+--- a/src/compiler/transform/token_order.jl
++++ b/src/compiler/transform/token_order.jl
+@@ -116,6 +116,9 @@ function collect_join_tokens_ir(token_key::TokenKey, token_map::Dict{TokenKey, A
+             if other_key.role == token_key.role
+                 should_join = should_join ||
+                     aliases(other_key.alias_set, token_key.alias_set) == MayAlias
++                if get(ENV, "CUTILE_EXPERIMENT", "") == "stores_after_all" && token_key.role == LAST_OP
++                    should_join = true
++                end
+             end
+         end
+         if should_join && !any(t -> t === other_tok, tokens_to_join)

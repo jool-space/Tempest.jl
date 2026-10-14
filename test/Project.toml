@@ -1,0 +1,11 @@
+[deps]
+ChainRules = "082447d4-558c-5d27-93f4-14fc19e9eca2"
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
+cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
+
+[sources]
+Tempest = {path = ".."}

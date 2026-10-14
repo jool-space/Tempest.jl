@@ -1,0 +1,94 @@
+# One prepared program owns one handle and its coefficients. Workspace comes
+# from the common schedule pool and is installed explicitly before each launch,
+# avoiding ambient cuBLAS policy and capture-time pool allocations.
+mutable struct BlasResources
+    handle::cuBLAS.cublasHandle_t
+    context::CUDACore.CuContext
+    workspace_bytes::Int
+    coefficients::Dict{DataType, Tuple{Any, Any}}
+end
+
+function BlasResources(workspace_bytes, precision = :full)
+    handle = cuBLAS.cublasCreate()
+    resource = BlasResources(
+        handle,
+        CUDACore.context(),
+        workspace_bytes,
+        Dict{DataType, Tuple{Any, Any}}(),
+    )
+    finalizer(resource) do r
+        if CUDACore.isvalid(r.context)
+            CUDACore.context!(r.context) do
+                cuBLAS.cublasDestroy_v2(r.handle)
+            end
+        end
+    end
+    cuBLAS.cublasSetPointerMode_v2(handle, cuBLAS.CUBLAS_POINTER_MODE_DEVICE)
+    # Explicit precision policy from the target; no ambient FAST_MATH override.
+    mode = precision === :tf32 ? cuBLAS.CUBLAS_TF32_TENSOR_OP_MATH : cuBLAS.CUBLAS_DEFAULT_MATH
+    cuBLAS.cublasSetMathMode(handle, mode)
+    resource
+end
+
+function gemm_call(resources::BlasResources, y, a, b, workspace)
+    T = eltype(y)
+    if !(eltype(a) == eltype(b) == T)
+        throw(ArgumentError("CUDA GEMM operands must have matching dtypes"))
+    end
+    alpha, beta = get!(resources.coefficients, T) do
+        (CUDACore.CuRef(one(T)), CUDACore.CuRef(zero(T)))
+    end
+    ta, aa = a isa Transpose ? ('T', parent(a)) : ('N', a)
+    tb, bb = b isa Transpose ? ('T', parent(b)) : ('N', b)
+    m, n, k = size(y, 1), size(y, 2), size(a, 2)
+    if !(max(m, n, k) <= typemax(Int32))
+        throw(ArgumentError("prototype GEMM dimensions exceed Int32"))
+    end
+    lda, ldb, ldc = max(1, stride(aa, 2)), max(1, stride(bb, 2)), max(1, stride(y, 2))
+    fn = if T === Float32
+        cuBLAS.cublasSgemm_v2
+    elseif T === Float64
+        cuBLAS.cublasDgemm_v2
+    else
+        throw(ArgumentError("unsupported GEMM dtype $T"))
+    end
+    return function ()
+        # SetStream resets workspace, so install workspace afterwards. All launches
+        # use the caller's current stream; concurrent use is deliberately unsupported.
+        cuBLAS.cublasSetStream_v2(resources.handle, CUDACore.stream())
+        # A shared slot may be larger because another implementation needs it.
+        # Keep cuBLAS's configured workspace budget independent of that capacity.
+        cuBLAS.cublasSetWorkspace_v2(resources.handle, workspace, resources.workspace_bytes)
+        fn(resources.handle, ta, tb, m, n, k, alpha, aa, lda, bb, ldb, beta, y, ldc)
+        nothing
+    end
+end
+
+function batched_gemm_call(resources::BlasResources, y, a, b, transpose_a, transpose_b, workspace)
+    T = eltype(y)
+    alpha, beta = get!(resources.coefficients, T) do
+        (CUDACore.CuRef(one(T)), CUDACore.CuRef(zero(T)))
+    end
+    ta, tb = transpose_a ? 'T' : 'N', transpose_b ? 'T' : 'N'
+    m, n, batch = size(y)
+    k = transpose_a ? size(a, 1) : size(a, 2)
+    if !(max(m, n, k, batch) <= typemax(Int32))
+        throw(ArgumentError("prototype GEMM dimensions exceed Int32"))
+    end
+    lda, ldb, ldc = max(1, size(a, 1)), max(1, size(b, 1)), max(1, m)
+    stride_a, stride_b, stride_c = size(a, 1) * size(a, 2), size(b, 1) * size(b, 2), m * n
+    fn = if T === Float32
+        cuBLAS.cublasSgemmStridedBatched
+    elseif T === Float64
+        cuBLAS.cublasDgemmStridedBatched
+    else
+        throw(ArgumentError("unsupported GEMM dtype $T"))
+    end
+    return function ()
+        cuBLAS.cublasSetStream_v2(resources.handle, CUDACore.stream())
+        cuBLAS.cublasSetWorkspace_v2(resources.handle, workspace, resources.workspace_bytes)
+        fn(resources.handle, ta, tb, m, n, k, alpha, a, lda, stride_a, b, ldb, stride_b,
+           beta, y, ldc, stride_c, batch)
+        nothing
+    end
+end

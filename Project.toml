@@ -1,0 +1,28 @@
+name = "Tempest"
+uuid = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
+version = "0.1.0-DEV"
+authors = ["AntonOresten <antonoresten@proton.me> and contributors"]
+
+[workspace]
+projects = ["test", "docs", "examples"]
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+
+[weakdeps]
+ChainRulesCore = "d360d2e6-b24c-11e9-a2a3-2a2ae2dbcce4"
+CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
+cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
+
+[extensions]
+ChainRulesCoreExt = "ChainRulesCore"
+CUDAExt = ["CUDACore", "cuBLAS"]
+cuTileExt = ["CUDACore", "cuTile"]
+
+[compat]
+ChainRulesCore = "1.25"
+CUDACore = "6.3.0"
+cuBLAS = "6.3.0"
+cuTile = "1.0.0"
+julia = "1.11"
