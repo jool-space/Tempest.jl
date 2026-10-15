@@ -4,6 +4,30 @@ Dated review decisions, newest first. Each entry records priorities at that
 date, not promises that every proposal survives implementation and measurement;
 "next step" language in older entries describes the state at that time.
 
+## Float32 accumulation for half-precision folds — 15 October 2026
+
+A Float16 sum accumulated in Float16 on the CPU and CUDA kernels and in the
+reference interpreter (Base's `sum` rounds every partial sum), in Float32 in
+cuDNN, so the result depended on the backend; adding 0.1 65536 times stalls at
+256 in Float16. Folds now declare the type they accumulate in,
+`fold_accumulator(fold, T)`: Float32 for Float16 and BFloat16 sums, products
+and logsumexps; the element type for maxima and minima, which are exact, and
+for `GenericFold`, whose `init` chooses its state. Elements convert to it before
+lifting and the observed value rounds once to the element type.
+
+Planning applies it once: a reduction region's expression converts its
+contributions and its identity state is the accumulator's, so CPU, CUDA and
+cuTile scalar kernels lift and combine in it without knowing the rule. Sum
+kernels take their accumulator from the region's state, as do the split-sum
+partial workspaces. The interpreter and the logsumexp reference convert before
+folding; cuTile graph regions are Float32 throughout; cuDNN already summed in
+Float32. The `GraphRequest` and `ProposedRequest` contracts state the rule.
+
+Half-precision sums of 32 MiB on GB10 took the same time before and after
+(CUDA 141-223 μs, cuTile 122-224 μs depending on the axis): the kernels are
+memory-bound. A BFloat16 column sum on the CUDA warp kernel, which threw a
+device exception when it accumulated and shuffled BFloat16, now runs.
+
 ## Implementation-proposed regions — 14 October 2026
 
 Tempest partitioned programs itself, and no implementation could fuse across a

@@ -129,6 +129,10 @@ function output_spec(::typeof(logsumexp), x; dims)
 end
 
 function reference(::typeof(logsumexp), x::AbstractArray; dims)
+    # Half-precision elements accumulate in Float32, as the fold does.
+    T = eltype(x)
+    A = fold_accumulator(LogSumExpFold(), T)
+    A === T || return T.(reference(logsumexp, A.(x); dims))
     peak = maximum(x; dims)
     # A slice of -Inf has sum zero; keep the result -Inf rather than NaN.
     shift = map(p -> isfinite(p) ? p : zero(p), peak)

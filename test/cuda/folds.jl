@@ -34,3 +34,16 @@ end
         @test y ≈ Tempest.logsumexp(x; dims = 2) rtol = 1e-5
     end
 end
+
+@testset "Half-precision folds on the CUDA kernels accumulate in Float32" begin
+    for T in (Float16, Core.BFloat16)
+        x = half_fold_input(T)
+        for case in HALF_FOLD_CASES
+            elements, reduce = case
+            f(x) = reduce(elements(x))
+            ex = prepare_forward(f, CuArray(x); target = CUDATarget(kernels = :cuda), fuse_regions = false)
+            @test all(==(:cuda), ex.providers)
+            check_half_fold(execute!(ex), half_fold_reference(case, x))
+        end
+    end
+end

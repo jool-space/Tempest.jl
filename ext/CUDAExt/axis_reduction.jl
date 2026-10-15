@@ -2,18 +2,19 @@
 # reduced, one block per output reads contiguous elements across its lanes.
 # Otherwise lanes cover consecutive outputs, so each warp reads contiguous
 # storage, and a second block dimension splits the reduction. Both sum in an
-# order fixed at build time.
-function cuda_contiguous_sum_kernel(out, expression, arrays, count)
+# order fixed at build time, from `init`, the zero of the region's accumulator,
+# and round once at the store.
+function cuda_contiguous_sum_kernel(out, init, expression, arrays, count)
     lane = CUDACore.threadIdx().x
     width = CUDACore.blockDim().x
     o = CUDACore.blockIdx().x
-    total = zero(eltype(out))
+    total = init
     r = lane
     while r <= count
         total += device_eval(expression.expression, arrays, 0, coordinates(expression, o, r))
         r += width
     end
-    scratch = CUDACore.CuStaticSharedArray(eltype(out), TILE_SIZE)
+    scratch = CUDACore.CuStaticSharedArray(typeof(init), TILE_SIZE)
     total = block_sum(scratch, lane, total, width)
     if lane == 1
         @inbounds out[o] = total
@@ -24,11 +25,11 @@ end
 # Short contiguous columns: one warp per output, eight outputs per block, and a
 # fixed butterfly order across lanes. One 256-thread block per 256-element
 # column of attention probabilities reached 65 GB/s.
-function cuda_warp_sum_kernel(out, expression, arrays, count)
+function cuda_warp_sum_kernel(out, init, expression, arrays, count)
     lane = (CUDACore.threadIdx().x - 1) % 32 + 1
     o = (CUDACore.blockIdx().x - 1) * SLICE_WARPS + (CUDACore.threadIdx().x - 1) ÷ 32 + 1
     o <= length(out) || return
-    total = zero(eltype(out))
+    total = init
     r = lane
     while r <= count
         total += device_eval(expression.expression, arrays, 0, coordinates(expression, o, r))
@@ -46,12 +47,12 @@ const WARP_SUM_LIMIT = 1024
 const OUTPUT_LANES = 32
 const REDUCTION_LANES = 32
 
-function cuda_strided_sum_kernel(out, expression, arrays, count)
+function cuda_strided_sum_kernel(out, init, expression, arrays, count)
     x = CUDACore.threadIdx().x
     y = CUDACore.threadIdx().y
     lanes = CUDACore.blockDim().y
     o = (CUDACore.blockIdx().x - 1) * OUTPUT_LANES + x
-    total = zero(eltype(out))
+    total = init
     if o <= length(out)
         r = y
         while r <= count
@@ -59,7 +60,7 @@ function cuda_strided_sum_kernel(out, expression, arrays, count)
             r += lanes
         end
     end
-    scratch = CUDACore.CuStaticSharedArray(eltype(out), (OUTPUT_LANES, REDUCTION_LANES))
+    scratch = CUDACore.CuStaticSharedArray(typeof(init), (OUTPUT_LANES, REDUCTION_LANES))
     @inbounds scratch[x, y] = total
     CUDACore.sync_threads()
     offset = lanes ÷ 2
@@ -79,14 +80,14 @@ end
 # A power of two between `low` and `high`, no larger than needed for `count`.
 lane_count(count, low, high) = clamp(nextpow(2, max(count, 1)), low, high)
 
-function axis_sum_call(out, expression, arrays, layout, multiprocessors)
+function axis_sum_call(out, init, expression, arrays, layout, multiprocessors)
     isempty(out) && return () -> nothing
     count = layout.count
     if contiguous_reduction(layout) && count <= WARP_SUM_LIMIT
-        kernel = CUDACore.@cuda launch=false cuda_warp_sum_kernel(out, expression, arrays, count)
+        kernel = CUDACore.@cuda launch=false cuda_warp_sum_kernel(out, init, expression, arrays, count)
         blocks = cld(length(out), SLICE_WARPS)
         return () -> begin
-            kernel(out, expression, arrays, count; threads = 32SLICE_WARPS, blocks)
+            kernel(out, init, expression, arrays, count; threads = 32SLICE_WARPS, blocks)
             nothing
         end
     end
@@ -94,12 +95,13 @@ function axis_sum_call(out, expression, arrays, layout, multiprocessors)
         threads = lane_count(count, 32, TILE_SIZE)
         kernel = CUDACore.@cuda launch=false cuda_contiguous_sum_kernel(
             out,
+            init,
             expression,
             arrays,
             count,
         )
         return () -> begin
-            kernel(out, expression, arrays, count; threads, blocks = length(out))
+            kernel(out, init, expression, arrays, count; threads, blocks = length(out))
             nothing
         end
     end
@@ -108,9 +110,9 @@ function axis_sum_call(out, expression, arrays, layout, multiprocessors)
     # the device.
     lanes = blocks >= 2multiprocessors ? 8 : REDUCTION_LANES
     lanes = min(lanes, lane_count(count, 1, REDUCTION_LANES))
-    kernel = CUDACore.@cuda launch=false cuda_strided_sum_kernel(out, expression, arrays, count)
+    kernel = CUDACore.@cuda launch=false cuda_strided_sum_kernel(out, init, expression, arrays, count)
     () -> begin
-        kernel(out, expression, arrays, count; threads = (OUTPUT_LANES, lanes), blocks)
+        kernel(out, init, expression, arrays, count; threads = (OUTPUT_LANES, lanes), blocks)
         nothing
     end
 end

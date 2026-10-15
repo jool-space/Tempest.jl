@@ -78,3 +78,35 @@ function check_fold_outputs(got, expected; rtol = 2e-5, atol = 2e-5)
         @test isapprox(observed, r; rtol, atol)
     end
 end
+
+# Half-precision folds accumulate in Float32 (`fold_accumulator`) on every
+# backend and round once. Each case maps elements in the element type, then
+# reduces. Element-type accumulation would lose most of these sums: adding 0.1
+# 65536 times in Float16 stalls at 256.
+half_fold_input(T) = T.(0.1 .+ 0.01 .* sin.(1:(1 << 16)))
+
+const HALF_FOLD_CASES = (
+    full_sum = (identity, x -> sum(x)),
+    long_columns = (identity, x -> sum(reshape(x, 4096, :); dims = 1)),
+    short_columns = (identity, x -> sum(reshape(x, 512, :); dims = 1)),
+    rows = (identity, x -> sum(reshape(x, 512, :); dims = 2)),
+    full_product = (x -> x[1:256] .+ eltype(x)(0.9), x -> prod(x)),
+    products = (x -> x .+ eltype(x)(0.9), x -> prod(reshape(x, 64, :); dims = 1)),
+    logsumexp = (identity, x -> Tempest.logsumexp(reshape(x, 1024, :); dims = 1)),
+)
+
+# The Float64 reduction of the mapped elements, rounded once to their type.
+function half_fold_reference(case, x)
+    elements, reduce = case
+    mapped = elements(x)
+    T = eltype(mapped)
+    r = reduce(Float64.(mapped))
+    r isa Number ? T(r) : T.(r)
+end
+
+# Within one unit in the last place of the rounded reference.
+function check_half_fold(got, expected)
+    observed = expected isa Number ? only(Array(got)) : Array(got)
+    @test eltype(observed) === eltype(expected)
+    @test all(abs.(Float64.(observed) .- Float64.(expected)) .<= eps.(expected))
+end

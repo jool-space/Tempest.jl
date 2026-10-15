@@ -96,6 +96,8 @@ function graph_value_support(node, domain, id)
             return Unsupported("constant %$id requires unsupported scalar precision")
         return Supported()
     end
+    # Every value is Float32, so each fold already accumulates in its element
+    # type, its `fold_accumulator`.
     node.dtype === Float32 ||
         return Unsupported("cuTile graph values must be Float32; value %$id is $(node.dtype)")
     if node.op isa Pointwise

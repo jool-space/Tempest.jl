@@ -71,17 +71,17 @@ struct Elementwise{E <: ScalarExpression} <: ScalarRegion
     count::Int
 end
 
-# Reductions carry their fold and its identity state for the input element
-# type, so kernels need no element type to start a fold. A provider without a
-# general fold path checks for `SumFold`.
+# Reductions carry their fold and its identity state in the fold's accumulator
+# type (`fold_accumulator`), and their expression yields contributions in that
+# type, so kernels need no element type to start a fold. The store rounds the
+# observed value to the output's type. A provider without a general fold path
+# checks for `SumFold`.
 struct FullReduction{E <: ScalarExpression, F <: Fold, S <: Tuple} <: ScalarRegion
     expression::E
     count::Int
     fold::F
     init::S
 end
-
-FullReduction(expression, count) = FullReduction(expression, count, SumFold(), (0,))
 
 struct AxisReductionRegion{E <: ScalarExpression, L <: AxisReduction, F <: Fold, S <: Tuple} <:
        ScalarRegion
@@ -92,8 +92,8 @@ struct AxisReductionRegion{E <: ScalarExpression, L <: AxisReduction, F <: Fold,
     init::S
 end
 
-AxisReductionRegion(expression, count, layout) =
-    AxisReductionRegion(expression, count, layout, SumFold(), (0,))
+# The type a sum region accumulates in, the type of its state.
+sum_accumulator(region::Union{FullReduction, AxisReductionRegion}) = typeof(only(region.init))
 
 struct ScatterRegion{E <: ScalarExpression, S <: Selection} <: ScalarRegion
     expression::E

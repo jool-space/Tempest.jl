@@ -259,6 +259,9 @@ Tanh's backward consumes the forward output rather than recomputing tanh.
   `map`; full and axis sums, products, maxima and minima, including `sum(f,x)`,
   `prod(f,x)` and `reduce`/`mapreduce` with any associative operator (`init` is
   required beyond `+`, `*`, `max` and `min`), and user folds through `Tempest.fold`.
+  Sums, products and logsumexps of Float16 or BFloat16 elements accumulate in
+  Float32 on every backend and round once to the element type
+  (`Tempest.fold_accumulator`); maxima and minima are exact in any type.
 - Explicit reverse operations, broadcast cotangent reductions back to each
   operand's shape, repeated-use accumulation, and zeros for unused inputs.
 - Dead-work elimination and conservative scalar-region fusion. GEMMs remain

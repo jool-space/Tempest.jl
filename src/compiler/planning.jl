@@ -195,15 +195,24 @@ function schedule_region(
     reduction_region(op, e, shape, nodes[input].dtype)
 end
 
-reduction_region(op::FoldReduction{<:Fold, Colon}, expression, shape, T) =
-    FullReduction(expression, prod(shape), op.fold, fold_init(op.fold, T))
-reduction_region(op::FoldReduction{<:Fold, <:Tuple}, expression, shape, T) = AxisReductionRegion(
-    expression,
-    prod(shape),
-    AxisReduction(shape, op.axes),
-    op.fold,
-    fold_init(op.fold, T),
-)
+# A reduction region's expression yields elements in the fold's accumulator, so
+# every scalar backend lifts and combines in it; the state starts from that
+# type's identity, and the store rounds the observed value to the output type.
+function accumulated(op::FoldReduction, expression, T)
+    A = fold_accumulator(op.fold, T)
+    contributions = A === T ? expression : ScalarCall(Cast{A}(), (expression,))
+    (contributions, fold_init(op.fold, A))
+end
+
+function reduction_region(op::FoldReduction{<:Fold, Colon}, expression, shape, T)
+    contributions, init = accumulated(op, expression, T)
+    FullReduction(contributions, prod(shape), op.fold, init)
+end
+
+function reduction_region(op::FoldReduction{<:Fold, <:Tuple}, expression, shape, T)
+    contributions, init = accumulated(op, expression, T)
+    AxisReductionRegion(contributions, prod(shape), AxisReduction(shape, op.axes), op.fold, init)
+end
 reduction_region(op::ScatterOp, expression, shape, T) =
     ScatterRegion(expression, prod(shape), op.selection)
 

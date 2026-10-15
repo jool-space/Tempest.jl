@@ -381,9 +381,8 @@ function build_implementation(::CuDNNKernels, request::ProposedRequest, runtime,
     )
     T = proposal_operand_type(region)
     operands = T === Float32 ? "Float32 operands rounded to TF32" : "$(nameof(T)) operands"
-    summary = "cuDNN $(region.label): $operands, Float32 accumulation" *
-              (isempty(widened) ? "" : ", sums written in Float32 and rounded to $(nameof(T))") *
-              "; engine workspace $(graph.workspace_size) bytes"
+    summary = "cuDNN $(region.label): $operands, Float32 accumulation; " *
+              "engine workspace $(graph.workspace_size) bytes"
     ImplementationPlan(specs) do buffers
         values = Dict{String, Any}()
         for (id, array) in zip(region.inputs, inputs)

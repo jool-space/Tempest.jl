@@ -251,8 +251,6 @@ end
         backward = only(filter(r -> all(>(primal), filter(id -> nodes[id].op isa MatMul, r.members)), regions))
         @test any(id -> nodes[id].op isa SumReduction, backward.members)
         @test length(backward.outputs) == 2
-        text = explanation(ex)
-        @test occursin("sums written in Float32 and rounded to $(nameof(T))", text)
         # Half-precision training differs from the Float64 reference by more
         # than its rounding: the first weight's gradient cancels. Measure the
         # default plan's error and require no more than that, within rounding.
@@ -274,11 +272,14 @@ end
         f(w, x) = sum(w * x; dims)
         ex = prepare_forward(f, w, x; implementations = (CuDNNKernels(),))
         @test ex.providers == [:cuDNN]
-        @test occursin("sums written in Float32", explanation(ex))
         y = execute!(ex)
         @test eltype(y) === Float16
         expected = f(Float64.(Array(w)), Float64.(Array(x)))
         @test relative_error(y, expected) < 4e-3
+        # Both plans round the product to Float16, then sum in Float32 and
+        # round once, so they agree within one unit in the last place.
+        default = Array(execute!(prepare_forward(f, w, x)))
+        @test all(abs.(Float32.(Array(y)) .- Float32.(default)) .<= eps.(default))
     end
 end
 

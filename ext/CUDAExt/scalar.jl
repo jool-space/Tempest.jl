@@ -42,13 +42,13 @@ end
 
 function cuda_partials_kernel(out, work, count)
     lane = CUDACore.threadIdx().x
-    total = zero(eltype(out))
+    total = zero(eltype(work))
     i = lane
     while i <= count
         @inbounds total += work[i]
         i += TILE_SIZE
     end
-    scratch = CUDACore.CuStaticSharedArray(eltype(out), TILE_SIZE)
+    scratch = CUDACore.CuStaticSharedArray(eltype(work), TILE_SIZE)
     total = block_sum(scratch, lane, total, TILE_SIZE)
     if lane == 1
         @inbounds out[1] = total

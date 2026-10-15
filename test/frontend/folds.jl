@@ -153,3 +153,24 @@ end
     # The integer `init` promotes as in Base; the fold state keeps the element type.
     @test trace(x -> reduce(norm_combine, x; init = 0), Float32.(x)).nodes[end].dtype == Float32
 end
+
+@testset "Half-precision folds accumulate in Float32" begin
+    for T in (Float16, Core.BFloat16)
+        x = half_fold_input(T)
+        @test Tempest.fold_accumulator(Tempest.SumFold(), T) === Float32
+        @test Tempest.fold_accumulator(MaxFold(), T) === T
+        @test Tempest.fold_accumulator(range_fold, T) === T
+        # Accumulating in the element type would be far off.
+        expected = half_fold_reference(HALF_FOLD_CASES.full_sum, x)
+        @test abs(Float64(foldl(+, x)) - Float64(expected)) > 100 * eps(expected)
+        for case in HALF_FOLD_CASES
+            elements, reduce = case
+            expected = half_fold_reference(case, x)
+            f(x) = reduce(elements(x))
+            # The interpreter's reference folds and the CPU kernels.
+            interpreted = only(Tempest.interpret(Tempest.ForwardProgram(trace(f, x)), x))
+            check_half_fold(interpreted isa Number ? fill(interpreted) : interpreted, expected)
+            check_half_fold(execute!(prepare_forward(f, x)), expected)
+        end
+    end
+end

@@ -57,7 +57,8 @@ function build_scalar(
         launch = () -> cuda_sum!(out, expression, arrays, count, nothing)
         return BuiltImplementation(launch, (runtime, out, arrays), 0)
     end
-    workspace = WorkspaceSpec(eltype(out), reduction_blocks(count))
+    # Partial sums keep the accumulator type; only the final store rounds.
+    workspace = WorkspaceSpec(Tempest.sum_accumulator(region), reduction_blocks(count))
     ImplementationPlan((workspace,)) do buffers
         work = only(buffers)
         launch = () -> cuda_sum!(out, expression, arrays, count, work)
@@ -93,7 +94,8 @@ function build_scalar(
 )
     multiprocessors =
         CUDACore.attribute(runtime.device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-    launch = axis_sum_call(out, expression, arrays, region.layout, multiprocessors)
+    init = zero(Tempest.sum_accumulator(region))
+    launch = axis_sum_call(out, init, expression, arrays, region.layout, multiprocessors)
     BuiltImplementation(launch, (runtime, out, arrays), 0)
 end
 

@@ -197,11 +197,10 @@ Probed with cuDNN 9.27 on GB10, `DEFAULT_MATH`, deterministic engines:
 Every value is declared in its Tempest element type, so it rounds where
 Tempest rounds it: the product rounds to Float16 before the bias is added, as
 it does in the default plan. Products accumulate in Float32, as cuBLAS does in
-the default plan. Sums of half-precision values accumulate in Float32, are
-written to a Float32 workspace, and are rounded once into their output; the
-default CUDA kernels accumulate those sums in the element type, so cuDNN's sums
-are the more precise. `explain` says `sums written in Float32 and rounded to
-Float16`.
+the default plan. Sums of half-precision values accumulate in Float32 and
+round once, as every Tempest fold does (`fold_accumulator`); no cuDNN engine
+wrote a half-precision sum, so the sum is written to a Float32 workspace and
+converted into its output.
 
 Float32 products round to TF32, which matched cuBLAS's TF32 error exactly, so
 cuDNN proposes them only under `CUDATarget(matmul_precision = :tf32)`. Float64

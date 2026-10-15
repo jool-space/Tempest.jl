@@ -115,3 +115,17 @@ end
     # The rule table is target-independent: no rule, no derivative.
     @test_throws ArgumentError prepare(x -> sum(Tempest.fold(range_fold, x; dims = 1)), CuArray(randn(Float32, 8, 3)))
 end
+
+@testset "Half-precision cuTile sums accumulate in Float32" begin
+    for T in (Float16, Core.BFloat16)
+        x = half_fold_input(T)
+        for name in (:full_sum, :long_columns, :short_columns)
+            case = HALF_FOLD_CASES[name]
+            elements, reduce = case
+            f(x) = reduce(elements(x))
+            ex = prepare_forward(f, CuArray(x); target = CUDATarget(kernels = :cutile))
+            @test ex.providers == [:cutile]
+            check_half_fold(execute!(ex), half_fold_reference(case, x))
+        end
+    end
+end

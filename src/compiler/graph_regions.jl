@@ -23,9 +23,13 @@ matching tuples of dense, logically shaped buffers; scalars use 0D buffers.
 Inputs are read-only and do not overlap outputs. Outputs may be needed only by
 backward or by an escaping view and must still be written completely.
 
-An implementation must preserve each node's logical element conversion. Fold
-association may differ, as for the existing parallel reduction providers; this
-contract does not authorize algebraic rewrites or a different accumulation type.
+An implementation must preserve each node's logical element conversion. Every
+fold accumulates in `fold_accumulator(fold, T)` of its input element type `T`:
+elements convert to it before lifting, and the observed value rounds once to the
+node's element type. For Float16 and BFloat16 sums, products and logsumexps that
+is Float32. Fold association may differ, as for the existing parallel reduction
+providers; this contract does not authorize algebraic rewrites or any other
+accumulation type.
 Reevaluating a scalar function requires its `recomputable` contract.
 """
 struct GraphRequest <: ImplementationRequest

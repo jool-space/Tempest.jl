@@ -24,8 +24,8 @@ function cpu_pointwise!(out, expression, arrays, count)
     nothing
 end
 
-function cpu_sum!(out, expression, arrays, count)
-    total = zero(eltype(out))
+function cpu_sum!(out, ::Type{A}, expression, arrays, count) where {A}
+    total = zero(A)
     for i = 1:count
         total += scalar_eval(expression, arrays, i)
     end
@@ -33,9 +33,9 @@ function cpu_sum!(out, expression, arrays, count)
     nothing
 end
 
-function cpu_axis_sum!(out, expression, arrays, layout)
+function cpu_axis_sum!(out, ::Type{A}, expression, arrays, layout) where {A}
     for o in eachindex(out)
-        total = zero(eltype(out))
+        total = zero(A)
         for r = 1:layout.count
             total += scalar_eval(expression, arrays, reduction_index(layout, o, r))
         end
@@ -116,10 +116,10 @@ cpu_launch(r::Elementwise, out, arrays) =
     () -> cpu_pointwise!(out, r.expression, arrays, r.count)
 
 cpu_launch(r::FullReduction{<:ScalarExpression, SumFold}, out, arrays) =
-    () -> cpu_sum!(out, r.expression, arrays, r.count)
+    () -> cpu_sum!(out, sum_accumulator(r), r.expression, arrays, r.count)
 
 cpu_launch(r::AxisReductionRegion{<:ScalarExpression, <:AxisReduction, SumFold}, out, arrays) =
-    () -> cpu_axis_sum!(out, r.expression, arrays, r.layout)
+    () -> cpu_axis_sum!(out, sum_accumulator(r), r.expression, arrays, r.layout)
 
 cpu_launch(r::FullReduction, out, arrays) =
     () -> cpu_fold!(out, r.fold, r.init, r.expression, arrays, r.count)

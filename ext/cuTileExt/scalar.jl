@@ -42,14 +42,16 @@ function reduction_kernel(work, expression, arrays, count::Int32, tile::Int)
     return
 end
 
+# Partial sums keep the region's accumulator type, the workspace's; the final
+# store rounds once to the output's type.
 function finish_reduction_kernel(out, work, count::Int32, tile::Int)
-    acc = zeros(eltype(out), tile)
+    acc = zeros(eltype(work), tile)
     for block = Int32(1):cld(count, Int32(tile))
         indices = lane_indices(block, tile)
         loaded = ct.load(work, (block,), (tile,); padding_mode = ct.PaddingMode.Zero)
-        acc = acc .+ ifelse.(indices .<= count, loaded, zero(eltype(out)))
+        acc = acc .+ ifelse.(indices .<= count, loaded, zero(eltype(work)))
     end
-    out[1] = sum(acc)
+    out[1] = convert(eltype(out), sum(acc))
     return
 end
 
@@ -109,23 +111,25 @@ end
 @inline column_eval(x::ScalarCall, arrays, block, tile) =
     x.f.(map(a -> column_eval(a, arrays, block, tile), x.args)...)
 
-function column_reduction_kernel(out, expression, arrays, rows::Int32, tile::Int)
-    acc = zeros(eltype(out), (tile, 1))
+# The expression yields contributions in the accumulator type `A`.
+function column_reduction_kernel(out, ::Type{A}, expression, arrays, rows::Int32, tile::Int) where {A}
+    acc = zeros(A, (tile, 1))
     for block = Int32(1):cld(rows, Int32(tile))
         indices = reshape(lane_indices(block, tile), (tile, 1))
         y = column_eval(expression, arrays, block, tile)
-        acc = acc .+ ifelse.(indices .<= rows, y, zero(eltype(out)))
+        acc = acc .+ ifelse.(indices .<= rows, y, zero(A))
     end
-    out[ct.bid(1)] = sum(acc)
+    out[ct.bid(1)] = convert(eltype(out), sum(acc))
     return
 end
 
-function tile_columns!(out, expression, arrays, layout)
+function tile_columns!(out, A, expression, arrays, layout)
     if isempty(out)
         return nothing
     end
     CUDACore.@cuda backend=ct occupancy=TILE_OCCUPANCY blocks=length(out) column_reduction_kernel(
         out,
+        A,
         ct.Constant(expression),
         arrays,
         Int32(layout.dims[1]),
@@ -215,7 +219,8 @@ function build_tile(region::AxisReductionRegion, out, arrays)
         prefix = length(array) == count ? array : view(array, 1:count)
         reshape(prefix, layout.dims)
     end
-    launch = () -> tile_columns!(out, expression, arrays, layout)
+    A = Tempest.sum_accumulator(region)
+    launch = () -> tile_columns!(out, A, expression, arrays, layout)
     BuiltImplementation(launch, (out, arrays), 0)
 end
 
@@ -225,7 +230,7 @@ function build_tile(region::FullReduction, out, arrays)
         launch = () -> tile_sum!(out, expression, arrays, count, nothing)
         return BuiltImplementation(launch, (out, arrays), 0)
     end
-    workspace = WorkspaceSpec(eltype(out), cld(count, TILE_SIZE))
+    workspace = WorkspaceSpec(Tempest.sum_accumulator(region), cld(count, TILE_SIZE))
     ImplementationPlan((workspace,)) do buffers
         work = only(buffers)
         launch = () -> tile_sum!(out, expression, arrays, count, work)

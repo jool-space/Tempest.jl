@@ -57,6 +57,12 @@ Another operator needs `init`, its identity, and becomes a one-value
 is zero, one, `typemin` or `typemax` of the element type, which it rebuilds from
 the type; another `init` is captured, and the fold runs on CUDA kernels.
 
+Each fold accumulates in `fold_accumulator(fold, T)`: Float32 for Float16 and
+BFloat16 sums, products and logsumexps, the element type otherwise. Planning
+puts the conversion into a reduction region's expression and its identity
+state, so scalar kernels lift and combine in that type, and the store rounds
+once; the interpreter converts before folding.
+
 Forward execution is general. The reference interpreter and CPU kernels fold
 with the fold's functions; CUDA runs a deterministic warp and block fold for
 any bits state; cuTile graph regions handle zero-size folds with Float32 or

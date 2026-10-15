@@ -51,6 +51,21 @@ end
 
 fold_eltype(f::Fold, T) = fold_types(f, T).result
 
+"""
+    fold_accumulator(f::Fold, T) -> Type
+
+The element type a fold over elements of type `T` accumulates in. Every
+implementation converts each element to it before `fold_lift`, starts from
+`fold_init(f, fold_accumulator(f, T))`, and rounds the observed value once to
+the reduction's element type `fold_eltype(f, T)`. Sums, products and
+logsumexps of Float16 or BFloat16 elements accumulate in Float32: rounding every
+partial state to half precision loses most of a long sum, and a result should
+not depend on which backend ran the fold. Maxima and minima are exact in any
+type and keep `T`, as do other folds, including `GenericFold`, whose state type
+its `init` chooses.
+"""
+fold_accumulator(::Fold, T) = T
+
 fold_init(::SumFold, T) = (zero(T),)
 fold_lift(::SumFold, x) = (x,)
 fold_combine(::SumFold, a, b) = (a[1] + b[1],)
@@ -133,6 +148,10 @@ end
 GenericFold(; init, combine, lift = tuple, observe = only, pullback = nothing) =
     GenericFold(init, lift, combine, observe, pullback)
 
+const HalfFloat = Union{Float16, Core.BFloat16}
+
+fold_accumulator(::Union{SumFold, ProdFold, LogSumExpFold}, ::Type{<:HalfFloat}) = Float32
+
 fold_init(f::GenericFold, T) = f.init isa Tuple ? f.init : f.init(T)
 fold_lift(f::GenericFold, x) = f.lift(x)
 fold_combine(f::GenericFold, a, b) = f.combine(a, b)
@@ -183,8 +202,18 @@ function fold_resident(::LogSumExpFold, x, valid, dims)
 end
 
 # Reference evaluation through Base's reductions with the fold's functions.
-# Base may regroup terms, which the associativity contract permits.
+# Base may regroup terms, which the associativity contract permits. Elements
+# convert to the fold's accumulator, and the result rounds once.
 function fold_array(f::Fold, x::AbstractArray, axes)
+    T = eltype(x)
+    A = fold_accumulator(f, T)
+    A === T && return fold_elements(f, x, axes)
+    R = fold_eltype(f, T)
+    result = fold_elements(f, A.(x), axes)
+    axes isa Colon ? R(result) : R.(result)
+end
+
+function fold_elements(f::Fold, x::AbstractArray, axes)
     states = mapreduce(
         element -> fold_lift(f, element),
         (a, b) -> fold_combine(f, a, b),
@@ -195,9 +224,9 @@ function fold_array(f::Fold, x::AbstractArray, axes)
     axes isa Colon ? fold_observe(f, states) : map(state -> fold_observe(f, state), states)
 end
 
-# Sums keep Base's pairwise order and accumulation type.
-fold_array(::SumFold, x::AbstractArray, ::Colon) = sum(x)
-fold_array(::SumFold, x::AbstractArray, axes::Tuple) = sum(x; dims = axes)
+# Sums keep Base's pairwise order and, after conversion, accumulation type.
+fold_elements(::SumFold, x::AbstractArray, ::Colon) = sum(x)
+fold_elements(::SumFold, x::AbstractArray, axes::Tuple) = sum(x; dims = axes)
 
 evaluate(op::FoldReduction, node, xs) = fold_array(op.fold, only(xs), op.axes)
 

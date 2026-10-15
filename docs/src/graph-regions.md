@@ -60,8 +60,9 @@ Construction receives `(provider, request, runtime, outputs, inputs)`, where bot
 buffer collections are ordered tuples of dense arrays with their logical
 shapes. Scalars use zero-dimensional arrays. Inputs are read-only and do not
 alias outputs. Every escaping output must be written completely. Preserve each
-node's element conversion and accumulation dtype; parallel sums may associate
-terms differently. Return `BuiltImplementation`, `ImplementationPlan`, or
+node's element conversion. Folds accumulate in `fold_accumulator(fold, T)`,
+Float32 for Float16 and BFloat16 sums, products and logsumexps, and round once
+to the node's type; parallel sums may associate terms differently. Return `BuiltImplementation`, `ImplementationPlan`, or
 `Unsupported(reason)` through the [usual implementation protocol](implementations.md).
 
 Views, reshapes, matrix products, scatter, and opaque semantic calls remain

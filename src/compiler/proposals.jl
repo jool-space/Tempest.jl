@@ -79,8 +79,9 @@ implementation that proposed it. `inputs` and `outputs` are ordered TensorSpecs.
 Construction receives matching tuples of logically shaped buffers, as for
 `GraphRequest`; an input read only by matrix products may be a `Transpose` of a
 dense buffer. Every output must be written, including values that escape only
-to backward. Unsupported from support or construction leaves the members to the
-default partition.
+to backward. Folds accumulate in `fold_accumulator` and round once, and every
+other value keeps its element conversion, as for `GraphRequest`. Unsupported
+from support or construction leaves the members to the default partition.
 """
 struct ProposedRequest <: ImplementationRequest
     target::ExecutionTarget
