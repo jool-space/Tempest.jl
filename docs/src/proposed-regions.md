@@ -36,8 +36,11 @@ Tempest.build_implementation(::MyLibrary, request::Tempest.ProposedRequest, runt
 Defining `propose_regions` is the participation mechanism, as defining
 `support` for `GraphRequest` is for graph regions, for any candidate: passed
 to `prepare` or active in the [registry](implementations.md#The-implementation-registry). A
-proposal lists value IDs: pointwise operations, constants, folds and matrix
-products. Constants used only by members join automatically. Tempest derives
+proposal lists value IDs: pointwise operations, constants, folds, matrix
+products and semantic calls. Constants used only by members join
+automatically, and so do the other results of a member call. A call is
+offered only if it survived semantic resolution, that is, some implementation
+supports it alone; otherwise it was already expanded into its reference. Tempest derives
 the boundary: the inputs, and every member that is read outside the proposal,
 by backward or as a result, as an output. `support` sees that complete boundary
 before storage is planned; construction receives buffers. A proposed region is
@@ -128,7 +131,7 @@ writes that the default would have avoided.
   reason. All regions that fail in one pass are blocked together and
   preparation replans once; smaller alternatives remain eligible.
 - Unexpected exceptions propagate, and a malformed proposal (a dead value, an
-  argument, a layout operation, a semantic call) is an error, not a fallback.
+  argument, a layout operation) is an error, not a fallback.
 
 An implementation that can check feasibility without buffers should do so in
 `support`, where a decline costs nothing. cuDNN builds its graph there; the

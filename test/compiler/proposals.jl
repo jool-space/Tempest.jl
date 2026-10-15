@@ -349,3 +349,105 @@ end
     end
     @test signature(regions[1]) == signature(regions[2])
 end
+
+# A named call claimed with its epilogue, the shape of an attention kernel that
+# also applies the pointwise work on its output. The call must survive semantic
+# resolution on its own (some implementation supports it alone); a proposal can
+# then claim it together with its consumers, as a product is claimed.
+wave_pair(x) = Tempest.reference(wave_pair, x)
+wave_pair(x::Tempest.TracedArray) = Tempest.record_call(wave_pair, x)
+Tempest.output_spec(::typeof(wave_pair), x) = (; s = Tempest.TensorSpec(x), c = Tempest.TensorSpec(x))
+Tempest.reference(::typeof(wave_pair), x) = (; s = sin.(x), c = cos.(x))
+Tempest.verb_pullback(::typeof(wave_pair), (x,), y, dy) = (dy.s .* y.c .- dy.c .* y.s,)
+
+mutable struct CallEpilogueKernels <: Implementation
+    mode::Symbol
+end
+Tempest.implementation_name(::CallEpilogueKernels) = :call_epilogue
+
+function Tempest.support(::CallEpilogueKernels, request::Tempest.CallRequest)
+    request.call.f === wave_pair ? Supported() : Unsupported("not a wave pair")
+end
+
+function Tempest.build_implementation(::CallEpilogueKernels, ::Tempest.CallRequest, runtime, out, inputs)
+    x = only(inputs)
+    BuiltImplementation(() -> (out.s .= sin.(x); out.c .= cos.(x); nothing), (out, inputs), 0)
+end
+
+# Propose the call's `s` result alone with the pointwise work that consumes the
+# call; the partitioner adds the sibling result `c`.
+function Tempest.propose_regions(::CallEpilogueKernels, request::ProposalRequest)
+    nodes = request.program.nodes
+    proposals = RegionProposal[]
+    for (id, node) in enumerate(nodes)
+        request.live[id] && node.op isa Tempest.CallResult && node.op.call.f === wave_pair || continue
+        leaves = Tempest.call_ids(node.op.call)
+        id == first(leaves) || continue
+        members = [id]
+        frontier = [leaves...]
+        while !isempty(frontier)
+            for user in request.users[popfirst!(frontier)]
+                user in members && continue
+                nodes[user].op isa Tempest.Pointwise || continue
+                push!(members, user)
+                push!(frontier, user)
+                push!(proposals, RegionProposal(members; label = "wave pair epilogue"))
+            end
+        end
+    end
+    proposals
+end
+
+function Tempest.support(impl::CallEpilogueKernels, request::ProposedRequest)
+    impl.mode === :decline && return Unsupported("call epilogue declined")
+    Supported()
+end
+
+function Tempest.build_implementation(::CallEpilogueKernels, request::ProposedRequest, runtime, outputs, inputs)
+    region = request.region
+    nodes = region.program.nodes
+    launch = () -> begin
+        values = Dict{Int, Any}(zip(region.inputs, inputs))
+        for id in region.members
+            haskey(values, id) && continue
+            node = nodes[id]
+            operands = map(i -> values[i], node.inputs)
+            if node.op isa Tempest.CallResult
+                call = node.op.call
+                result = Tempest.reference(call.f, operands...; call.kwargs...)
+                foreach((leaf, value) -> values[leaf] = value, Tempest.call_ids(call), Tempest.tree_leaves(result))
+            else
+                values[id] = Tempest.evaluate(node.op, node, operands)
+            end
+        end
+        foreach((output, id) -> copyto!(output, values[id]), outputs, region.outputs)
+        nothing
+    end
+    BuiltImplementation(launch, (region, inputs, outputs), 0)
+end
+
+wave_epilogue(x) = (w = wave_pair(x); tanh.(w.s .* w.c .+ 0.5) .* 2)
+
+@testset "Proposals claim semantic calls with their epilogues" begin
+    x = reshape(collect(range(-1.0, 1.2; length = 12)), 3, 4)
+    expected = tanh.(sin.(x) .* cos.(x) .+ 0.5) .* 2
+    ex = prepare_forward(wave_epilogue, x; implementations = (CallEpilogueKernels(:accept),))
+    @test execute!(ex) ≈ expected
+    @test length(ex.storage.steps) == 1
+    region = only(proposed_steps(ex)).region
+    @test count(id -> region.program.nodes[id].op isa Tempest.CallResult, region.members) == 2
+    @test occursin("wave pair epilogue", sprint(explain, ex))
+    # Declined: the call runs alone and the epilogue in the default partition.
+    ex = prepare_forward(wave_epilogue, x; implementations = (CallEpilogueKernels(:decline),))
+    @test execute!(ex) ≈ expected
+    @test [Tempest.region_name(s.region) for s in ex.storage.steps] == [:call, :pointwise]
+    # Training: the region writes the call results that the pullback reads.
+    loss(x) = sum(abs2, wave_epilogue(x))
+    d = differentiate(trace(loss, x))
+    value, (dx,) = value_and_gradient(d, x)
+    ex = prepare(loss, x; implementations = (CallEpilogueKernels(:accept),))
+    got = execute!(ex)
+    @test got[1][] ≈ value
+    @test got[2] ≈ dx
+    @test !isempty(proposed_steps(ex))
+end

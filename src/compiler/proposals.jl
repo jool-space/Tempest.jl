@@ -9,10 +9,11 @@
     RegionProposal(members; label = "")
 
 A set of original value IDs an implementation offers to realize as one region.
-Members may be pointwise operations, constants, folds and matrix products, and
-must form a dependency-closed unit: every path from one member to another stays
-inside the proposal, which the partitioner checks. Constants used only by
-members join the proposal. Inputs and escaping outputs follow from the program,
+Members may be pointwise operations, constants, folds, matrix products and
+semantic calls, and must form a dependency-closed unit: every path from one
+member to another stays inside the proposal, which the partitioner checks.
+Constants used only by members join the proposal, and so do the other results
+of a member call. Inputs and escaping outputs follow from the program,
 as for graph regions. `label` names the pattern in `explain`.
 """
 struct RegionProposal
@@ -57,7 +58,7 @@ propose_regions(::Implementation, ::ProposalRequest) = RegionProposal[]
 A region selected from an implementation's proposal. It has the fields of a
 `GraphRegion` and, in addition, the `implementation` that proposed it, which
 alone builds it, and the proposal's `label`. Members may include matrix
-products. An input read only by matrix products keeps its native presentation,
+products and semantic calls. An input read only by matrix products keeps its native presentation,
 dense or a transpose wrapper; every other input is a dense buffer.
 """
 struct ProposedRegion <: Region
@@ -106,7 +107,13 @@ struct ProposalRecord
     reason::String
 end
 
-proposal_operation(op) = op isa Union{Pointwise, Constant, FoldReduction, MatMul}
+proposal_operation(op) = op isa Union{Pointwise, Constant, FoldReduction, MatMul, CallResult}
+
+# A call is one unit: proposing any of its results proposes all of them.
+function include_call_results(program, members)
+    calls = [call_ids(program.nodes[id].op.call) for id in members if program.nodes[id].op isa CallResult]
+    isempty(calls) ? members : sort!(unique!([members; calls...]))
+end
 
 # An input stays native when every member reading it accepts a native
 # presentation without requiring a dense one.
@@ -208,7 +215,8 @@ function select_proposed_regions(program, target, implementations, blocked, reco
         for proposal in propose_regions(implementation, request)
             check_proposal(program, live, proposal, implementation)
             # Private literals enter with their consumers, as in graph regions.
-            members = include_private_literals(program, proposal.members, request.users, unclaimed)
+            members = include_call_results(program, proposal.members)
+            members = include_private_literals(program, members, request.users, unclaimed)
             proposal = RegionProposal(members; proposal.label)
             proposal.members in seen && continue
             push!(seen, proposal.members)
