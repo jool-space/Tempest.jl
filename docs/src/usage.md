@@ -55,7 +55,7 @@ Core Tempest depends only on LinearAlgebra. Tracing, differentiation, planning,
 and CPU execution require no CUDA packages. Install `CUDACore` and `cuBLAS` in
 an application environment and load both to enable the CUDA extension. Loading
 `cuTile` additionally enables tiled implementations of eligible regions. Loading
-`cuDNN` enables the opt-in `CuDNNKernels()`, see below.
+`cuDNN` makes `CuDNNKernels()` available, inactive until activated; see below.
 
 `prepare(f, args...)` infers placement from all array arguments, including wrappers
 such as views and transposes. Floating scalars do not choose a device; scalar-only
@@ -66,24 +66,46 @@ Use `target=CPUTarget()` or `target=CUDATarget()` for intentional input copies.
 CUDA preparation and execution require the intended device/context to be current;
 `CUDATarget(device=dev)` checks it explicitly. Owned buffers stay on that device.
 
-`CUDATarget(kernels=:auto)` chooses cuTile where eligible if its extension is loaded,
-and CUDA kernels elsewhere. `kernels=:cuda` uses no cuTile kernels, including the
-reduction finalizer. `kernels=:cutile` requires cuTile to be loaded and uses CUDA
-for mapped indexing and general axis reductions. Choices are fixed at preparation;
-loading a provider later does not change existing executables. Compilation errors
-propagate without retrying another provider.
+A CUDA executable uses cuTile where eligible once cuTile is loaded, and CUDA
+kernels elsewhere; `Tempest.deactivate(cuTile)` uses CUDA kernels everywhere,
+including the reduction finalizer. Choices are fixed at preparation: loading,
+activating or deactivating a provider later does not change existing
+executables. Compilation errors propagate without retrying another provider.
 
-## Additional implementations
+## Choosing implementations
 
-Pass implementations to `prepare` to try them before the defaults:
+Each target has baseline kernels (CPU loops and LinearAlgebra products; CUDA's
+generated kernels) that are always candidates. Packages add more by
+registering them, and the registry decides which are active:
+
+| Implementation | Module | Rank | Active |
+| --- | --- | --- | --- |
+| `CuDNNKernels()` | `cuDNN` | 0 | after `Tempest.activate(cuDNN)` |
+| `CuTileKernels()` | `cuTile` | 10 | once loaded |
+| `CUDAKernels()` | baseline of `CUDATarget` | 20 | always |
+| `CuBLASGemm()` | `cuBLAS` | 30 | once loaded |
+
+Candidates are tried in rank order, ties broken by name, never by load order.
 
 ```julia
+import cuDNN
+Tempest.activate(cuDNN; float32_cast = Core.BFloat16)  # keywords construct CuDNNKernels
+Tempest.deactivate(cuTile)                             # CUDA kernels where cuTile would run
+Tempest.activate(cuDNN) do                             # only while the function runs
+    prepare(f, args...)
+end
 ex = prepare(f, args...; implementations = (MyImplementation(),))
 ```
 
-Tempest ships one opt-in implementation: `CuDNNKernels()`, available once
-`cuDNN` is loaded alongside `CUDACore`. It runs attention, forward and backward,
-on cuDNN's SDPA engines. Those engines take Float16 or BFloat16 operands only.
+Candidates passed to `prepare` come first, in their order, then the defaults:
+a scope's changes override the registry's. Each `prepare` resolves its
+candidates once, and `explain` lists them with where each came from, for
+example `cuDNN (explicit) → cutile (registry) → cuda (target) → cuBLAS
+(registry)`.
+
+`CuDNNKernels()` is available once `cuDNN` is loaded alongside `CUDACore`. It
+runs attention, forward and backward, on cuDNN's SDPA engines, and proposes
+matrix products fused with their epilogues. Those engines take Float16 or BFloat16 operands only.
 Float32 attention needs an explicit
 `CuDNNKernels(float32_cast = Core.BFloat16)` or `Float16`; otherwise
 cuDNN declines it and cuTile or the reference runs it. See
@@ -270,7 +292,7 @@ Tanh's backward consumes the forward output rather than recomputing tanh.
   stay live; shared reduction scratch is separate. `reuse=false` is a checkable baseline.
 - CPU interpretation of the same schedule; optional CUDA kernels and cuBLAS, with
   optional cuTile implementations and opt-in cuDNN attention.
-- `CUDATarget(kernels=:cuda)` explicitly selects generated CUDA scalar kernels instead.
+- `Tempest.deactivate(cuTile)` explicitly selects generated CUDA scalar kernels instead.
   Mapped broadcast/layout reads use CUDA indexing. Dense leading-axis matrix
   reductions have a cuTile schedule; other axis reductions use a general CUDA
   schedule. Each provider has its own full-reduction finalizer.
@@ -328,7 +350,7 @@ transposed and gathered reads use CUDA scalar indexing. Regions containing
 Float64 literals use CUDA because cuTile scalar/tile promotion can otherwise
 narrow intermediate arithmetic. [cuTile issues](cutile-issues.md) lists the
 compiler problems found so far and their status. Compilation failures are not
-silently hidden; `CUDATarget(kernels=:cuda)` is an explicit alternative for
+silently hidden; `Tempest.deactivate(cuTile)` is an explicit alternative for
 scalar expressions.
 
 ## Tests

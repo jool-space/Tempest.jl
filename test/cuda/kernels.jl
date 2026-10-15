@@ -129,7 +129,7 @@ end
         rtol = 1e-8,
     )
     # The CUDA scalar lowering can be selected explicitly without changing IR.
-    alt = prepare(f, x, w; target = CUDATarget(kernels = :cuda))
+    alt = without_cutile(() -> prepare(f, x, w; target = CUDATarget()))
     execute!(alt)
     @test Array(outputs(alt)[1])[] ≈ f(x, w) atol=2e-5 rtol=2e-5
     capture!(alt)
@@ -142,12 +142,12 @@ end
 end
 
 @testset "Generated CUDA kernels resolve reads at build time" begin
-    target = CUDATarget(kernels = :cuda)
+    target = CUDATarget()
     x = reshape(Float32.(sin.(1:(37 * 19 * 5))), 37, 19, 5)
     b = reshape(Float32.(cos.(1:19)), 1, 19)
     # Both axis-sum schedules, broadcasts, transposed reads and mixed axes; the
     # gradients add broadcast reads of the reduced values.
-    check(f, args...) = compare_prepared(f, args...; target, atol = 1e-3, rtol = 1e-5)
+    check(f, args...) = without_cutile(() -> compare_prepared(f, args...; target, atol = 1e-3, rtol = 1e-5))
     check(x -> sum(abs2, sum(abs2, x; dims = 1)), x)
     check(x -> sum(abs2, sum(abs2, x; dims = 2)), x)
     check(x -> sum(abs2, sum(x; dims = (1, 3))), x)
@@ -165,7 +165,9 @@ end
     forced_bounds_checks = Base.JLOptions().check_bounds == 1
     ext = Base.get_extension(Tempest, :CUDAExt)
     h = CuArray(y)
-    ex = prepare_forward((h, b) -> tanh.(h .* sum(abs2, h; dims = 1) .+ b'), h, CuArray(b[:, 1:1]); target)
+    ex = without_cutile() do
+        prepare_forward((h, b) -> tanh.(h .* sum(abs2, h; dims = 1) .+ b'), h, CuArray(b[:, 1:1]); target)
+    end
     for (step, call) in zip(ex.storage.steps, ex.calls)
         step.region isa Tempest.Elementwise || continue
         runtime, out, arrays = call.owners

@@ -21,6 +21,9 @@ using Tempest:
     record_call,
     ReverseRule
 
+# Prepare with CUDA's generated kernels where cuTile would run, loaded or not.
+without_cutile(f) = CUTILE_ENABLED ? Tempest.deactivate(f, cuTile) : f()
+
 function finite_difference(f, arrays, which; h = 1e-6)
     a = arrays[which]
     if a isa Number

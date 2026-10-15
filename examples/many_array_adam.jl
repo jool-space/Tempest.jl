@@ -49,7 +49,7 @@ function benchmark_many_arrays(count; options...)
     preparation_seconds = @elapsed ex = prepare_forward(
         program,
         args...;
-        target = CUDATarget(kernels = :cuda),
+        target = CUDATarget(),
         donate = (1, 2),
         options...,
     )

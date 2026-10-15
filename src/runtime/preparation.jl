@@ -72,15 +72,13 @@ Base.@nospecializeinfer function prepare(
     if !(target isa ExecutionTarget)
         throw(ArgumentError("target must be an ExecutionTarget"))
     end
-    defaults = default_implementations(target)
-    if !(defaults isa Tuple && all(x -> x isa Implementation, defaults))
-        throw(
-            ArgumentError(
-                "default_implementations must return a tuple of Implementation instances",
-            ),
-        )
+    # Resolved once: activation after this call leaves the executable unchanged.
+    # A default of a type the caller passed explicitly is not tried twice.
+    defaults = filter(default_candidates(target)) do (default, _)
+        !any(explicit -> typeof(explicit) === typeof(default), implementations)
     end
-    candidates = (Tuple(implementations)..., defaults...)
+    candidates = (Tuple(implementations)..., first.(defaults)...)
+    sources = [fill(:explicit, length(implementations)); last.(defaults)]
     excluded = IdDict{Any, Vector{String}}()
     notes = String[]
     rejected_rules = IdDict{Any, Set{Int}}()
@@ -145,6 +143,7 @@ Base.@nospecializeinfer function prepare(
         end
         prepare_state!(result, donate)
         append!(result.semantic_notes, notes)
+        result.candidate_sources = sources
         return result
     end
 end
@@ -295,6 +294,7 @@ Base.@nospecializeinfer function prepare_schedule(
         selection.notes,
         String[],
         map(implementation_name, collect(implementations)),
+        Symbol[],
         [implementation_notes(candidate, target) for candidate in implementations],
         workspace_slots,
         StateBindings(),

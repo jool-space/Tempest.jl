@@ -1,6 +1,7 @@
 module Tempest
 
 using LinearAlgebra
+using Base.ScopedValues: ScopedValue, with
 
 # Model authors use the exported names. Provider and verb authors extend the
 # public names below through qualification or `using Tempest: support, ...`.
@@ -50,6 +51,9 @@ public Implementation,
     ImplementationPlan,
     WorkspaceSpec,
     default_implementations,
+    register!,
+    activate,
+    deactivate,
     implementation_name,
     implementation_notes,
     TensorSpec,
@@ -108,6 +112,7 @@ include("transforms/reverse.jl")
 # Implementations: targets, the provider protocol, and the CPU provider.
 include("implementations/targets.jl")
 include("implementations/protocol.jl")
+include("implementations/registry.jl")
 include("implementations/reverse_rules.jl")
 include("implementations/cpu.jl")
 

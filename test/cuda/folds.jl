@@ -41,7 +41,7 @@ end
         for case in HALF_FOLD_CASES
             elements, reduce = case
             f(x) = reduce(elements(x))
-            ex = prepare_forward(f, CuArray(x); target = CUDATarget(kernels = :cuda), fuse_regions = false)
+            ex = without_cutile(() -> prepare_forward(f, CuArray(x); fuse_regions = false))
             @test all(==(:cuda), ex.providers)
             check_half_fold(execute!(ex), half_fold_reference(case, x))
         end

@@ -123,7 +123,7 @@ end
             case = HALF_FOLD_CASES[name]
             elements, reduce = case
             f(x) = reduce(elements(x))
-            ex = prepare_forward(f, CuArray(x); target = CUDATarget(kernels = :cutile))
+            ex = prepare_forward(f, CuArray(x))
             @test ex.providers == [:cutile]
             check_half_fold(execute!(ex), half_fold_reference(case, x))
         end

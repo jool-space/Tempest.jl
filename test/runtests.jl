@@ -1,8 +1,8 @@
 # Each file below test/ runs as its own test, in parallel worker processes:
 # `julia --project=test test/runtests.jl [--jobs=N] [--list] [name prefixes...]`.
 # setup.jl is evaluated in every test's module. fixtures/ holds helpers that a
-# CPU test shares with its GPU counterpart, and isolated/ scripts that run in
-# fresh processes; neither runs as a test.
+# CPU test shares with its GPU counterpart, isolated/ scripts that run in
+# fresh processes, and packages/ a package outside Tempest; none runs as a test.
 using ParallelTestRunner
 using Tempest
 import CUDACore
@@ -18,6 +18,7 @@ filter!(testsuite) do (name, _)
     name == "setup" && return false
     startswith(name, "fixtures/") && return false
     startswith(name, "isolated/") && return false
+    startswith(name, "packages/") && return false
     name == "cuda/cudnn" && return CUDNN_FUNCTIONAL
     startswith(name, "cuda/") && return CUDA_FUNCTIONAL
     startswith(name, "cutile/") && return CUTILE_ENABLED

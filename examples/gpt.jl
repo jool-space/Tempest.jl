@@ -18,7 +18,7 @@
 # TEMPEST_GPT_{HIDDEN,HEADS,KV_HEADS,FFN,LAYERS,T,B}; TEMPEST_GPT_PRECISION=tf32
 # lets matrix products use TensorFloat-32, TEMPEST_GPT_DROPOUT=0.1 adds
 # residual dropout keyed by a seed the step advances, TEMPEST_GPT_KERNELS=cuda
-# excludes cuTile, and TEMPEST_GPT_SEED changes the random stream (0 matches
+# deactivates cuTile, and TEMPEST_GPT_SEED changes the random stream (0 matches
 # nanoGPT).
 module GPTExample
 
@@ -30,6 +30,7 @@ import cuBLAS
 # includes it, such as the test suite, decides which providers are loaded.
 if abspath(PROGRAM_FILE) == @__FILE__
     import cuTile
+    get(ENV, "TEMPEST_GPT_KERNELS", "auto") == "cuda" && Tempest.deactivate(cuTile)
 end
 
 const logsumexp = Tempest.logsumexp
@@ -200,8 +201,7 @@ function build(; text = get(ENV, "TEMPEST_GPT_TEXT", joinpath(@__DIR__, "..", "d
             (next_params, next_state, value)
         end
         precision = Symbol(get(ENV, "TEMPEST_GPT_PRECISION", "full"))
-        kernels = Symbol(get(ENV, "TEMPEST_GPT_KERNELS", "auto"))
-        target = CUDATarget(; matmul_precision = precision, kernels)
+        target = CUDATarget(; matmul_precision = precision)
         ex = prepare(step, params, state, batch, c; target, donate = (1, 2))
         capture!(ex)
     end

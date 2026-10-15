@@ -30,4 +30,7 @@ include("launch.jl")
 include("attention.jl")
 include("matmul.jl")
 
+# Inactive until Tempest.activate(cuDNN; kwargs...), or passed to prepare.
+__init__() = Tempest.register!(cuDNN, CuDNNKernels; target = CUDATarget, rank = 0, active = false)
+
 end

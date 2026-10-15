@@ -43,17 +43,8 @@ function check_runtime(r::CUDARuntime)
     nothing
 end
 
-function default_implementations(target::CUDATarget)
-    tile_loaded = Base.get_extension(Tempest, :cuTileExt) !== nothing
-    if target.kernels === :cutile && !tile_loaded
-        throw(ArgumentError("kernels=:cutile requires loading cuTile"))
-    end
-    if target.kernels !== :cuda && tile_loaded
-        (CuTileKernels(), CUDAKernels(), CuBLASGemm())
-    else
-        (CUDAKernels(), CuBLASGemm())
-    end
-end
+# CUDA's generated kernels are the target's baseline; cuBLAS registers below.
+baseline_implementations(::CUDATarget) = ((CUDAKernels(), 20),)
 
 function capture_runtime!(r::CUDARuntime, ex)
     execute!(ex)

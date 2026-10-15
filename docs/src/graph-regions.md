@@ -44,8 +44,8 @@ that signature.
 
 A provider participates by defining the existing
 `support(provider, request::GraphRequest)` and `build_implementation` methods.
-There is no additional registry. User providers precede target defaults for a
-particular request. A provider implementing only `RegionRequest` does not compete
+Candidates are the implementations passed to `prepare` and the registry's
+active ones. User providers precede target defaults for a particular request. A provider implementing only `RegionRequest` does not compete
 for `GraphRequest`: graph selection can claim work before decomposition reaches
 that provider. Use `fuse_regions=false` when comparing such implementations.
 Comparing providers across different region boundaries needs broader selection

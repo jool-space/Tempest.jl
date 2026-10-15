@@ -1,12 +1,12 @@
 include("../fixtures/state.jl")
 
 @testset "Captured Adam preserves and advances owned state" begin
-    kernels = Base.get_extension(Tempest, :cuTileExt) === nothing ? (:cuda,) : (:cuda, :auto)
-    for provider in kernels
+    for cutile in unique((false, CUTILE_ENABLED))
         (; params, opt, batch, differentiated, step) = adam_problem()
         device(x) = x isa AbstractArray ? CuArray(x) : x
         inputs = Tempest.tree_map(device, (params, opt, batch))
-        ex = prepare(step, inputs...; target = CUDATarget(kernels = provider), donate = (1, 2))
+        build() = prepare(step, inputs...; target = CUDATarget(), donate = (1, 2))
+        ex = cutile ? build() : without_cutile(build)
         state_outputs = outputs(ex)[1:2]
         addresses = map(pointer, Tempest.tree_leaves(outputs(ex)))
         capture!(ex)

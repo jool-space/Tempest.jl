@@ -13,6 +13,7 @@ mutable struct Prepared{R <: AbstractRuntime}
     selection_notes::Vector{Vector{String}}
     semantic_notes::Vector{String}
     candidates::Vector{Symbol}
+    candidate_sources::Vector{Symbol} # :explicit, :scoped, :registry or :target
     candidate_notes::Vector{Vector{String}} # implementation_notes, resolved at preparation
     workspace_slots::Vector{Vector{Int}}
     state::StateBindings
@@ -103,7 +104,8 @@ function explain(io::IO, ex::Prepared)
         scratchbytes,
         " bytes",
     )
-    println(io, "Implementation candidates: ", join(ex.candidates, " → "))
+    labels = ["$name ($source)" for (name, source) in zip(ex.candidates, ex.candidate_sources)]
+    println(io, "Implementation candidates: ", join(labels, " → "))
     for (name, notes) in zip(ex.candidates, ex.candidate_notes), note in notes
         println(io, "  ", name, " ", note)
     end

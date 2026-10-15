@@ -5,14 +5,13 @@ abstract type ExecutionTarget end
 struct CPUTarget <: ExecutionTarget end
 
 """
-    CUDATarget(; device=nothing, kernels=:auto, blas_workspace_bytes=4<<20,
-               matmul_precision=:full)
+    CUDATarget(; device=nothing, blas_workspace_bytes=4<<20, matmul_precision=:full)
 
 Prepare on the current CUDA device (or require `device` to be current).
-Load CUDACore and cuBLAS to enable this target. `kernels=:auto` uses eligible
-cuTile implementations when cuTile is loaded; `:cuda` uses only CUDA kernels;
-`:cutile` requires cuTile but still uses CUDA for mapped/general axis operations.
-Provider choices are fixed at preparation. Compilation errors are propagated.
+Load CUDACore and cuBLAS to enable this target. Its baseline is CUDA's
+generated kernels; registered implementations (cuBLAS, cuTile once loaded,
+cuDNN once activated) join them, see `Tempest.activate`. `Tempest.deactivate(cuTile)`
+uses CUDA kernels where cuTile would. Provider choices are fixed at preparation. Compilation errors are propagated.
 `matmul_precision=:full` keeps Float32 products in full precision;
 `:tf32` lets cuBLAS round Float32 inputs to TensorFloat-32 on tensor cores,
 the default of several frameworks, which trades about three decimal digits of
@@ -20,26 +19,21 @@ input precision for speed.
 """
 struct CUDATarget{D} <: ExecutionTarget
     device::D
-    kernels::Symbol
     blas_workspace_bytes::Int
     matmul_precision::Symbol
 
     function CUDATarget(;
         device = nothing,
-        kernels = :auto,
         blas_workspace_bytes = 4<<20,
         matmul_precision = :full,
     )
-        if !(kernels in (:auto, :cuda, :cutile))
-            throw(ArgumentError("kernels must be :auto, :cuda, or :cutile"))
-        end
         if !(blas_workspace_bytes >= 0)
             throw(ArgumentError("blas_workspace_bytes must be nonnegative"))
         end
         if !(matmul_precision in (:full, :tf32))
             throw(ArgumentError("matmul_precision must be :full or :tf32"))
         end
-        new{typeof(device)}(device, kernels, Int(blas_workspace_bytes), matmul_precision)
+        new{typeof(device)}(device, Int(blas_workspace_bytes), matmul_precision)
     end
 end
 

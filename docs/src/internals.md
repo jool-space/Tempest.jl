@@ -25,7 +25,8 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | Built-in verbs | `src/verbs/builtin.jl` | `batched_mul`, `logsumexp`, column gathers, `take_rows`, `dropout`, `attention` |
 | Derivatives | `src/transforms/reverse.jl` | `differentiate`, `pullback`, `local_partials`, `call_pullback`, `with_update` |
 | Placement | `src/implementations/targets.jl` | `CPUTarget`, `CUDATarget`, `infer_target` |
-| Implementation contract | `src/implementations/protocol.jl` | `support`, `build_implementation`, `choose_implementation` |
+| Implementation contract | `src/implementations/protocol.jl` | `support`, `build_implementation`, `choose_implementation`, `implementation_notes` |
+| Implementation registry | `src/implementations/registry.jl` | `register!`, `activate`, `deactivate`, `default_candidates`, `baseline_implementations` |
 | Implementation reverse rules | `src/implementations/reverse_rules.jl` | `reverse_rule`, `prepare_reverse_rules` |
 | CPU kernels | `src/implementations/cpu.jl` | `scalar_eval`, `build_implementation` |
 | Reference decomposition | `src/compiler/lowering.jl` | `resolve_semantics`, `lower_call!`, `lower_graph!` |
@@ -38,7 +39,7 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | Execution lifecycle | `src/runtime/execution.jl` | `Prepared`, `bind!`, `execute!`, `capture!`, `replay!`, `profile` |
 | Concrete preparation | `src/runtime/preparation.jl` | `prepare`, `prepare_schedule`, `allocate_storage` |
 | Shared scalar rules | `ext/ChainRulesCoreExt.jl` | `trace_scalar_rule`, `lift_partials` |
-| Device and vendor integration | `ext/` | CUDA, cuTile and cuDNN extensions |
+| Device and vendor integration | `ext/` | CUDA (with `device_rates` in `device.jl`), cuTile and cuDNN extensions, each registering from `__init__` |
 
 ## Folds
 
@@ -182,7 +183,10 @@ verbs, `ext/CUDAExt/kernels.jl` builds the generated scalar kernels, and
 
 ## Preparation and ownership
 
-Preparation allocates input copies and planned slots, resolves aliases, and binds
+Preparation resolves the candidate list once, from the explicit
+implementations, the scoped registry changes and the registry, and records each
+candidate's source and `implementation_notes` in the executable. It allocates
+input copies and planned slots, resolves aliases, and binds
 candidate implementations to their final arrays. Candidates are tried in order.
 `Supported()` means eligible for construction. `Unsupported(reason)` from either
 support or construction permits fallback; unexpected exceptions propagate.

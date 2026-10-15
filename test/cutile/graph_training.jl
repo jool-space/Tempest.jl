@@ -73,11 +73,9 @@ end
     # Disabling the cuTile provider retains the decomposed CUDA schedule.
     args = fusion_inputs(Float32, 11, 7)
     device_args = map(a -> a isa AbstractArray ? CuArray(a) : a, args)
-    ex = prepare_forward(
-        residual_normalization,
-        device_args...;
-        target = CUDATarget(kernels = :cuda),
-    )
+    ex = Tempest.deactivate(cuTile) do
+        prepare_forward(residual_normalization, device_args...)
+    end
     @test all(s -> !(s.region isa Tempest.GraphRegion), ex.storage.steps)
     @test Array(execute!(ex).y) ≈ residual_normalization(args...).y rtol=3e-5
 end

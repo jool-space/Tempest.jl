@@ -9,15 +9,16 @@ not the required semantic interface.
 ## Implemented now: scheduled-region realizations
 
 `prepare(...; implementations=(candidate1, candidate2))` tries user candidates
-first, then `default_implementations(target)`. Every candidate uses the same
+first, then `default_implementations(target)`: the target's baseline kernels and
+the active registered implementations, in rank order ([the
+registry](#The-implementation-registry)). Every candidate uses the same
 `support` and `build_implementation` methods. CPU defaults are `CPUKernels()` and
-`LinearAlgebraGemm()`. CUDA defaults are eligible loaded `CuTileKernels()`, then
-`CUDAKernels()` and `CuBLASGemm()`. `CuDNNKernels()` is opt-in
-([cuDNN](#cuDNN)). `CUDATarget(kernels=:cuda)` omits cuTile;
-`:cutile` requires it to be loaded but still permits CUDA indexing/reduction fallback.
+`LinearAlgebraGemm()`. CUDA defaults are `CuTileKernels()` once cuTile is
+loaded, then `CUDAKernels()` and `CuBLASGemm()`. `CuDNNKernels()` is registered
+inactive ([cuDNN](#cuDNN)).
 
-Resolve the candidate list once during preparation. Loading an extension later
-does not change an existing executable. If no candidate
+Resolve the candidate list once during preparation. Loading an extension or
+activating an implementation later does not change an existing executable. If no candidate
 supports a scheduled region, preparation reports all rejection reasons. An
 unrealized semantic call instead expands its reference and replans.
 
@@ -75,12 +76,70 @@ and workspace slots, along with the candidate order. Private persistent resource
 remain owned by the realization. Shareable temporary buffers use the common
 workspace plan below.
 
+## The implementation registry
+
+A package registers the implementation it provides under its own module, from
+`__init__` (precompiled mutation of Tempest's state would not persist):
+
+```julia
+module MyLib
+using Tempest
+struct MyKernels <: Tempest.Implementation
+    name::Symbol
+end
+MyKernels(; name = :mylib) = MyKernels(name)
+Tempest.implementation_name(k::MyKernels) = k.name
+# Tempest.support and Tempest.build_implementation methods ...
+__init__() = Tempest.register!(MyLib, MyKernels; target = CPUTarget, rank = 5, active = false)
+end
+```
+
+`Tempest.activate(MyLib; kwargs...)` constructs it with those keywords and
+enables it; `Tempest.activate(MyKernels(...))` enables an instance;
+`Tempest.deactivate(MyLib)` disables it. Both take a function first to change
+the registry only while it runs (a `ScopedValue`, so tasks it starts see the
+change too). The registry is a `Dict` keyed by module behind a lock.
+
+- **Order.** Candidates are ordered by rank, then by name: never by
+  registration or load order, so the same packages give the same plan however
+  they were loaded (`test/isolated/registry_order.jl`). Tempest's ranks are
+  cuDNN 0, cuTile 10, CUDA kernels 20, cuBLAS 30, and CPU kernels 20 and
+  LinearAlgebra 30 on CPU.
+- **Kinds.** A target's baseline kernels (`CPUKernels`, `LinearAlgebraGemm`,
+  `CUDAKernels`) belong to it, are not registered and cannot be deactivated.
+  cuBLAS and cuTile register active, cuDNN inactive.
+- **Precedence.** Candidates passed to `prepare` come first, then defaults; a
+  scope's changes override the registry's, and a default of a type passed
+  explicitly is not tried twice. `explain` labels each candidate `explicit`,
+  `scoped`, `registry` or `target`.
+- **Errors.** Activating a module that registered nothing explains why; for a
+  trigger of one of Tempest's extensions it names the missing packages, as in
+  `cuDNN is loaded but Tempest's cuDNNExt isn't; load CUDACore`.
+
+Proposals remain their own phase: every candidate, explicit or default, is
+asked to propose regions before growth-based graph regions form. If cuTile
+moves into CUDA.jl, the registry turns that into a change of defaults (which
+module registers it, at which rank), not a refactor.
+
+`test/packages/MyLib` is such a package, written against public names only,
+and `test/isolated/out_of_tree.jl` activates it. A semantic call needed no
+internal name: the request fields it reads (`request.call.f`, `.kwargs`,
+`.inputs`, `.target`) are documented in [verbs](verbs.md), though the call's
+type is not public. Other request kinds are not yet reachable this way: the
+region payloads (`Tempest.Elementwise`, `Read`, `ScalarCall`), the graph
+operations a proposal inspects (`MatMul`, `Pointwise`, `FoldReduction`),
+`baseline_implementations` for a new target, `device_rates` and
+`implementation_summary` are internal. cuDNNExt uses those operations, plus
+`Cast`, `LiteralPower`, `TransposeOp`, `Constant`, `SumFold`, `TracedArray`,
+`native_region_input`, `attention_forward`, `device_rates` and
+`implementation_summary`.
+
 ## Semantic graph regions before storage
 
 `GraphRequest` uses the same `support` and `build_implementation` methods for a
 selection of original pointwise, constant, and sum nodes. Defining support for
-that request type is the participation mechanism; there is no second provider
-registry. Selection runs before layout and storage planning and is enabled by
+that request type is the participation mechanism for any candidate, explicit
+or registered. Selection runs before layout and storage planning and is enabled by
 default. `fuse_regions=false` disables it. Without an eligible graph provider,
 ordinary scheduled-region implementations remain in use.
 
@@ -156,10 +215,11 @@ stream. General multi-stream workspace sharing is not implemented.
 ## cuDNN
 
 `CuDNNKernels()` realizes semantic verbs as cuDNN graphs, built directly with
-cuDNN.jl's graph API. Load `CUDACore` and `cuDNN` to enable it. It is opt-in, so
-pass it explicitly:
+cuDNN.jl's graph API. Load `CUDACore` and `cuDNN` to make it available. It is
+registered inactive, so activate it or pass it explicitly:
 
 ```julia
+Tempest.activate(cuDNN; float32_cast = Core.BFloat16)
 ex = prepare(loss, args...; implementations = (CuDNNKernels(float32_cast = Core.BFloat16),))
 ```
 

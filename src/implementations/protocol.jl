@@ -245,15 +245,6 @@ implementation_name(::CuTileKernels) = :cutile
 implementation_name(::CuBLASGemm) = :cuBLAS
 implementation_name(::CuDNNKernels) = :cuDNN
 
-"""
-    default_implementations(target) -> Tuple
-
-Ordered candidates appended after the user's implementations during preparation.
-Resolve this list once per executable. Unknown targets have no defaults.
-"""
-default_implementations(::ExecutionTarget) = ()
-default_implementations(::CPUTarget) = (CPUKernels(), LinearAlgebraGemm())
-
 # Apply the same contract checks during semantic eligibility and construction.
 function checked_support(implementation, request)
     verdict = support(implementation, request)

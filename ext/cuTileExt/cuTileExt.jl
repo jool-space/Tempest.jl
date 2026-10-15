@@ -39,4 +39,7 @@ include("graph/codegen.jl")
 include("graph/kernels.jl")
 include("graph/build.jl")
 
+# Active once loaded; Tempest.deactivate(cuTile) removes it.
+__init__() = Tempest.register!(ct, CuTileKernels; target = Tempest.CUDATarget, rank = 10)
+
 end

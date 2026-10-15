@@ -44,7 +44,7 @@ import Tempest:
     make_runtime,
     allocate,
     check_runtime,
-    default_implementations,
+    baseline_implementations,
     support,
     build_implementation,
     capture_runtime!,
@@ -64,5 +64,8 @@ include("scatter.jl")
 include("grouping.jl")
 include("kernels.jl")
 include("verbs.jl")
+
+# Registered at load, not during precompilation, which would not persist.
+__init__() = Tempest.register!(cuBLAS, CuBLASGemm; target = CUDATarget, rank = 30)
 
 end

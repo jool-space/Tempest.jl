@@ -10,7 +10,6 @@
     @test prepare(x -> x * x, 2.0f0).runtime isa Tempest.CPURuntime
     @test prepare(f, x; target = CPUTarget()).runtime isa Tempest.CPURuntime
     @test_throws ArgumentError prepare(f, x; target = :cuda)
-    @test_throws ArgumentError CUDATarget(kernels = :unknown)
     @test_throws ArgumentError CUDATarget(blas_workspace_bytes = -1)
     @test occursin("Target: CPU", sprint(explain, ex))
 end

@@ -4,6 +4,43 @@ Dated review decisions, newest first. Each entry records priorities at that
 date, not promises that every proposal survives implementation and measurement;
 "next step" language in older entries describes the state at that time.
 
+## An implementation registry; device rates; layout copies — 15 October 2026
+
+**Registry.** Default candidates come from a registry keyed by module:
+`Tempest.register!(mod, constructor; target, rank, active)` from a package's
+or extension's `__init__`, `Tempest.activate(mod; kwargs...)` or an instance,
+`Tempest.deactivate(mod)`, and do-block forms of both that change a
+`ScopedValue` for the function's extent. Decisions:
+
+- Candidates are ordered by declared rank, then name, never by load order; a
+  fresh-process test loads the extensions in two orders and compares.
+- Baseline kernels belong to the target and cannot be deactivated. cuBLAS
+  and cuTile register active, cuDNN inactive. `deactivate(cuTile)` replaces
+  `CUDATarget(kernels = :cuda)`, which is removed rather than deprecated:
+  `:cutile` had no remaining meaning and `:cuda` was a special case of the
+  general mechanism.
+- Explicit `prepare(...; implementations)` precedes a scope, which overrides
+  the registry. Candidates are resolved once per `prepare`; `explain` labels
+  each with its source.
+- A plain `Dict` behind a lock, no `Val` dispatch. Proposals stay their own
+  phase before growth-based regions.
+- If cuTile moves into CUDA.jl, the registry makes that a change of defaults.
+
+**Device rates.** `CuDNNKernels`'s product rate and bandwidth default to the
+device's, derived from attributes and a compute-capability table, or measured
+once per device and process for an unknown architecture. On GB10 the derived
+107 TFLOP/s and 232 GB/s left every benchmark decision unchanged.
+
+**Layout copies around attention** were measured before deciding whether
+implementations should declare accepted strided layouts for the planner to
+absorb permutes, slices and reshapes
+([measurements](implementations.md#Layout-copies-around-attention)). Heads
+split by reshape, as in the GPT example, cost nothing. Packed-projection slices
+cost 6–7% of a training step and 27–28% of a forward; row-form permutes 14–17%
+and 37–40%. Deferred: the gain is real only for code written in other
+layouts, the slice case is the one strides would clearly absorb, and the
+row-form permute is likely not unit-stride for cuDNN anyway.
+
 ## Why cuDNN's fused products lose, and the rule that replaced 4096 — 15 October 2026
 
 The first cuDNN consumer declined products whose right operand exceeded three

@@ -1,0 +1,6 @@
+name = "MyLib"
+uuid = "549fab05-827f-426a-b938-33ea375d88a0"
+version = "0.1.0"
+
+[deps]
+Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"

@@ -8,7 +8,7 @@ end
     x = Float32.(range(-0.5, 0.7; length = 1025))
     inds = [mod(i * 13, 1025) + 1 for i = 1:4097]
     f(x) = sum(abs2, view(x, inds))
-    ex = prepare(f, x; target = CUDATarget(kernels = :cuda))
+    ex = without_cutile(() -> prepare(f, x; target = CUDATarget()))
     capture!(ex)
     expected = f(2x)
     gradient = zeros(Float32, length(x))

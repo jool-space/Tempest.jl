@@ -34,7 +34,8 @@ Tempest.build_implementation(::MyLibrary, request::Tempest.ProposedRequest, runt
 ```
 
 Defining `propose_regions` is the participation mechanism, as defining
-`support` for `GraphRequest` is for graph regions; there is no registry. A
+`support` for `GraphRequest` is for graph regions, for any candidate: passed
+to `prepare` or active in the [registry](implementations.md#The-implementation-registry). A
 proposal lists value IDs: pointwise operations, constants, folds and matrix
 products. Constants used only by members join automatically. Tempest derives
 the boundary: the inputs, and every member that is read outside the proposal,
