@@ -238,7 +238,9 @@ on the CPU and read as NaN on CUDA.
 `rate` and rescales the rest. Its mask is a counter hash of the first element of
 the integer array `seed`, the per-site `stream` number, and each element's
 index. It is identical on the CPU and CUDA and is redrawn, not stored, for the
-gradient. Randomness is functional: a training step advances the seed like
+gradient. It is a pointwise operation of the element, the seed and the
+element's position, so it fuses with the work around it. Randomness is
+functional: a training step advances the seed like
 any other state, for example `(; params, seed = seed .+ Int32(1))` with the
 seed donated.
 

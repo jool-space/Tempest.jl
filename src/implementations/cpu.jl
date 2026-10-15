@@ -2,6 +2,7 @@
 # kernels. These loops are also useful for checking scheduling independently of
 # the allocating graph interpreter in ir/interpret.jl.
 scalar_eval(x::Literal, arrays, i) = x.value
+scalar_eval(x::Position, arrays, i) = position_value(x, i)
 
 @inline function scalar_eval(x::Read{I}, arrays, i) where {I}
     if x.dims == x.shape && linear_identity(x.mapping)
@@ -142,7 +143,7 @@ end
 # Built-in verbs on CPU, through their references.
 function support(::CPUKernels, request::CallRequest)
     request.target isa CPUTarget || return Unsupported("requires a CPU target")
-    request.call.f in INDEX_VERBS || request.call.f === dropout ||
+    request.call.f in INDEX_VERBS ||
         request.call.f in (attention_forward, attention_backward, causal_fill) ||
         return Unsupported("no CPU kernel for $(request.call.f)")
     Supported()

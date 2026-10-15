@@ -1,8 +1,8 @@
-# Built-in verbs: runtime-index verbs, dropout and the causal fill. They write
-# into planned output storage and capture like other calls.
+# Built-in verbs: runtime-index verbs and the causal fill. They write into
+# planned output storage and capture like other calls.
 function support(::CUDAKernels, request::CallRequest)
     request.target isa CUDATarget || return Unsupported("requires a CUDA target")
-    if index_support(request.call.f) || request.call.f in (Tempest.dropout, Tempest.causal_fill)
+    if index_support(request.call.f) || request.call.f === Tempest.causal_fill
         all(s -> isbitstype(s.dtype), request.inputs) ||
             return Unsupported("index verbs need bits element types")
         return Supported()
@@ -22,19 +22,6 @@ const SLICE_WARPS = 8
     value
 end
 
-function dropout_kernel(out, x, seed, rate, stream)
-    i = (CUDACore.blockIdx().x - 1) * INDEX_THREADS + CUDACore.threadIdx().x
-    i <= length(out) || return
-    @inbounds out[i] = Tempest.dropout_value(x[i], Tempest.hash_uniform(seed[1], stream, i), rate)
-    return
-end
-
-function dropout_call(out, x, seed, rate, stream)
-    kernel = CUDACore.@cuda launch=false dropout_kernel(out, x, seed, rate, stream)
-    blocks = cld(length(out), INDEX_THREADS)
-    () -> (isempty(out) || kernel(out, x, seed, rate, stream; threads = INDEX_THREADS, blocks); nothing)
-end
-
 function causal_fill_kernel(out, x, rows, columns, value)
     i = (CUDACore.blockIdx().x - 1) * INDEX_THREADS + CUDACore.threadIdx().x
     i <= length(out) || return
@@ -52,11 +39,6 @@ function build_implementation(::CUDAKernels, request::CallRequest, runtime, out,
         blocks = cld(length(out), INDEX_THREADS)
         launch = () -> (isempty(out) || kernel(out, x, rows, columns, value; threads = INDEX_THREADS, blocks); nothing)
         return BuiltImplementation(launch, (out, inputs), 0)
-    end
-    if request.call.f === Tempest.dropout
-        (; rate, stream) = request.call.kwargs
-        x, seed = inputs
-        return BuiltImplementation(dropout_call(out, x, seed, rate, stream), (out, inputs), 0)
     end
     BuiltImplementation(index_call(request.call.f, out, inputs), (out, inputs), 0)
 end

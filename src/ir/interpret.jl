@@ -33,6 +33,7 @@ end
 # planning and kernel implementations. Result metadata preserves scalar/0D identity.
 evaluate(op::Constant, node, xs) = node.scalar ? op.value : fill(op.value, node.dims)
 evaluate(::MatMul, node, xs) = xs[1] * xs[2]
+evaluate(::Positions, node, xs) = reshape(Int32.(1:prod(node.dims)), node.dims)
 evaluate(::TransposeOp, node, xs) = transpose(only(xs))
 evaluate(op::PermuteOp, node, xs) = permutedims(only(xs), op.permutation)
 

@@ -107,3 +107,13 @@ end
     ex = prepare(loss, Float32.(Array(q)), Float32.(Array(k)); target = CUDATarget())
     @test count(s -> s.region isa Tempest.BatchedGemmRegion, ex.storage.steps) == 3
 end
+
+# Dropout is pointwise: it fuses with the work on either side.
+@testset "Dropout fuses with its neighbours" begin
+    x = CuArray(sin.(reshape(Float32.(1:(512 * 64)), 512, 64)))
+    seed = CuArray(Int32[5])
+    f(x, s) = tanh.(Tempest.dropout(x .* 2.0f0 .+ 1.0f0, s; rate = 0.2) .* 3.0f0)
+    ex = prepare_forward(f, x, seed)
+    @test first.(plan_shape(ex)) == [:pointwise]
+    @test Array(execute!(ex)) ≈ f(Array(x), Int32[5]) rtol = 1e-6
+end

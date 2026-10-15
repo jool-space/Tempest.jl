@@ -24,6 +24,11 @@ struct Pointwise{F} <: Operation
     f::F
 end
 
+# The one-based linear index of each element, as Int32: the counter that
+# position-dependent pointwise functions such as dropout's hash read. It has no
+# operands and no storage; kernels compute it from their iteration index.
+struct Positions <: Operation end
+
 """
     Fold
 
@@ -85,6 +90,7 @@ operation_name(::Constant) = :constant
 operation_name(::MatMul) = :matmul
 operation_name(::BatchedMatMul) = :batched_matmul
 operation_name(::Pointwise) = :pointwise
+operation_name(::Positions) = :positions
 operation_name(op::FoldReduction) = fold_name(op.fold)
 operation_name(::TransposeOp) = :transpose
 operation_name(::ReshapeOp) = :reshape

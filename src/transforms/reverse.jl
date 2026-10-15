@@ -168,6 +168,8 @@ function pullback(op::Pointwise, xs, y, g)
         throw(ArgumentError("wrong number of partials for $(op.f)"))
     map(xs, partials) do x, partial
         x.nodes[x.id].op isa Constant && return nothing
+        # Integer operands (indices, seeds, positions) are not differentiable.
+        eltype(x) <: Integer && return nothing
         sum_to(pointwise(*, g, partial), x)
     end
 end

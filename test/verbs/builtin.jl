@@ -65,6 +65,13 @@ end
     @test y != Tempest.dropout(x, Int32[8]; rate = 0.25)
     @test y != Tempest.dropout(x, seed; rate = 0.25, stream = 1)
     @test all((y .== 0) .| (y .≈ x ./ 0.75f0))
+    # The kept elements are those whose uniform draw is at least the rate.
+    kept = [Tempest.hash_uniform(7, 0, i) >= 0.25 for i in eachindex(x)]
+    @test (y .!= 0) == reshape(kept, size(x)) .& (x .!= 0)
+    # A pointwise operation over the element, the seed and its position.
+    p = trace((x, s) -> Tempest.dropout(x, s; rate = 0.25), x, seed)
+    @test !any(node -> node.op isa Tempest.CallResult, p.nodes)
+    @test Tempest.interpret(Tempest.ForwardProgram(p), x, seed)[1] == y
     f(x, s) = sum(abs2, Tempest.dropout(tanh.(x), s; rate = 0.3))
     d = differentiate(trace(f, x, seed); wrt = (1,))
     value, (dx,) = value_and_gradient(d, x, seed)

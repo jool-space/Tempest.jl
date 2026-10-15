@@ -55,6 +55,17 @@ AxisReduction(dims, axes) = AxisReduction(dims, axes, prod(dims[d] for d in axes
     end
 end
 
+# The value of a `Positions` node read through a layout: the storage index a
+# Read with the same mapping would load from, without loading anything.
+struct Position{M, D, O} <: ScalarExpression
+    mapping::M
+    dims::D
+    shape::O
+end
+
+@inline position_value(x::Position, i) =
+    Int32(map_index(x.mapping, broadcast_index(i, x.dims, x.shape)))
+
 struct ScalarCall{F, A} <: ScalarExpression
     f::F
     args::A
@@ -152,3 +163,4 @@ function needs_indexing(x::Read)
 end
 
 needs_indexing(x::ScalarCall) = any(needs_indexing, x.args)
+needs_indexing(::Position) = true

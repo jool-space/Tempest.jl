@@ -16,6 +16,19 @@ struct MappedRead{I, N, M}
     mapping::M
 end
 
+# Positions resolve like reads and yield the index instead of loading it.
+struct LinearPosition end
+
+struct StridedPosition{N}
+    strides::NTuple{N, Int}
+    offset::Int
+end
+
+struct MappedPosition{N, M}
+    strides::NTuple{N, Int}
+    mapping::M
+end
+
 # `kept` enumerates outputs and `reduced` the summed elements of each output.
 # Pointwise, full and scatter regions iterate `kept` alone.
 struct DeviceExpression{E, K, R}
@@ -50,6 +63,12 @@ end
 
 @inline device_eval(x::MappedRead{I}, arrays, i, c) where {I} =
     @inbounds arrays[I][device_index(x.mapping, strided_offset(c, x.strides) % UInt32)]
+
+@inline device_eval(::LinearPosition, arrays, i, c) = i % Int32
+@inline device_eval(x::StridedPosition, arrays, i, c) =
+    (x.offset + 1 + strided_offset(c, x.strides)) % Int32
+@inline device_eval(x::MappedPosition, arrays, i, c) =
+    device_index(x.mapping, strided_offset(c, x.strides) % UInt32) % Int32
 
 # Layout maps evaluated from a zero-based UInt32 logical index. Logical indices
 # of a generated region fit in 32 bits (preparation checks the count), so each
@@ -103,7 +122,7 @@ end
     device_eval(e.expression, arrays, i, coordinates(e, i))
 
 expression_shape(::Literal) = nothing
-expression_shape(x::Read) = x.shape
+expression_shape(x::Union{Read, Tempest.Position}) = x.shape
 
 function expression_shape(x::ScalarCall)
     for a in x.args
@@ -137,11 +156,25 @@ end
 
 device_leaf(r, x::Literal, order, linear) = x
 
+function device_leaf(r, x::Tempest.Position, order, linear)
+    if linear && x.dims == x.shape && linear_identity(x.mapping)
+        return LinearPosition()
+    end
+    m = x.mapping
+    if m isa AffineMap && m.dims == x.dims
+        strides = broadcast_strides(x.dims, m.strides, x.shape)
+        return StridedPosition{length(order)}(map(d -> strides[d], order), m.offset)
+    end
+    strides = broadcast_strides(x.dims, dense_strides(x.dims), x.shape)
+    mapping = gpu_mapping(r, m)
+    MappedPosition{length(order), typeof(mapping)}(map(d -> strides[d], order), mapping)
+end
+
 device_leaf(r, x::ScalarCall, order, linear) =
     ScalarCall(x.f, map(a -> device_leaf(r, a, order, linear), x.args))
 
 uses_coordinates(x) = false
-uses_coordinates(::Union{StridedRead, MappedRead}) = true
+uses_coordinates(::Union{StridedRead, MappedRead, StridedPosition, MappedPosition}) = true
 uses_coordinates(x::ScalarCall) = any(uses_coordinates, x.args)
 
 # A pointwise, full-reduction or scatter expression iterating linearly over its

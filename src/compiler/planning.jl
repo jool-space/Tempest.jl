@@ -18,7 +18,7 @@ requires_dense_inputs(::Union{BatchedMatMul, CallResult}) = true
 # Unknown operations are boundaries until they provide an explicit lowering.
 # Constant fills and layout aliases have their own treatment below.
 fusion_boundary(::Operation) = true
-fusion_boundary(::Union{Pointwise, Constant, LayoutOperation}) = false
+fusion_boundary(::Union{Pointwise, Constant, Positions, LayoutOperation}) = false
 
 function native_requirements(program, live, regions)
     native = falses(length(program.nodes))
@@ -120,6 +120,8 @@ function schedule_steps(program, live, layouts, materialized, regions = ())
 
     function read_expression(i, dependencies, shape; force = false)
         root, mapping = layout(i; force)
+        # Positions are computed where they are read, never loaded.
+        nodes[root].op isa Positions && return Position(mapping, nodes[i].dims, shape)
         j = findfirst(==(root), dependencies)
         if j === nothing
             push!(dependencies, root)
@@ -131,6 +133,9 @@ function schedule_steps(program, live, layouts, materialized, regions = ())
         node = nodes[i]
         if node.op isa Constant
             return Literal(node.op.value)
+        end
+        if node.op isa Positions
+            return Position(dense_map(node.dims), node.dims, shape)
         end
         if is_layout(node) || (!force && roots[i])
             return read_expression(i, dependencies, shape; force)
@@ -173,7 +178,7 @@ schedule_region(op::BatchedMatMul, nodes, id, dependencies, expression) =
 schedule_region(op::CallResult, nodes, id, dependencies, expression) = OpaqueCall(op.call)
 
 function schedule_region(
-    ::Union{Pointwise, Constant, LayoutOperation},
+    ::Union{Pointwise, Constant, Positions, LayoutOperation},
     nodes,
     id,
     dependencies,

@@ -198,9 +198,11 @@ const INDEX_VERBS = (gather_columns, scatter_columns, take_rows, put_rows)
 
 # Counter-based randomness: every element's draw is a hash of the seed, a
 # per-site stream number, and its linear index, so a mask depends on nothing
-# but those three and is the same on every target. The backward pass redraws
-# it instead of storing it; advancing the seed is ordinary integer arithmetic
-# in a training step's update.
+# but those three and is the same on every target. Dropout is a pointwise
+# function of the element, the seed and the element's position: it fuses with
+# the work around it, and its derivative redraws the mask instead of storing
+# it. Advancing the seed is ordinary integer arithmetic in a training step's
+# update.
 
 """
     Tempest.dropout(x, seed; rate, stream = 0)
@@ -209,42 +211,73 @@ Zero each element of `x` with probability `rate` and scale the rest by
 `1 / (1 - rate)`. `seed` is a traced integer array whose first element keys
 the draw; distinct dropout sites in one program should use distinct `stream`
 numbers. The mask is a counter hash of `(seed, stream, index)`, identical on
-the CPU and CUDA, and recomputed for the gradient.
+the CPU and CUDA, and recomputed for the gradient. On traced arrays it is a
+pointwise operation, so it fuses with its neighbours.
 """
-dropout(x, seed; rate::Real, stream::Integer = 0) =
-    reference(dropout, x, seed; rate = Float64(rate), stream = Int(stream))
-dropout(x::TracedArray, seed::TracedArray; rate::Real, stream::Integer = 0) =
-    record_call(dropout, x, seed; rate = Float64(rate), stream = Int(stream))
-
-function output_spec(::typeof(dropout), x, seed; rate, stream)
-    0 <= rate < 1 || throw(ArgumentError("dropout rate must lie in [0, 1)"))
-    eltype(seed) <: Integer || throw(ArgumentError("dropout seeds are integer arrays"))
-    TensorSpec(eltype(x), size(x))
+function dropout(x, seed; rate::Real, stream::Integer = 0)
+    f = DropoutApply(eltype(x), dropout_rate(rate, seed), stream)
+    key = first(seed)
+    reshape([f(x[i], key, i) for i in eachindex(IndexLinear(), x)], size(x))
 end
 
-# SplitMix64's finalizer over the seed, stream and index; the top 24 bits give
-# a uniform Float32 in [0, 1).
-@inline function hash_uniform(seed, stream, index)
+function dropout(x::TracedArray, seed::TracedArray; rate::Real, stream::Integer = 0)
+    f = DropoutApply(eltype(x), dropout_rate(rate, seed), stream)
+    pointwise(f, x, view(seed, 1), positions(x))
+end
+
+function dropout_rate(rate, seed)
+    0 <= rate < 1 || throw(ArgumentError("dropout rate must lie in [0, 1)"))
+    eltype(seed) <: Integer || throw(ArgumentError("dropout seeds are integer arrays"))
+    Float64(rate)
+end
+
+positions(x::TracedArray) = emit(x.nodes, Positions(), (), size(x), Int32; scalar = false)
+
+# SplitMix64's finalizer over the seed, stream and index. Its top 24 bits `k`
+# give the uniform Float32 `k / 2^24` in [0, 1).
+@inline function hash_bits(seed, stream, index)
     z = UInt64(seed % UInt32) * 0x9e3779b97f4a7c15 ⊻ (UInt64(stream % UInt32) << 32) ⊻ UInt64(index % UInt32)
     z = (z ⊻ (z >> 30)) * 0xbf58476d1ce4e5b9
     z = (z ⊻ (z >> 27)) * 0x94d049bb133111eb
     z ⊻= z >> 31
-    Float32(z >> 40) * Float32(0x1p-24)
+    (z >> 40) % UInt32
 end
 
-@inline function dropout_value(x, u, rate)
-    T = typeof(x)
-    u >= rate ? x / (one(T) - T(rate)) : zero(T)
+hash_uniform(seed, stream, index) = Float32(hash_bits(seed, stream, index)) * Float32(0x1p-24)
+
+"""
+Dropout of `x` keyed by `seed` at linear index `index`. An element is kept
+when its uniform draw `k / 2^24` is at least the rate, that is when
+`k >= threshold = ceil(rate * 2^24)`, and kept elements are multiplied by
+`scale`, `1 / (1 - rate)` rounded to the element type. The integer comparison
+keeps double-precision arithmetic out of kernels.
+"""
+struct DropoutApply{T}
+    threshold::UInt32
+    stream::UInt32
+    scale::T
 end
 
-function reference(::typeof(dropout), x::AbstractArray, seed::AbstractArray; rate, stream)
-    key = first(seed)
-    [dropout_value(x[i], hash_uniform(key, stream, i), rate) for i in eachindex(IndexLinear(), x)] |>
-        values -> reshape(values, size(x))
+DropoutApply(T::Type, rate::Float64, stream) =
+    DropoutApply{T}(UInt32(ceil(rate * 0x1p24)), UInt32(stream % UInt32), T(inv(1 - rate)))
+
+# The factor of an element: zero, or the scale. Forward and backward multiply
+# by the same factor, so they agree bitwise.
+@inline dropout_factor(f, seed, index) =
+    ifelse(hash_bits(seed, f.stream, index) >= f.threshold, f.scale, zero(f.scale))
+
+@inline (f::DropoutApply)(x, seed, index) = x * dropout_factor(f, seed, index)
+
+"""The derivative of `DropoutApply` with respect to `x`: its factor."""
+struct DropoutFactor{T}
+    apply::DropoutApply{T}
 end
 
-verb_pullback(::typeof(dropout), (x, seed), y, dy; rate, stream) =
-    (dropout(dy, seed; rate, stream), nothing)
+@inline (f::DropoutFactor)(x, seed, index) = dropout_factor(f.apply, seed, index)
+
+recomputable(::Union{DropoutApply, DropoutFactor}) = true
+
+local_partials(f::DropoutApply, xs, y) = (pointwise(DropoutFactor(f), xs...), nothing, nothing)
 
 # Scaled dot-product attention. Queries have size (features, heads, positions,
 # batch) and keys and values (features, key/value heads, positions, batch);

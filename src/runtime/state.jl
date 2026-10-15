@@ -146,7 +146,7 @@ end
 
 # A read of the overwritten input must address exactly the output lane. Other
 # inputs may broadcast or gather: only reads of this destination can race writes.
-same_lane_read(::Literal, position, count) = true
+same_lane_read(::Union{Literal, Position}, position, count) = true
 
 function same_lane_read(read::Read{I}, position, count) where {I}
     I != position ||
