@@ -144,7 +144,7 @@ end
 function support(::CPUKernels, request::CallRequest)
     request.target isa CPUTarget || return Unsupported("requires a CPU target")
     request.call.f in INDEX_VERBS ||
-        request.call.f in (attention_forward, attention_backward, causal_fill) ||
+        request.call.f in (attention_forward, attention_backward) ||
         return Unsupported("no CPU kernel for $(request.call.f)")
     Supported()
 end

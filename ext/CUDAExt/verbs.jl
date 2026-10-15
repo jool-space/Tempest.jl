@@ -1,8 +1,8 @@
-# Built-in verbs: runtime-index verbs and the causal fill. They write into
-# planned output storage and capture like other calls.
+# Runtime-index verbs. They write into planned output storage and capture like
+# other calls.
 function support(::CUDAKernels, request::CallRequest)
     request.target isa CUDATarget || return Unsupported("requires a CUDA target")
-    if index_support(request.call.f) || request.call.f === Tempest.causal_fill
+    if index_support(request.call.f)
         all(s -> isbitstype(s.dtype), request.inputs) ||
             return Unsupported("index verbs need bits element types")
         return Supported()
@@ -22,24 +22,7 @@ const SLICE_WARPS = 8
     value
 end
 
-function causal_fill_kernel(out, x, rows, columns, value)
-    i = (CUDACore.blockIdx().x - 1) * INDEX_THREADS + CUDACore.threadIdx().x
-    i <= length(out) || return
-    n = (i - 1) % rows + 1
-    m = ((i - 1) ÷ rows) % columns + 1
-    @inbounds out[i] = n > m ? eltype(out)(value) : x[i]
-    return
-end
-
 function build_implementation(::CUDAKernels, request::CallRequest, runtime, out, inputs)
-    if request.call.f === Tempest.causal_fill
-        x = only(inputs)
-        rows, columns, value = size(x, 1), size(x, 2), request.call.kwargs.value
-        kernel = CUDACore.@cuda launch=false causal_fill_kernel(out, x, rows, columns, value)
-        blocks = cld(length(out), INDEX_THREADS)
-        launch = () -> (isempty(out) || kernel(out, x, rows, columns, value; threads = INDEX_THREADS, blocks); nothing)
-        return BuiltImplementation(launch, (out, inputs), 0)
-    end
     BuiltImplementation(index_call(request.call.f, out, inputs), (out, inputs), 0)
 end
 

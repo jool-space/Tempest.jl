@@ -411,19 +411,41 @@ end
     Tempest.causal_fill(x; value)
 
 Replace `x[n, m, ...]` with `value` wherever `n > m`: the entries a causal
-query `m` may not see. Its pullback zeroes the same entries.
+query `m` may not see. It is a pointwise operation of each element and its
+position, and its derivative zeroes the same entries.
 """
-causal_fill(x; value::Real) = reference(causal_fill, x; value = Float32(value))
-causal_fill(x::TracedArray; value::Real) = record_call(causal_fill, x; value = Float32(value))
-
-output_spec(::typeof(causal_fill), x; value) = TensorSpec(x)
-
-function reference(::typeof(causal_fill), x::AbstractArray; value)
-    y = copy(x)
-    for index in CartesianIndices(y)
-        index[1] > index[2] && (y[index] = value)
-    end
-    y
+function causal_fill(x; value::Real)
+    f = CausalFill(eltype(x), size(x, 1), size(x, 2), value)
+    reshape([f(x[i], i) for i in eachindex(IndexLinear(), x)], size(x))
 end
 
-verb_pullback(::typeof(causal_fill), (x,), y, dy; value) = (causal_fill(dy; value = 0.0f0),)
+function causal_fill(x::TracedArray; value::Real)
+    pointwise(CausalFill(eltype(x), size(x, 1), size(x, 2), value), x, positions(x))
+end
+
+"""`value` where the row of linear index `index` exceeds its column, else `x`."""
+struct CausalFill{T}
+    rows::Int32
+    columns::Int32
+    value::T
+end
+
+CausalFill(T::Type, rows, columns, value) = CausalFill{T}(Int32(rows), Int32(columns), T(value))
+
+@inline function causal_hidden(f, index)
+    i = index - Int32(1)
+    i % f.rows > (i ÷ f.rows) % f.columns
+end
+
+@inline (f::CausalFill)(x, index) = ifelse(causal_hidden(f, index), f.value, x)
+
+"""The derivative of `CausalFill` with respect to `x`: zero where it fills."""
+struct CausalKeep{T}
+    fill::CausalFill{T}
+end
+
+@inline (f::CausalKeep)(x, index) = ifelse(causal_hidden(f.fill, index), zero(x), one(x))
+
+recomputable(::Union{CausalFill, CausalKeep}) = true
+
+local_partials(f::CausalFill, xs, y) = (pointwise(CausalKeep(f), xs...), nothing)

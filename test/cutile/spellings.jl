@@ -117,3 +117,15 @@ end
     @test first.(plan_shape(ex)) == [:pointwise]
     @test Array(execute!(ex)) ≈ f(Array(x), Int32[5]) rtol = 1e-6
 end
+
+# Without a fused kernel (full-precision products), attention expands to its
+# reference: products, a logsumexp fold and pointwise work, with no calls left.
+@testset "The attention reference has no calls" begin
+    q, k, v = (CuArray(Float32.(reshape(sin.((1:(16 * 2 * 32 * 2)) .* s), 16, 2, 32, 2))) for s in (0.3, 0.7, 1.1))
+    for causal in (false, true)
+        ex = prepare_forward((q, k, v) -> Tempest.attention(q, k, v; causal), q, k, v)
+        @test !any(step -> step.region isa Tempest.OpaqueCall, ex.storage.steps)
+        @test count(step -> step.region isa Tempest.BatchedGemmRegion, ex.storage.steps) == 2
+        @test Array(execute!(ex)) ≈ Tempest.attention(Array(q), Array(k), Array(v); causal) rtol = 1e-4
+    end
+end
