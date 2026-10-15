@@ -110,8 +110,14 @@ not require a reference or derivative, though a reference is valuable for tests.
 
 Expanded pointwise operations can fuse with their neighbors under the ordinary
 region policy. Selected opaque calls are explicit boundaries: Tempest cannot fuse
-inside them or reinterpret their internals. This is not yet a cost-based search,
-nor automatic matching of multiple calls to a larger fused implementation.
+inside them or reinterpret their internals. An implementation can claim a call
+together with the work around it by [proposing a region](proposed-regions.md)
+that contains it, as a library claims a product with its epilogue. A supported
+call is not compared with its expanded reference by cost: an implementation
+should decline a call it would realize worse than the reference fused with its
+neighbours. A verb whose meaning is a fold, a product or a pointwise function
+should lower to that primitive instead of recording a call; see
+[spelling invariance](spelling-invariance.md).
 
 Forward/backward kernels can share saved data through explicit outputs and inputs.
 In this stage those values belong to the declared semantic result tree; alternative

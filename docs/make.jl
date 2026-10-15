@@ -30,6 +30,7 @@ makedocs(;
             "Source guide" => "internals.md",
             "Direction" => "compiler-direction.md",
             "Interface direction" => "interface-direction.md",
+            "Spelling invariance" => "spelling-invariance.md",
         ],
         "API" => "api.md",
         "Reports" => [
