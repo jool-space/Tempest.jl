@@ -1,5 +1,6 @@
 # Each file below test/ runs as its own test, in parallel worker processes:
 # `julia --project=test test/runtests.jl [--jobs=N] [--list] [name prefixes...]`.
+# benchmarks/ runs only when named (see below).
 # setup.jl is evaluated in every test's module. fixtures/ holds helpers that a
 # CPU test shares with its GPU counterpart, isolated/ scripts that run in
 # fresh processes, and packages/ a package outside Tempest; none runs as a test.
@@ -13,12 +14,17 @@ const CUDNN_FUNCTIONAL = CUDA_FUNCTIONAL && (@eval(import cuDNN); cuDNN.function
 CUDA_FUNCTIONAL || @warn "CUDA unavailable; GPU tests skipped"
 CUDA_FUNCTIONAL && !CUDNN_FUNCTIONAL && @warn "cuDNN unavailable; cuDNN tests skipped"
 
+# Speed guard rails time the GPU and need it to themselves: they run only when
+# named, as in `julia --project=test test/runtests.jl benchmarks`.
+const BENCHMARKS_NAMED = any(arg -> startswith(arg, "benchmarks"), ARGS)
+
 testsuite = find_tests(@__DIR__)
 filter!(testsuite) do (name, _)
     name == "setup" && return false
     startswith(name, "fixtures/") && return false
     startswith(name, "isolated/") && return false
     startswith(name, "packages/") && return false
+    startswith(name, "benchmarks/") && return BENCHMARKS_NAMED && CUTILE_ENABLED
     name == "cuda/cudnn" && return CUDNN_FUNCTIONAL
     startswith(name, "cuda/") && return CUDA_FUNCTIONAL
     startswith(name, "cutile/") && return CUTILE_ENABLED

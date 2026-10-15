@@ -50,12 +50,26 @@ const STREAMED_ROWS = 1024
 
 resident_schedule(schedule) = schedule.axes == (1,) && schedule.tile[1] >= schedule.dims[1]
 
-# Unsplit second-axis reductions stream eight columns at a time over tiles of
-# this many rows. Measured on GB10 with row softmax, warm us at 32 / 128 / 256
-# rows: 262144 x 16 (a rank-3 array reduced over its last axis) 498 / 149 / 149,
-# 65536 x 64 207 / 153 / 148, 16384 x 256 166 / 157 / 171, 4096 x 4096
-# 933 / 895 / 947. The CUDA kernels take 306 us on the first shape.
+# Unsplit second-axis reductions stream STREAMED_ROW_COLUMNS columns at a time
+# (fewer when the domain has fewer) over tiles of at most STREAMED_ROW_TILE
+# rows. Measured on GB10 with row softmax, warm us at 32 / 128 / 256 rows and
+# eight columns: 262144 x 16 (a rank-3 array reduced over its last axis)
+# 498 / 149 / 149, 65536 x 64 207 / 153 / 148, 16384 x 256 166 / 157 / 171,
+# 4096 x 4096 933 / 895 / 947. The CUDA kernels take 306 us on the first shape.
+# Eight columns per step left the 2048 x 1024 bias gradient of an MLP at
+# 35 us against 20 on the CUDA kernels, and row sums over 2048 x 8192 at 384
+# against 336; 32 columns took 14 and 290, and kept the shapes above (softmax
+# over 2048 x 4096 435 instead of 490). 64 columns gained nothing more.
 const STREAMED_ROW_TILE = 128
+const STREAMED_ROW_COLUMNS = 32
+
+# Taller tiles leave fewer blocks: the unsplit schedule keeps at least
+# SPLIT_KEPT_BLOCKS[2] blocks, the count below which second-axis reductions
+# split, so a domain of 2048 rows runs 64 blocks of 32 rows, not 16 of 128.
+function streamed_row_tile(rows)
+    fitting = prevpow(2, max(1, rows ÷ SPLIT_KEPT_BLOCKS[2]))
+    min(STREAMED_ROW_TILE, nextpow(2, rows), max(SPLIT_TILE[2][1], fitting))
+end
 
 # Short columns share a block: columns of at most PACKED_ROWS rows are packed
 # into tiles of about PACKED_ELEMENTS values, keeping at least MINIMUM_BLOCKS
@@ -64,6 +78,17 @@ const STREAMED_ROW_TILE = 128
 # Packing 256-row columns fell from 62% to about 40%, and larger tiles were
 # slower than 512 values at every packed shape.
 const PACKED_ROWS = 128
+
+# Full reductions give each block a tile of this many values, as tall as the
+# domain's columns allow, and write one partial per block. With 256-value tiles
+# (at most 256 rows) every full reduction lost to the CUDA kernels, measured on
+# GB10 against `Tempest.deactivate(cuTile)`, warm us: `sum(a .* b)` over 2^20
+# values 14.4 against 8.6, `sum(abs2, tanh.(x))` over 1024 x 4096 45 / 17, a
+# full maximum and shifted sum 94 / 36. At 1024 values in 1024-row tiles: 7.6,
+# 18.3 and 32. Tiles of 4096 values, or of 2048 rows, were slower again (fewer
+# blocks than the device holds), and 512-row tiles of two columns lost a
+# third. The test/benchmarks guard rails compare these against the CUDA kernels.
+const FULL_TILE_ELEMENTS = 1024
 const PACKED_ELEMENTS = 512
 const MINIMUM_BLOCKS = 128
 
@@ -239,10 +264,10 @@ function graph_reduction_schedule(request::GraphRequest)
     tile = if axes == (1,)
         domain[1] <= RESIDENT_ROWS ? resident_tile(domain) : (STREAMED_ROWS, 1)
     elseif axes == (2,)
-        (min(STREAMED_ROW_TILE, nextpow(2, domain[1])), 8)
+        (streamed_row_tile(domain[1]), min(STREAMED_ROW_COLUMNS, nextpow(2, domain[2])))
     else
-        rows = min(256, nextpow(2, domain[1]))
-        (rows, div(256, rows))
+        rows = min(FULL_TILE_ELEMENTS, nextpow(2, domain[1]))
+        (rows, div(FULL_TILE_ELEMENTS, rows))
     end
     schedule = split_schedule(GraphReductionSchedule(domain, axes, tile, groups, 1, folds, shape, leading))
     all(n -> n < (1 << 24), graph_grid(schedule)) ||
