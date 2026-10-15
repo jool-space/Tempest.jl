@@ -40,6 +40,7 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | Execution lifecycle | `src/runtime/execution.jl` | `Prepared`, `bind!`, `execute!`, `capture!`, `replay!`, `profile` |
 | Concrete preparation | `src/runtime/preparation.jl` | `prepare`, `prepare_schedule`, `allocate_storage` |
 | Shared scalar rules | `ext/ChainRulesCoreExt.jl` | `trace_scalar_rule`, `lift_partials` |
+| Statistics | `ext/StatisticsExt.jl` | `mean`, `var`, `std` as sums and pointwise work |
 | Device and vendor integration | `ext/` | CUDA (with `device_rates` in `device.jl`), cuTile and cuDNN extensions, each registering from `__init__` |
 
 ## Folds

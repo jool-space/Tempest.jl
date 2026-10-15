@@ -29,6 +29,7 @@ end
 # earlier test on its worker happened to load.
 const init_code = quote
     using Tempest, Test
+    import Statistics
     const CUDA_FUNCTIONAL = $CUDA_FUNCTIONAL
     const CUTILE_ENABLED = $CUTILE_ENABLED
     $(CUDA_FUNCTIONAL ? :(using CUDACore; import cuBLAS, cuDNN) : nothing)

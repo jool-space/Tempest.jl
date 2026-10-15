@@ -167,6 +167,20 @@ This is currently an ordinary composition of tensor operations, **not a tuned
 normalization primitive**. Julia's `BroadcastStyle` machinery preserves lazy
 broadcast trees, including singleton axes and arbitrary-arity scalar functions.
 
+With Statistics loaded, `mean`, `var` and `std` (with `dims`, `corrected` and
+`mean`) work on traced arrays. They are spelled with sums and pointwise
+operations, `sum(x; dims) ./ n` and so on, so they plan, fuse and differentiate
+as that spelling does. `var(x; dims)` computes its own mean; pass
+`mean = mean(x; dims)` to share one reduction with a mean you also use:
+
+```julia
+using Statistics
+function layernorm(x)
+    m = mean(x; dims = 1)
+    (x .- m) ./ sqrt.(var(x; dims = 1, mean = m, corrected = false) .+ 1f-5)
+end
+```
+
 A full `sum(x)` produces `TracedScalar{T} <: Real`; `sum(x; dims=1)` remains an
 array. A genuine zero-dimensional array remains distinct from a scalar, with
 `x[]` explicitly producing a symbolic number. Both use one-element buffers in

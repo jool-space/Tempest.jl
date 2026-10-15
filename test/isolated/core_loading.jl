@@ -8,10 +8,10 @@ using Tempest, Test
     ex = prepare(f, x)
     @test execute!(ex)[1][] ≈ f(x)
     @test value_and_gradient(trace(f, x), x)[1] ≈ f(x)
-    for extension in (:CUDAExt, :cuTileExt, :cuDNNExt, :ChainRulesCoreExt)
+    for extension in (:CUDAExt, :cuTileExt, :cuDNNExt, :ChainRulesCoreExt, :StatisticsExt)
         @test Base.get_extension(Tempest, extension) === nothing
     end
     @test_throws ArgumentError prepare(f, x; target = CUDATarget())
-    optional = ("CUDACore", "cuBLAS", "cuTile", "cuDNN", "ChainRulesCore")
+    optional = ("CUDACore", "cuBLAS", "cuTile", "cuDNN", "ChainRulesCore", "Statistics")
     @test !any(id -> id.name in optional, keys(Base.loaded_modules))
 end

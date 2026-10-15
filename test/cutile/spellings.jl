@@ -231,3 +231,39 @@ end
     @test count(step -> step.region isa Tempest.GraphRegion, ex.storage.steps) == 1
     @test Array(execute!(ex)) ≈ Tempest.attention(Array(q), Array(k), Array(v)) rtol = 1e-4
 end
+
+# Statistics' mean, var and std are their sums (ext/StatisticsExt.jl), so a
+# layer norm written with them plans as the spelling with sums, forward and in
+# training. Without the `mean` keyword, var computes its own mean: a second
+# sum over the same values, in the same region.
+@testset "Statistics spellings plan as their sums" begin
+    x = CuArray(sin.(reshape(Float32.(1:(256 * 40)), 256, 40)))
+    w = CuArray(Float32.(range(0.5, 1.5; length = 256)))
+    function by_statistics(x, w)
+        m = Statistics.mean(x; dims = 1)
+        v = Statistics.var(x; dims = 1, mean = m, corrected = false)
+        (x .- m) ./ sqrt.(v .+ 1.0f-5) .* w
+    end
+    function by_sums(x, w)
+        m = sum(x; dims = 1) ./ size(x, 1)
+        v = sum(abs2, x .- m; dims = 1) ./ size(x, 1)
+        (x .- m) ./ sqrt.(v .+ 1.0f-5) .* w
+    end
+    by_std(x, w) = (x .- Statistics.mean(x; dims = 1)) ./ Statistics.std(x; dims = 1, corrected = false) .* w
+    a, b, c = prepare_forward(by_statistics, x, w), prepare_forward(by_sums, x, w), prepare_forward(by_std, x, w)
+    @test plan_shape(a) == plan_shape(b) == plan_shape(c) == [(:graph, :cutile)]
+    expected = Array(execute!(b))
+    @test Array(execute!(a)) ≈ expected rtol = 1e-5
+    @test Array(execute!(c)) ≈ expected rtol = 1e-3
+    loss(f) = (x, w) -> sum(abs2, f(x, w))
+    a, b = prepare(loss(by_statistics), x, w), prepare(loss(by_sums), x, w)
+    @test plan_shape(a) == plan_shape(b)
+    @test Array(execute!(a)[2]) ≈ Array(execute!(b)[2]) rtol = 1e-5
+    # A full mean, and the mean of a rank-3 array over its last axis.
+    @test plan_shape(prepare_forward(x -> Statistics.mean(abs2, x), x)) ==
+          plan_shape(prepare_forward(x -> sum(abs2, x) / length(x), x))
+    x3 = CuArray(sin.(reshape(Float32.(1:(32 * 24 * 5)), 32, 24, 5)))
+    ex = prepare_forward(x -> x .- Statistics.mean(x; dims = 3), x3)
+    @test plan_shape(ex) == [(:graph, :cutile)]
+    @test Array(execute!(ex)) ≈ Array(x3) .- Statistics.mean(Array(x3); dims = 3) rtol = 1e-5
+end

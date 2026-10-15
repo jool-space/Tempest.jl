@@ -15,17 +15,20 @@ CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
 cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
 cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
 cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [extensions]
 ChainRulesCoreExt = "ChainRulesCore"
 CUDAExt = ["CUDACore", "cuBLAS"]
 cuDNNExt = ["CUDACore", "cuDNN"]
 cuTileExt = ["CUDACore", "cuTile"]
+StatisticsExt = "Statistics"
 
 [compat]
 ChainRulesCore = "1.25"
 CUDACore = "6.3.0"
 LinearAlgebra = "1.11"
+Statistics = "1"
 cuBLAS = "6.3.0"
 cuDNN = "6.3.0"
 cuTile = "1.0.0"

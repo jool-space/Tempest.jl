@@ -118,7 +118,7 @@ on cuTile unless stated.
 
 | computation | spellings | plan and time | why |
 |:--|:--|:--|:--|
-| mean-based norms | `Statistics.mean(x; dims)` | error | Tempest has no `mean` method; `sum(x; dims) ./ n` works |
+| mean-based norms | `Statistics.mean(x; dims)` / `sum(x; dims) ./ n` | error; now one graph region each | the Statistics extension spells `mean`, `var` and `std` with sums |
 | dot product, 2²⁰ | `sum(a .* b)` / `reshape(a, 1, :) * reshape(b, :, 1)` | 61 / 10 μs; now 14 / 7 | not the staged partial sums: their kernels compiled without an occupancy hint ([outside review](outside-review.md)) |
 | softmax over a 3-D array | rank 3 / reshaped to rank 2 | CUDA kernels / one graph region; now one graph region each, 145 / 136 μs | was: cuTile graph regions are rank ≤ 2; leading and trailing axes now collapse |
 | softmax of a permuted matrix | `logsumexp(x; dims=2)` / `permutedims(logsumexp(permutedims(x)))` | 155 / 358 μs; now one graph region each | was: layout operations end graph regions; a fold over a permutation now folds the source |
