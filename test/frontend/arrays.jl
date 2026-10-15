@@ -128,3 +128,84 @@ end
         end
     end
 end
+
+# Exact identities of index maps are canonical while tracing: a permutation of
+# a permutation is their composition, a matrix permutation is its transpose, a
+# full reduction reads through reshapes, and a reduction over a permuted array
+# is the permuted reduction of its source (docs/src/spelling-invariance.md).
+@testset "Layout identities canonicalize while tracing" begin
+    x = reshape(collect(range(-0.6, 0.7; length = 24)), 3, 4, 2)
+    m = reshape(collect(range(-0.5, 0.7; length = 12)), 3, 4)
+    run(f, args...) = only(Tempest.interpret(Tempest.ForwardProgram(trace(f, args...)), args...))
+    # Operations the result depends on; cancelled layout nodes stay in the
+    # trace as dead nodes.
+    function ops(p)
+        live = Tempest.live_nodes(p.nodes, Tempest.tree_leaves(p.output))
+        [typeof(n.op) for (id, n) in enumerate(p.nodes) if live[id] && !(n.op isa Tempest.Argument)]
+    end
+    returns_argument(p) = p.output == only(p.arguments)
+
+    @test returns_argument(trace(x -> permutedims(permutedims(x, (3, 1, 2)), (2, 3, 1)), x))
+    @test returns_argument(trace(m -> permutedims(permutedims(m)), m))
+    @test returns_argument(trace(m -> permutedims(m', (2, 1)), m))
+    @test returns_argument(trace(m -> transpose(permutedims(m, (2, 1))), m))
+    composed(x) = permutedims(permutedims(x, (2, 3, 1)), (2, 3, 1))
+    @test ops(trace(composed, x)) == [Tempest.PermuteOp{Tuple{Int, Int, Int}}]
+    @test run(composed, x) == composed(x)
+    @test ops(trace(m -> permutedims(m, (2, 1)), m)) == [Tempest.TransposeOp]
+
+    # Full reductions read the array a reshape presents.
+    for (f, a) in (
+        (x -> sum(vec(x)), x),
+        (x -> sum(reshape(x, 2, :)), x),
+        (m -> maximum(reshape(m, 2, :)), m),
+        (m -> prod(vec(m)'), m),
+    )
+        p = trace(f, a)
+        fold = only(filter(n -> n.op isa Tempest.FoldReduction, p.nodes))
+        @test fold.inputs == (only(p.arguments),)
+        @test run(f, a) ≈ f(a)
+    end
+    # A transposed matrix is not a reshape: its elements are in another order.
+    p = trace(m -> sum(vec(m')), m)
+    @test only(filter(n -> n.op isa Tempest.FoldReduction, p.nodes)).inputs == (2,)
+    @test p.nodes[2].op isa Tempest.TransposeOp
+
+    # Reductions over permuted arrays fold the source and permute the result.
+    for (f, g, a) in (
+        (m -> sum(m'; dims = 1), m -> sum(m; dims = 2)', m),
+        (m -> maximum(m'; dims = 2), m -> maximum(m; dims = 1)', m),
+        (
+            x -> Tempest.logsumexp(permutedims(x, (3, 1, 2)); dims = 2),
+            x -> permutedims(Tempest.logsumexp(x; dims = 1), (3, 1, 2)),
+            x,
+        ),
+        (
+            x -> sum(permutedims(x, (2, 3, 1)); dims = (1, 3)),
+            x -> permutedims(sum(x; dims = (1, 2)), (2, 3, 1)),
+            x,
+        ),
+    )
+        @test ops(trace(f, a)) == ops(trace(g, a))
+        @test size(run(f, a)) == size(f(a))
+        @test run(f, a) ≈ f(a)
+    end
+    # The permuted spelling of a softmax is one reduction over the source and no
+    # layout operation: both transposes cancel.
+    permuted_softmax(m) = exp.(m .- permutedims(Tempest.logsumexp(permutedims(m); dims = 1)))
+    p = trace(permuted_softmax, m)
+    live = Tempest.live_nodes(p.nodes, Tempest.tree_leaves(p.output))
+    @test !any(id -> live[id] && p.nodes[id].op isa Tempest.LayoutOperation, eachindex(p.nodes))
+    @test run(permuted_softmax, m) ≈ exp.(m .- Tempest.logsumexp(m; dims = 2))
+
+    # Derivatives agree with finite differences through the rewrites.
+    for (f, a) in (
+        (m -> sum(abs2, permuted_softmax(m)), m),
+        (m -> sum(abs2, sum(m'; dims = 1) .* m'), m),
+        (x -> sum(abs2, vec(x) .* 2.0) + sum(vec(sin.(x))), x),
+    )
+        value, (grad,) = value_and_gradient(differentiate(trace(f, a)), a)
+        @test value ≈ f(a)
+        @test grad ≈ finite_difference(f, (a,), 1) rtol = 1e-5 atol = 1e-7
+    end
+end

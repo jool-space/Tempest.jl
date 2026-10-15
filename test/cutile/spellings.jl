@@ -130,6 +130,49 @@ end
     end
 end
 
+# Statistics with a dropped axis, and reductions of permuted arrays, reach the
+# plan of their direct spellings: exact aliases collapse before planning and
+# permuted folds fold their source.
+@testset "Reshaped statistics and permuted reductions plan alike" begin
+    x = CuArray(sin.(reshape(Float32.(1:(256 * 40)), 256, 40)))
+    w = CuArray(Float32.(range(0.5, 1.5; length = 256)))
+    rms(x, w) = x .* w .* inv.(sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0f-5))
+    rms_dropdims(x, w) = x .* w .* inv.(sqrt.(dropdims(sum(abs2, x; dims = 1); dims = 1) ./ size(x, 1) .+ 1.0f-5))'
+    rms_vec(x, w) = x .* w .* inv.(sqrt.(vec(sum(abs2, x; dims = 1)) ./ size(x, 1) .+ 1.0f-5))'
+    expected = Array(execute!(prepare_forward(rms, x, w)))
+    for f in (rms_dropdims, rms_vec)
+        ex = prepare_forward(f, x, w)
+        @test plan_shape(ex) == [(:graph, :cutile)]
+        @test Array(execute!(ex)) ≈ expected rtol = 1e-5
+    end
+    # In training the forward statistics chain is also read by backward, so
+    # the reshape cannot sink through it and the plan keeps two more steps;
+    # that residual needs region growth through reshapes, not a rewrite.
+    loss(f) = (x, w) -> sum(abs2, f(x, w))
+    a, b = prepare(loss(rms_dropdims), x, w), prepare(loss(rms), x, w)
+    @test first(plan_shape(a)) == first(plan_shape(b)) == (:graph, :cutile)
+    @test Array(execute!(a)[2]) ≈ Array(execute!(b)[2]) rtol = 1e-4 atol = 1e-6
+
+    row_softmax(x) = exp.(x .- Tempest.logsumexp(x; dims = 2))
+    permuted(x) = exp.(x .- permutedims(Tempest.logsumexp(permutedims(x); dims = 1)))
+    transposed(x) = exp.(x .- Tempest.logsumexp(x')')
+    expected = Array(execute!(prepare_forward(row_softmax, x)))
+    for f in (permuted, transposed)
+        ex = prepare_forward(f, x)
+        @test plan_shape(ex) == [(:graph, :cutile)]
+        @test Array(execute!(ex)) ≈ expected rtol = 1e-5
+    end
+    # Full reductions read through reshapes, and reshapes sink through
+    # pointwise work to the value they present.
+    ex = prepare_forward(x -> sum(abs2, vec(x)) + sum(reshape(x, 40, :)), x)
+    @test plan_shape(ex) == plan_shape(prepare_forward(x -> sum(abs2, x) + sum(x), x))
+    for f in (x -> sum(abs2, vec(tanh.(x))), x -> sum(abs2, reshape(tanh.(x), 40, :)))
+        ex = prepare_forward(f, x)
+        @test plan_shape(ex) == [(:graph, :cutile)]
+        @test Array(execute!(ex))[] ≈ sum(abs2, tanh.(Array(x))) rtol = 1e-5
+    end
+end
+
 # Reductions over leading or trailing axes of any rank collapse to a matrix
 # domain: rank-3 softmax plans as its reshaped rank-2 spelling and shares its
 # kernel. Interior axes and partial broadcasts within a collapsed group are

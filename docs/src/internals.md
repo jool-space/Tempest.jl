@@ -30,6 +30,7 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | Implementation reverse rules | `src/implementations/reverse_rules.jl` | `reverse_rule`, `prepare_reverse_rules` |
 | CPU kernels | `src/implementations/cpu.jl` | `scalar_eval`, `build_implementation` |
 | Reference decomposition | `src/compiler/lowering.jl` | `resolve_semantics`, `lower_call!`, `lower_graph!` |
+| Exact canonical forms | `src/compiler/canonical.jl` | `canonical_program`, `sink_reshapes`, `collapse_aliases` |
 | Semantic graph regions | `src/compiler/graph_regions.jl` | `GraphRequest`, `select_graph_regions`, `region_boundary`, `standard_numbering` |
 | Proposed regions | `src/compiler/proposals.jl` | `propose_regions`, `ProposedRequest`, `select_proposed_regions`, `proposal_benefit` |
 | Region and storage planning | `src/compiler/planning.jl` | `plan`, `explain` |
@@ -113,6 +114,15 @@ only known operations may reject those callables; GPU compilability alone does
 not establish vendor support.
 
 ## Planning decisions
+
+Before planning, `canonical_program` resolves semantic calls and then removes
+layout operations that move nothing: reshapes (and vector transposes) sink
+through single-use pointwise work to the value they present, and a layout
+chain whose composed map is the identity onto an ancestor of the same shape
+is replaced by that ancestor (`src/compiler/canonical.jl`). The frontend
+already applies the trace-time identities: a permutation of a permutation
+composes, a matrix permutation is its transpose, a full reduction reads
+through reshapes, and a reduction over a permuted array folds the source.
 
 Preparation first collects the regions implementations propose
 (`propose_regions`) and selects a non-overlapping, acyclic subset in candidate

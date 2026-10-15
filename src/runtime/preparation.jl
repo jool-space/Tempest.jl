@@ -85,7 +85,7 @@ Base.@nospecializeinfer function prepare(
     current, rule_owners = prepare_reverse_rules(p, target, candidates, rejected_rules, notes)
     blocked = Set{Int}()
     blocked_regions = Dict{Tuple, String}()
-    current = resolve_semantics(current, target, candidates, excluded, notes)
+    current = canonical_program(current, target, candidates, excluded, notes)
     while true
         result = prepare_schedule(
             current,
@@ -131,13 +131,13 @@ Base.@nospecializeinfer function prepare(
                 empty!(excluded)
                 empty!(blocked)
                 empty!(blocked_regions)
-                current = resolve_semantics(current, target, candidates, excluded, notes)
+                current = canonical_program(current, target, candidates, excluded, notes)
                 continue
             end
             excluded[result.call.origin] = result.reasons
             # Nested call identities persist, but expansion can renumber values.
             # Candidate rejections belong to the previous graph snapshot.
-            current = resolve_semantics(current, target, candidates, excluded, notes)
+            current = canonical_program(current, target, candidates, excluded, notes)
             empty!(blocked_regions)
             continue
         end

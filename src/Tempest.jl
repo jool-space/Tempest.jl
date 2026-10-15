@@ -118,6 +118,7 @@ include("implementations/cpu.jl")
 
 # Compiler: semantic lowering, graph regions, planning, selection.
 include("compiler/lowering.jl")
+include("compiler/canonical.jl")
 include("compiler/graph_regions.jl")
 include("compiler/proposals.jl")
 include("compiler/planning.jl")

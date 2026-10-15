@@ -3,17 +3,22 @@ include("../fixtures/layout.jl")
 @testset "Layout composition and slice pullbacks" begin
     check_layout_cases(CPUTarget())
     x = reshape(collect(1.0:24.0), 3, 4, 2)
-    ex = prepare(x -> sum(reshape(view(x, 1:2, :, :), 2, 8)), x)
-    # The legal reshape/view commute becomes one affine read, without a copy.
-    primal = ex.storage.program.primal
-    for (id, n) in enumerate(primal.nodes)
-        if !(Tempest.is_layout(n))
-            continue
+    # A full sum reads through the reshape (dead in the trace); a pointwise
+    # consumer keeps it. Either way the legal reshape/view commute becomes one
+    # affine read, without a copy.
+    for f in (x -> sum(reshape(view(x, 1:2, :, :), 2, 8)), x -> sum(2 .* reshape(view(x, 1:2, :, :), 2, 8)))
+        ex = prepare(f, x)
+        primal = ex.storage.program.primal
+        live = Tempest.live_nodes(primal.nodes, Tempest.tree_leaves(primal.output))
+        for (id, n) in enumerate(primal.nodes)
+            if !(live[id] && Tempest.is_layout(n))
+                continue
+            end
+            @test !haskey(ex.storage.slots, id)
+            @test ex.storage.layouts[id][2] isa Tempest.AffineMap
         end
-        @test !haskey(ex.storage.slots, id)
-        @test ex.storage.layouts[id][2] isa Tempest.AffineMap
+        @test occursin("(alias)", sprint(explain, ex))
     end
-    @test occursin("(alias)", sprint(explain, ex))
     # The gather is a fixed snapshot, not a mutable captured host input.
     inds = [3, 1, 3]
     f(x) = sum(view(x, inds, :, :))

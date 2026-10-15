@@ -172,6 +172,7 @@ end
 function Base.sum(v::TracedArray; dims = :)
     T = Base.promote_op(Base.add_sum, eltype(v), eltype(v))
     if dims isa Colon
+        v = reshape_root(v)
         return emit(v.nodes, SumReduction(:), (v.id,), (), T; scalar = true)
     end
     ds = dims isa Integer ? (dims,) : Tuple(dims)
@@ -182,8 +183,50 @@ function Base.sum(v::TracedArray; dims = :)
     if isempty(axes)
         return eltype(v) == T ? v : pointwise(T, v)
     end
+    source = permuted_source(v)
+    if source !== nothing
+        parent, perm = source
+        return permutedims(sum(parent; dims = Tuple(perm[d] for d in axes)), perm)
+    end
     shape = ntuple(d -> d in axes ? 1 : size(v, d), ndims(v))
     emit(v.nodes, SumReduction(axes), (v.id,), shape, T; scalar = false)
+end
+
+# Reshapes, and the transpose of a vector, present the same elements in the
+# same linear order. A full reduction reads every element once, so it reads the
+# array they present; the reshape does not separate the reduction from the
+# work that produced its operand. A zero-dimensional presentation of a scalar
+# stays an array: the reduction of a scalar is itself.
+function reshape_root(v::TracedArray)
+    nodes = v.nodes
+    id = v.id
+    while true
+        node = nodes[id]
+        parent = node.op isa ReshapeOp ? only(node.inputs) :
+            node.op isa TransposeOp && length(nodes[only(node.inputs)].dims) == 1 ?
+            only(node.inputs) : 0
+        parent == 0 && break
+        nodes[parent].scalar && break
+        id = parent
+    end
+    id == v.id ? v : value(nodes, id)
+end
+
+# A reduction over axes of a permuted array is the permuted reduction over the
+# source's corresponding axes: each slice is the same set of elements, and the
+# fold contract leaves their order to the backend. The reduction then runs in
+# its operand's own layout, and the permutation applies to the smaller result,
+# where a dropped axis usually makes it a dense alias.
+function permuted_source(v::TracedArray)
+    node = v.nodes[v.id]
+    if node.op isa PermuteOp
+        return (value(v.nodes, only(node.inputs)), node.op.permutation)
+    end
+    if node.op isa TransposeOp && ndims(v) == 2
+        parent = value(v.nodes, only(node.inputs))
+        ndims(parent) == 2 && return (parent, (2, 1))
+    end
+    nothing
 end
 
 Base.sum(f, v::TracedArray; dims = :) = sum(pointwise(f, v); dims)
@@ -244,6 +287,17 @@ function Base.permutedims(a::TracedArray, perm)
     end
     if ps == ntuple(identity, ndims(a))
         return a
+    end
+    # Exact identities of index maps: a permutation of a permutation is their
+    # composition, and a matrix's only permutation is its transpose, so the two
+    # spellings share one node and cancel against each other.
+    node = a.nodes[a.id]
+    if node.op isa PermuteOp
+        parent = value(a.nodes, only(node.inputs))
+        return permutedims(parent, Tuple(node.op.permutation[p] for p in ps))
+    end
+    if ps == (2, 1)
+        return transpose(a)
     end
     emit(
         a.nodes,

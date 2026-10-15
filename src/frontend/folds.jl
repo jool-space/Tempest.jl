@@ -242,9 +242,15 @@ function fold(f::Fold, v::TracedArray; dims = :)
     axes = fold_axes(v, dims)
     T = fold_eltype(f, eltype(v))
     if axes isa Colon
+        v = reshape_root(v)
         return emit(v.nodes, FoldReduction(f, axes), (v.id,), (), T; scalar = true)
     end
     isempty(axes) && throw(ArgumentError("a fold needs at least one reduced axis of the input"))
+    source = permuted_source(v)
+    if source !== nothing
+        parent, perm = source
+        return permutedims(fold(f, parent; dims = Tuple(perm[d] for d in axes)), perm)
+    end
     shape = ntuple(d -> d in axes ? 1 : size(v, d), ndims(v))
     emit(v.nodes, FoldReduction(f, axes), (v.id,), shape, T; scalar = false)
 end

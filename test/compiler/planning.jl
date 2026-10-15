@@ -131,3 +131,40 @@ Tempest.scalar_partials(::typeof(broken_derivative)) = missing_rule_helper()
     @test error isa MethodError
     @test error.f === missing_rule_helper
 end
+
+# Exact aliases, layout chains whose composed map is the identity onto an
+# ancestor of the same shape, are removed before planning: consumers read the
+# ancestor, so a dropped and restored axis or a selection of every element does
+# not end a region or materialize its operand (src/compiler/canonical.jl).
+@testset "Exact aliases collapse before planning" begin
+    x = reshape(collect(range(-0.5, 0.7; length = 12)), 3, 4)
+    statistics(x) = x .* inv.(sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1e-3))
+    dropped(x) = x .* inv.(sqrt.(dropdims(sum(abs2, x; dims = 1); dims = 1) ./ size(x, 1) .+ 1e-3))'
+    flattened(x) = x .* inv.(sqrt.(vec(sum(abs2, x; dims = 1)) ./ size(x, 1) .+ 1e-3))'
+    reference = prepare_forward(statistics, x)
+    for f in (dropped, flattened)
+        ex = prepare_forward(f, x)
+        @test length(ex.storage.steps) == length(reference.storage.steps)
+        @test !occursin("layout", sprint(explain, ex))
+        @test execute!(ex) ≈ execute!(reference)
+    end
+    # Full selections and reshapes that return to the source alias it, results
+    # included; a genuine slice keeps its mapping.
+    ex = prepare_forward(x -> (whole = x[:, :], viewed = view(x, 1:3, :), restored = dropdims(reshape(x, 3, 4, 1); dims = 3), part = x[1:2, :]), x)
+    result = execute!(ex)
+    @test result.whole == x && result.viewed == x && result.restored == x && result.part == x[1:2, :]
+    @test count(==("layout"), split(sprint(explain, ex))) == 1
+    # A reshape over pointwise work sinks to the work's source; a pointwise
+    # value with another user is not computed twice.
+    ex = prepare_forward(x -> sum(abs2, vec(sin.(x))), x)
+    @test length(ex.storage.steps) == 1
+    ex = prepare_forward(x -> (h = sin.(x); (flat = sum(abs2, vec(h)), h = h)), x)
+    @test count(n -> n.op isa Tempest.Pointwise{typeof(sin)}, ex.storage.program.nodes[Tempest.live_nodes(ex.storage.program.nodes, ex.storage.program.results)]) == 1
+    @test execute!(ex).flat[] ≈ sum(abs2, sin.(x))
+    # Gradients flow through the collapsed aliases.
+    loss(x) = sum(abs2, dropped(x)) + sum(x[:, :] .* 2.0)
+    ex = prepare(loss, x)
+    value, grad = execute!(ex)
+    @test value[] ≈ loss(x)
+    @test grad ≈ finite_difference(loss, (x,), 1) rtol = 1e-6 atol = 1e-8
+end
