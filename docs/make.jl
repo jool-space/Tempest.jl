@@ -29,6 +29,7 @@ makedocs(;
             "Layouts" => "layouts.md",
             "Source guide" => "internals.md",
             "Direction" => "compiler-direction.md",
+            "Interface direction" => "interface-direction.md",
         ],
         "API" => "api.md",
         "Reports" => [
