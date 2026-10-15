@@ -1,5 +1,10 @@
 # cuTile issues found by Tempest
 
+!!! note "Historical report"
+    Written on 23 September and rechecked on 15 October 2026; the table is the status on that date. It records the state, measurements and plans of that
+    date; the current design is described in [Architecture](architecture.md),
+    whose open directions replace the plans here.
+
 First written 23 September 2026 against cuTile 1.0.0 on GB10 (sm_121), Julia
 1.13. Rechecked on 15 October 2026 against cuTile `main` (`d2fafa3`, which
 includes cuTile.jl#315, #316, #318 and #326). The one reproducer still
@@ -99,7 +104,8 @@ recovers the resident kernels completely but still slows the streamed one
 
 This looks like a `tileiras` scheduling problem rather than a cuTile bug:
 removing a token edge that the data dependence already implies should not
-raise register allocation from 25 to 255. Next steps, in order of value:
+raise register allocation from 25 to 255. The follow-ups proposed then, before
+cuTile.jl#318 and later cuTile changes made the probe fast:
 
 1. Report the probe to NVIDIA (the `tileiras` team, or the
    cuTile Python project, which has the same token-order design), with the two

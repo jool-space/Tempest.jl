@@ -77,7 +77,7 @@ arrays remain owned by the executable. CPU groups execute ordinary scalar loops.
 `grouped=false` disables grouping for inspection and timing comparisons.
 
 This is bounded grouping of existing neighboring regions, not global scheduling
-or an Adam-specific recognizer. It does not yet group reductions, GEMMs, opaque
+or an Adam-specific recognizer. It does not group reductions, GEMMs, opaque
 calls, or differently typed scalar expressions. Very different member sizes can
 waste CUDA blocks in the rectangular launch grid.
 

@@ -1,5 +1,10 @@
 # Many-array update experiment
 
+!!! note "Historical report"
+    Written 7 September 2026. It records the state, measurements and plans of that
+    date; the current design is described in [Architecture](architecture.md),
+    whose open directions replace the plans here.
+
 The optimizer benchmark uses 100 or 1,000 Float32 parameter arrays. Their lengths
 cycle through 17, 63, 127, 513, and 1,025. It takes gradients as inputs and executes
 ordinary Adam arithmetic, including both moments and the step counter. This

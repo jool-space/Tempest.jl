@@ -65,8 +65,9 @@ without slot reuse, then exercise GPU replay with changed input contents.
 Supported indices are fixed integers, colons, integer ranges (including negative
 steps), host integer vectors, and individual `CartesianIndex` values. Empty
 selections are supported even though external example arrays must be nonempty.
-Boolean masks, integer index matrices, runtime index inputs, and data-dependent
-output sizes remain outside this stage. Direct scalar indexing of nonzero-rank
+Boolean masks, integer index matrices and data-dependent output sizes are not
+supported; runtime integer indices exist only through the gather verbs
+([usage](usage.md#Runtime-integer-indices)). Direct scalar indexing of nonzero-rank
 symbolic arrays remains refused; zero-dimensional views can use `[]`.
 
 Wrappers constructed inside a traced function are represented as `TracedArray`,
@@ -75,6 +76,5 @@ helpers work for supported operations; concrete-wrapper dispatch is not promised
 Since mutation is refused, view and slice nodes share the same read mapping;
 model-visible mutable copy/alias semantics need a separate state design.
 
-General function outputs and forward-only compilation are now supported; see
-[verbs.md](verbs.md). Callable specialization caches and mutation/control-flow
-support remain subsequent work.
+General function outputs and forward-only compilation are described in
+[verbs](verbs.md). Mutation and control flow on traced values are not supported.

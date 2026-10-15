@@ -1,9 +1,14 @@
 # Spelling invariance
 
+!!! note "Historical report"
+    Written 15 October 2026, with changes on the `spelling-audit` and `outside-review` branches. It records the state, measurements and plans of that
+    date; the current design is described in [Architecture](architecture.md),
+    whose open directions replace the plans here.
+
 An audit of whether equivalent spellings of a computation reach equivalent
 plans, what made them diverge, and the changes made on 15 October 2026. The
-[interface direction](interface-direction.md) asks which parts of the interface
-a perfect compiler would keep. Its answer implies this property: what to
+interface direction of the same day (now [interface principles](architecture.md#Interface-principles))
+asked which parts of the interface a perfect compiler would keep. Its answer implies this property: what to
 compute is the caller's choice, and how it is spelled is not. A spelling that
 plans worse is the compiler leaking into the interface.
 
@@ -227,7 +232,7 @@ too. Both current attention implementations do.
   its results; the call's internals cannot be split across regions.
 - **Proposers see internal IR.** Matching a call reads `node.op.call.f` and
   `.kwargs`; matching a product reads `MatMul`. Neither is public (see
-  [interface direction](interface-direction.md#5.-A-public-surface-for-implementation-authors)).
+  [Architecture](architecture.md#Open-directions)).
 - **`logsumexp` is no longer a call an outside package can replace.** A library
   logsumexp kernel would have to be a graph-region or proposal implementation.
   `test/packages/MyLib` now implements `take_rows`.
@@ -276,7 +281,7 @@ to the same type, multiplication by a literal one, constant folding, `reduce`
 and `mapreduce` with `+ * max min` to folds. The divergences above are mostly
 not of that kind. Naive softmax and the logsumexp fold round differently, and
 rewriting one into the other is a numerical choice the caller has not
-permitted ([interface direction](interface-direction.md#What-stays)). The
+permitted ([interface principles](architecture.md#Interface-principles)). The
 exact rewrites that remain are worth a pass: `transpose(A * B)` to
 `transpose(B) * transpose(A)`, which would give the doubly transposed MLP the
 cuDNN plan, and a permuted reduction to a reduction over the permuted axis.
@@ -350,34 +355,3 @@ found the divergences added to the table above:
 
 `test/cutile/spellings.jl` asserts the plan shapes; `test/frontend/arrays.jl`
 and `test/compiler/planning.jl` the rewrites and the passes on the CPU.
-
-## Remaining plan
-
-In order of the divergence each removes:
-
-1. **cuTile positions and integer boundaries.** Let cuTile kernels compute
-   `Positions` and graph regions take integer inputs. Dropout would then join
-   graph regions, and `take_rows`/`put_rows` could become a positional select
-   and a sum, fusing cross-entropy into one region.
-2. **Region inputs through index maps.** A graph region's inputs are dense
-   buffers, so every mapped input (a transpose, a slice with a step, a
-   gather) is copied first, and a reshape between pointwise values of
-   different shapes still splits a region (`sum(abs2, vec(tanh.(x)))` fuses
-   only because the reshape sinks; `tanh.(reshape(x, d, :))` under a reduction
-   over `x`'s own axes would not). The planner already has the maps; the
-   providers need to accept the affine ones.
-3. **A profitability check for graph regions.** A selected region is never
-   compared with the CUDA kernels it displaces. Rank-N collapse made that
-   visible: a last-axis softmax over 1024 × 256 × 16 collapses to a
-   262144 × 16 domain, where the second-axis schedule's 32 × 8 tile does
-   almost no work per block and takes 491 μs against 306 on the CUDA kernels
-   (at rank two the same schedule wins, 177 against 227 at 1024 × 4096).
-4. **cuDNN anchors on `BatchedMatMul`**, so batched products take epilogues.
-5. **A runtime-index read** for `gather_columns`, so a gather inlines into its
-   consumer; `scatter_columns` stays a call.
-6. **`mean`, `var` and `std`** on traced arrays, through a Statistics
-   extension.
-7. **Attention epilogues** in cuTile's kernel and cuDNN's graph, through
-   `propose_regions` as above.
-8. **Recognizing a spelled-out attention**: a proposer matching batched
-   products around a logsumexp fold.

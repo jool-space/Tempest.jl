@@ -74,9 +74,9 @@ support the same function. Pass their instances in preference order to
 
 Construction receives the full output tree, with each leaf replaced by a physical
 buffer, and a tuple of input buffers. Scalar leaves use zero-dimensional buffers;
-read them on the device when they must change during replay. This first contract
-provides dense inputs, materializing mapped views and transposes as needed.
-Stride/layout negotiation is subsequent work.
+read them on the device when they must change during replay. Inputs are dense:
+mapped views and transposes are materialized first, with no stride or layout
+negotiation.
 
 The launcher must write all declared outputs, read only declared inputs, and
 retain its resource owners. Workspace and kernel compilation belong in
@@ -117,17 +117,16 @@ call is not compared with its expanded reference by cost: an implementation
 should decline a call it would realize worse than the reference fused with its
 neighbours. A verb whose meaning is a fold, a product or a pointwise function
 should lower to that primitive instead of recording a call; see
-[spelling invariance](spelling-invariance.md).
+[primitives and calls](architecture.md#Primitives-and-calls).
 
 Forward/backward kernels can share saved data through explicit outputs and inputs.
-In this stage those values belong to the declared semantic result tree; alternative
-implementations of the same call must agree on that tree. Private,
-implementation-specific saved-state contracts and joint forward/backward selection
-remain subsequent work.
+Those values belong to the declared semantic result tree, on which alternative
+implementations of the same call must agree. Values private to one
+implementation's forward and backward use a reverse rule (below).
 
 ## General forward-only programs
 
-`trace` now accepts a symbolic value or nested tuple/named tuple of values.
+`trace` accepts a symbolic value or nested tuple/named tuple of values.
 `prepare_forward(f, examples...; ...)` compiles that result without differentiating
 it. `prepare_forward(trace(f, examples...), examples...)` accepts a saved trace.
 
@@ -145,12 +144,12 @@ need to retain. CUDA capture/replay supports the same output structure.
 
 `prepare` remains the scalar-loss training convenience. `differentiate` requires
 a single symbolic-number result and an explicit `verb_pullback` for each semantic
-call contributing to that result. Automatic AD of a verb's reference is not yet
-provided; write the decomposition directly or supply its pullback recipe.
+call contributing to that result. A verb's reference is not differentiated
+automatically; write the decomposition directly or supply its pullback recipe.
 
 ## Implementation-specific saved values
 
-A provider can now select a complete forward/backward recipe with private saved
+A provider can select a complete forward/backward recipe with private saved
 outputs. See [Implementation-specific reverse rules](reverse-rules.md) for the
 `ReverseRule` contract, lifetime handling, and paired fallback. The public verb
 still returns only its mathematical result.

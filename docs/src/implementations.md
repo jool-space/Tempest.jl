@@ -1,12 +1,11 @@
 # Semantics, implementations, and support
 
-Tempest's direction is a semantic graph with multiple possible realizations.
-A public verb describes results. A kernel implementation writes supplied buffers.
-Neither an eager allocating wrapper nor an allocation scope should determine the
-compiled graph. Existing Pol/Vallmo launchers can be adapted; Pol.Allocating is
-not the required semantic interface.
+Tempest's graph has several possible realizations of each part. A public verb
+describes results; an implementation writes supplied buffers. Neither an eager
+allocating wrapper nor an allocation scope determines the compiled graph, and
+existing kernel launchers can be adapted to this protocol.
 
-## Implemented now: scheduled-region realizations
+## Scheduled regions
 
 `prepare(...; implementations=(candidate1, candidate2))` tries user candidates
 first, then `default_implementations(target)`: the target's baseline kernels and
@@ -125,11 +124,12 @@ module registers it, at which rank), not a refactor.
 and `test/isolated/out_of_tree.jl` activates it. A semantic call needed no
 internal name: the request fields it reads (`request.call.f`, `.kwargs`,
 `.inputs`, `.target`) are documented in [verbs](verbs.md), though the call's
-type is not public. Other request kinds are not yet reachable this way: the
+type is not public. Other request kinds are not reachable this way: the
 region payloads (`Tempest.Elementwise`, `Read`, `ScalarCall`), the graph
 operations a proposal inspects (`MatMul`, `Pointwise`, `FoldReduction`),
 `baseline_implementations` for a new target, `device_rates` and
-`implementation_summary` are internal. cuDNNExt uses those operations, plus
+`implementation_summary` are internal. `region_cost`, `KernelCost`,
+`cost_rates` and `CostRates` are public. cuDNNExt uses those operations, plus
 `Cast`, `LiteralPower`, `TransposeOp`, `Constant`, `SumFold`, `TracedArray`,
 `native_region_input`, `attention_forward`, `device_rates` and
 `implementation_summary`.
@@ -137,7 +137,7 @@ operations a proposal inspects (`MatMul`, `Pointwise`, `FoldReduction`),
 ## Semantic graph regions before storage
 
 `GraphRequest` uses the same `support` and `build_implementation` methods for a
-selection of original pointwise, constant, and sum nodes. Defining support for
+selection of original pointwise, constant and fold nodes. Defining support for
 that request type is the participation mechanism for any candidate, explicit
 or registered. Selection runs before layout and storage planning and is enabled by
 default. `fuse_regions=false` disables it. Without an eligible graph provider,
@@ -159,8 +159,11 @@ and retries selection;
 shared nodes are not blacklisted. Unexpected exceptions propagate. Graph regions
 have no direct in-place contract, so state updates retain staged donation.
 Recomputation additionally needs the public `recomputable(f)` promise; device
-compilability alone does not establish it. See [graph regions](graph-regions.md)
-for an ordinary-code example, current cuTile coverage, and selection limits.
+compilability alone does not establish it. A supported region is kept only when
+it is not estimated to lose to the default kernels for its members; an
+implementation takes part in that check by defining `region_cost` (below). See
+[graph regions](graph-regions.md) for an ordinary-code example, current cuTile
+coverage, and selection limits.
 
 ## Regions an implementation proposes
 
@@ -177,6 +180,29 @@ implementation builds a selected region, with the same tuple contract as
 a `Transpose`. Declines and construction failures fall back to the default
 partition. [Proposed regions](proposed-regions.md) records the design and the
 cuDNN consumer.
+
+## Estimates
+
+An implementation describes the launches it would make for a request, and the
+target prices them ([selection by estimate](architecture.md#Selection-by-estimate)):
+
+```julia
+# One KernelCost per launch: bytes read and written, and bytes requested at once.
+function Tempest.region_cost(::MyKernels, request::Tempest.GraphRequest)
+    bytes = sum(spec -> sizeof(spec.dtype) * prod(spec.dims; init = 1), (request.inputs..., request.outputs...))
+    [Tempest.KernelCost(bytes, 256 * 1024)]
+end
+```
+
+`region_cost` is asked about graph and proposed regions of the implementation
+that supports them, and about the default partition's `RegionRequest`s of the
+first candidate supporting each step; `nothing`, the default, means no
+estimate, and a region without estimates on both sides is kept. A target
+supplies `Tempest.cost_rates(target) -> CostRates(memory_bandwidth, latency,
+launch_seconds, detail)`; the CUDA target derives the bandwidth from
+`device_rates` and uses a latency of 0.45 μs and 1 μs per launch, and the CPU
+target has none. A proposer that defines `region_cost` is held to the check;
+cuDNN, which estimates fused products in `support` instead, does not.
 
 ## Shared workspace
 
@@ -385,33 +411,15 @@ copy bandwidth). In training they are 6 to 17% of the step; forward-only,
 attention engines likely require, so strides would absorb the packed slices
 but probably not the row permutation.
 
-### Next
+## How the pieces fit
 
-Norms are the next cuDNN pattern: `norm_fwd!`/`norm_bwd!` with saved statistics,
-once Tempest has a normalization verb. They would follow the attention rule's
-shape. Normalization fused into a matrix product would be another proposal
-around the product, like the epilogues `CuDNNKernels` proposes now.
-
-## How fusion works today
-
-First, implementations propose regions of their own, such as a matrix product
-with its epilogue, and the selected proposals claim their nodes. Then supported
-`GraphRequest` candidates can cover connected semantic nodes around reductions,
-before layouts and storage are assigned. Their original
-operations and escaping outputs remain visible to the selected provider. This
-lets a provider compile several reduction phases and their pointwise consumers.
-
-For remaining work, Tempest counts uses and creates materialization boundaries
-at matrix products, reductions, scatter, returned values, and certain shared
-values/layouts. It recursively inlines pointwise nodes into scalar expression
-trees. CPU/CUDA/cuTile providers evaluate those trees without allocating every
-intermediate.
-
-Graph selection is a bounded greedy policy. It does not negotiate arbitrary
-output layouts or optimize across opaque operations. Construction of ordinary
-scheduled regions still happens after storage planning. Only selected
-constructions contribute workspace requests, so rejected alternatives consume
-no shared workspace.
+Proposals claim their members first, graph regions grow around them, each
+region is kept only if it is not estimated to lose to the default kernels, and
+the remaining work is planned as scalar regions whose expression trees inline
+pointwise producers. The order and the reasons are in
+[Architecture](architecture.md#The-pipeline). Construction of scheduled
+regions happens after storage planning; only selected constructions contribute
+workspace requests, so rejected alternatives consume no shared workspace.
 
 ## Reductions inside graph regions
 
@@ -446,12 +454,12 @@ Construction rejection also permits reference expansion and replanning.
 [Implementation-specific reverse rules](reverse-rules.md) can coordinate
 forward/backward saved values without changing the public verb.
 
-The graph-region selector now lets candidates cover multiple primitive semantic
-nodes. Its bounded scope is described in [graph-regions.md](graph-regions.md);
-layout negotiation and a general scheduling cost model remain open. Pol's buffer
-descriptions and mutating launchers can serve as adapters without defining the
-graph contract. Arbitrary input mutation and state aliases still require
-explicit effect tracking.
+The graph-region selector lets candidates cover several primitive nodes; its
+bounded scope is described in [graph regions](graph-regions.md), and region
+boundaries take dense buffers (see [open directions](architecture.md#Open-directions)).
+External buffer descriptions and mutating launchers can serve as adapters
+without defining the graph contract. Arbitrary input mutation and state
+aliases would need explicit effect tracking.
 
 ## In-place and grouped requests
 

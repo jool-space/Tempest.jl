@@ -79,7 +79,12 @@ Proposals are ordered by three keys, and the order is total:
 The partitioner walks that order and accepts a proposal when it is not blocked
 by an earlier construction failure, overlaps no accepted proposal, keeps the
 contracted graph acyclic, and its implementation supports the complete
-request. Growth-based graph regions then form around the accepted proposals,
+request. A proposer that estimates its launches (`region_cost`) is also held to
+the check graph regions get: a proposal estimated to be more than 15% slower
+than the default kernels for its members is declined, and `explain` prints both
+estimates ([selection by estimate](architecture.md#Selection-by-estimate)).
+cuDNN does not; it declines unprofitable products in `support` by its own
+estimate (below). Growth-based graph regions then form around the accepted proposals,
 which count as claimed and take part in the acyclicity check.
 
 Benefit decides real cases. In a two-layer MLP, the forward product's epilogue
@@ -332,14 +337,8 @@ and bias gradient is fused too. The first rule, which declined products past
 three quarters of L2 or an inner dimension of 4096, gave 1.26 to 2.26 times;
 column chunks raised the forward at `d = 768` from 1.41 to 1.53.
 
-## Not done
+## Related open directions
 
-- **cuBLASLt epilogues and cuTile products.** cuBLASLt's bias/ReLU/GELU
-  epilogues, with their auxiliary output for backward, and a cuTile product
-  with a fused epilogue would each be another `propose_regions` method on the
-  same protocol.
-- **User activations.** cuDNN recognizes Base functions only. A user's
-  `swish` or `gelu` stays outside the region even where cuDNN has a mode for
-  it; a public hook mapping callables to modes would let it join.
-- **Cover optimization.** Selection is greedy over a total order; an exact
-  cover, or comparing benefits across implementations, is open.
+cuBLASLt epilogues, a cuTile product with an epilogue, a hook mapping user
+callables to cuDNN pointwise modes, and an exact cover of proposals are listed
+with the other [open directions](architecture.md#Open-directions).

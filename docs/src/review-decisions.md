@@ -1,8 +1,13 @@
 # Decision log
 
-Dated review decisions, newest first. Each entry records priorities at that
-date, not promises that every proposal survives implementation and measurement;
-"next step" language in older entries describes the state at that time.
+!!! note "Historical report"
+    Written between 6 September and 15 October 2026, entry by entry. It records the state, measurements and plans of that
+    date; the current design is described in [Architecture](architecture.md),
+    whose open directions replace the plans here.
+
+Dated review decisions, newest first, in detail; [History](history.md) is the
+short version. Each entry records priorities at its date, not promises that
+every proposal survived implementation and measurement.
 
 ## Occupancy hints remeasured — 15 October 2026
 
@@ -179,7 +184,7 @@ Research code that no current page or test depends on was removed. The git tag
 - **Dated reports in docs/src.** The first-experiment, array-frontend and design
   notes predate the current compiler and are superseded by the guides; the
   compiler landscape and scheduler investigation surveys (21 September) fed the
-  [compiler direction](compiler-direction.md) page; the Stiletto perspective
+  compiler direction page (since folded into [Architecture](architecture.md)) page; the Stiletto perspective
   described an extension removed on 14 October in favor of cuDNN. The dated
   sections of the compiler direction page moved into this log, next to its
   21 September entry.
@@ -307,7 +312,7 @@ Passing local tests alone is not evidence for those portability claims.
 
 Do consolidation as bounded changes with existing regression coverage before
 adding another schedule family. Preserve the three active priorities in
-[compiler direction](compiler-direction.md).
+compiler direction page (since folded into [Architecture](architecture.md)).
 
 ## Review of 6 September 2026 and its implementation record
 
@@ -523,7 +528,7 @@ operator coverage or introducing another compiler layer is not the next step.
 
 ## Compiler direction: experiments and integration — 21–23 September 2026
 
-Moved from the [compiler direction](compiler-direction.md) page, which keeps the
+Moved from the compiler direction page (since folded into [Architecture](architecture.md)) page, which keeps the
 principles. Paths under `examples/research` are archived with the tag
 `research-2026-09`.
 
@@ -734,7 +739,7 @@ TensorIR and cuTile.jl share a lower target but have no direct frontend fusion
 interface. That distinction changes the next priority: retain Tempest's semantic
 graph and develop region selection before committing to a compiler dependency.
 
-The [compiler direction note](compiler-direction.md) records the resulting
+The compiler direction note (since folded into [Architecture](architecture.md)) records the resulting
 contracts and experiments. A CPU-only boundary probe exercises graph contraction,
 multiple outputs, logical aliases, and functional state. Automatic extraction
 and a native cuTile schedule now cover dependent reductions,
@@ -757,6 +762,6 @@ MLP backward, remain actual workload barriers.
 Bring a small transformer diagnostic forward, widen reduction domains, and set
 up a matched cuTile/Stiletto/TensorIR reference before comparing schedules.
 Historical ratios against the untuned decomposition are not evidence of
-competitive throughput. The [revised compiler priorities](compiler-direction.md#Integration-review-and-revised-priorities)
+competitive throughput. The [revised compiler priorities](#Integration-review-and-revised-priorities)
 record the findings, remaining greedy-search limits, precision issue, and
 consolidation of the three existing fusion paths.

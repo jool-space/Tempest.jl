@@ -48,8 +48,9 @@ Candidates are the implementations passed to `prepare` and the registry's
 active ones. User providers precede target defaults for a particular request. A provider implementing only `RegionRequest` does not compete
 for `GraphRequest`: graph selection can claim work before decomposition reaches
 that provider. Use `fuse_regions=false` when comparing such implementations.
-Comparing providers across different region boundaries needs broader selection
-policy; candidate ordering alone does not solve it.
+A selected region is compared with the default kernels for its members by
+estimate (see [Selection and fallback](#Selection-and-fallback)); providers of
+different region boundaries are not compared with each other.
 
 `request.region` contains `program`, `members`, `inputs`, and `outputs`. Those ID
 vectors refer to the original execution graph. `request.inputs` and
@@ -107,6 +108,17 @@ outside that growth attempt, so an unsupported activation or reduction need not
 cut off other supported branches. Private literals enter with their consumers.
 Support verdicts are cached for each exact candidate during selection.
 
+Of each seed's growth, the largest candidate that is supported and not
+estimated to be more than 15% slower than the default kernels for its members
+is selected ([selection by estimate](architecture.md#Selection-by-estimate)).
+A candidate whose inputs the default partition would compute inline pays for
+writing them. A column sum of `sign.(x) .* ifelse.(x .> 0, a, b) .* exp.(x)`
+over 64 × 4 is an example: the Bool comparison cannot enter a cuTile graph
+region, the candidates without it need it written first, and every candidate
+is declined, so the whole expression runs as one scalar column sum.
+`explain` prints both estimates and the decision for every candidate
+considered.
+
 The initial complete-candidate check matters: a provider may accept a full formula
 without accepting its fragments. This remains bounded greedy search. Seed and
 neighbor order can affect the result, and combinations that become supported
@@ -140,16 +152,18 @@ supported.
 | Axes | Execution | Shared workspace |
 | --- | --- | --- |
 | First axis | One block per column; a column of at most 4096 rows stays resident in one tile, longer columns stream 1024 rows at a time | None |
-| Second axis | One block per row tile, streaming eight columns at a time | None |
-| All axes | Parallel partial sums (unobserved state tuples for other folds), then a finishing kernel for each dependency phase; a final kernel writes escaping outputs | Partial sums or states, and completed statistics |
+| Second axis | One block per row tile, streaming 32 columns at a time | None |
+| All axes | Parallel partial sums (unobserved state tuples for other folds), then a finishing kernel for each dependency phase; a final kernel writes escaping outputs, unless the region's only output is its only reduction, which the finishing kernel writes | Partial sums or states, and completed statistics |
 
-Second-axis tiles hold up to 128 rows (32 rows at 32 × 32 when split). Full-reduction tiles contain 256 elements,
-with their shape chosen from the domain. A first-axis reduction over fewer than
-32 streamed columns splits each column across blocks; its tiles shorten, down to
-256 rows, until the grid holds 128 blocks. The streamed tile height and the split
-thresholds were measured on GB10 (see
-[reduction domains](reduction-domains.md#Taller-streamed-tiles,-14-October-2026));
-the other tile shapes are fixed policies, not tuned choices. Independent sums share a phase; dependent sums start a later
+Second-axis tiles hold up to 128 rows, fewer when 128 would leave fewer than 64
+blocks, and a second-axis reduction over fewer than 64 tiles of 32 rows splits
+its rows across blocks in 32 × 32 tiles. Full-reduction tiles hold 1024
+values, as tall as the domain's columns allow. A first-axis reduction over
+fewer than 32 streamed columns splits each column across blocks; its tiles
+shorten, down to 256 rows, until the grid holds 128 blocks. These sizes and
+thresholds were measured on GB10; the measurements are next to the constants
+in `ext/cuTileExt/graph/schedule.jl`, and `test/benchmarks/guard_rails.jl`
+compares the schedules with the CUDA kernels by time. Independent sums share a phase; dependent sums start a later
 phase. A resident column loads and computes every value once and shares it
 across phases and outputs; a streamed schedule retains completed statistics in
 the block and recomputes permitted pointwise producers in each sweep.
@@ -162,7 +176,8 @@ registers instead: 8 for tiles of at most 512 values, 4 for longer tiles up to
 2048 rows, none for 4096-row tiles, where the allocation does not hurt. The
 kernels that write partial sums or states, of full and split reductions, take
 8 as well: without it a full `sum(abs2, x)` over 4096 × 4096 took 1294 μs and
-with it 283, copy bandwidth, and `sum(a .* b)` over 2²⁰ values 60 against 14.
+with it 283, copy bandwidth, and `sum(a .* b)` over 2²⁰ values 60 against 14
+(7.6 with 1024-value tiles; the CUDA kernels take 8.6).
 Unsplit streamed kernels take none; any hint slowed them by 12–40%.
 Resident kernels previously took one tuple argument, whose arrays shared an
 alias class, until cuTile.jl#318 gave them separate classes.
@@ -200,7 +215,8 @@ opaque calls remain outside this provider. The frontend currently rejects empty 
 inputs. Grid and indexing limits are checked during support. Unknown scalar
 functions still need the recomputation promise and a compilable body.
 
-Coverage does not establish profitability. In particular, a small full reduction
-pays for three launches even when a dedicated kernel could do it in one; the
-selector does not yet compare costs. The [reduction-domain experiment](reduction-domains.md)
-records correctness checks, MLP coverage, and matched independent measurements.
+Coverage does not establish profitability. The estimate described under
+[selection and fallback](#Selection-and-fallback) declines regions that would
+lose by launches, bytes or parallelism, but it cannot see code generation; the
+speed guard rails can. The [reduction-domain report](reduction-domains.md)
+records the earlier correctness checks and measurements of these schedules.

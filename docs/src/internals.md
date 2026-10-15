@@ -31,6 +31,7 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | CPU kernels | `src/implementations/cpu.jl` | `scalar_eval`, `build_implementation` |
 | Reference decomposition | `src/compiler/lowering.jl` | `resolve_semantics`, `lower_call!`, `lower_graph!` |
 | Exact canonical forms | `src/compiler/canonical.jl` | `canonical_program`, `sink_reshapes`, `collapse_aliases` |
+| Region estimates | `src/compiler/costs.jl` | `KernelCost`, `CostRates`, `region_cost`, `default_kernels`, `region_profit` |
 | Semantic graph regions | `src/compiler/graph_regions.jl` | `GraphRequest`, `select_graph_regions`, `region_boundary`, `standard_numbering` |
 | Proposed regions | `src/compiler/proposals.jl` | `propose_regions`, `ProposedRequest`, `select_proposed_regions`, `proposal_benefit` |
 | Region and storage planning | `src/compiler/planning.jl` | `plan`, `explain` |
@@ -41,7 +42,7 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | Concrete preparation | `src/runtime/preparation.jl` | `prepare`, `prepare_schedule`, `allocate_storage` |
 | Shared scalar rules | `ext/ChainRulesCoreExt.jl` | `trace_scalar_rule`, `lift_partials` |
 | Statistics | `ext/StatisticsExt.jl` | `mean`, `var`, `std` as sums and pointwise work |
-| Device and vendor integration | `ext/` | CUDA (with `device_rates` in `device.jl`), cuTile and cuDNN extensions, each registering from `__init__` |
+| Device and vendor integration | `ext/` | CUDA (with `device_rates`, `cost_rates` and the CUDA kernels' `region_cost` in `device.jl`), cuTile (estimates in `costs.jl`) and cuDNN extensions, each registering from `__init__` |
 
 ## Folds
 
@@ -165,7 +166,11 @@ selected graph region, preparation excludes that exact member set and replans,
 once for all regions that failed in the pass; smaller overlapping regions
 remain eligible. Rewriting the semantic graph discards these exclusions
 because node IDs belong to one graph snapshot. Selection is deterministic and
-greedy, without a cost model. `fuse_regions=false` bypasses it, proposals included.
+greedy. Each supported candidate is compared by estimate with the default
+partition's kernels for its members, planned once without regions
+(`default_kernels`), and kept unless estimated to be more than 15% slower
+(`region_profit`); see [selection by estimate](architecture.md#Selection-by-estimate).
+`fuse_regions=false` bypasses region selection, proposals included.
 
 The cuTile graph provider (`ext/cuTileExt/graph/`) separates domain and phase
 analysis (`schedule.jl`), generated tile code (`codegen.jl`), the generated kernel
@@ -241,9 +246,12 @@ loading a provider after preparation, are checked in fresh processes
 For derivative changes, compare with finite differences, not only the interpreter
 that executes the same generated derivative graph. For scheduling changes, compare
 reuse on/off and check retained aliases. For implementation changes, exercise both
-ordinary execution and repeated replay with rebound inputs.
+ordinary execution and repeated replay with rebound inputs. For changes to a
+provider's schedules or to region selection, run the speed guard rails on an
+idle GPU: `julia --project=test test/runtests.jl benchmarks`
+([performance checks](architecture.md#Performance-checks)).
 
-See [review decisions](review-decisions.md) for the agreed priorities and experiments.
+[Architecture](architecture.md) lists the open directions.
 
 ## State commits
 

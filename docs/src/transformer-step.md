@@ -1,8 +1,13 @@
 # A transformer training step
 
+!!! note "Historical report"
+    Written 23 September 2026. It records the state, measurements and plans of that
+    date; the current design is described in [Architecture](architecture.md),
+    whose open directions replace the plans here. The questions it left open are among them.
+
 23 September 2026. `examples/gpt.jl` prepares and captures one training step
 of a character-level GPT as a single CUDA graph. It is the workload the
-[compiler direction](compiler-direction.md) named as the proof of the design:
+compiler direction of the time named as the proof of the design:
 unsupported operations, retained activations, state transitions and
 preparation cost all show up in one program.
 
@@ -238,42 +243,3 @@ normalization fixture (see [reduction domains](reduction-domains.md)):
 
 Device time per step (replay only) went from 7.45 ms to about 6.2 ms in full
 precision.
-
-## Open
-
-- **FP32 products at small shapes.** cuBLAS picks SIMT kernels with split-K
-  reduction passes. XLA's Triton FP32 GEMMs take 1.82 against 2.75 ms per step
-  on the small model. A cuTile GEMM provider, or cuBLASLt heuristics with
-  split-K disabled, is the obvious experiment.
-- **Composed attention's non-product work.** 52 ms more per step than XLA's
-  fusions at GPT-2-small size, mostly score-sized pointwise passes and a
-  separate causal fill. Fused attention avoids it under TF32; full precision
-  still pays it.
-- **Clock control.** The GB10 is power-capped at 650–950 MHz under load, and
-  runs differ. Comparisons need the clock logged, or runs interleaved.
-- **Index accumulation at scale.** The embedding gradient scans every index
-  once per table column (in chunks, with warp-ballot compaction). That is
-  fine for this vocabulary. For a 50,000-token vocabulary it would want a
-  device sort by index.
-- **Horizontal fusion of products that share an input** (Q, K and V; gate and
-  up). A grouped cuBLAS launch (`cublasSgemmGroupedBatched`) was 22% faster
-  than three separate same-shape products in isolation. Grouping every run of
-  consecutive independent products in the step, however, made the step much
-  slower: 9.5 against 6.2 ms in full precision and 5.4 against 3.7 ms with
-  TF32. Mixed shapes, such as a weight gradient with a 1024-long inner
-  dimension next to an input gradient with 128, share one kernel configuration
-  there. A useful version must group only products of matching shape, which
-  first needs a schedule that places Q, K and V together.
-- **Multi-output pointwise fusion.** Seeding cuTile graph regions at pointwise
-  values with several consumers was tried and made the step slower (6.28
-  against 6.18 ms). The regions stayed at a shared value and one consumer. Their
-  dense-boundary inputs had to be materialized, where the scalar kernels had
-  computed them inline, and growth stopped at producers that read layout views.
-  Useful multi-output fusion needs region growth that can absorb those
-  producers.
-- **Cold preparation.** Kernel compilation is serial; a persistent cache or
-  parallel compilation would change the 72 s the most.
-- **Symbolic shapes** remain unsupported. Dropout exists: the counter-based
-  `Tempest.dropout` gives residual dropout with `TEMPEST_GPT_DROPOUT=0.1`
-  (6.39 ms/step steady in a short run), and the CUDA-versus-CPU transformer
-  test runs with it.

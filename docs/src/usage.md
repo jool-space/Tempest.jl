@@ -10,8 +10,8 @@ CUDA graph replay. Model code contains neither allocation spaces nor launch logi
 [Source guide](internals.md) describes the current compiler stages and invariants.
 [Contributing](https://github.com/jool-space/Tempest.jl/blob/main/CONTRIBUTING.md) describes expectations for maintainable changes.
 
-The [decision log](review-decisions.md) records dated priorities and what each
-experiment showed.
+[Architecture](architecture.md) describes the compiler as it stands and its
+open directions; [History](history.md) records what was decided and when.
 
 ## A forward/backward executable
 
@@ -71,6 +71,9 @@ kernels elsewhere; `Tempest.deactivate(cuTile)` uses CUDA kernels everywhere,
 including the reduction finalizer. Choices are fixed at preparation: loading,
 activating or deactivating a provider later does not change existing
 executables. Compilation errors propagate without retrying another provider.
+A cuTile graph region is kept only when it is not estimated to be slower than
+the kernels it displaces; `explain` prints both estimates and the decision
+([selection by estimate](architecture.md#Selection-by-estimate)).
 
 ## Choosing implementations
 
@@ -146,9 +149,10 @@ calls get distinct destinations, including outputs unused by the surrounding mod
 The reference and pullback are explicit contracts, not inferred from kernel code.
 
 See [semantic verb contracts](verbs.md) and the runnable
-[custom CUDA training example](https://github.com/jool-space/Tempest.jl/blob/main/examples/semantic_kernels.jl). Automatic larger-region
-matching, implementation-private saved state, and arbitrary mutation remain future
-work.
+[custom CUDA training example](https://github.com/jool-space/Tempest.jl/blob/main/examples/semantic_kernels.jl). An implementation can
+claim a call together with the work around it by [proposing a region](proposed-regions.md),
+and keep private saved values with a [reverse rule](reverse-rules.md).
+Arbitrary mutation is not supported.
 
 ## Ordinary array interfaces, symbolic values
 
@@ -308,10 +312,11 @@ Tanh's backward consumes the forward output rather than recomputing tanh.
   stay live; shared reduction scratch is separate. `reuse=false` is a checkable baseline.
 - CPU interpretation of the same schedule; optional CUDA kernels and cuBLAS, with
   optional cuTile implementations and opt-in cuDNN attention.
-- `Tempest.deactivate(cuTile)` explicitly selects generated CUDA scalar kernels instead.
-  Mapped broadcast/layout reads use CUDA indexing. Dense leading-axis matrix
-  reductions have a cuTile schedule; other axis reductions use a general CUDA
-  schedule. Each provider has its own full-reduction finalizer.
+- With cuTile loaded, graph regions run Float32 reductions over the leading,
+  trailing or all axes of any rank together with their pointwise neighbours,
+  and cuTile's scalar kernels run dense pointwise work and sums. Mapped reads,
+  interior reduction axes, other element types in reductions, and scatters use
+  the CUDA kernels; `Tempest.deactivate(cuTile)` uses them everywhere.
 - Stable input/output/workspace addresses and repeatedly tested graph replay.
   Capture rejects allocation/free nodes rather than assuming a mutating API is safe.
 
@@ -354,12 +359,12 @@ values while preserving buffer addresses. No normalization-specific engine is us
 ## Known boundaries
 
 No symbolic shapes, Boolean masks, arbitrary mutation, random distributions
-beyond dropout, activation checkpointing, distributed execution, or general
-autotuner yet. Runtime indices cover column gathers and row picks.
+beyond dropout, activation checkpointing, distributed execution, or autotuner.
+Runtime indices cover column gathers and row picks.
 Functional optimizer updates support proven in-place donation and grouping of
 independent elementwise updates; other updates retain staged commits.
-Pol allocator integration is not yet implemented. The planner directly owns reusable arrays. Neither the node representation nor the
-public API is settled.
+The planner owns its arrays directly; there is no external allocator
+integration. Neither the node representation nor the public API is settled.
 
 Scalar regions on cuTile use tiled loads and stores of dense storage;
 transposed and gathered reads use CUDA scalar indexing. Regions containing
@@ -381,6 +386,9 @@ julia --project=test -e 'using Pkg; Pkg.instantiate()'
 julia --project=test test/runtests.jl
 TEMPEST_TEST_CUTILE=false julia --project=test test/runtests.jl
 julia --project=test test/runtests.jl cuda/ verbs/
+
+# Speed guard rails: default plans against the CUDA kernels, on an idle GPU
+julia --project=test test/runtests.jl benchmarks
 ```
 
 Tests cover finite-difference gradients, the explicit backward graph, custom scalar
@@ -390,7 +398,9 @@ zero-dimensional inputs, reduction tails, and repeated CUDA
 replay with changed inputs and stable pointers. GPU test dependencies are declared in `test/Project.toml`. GPU tests run when
 `CUDACore.functional()` is true and otherwise log a skip. cuTile is enabled by
 default; `TEMPEST_TEST_CUTILE=false` exercises the CUDA-only provider path and
-skips `test/cutile/`. A fresh process checks that core use loads no GPU package. GPU execution has been tested on NVIDIA GB10;
+skips `test/cutile/`. The speed guard rails in `test/benchmarks/` run only when
+named, since timing needs the GPU alone ([performance checks](architecture.md#Performance-checks)).
+A fresh process checks that core use loads no GPU package. GPU execution has been tested on NVIDIA GB10;
 other architectures and Julia versions need validation. The manual **GPU validation**
 workflow runs both provider configurations on supplied CUDA runner labels; it needs
 an available GPU runner. Regular CI uses the same functional-CUDA gate.

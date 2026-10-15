@@ -16,33 +16,26 @@ loss_buffer, dx, dw = execute!(ex)
 explain(ex)
 ```
 
-The [usage guide](usage.md) covers CPU/GPU preparation, capture, supported array
-operations, examples, and limitations. [Semantic verbs](verbs.md) describes how
-to connect custom kernels. [Training state](state.md) covers functional updates,
-selected gradients, and persistent optimizer buffers. [Implementation selection](implementations.md) covers
-eligibility, construction, and fallback. The [source guide](internals.md) explains
-the compiler stages and ownership invariants.
-
-See the [API reference](api.md) for exported functions and types. Provider and
-verb APIs are public but not exported; the [Implementations](implementations.md)
-page describes them.
-
-## Where things stand
-
-Tempest owns the semantic tensor graph, differentiation, functional state
-updates, region boundaries, storage lifetimes, and CUDA graph capture.
-Implementations realize regions behind one `support`/`build_implementation`
-protocol: generated CPU and CUDA kernels, cuBLAS, user
-kernel pairs with private saved tensors, and cuTile-compiled
-[graph regions](graph-regions.md) selected before storage planning.
-
 `examples/gpt.jl` trains a small GPT this way: grouped-query attention through
-the built-in `Tempest.attention` verb (fused cuTile kernels under TF32), runtime
-token indices, and one captured graph per step. The [transformer report](transformer-step.md) compares it with
-the same model under Reactant/XLA. `Tempest.profile(ex)` ranks a prepared
-schedule's calls by device time.
+the built-in `Tempest.attention` verb, runtime token indices, and one captured
+graph per step.
 
-The [compiler direction](compiler-direction.md) page records the architectural
-conclusions and the next experiments. Dated investigations, measurements, and
-review decisions are collected under Reports; their "next step" language
-describes the state at that date, not the current plan.
+## Where to read
+
+- The **Guide** is for writing models: the [usage guide](usage.md) covers
+  CPU and GPU preparation, capture, supported array operations, examples and
+  limitations; [training state](state.md) covers functional updates, selected
+  gradients and persistent optimizer buffers; [semantic verbs](verbs.md),
+  [reverse rules](reverse-rules.md) and [scalar rules](scalar-rules.md) cover
+  connecting custom kernels and derivatives.
+- The **Compiler** pages are for changing Tempest or writing implementations.
+  [Architecture](architecture.md) is the current description of the whole:
+  the pipeline, what fuses and why, the cost model, numerics, and the open
+  directions. [Implementations](implementations.md), [graph regions](graph-regions.md)
+  and [proposed regions](proposed-regions.md) document the provider protocol;
+  [layouts](layouts.md) and the [source guide](internals.md) the internals.
+- The [API reference](api.md) lists documented functions and types. Provider
+  and verb APIs are public but not exported.
+- [History](history.md) records what was decided and when. The **Reports**
+  are dated investigations with their measurements; their plans are superseded
+  by [Architecture](architecture.md#Open-directions).

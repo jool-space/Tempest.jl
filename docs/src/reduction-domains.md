@@ -1,5 +1,10 @@
 # Reduction-domain experiment
 
+!!! note "Historical report"
+    Written between 21 September and 14 October 2026. It records the state, measurements and plans of that
+    date; the current design is described in [Architecture](architecture.md),
+    whose open directions replace the plans here. The schedules' current tile sizes are in [graph regions](graph-regions.md#Native-cuTile-scope).
+
 This extends the production cuTile graph provider to second-axis and full sums.
 The semantic graph, region selector, and support/build interface are unchanged.
 The schedule separates domain and dependency-phase analysis, generated tile code,

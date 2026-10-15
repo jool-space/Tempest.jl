@@ -56,10 +56,12 @@ compose these operations. Tuple/NamedTuple inputs preserve their structure throu
 selected gradients and functional updates. Built-in verbs cover batched matrix
 products, a stable `logsumexp`, scaled dot-product attention (fused cuTile kernels
 under TF32), runtime column gathers and dropout. Custom semantic verbs can retain an opaque kernel
-boundary or expand a reference implementation. Loading cuTile also enables graph fusion of supported
-pointwise work and dependent matrix-axis or full reductions, selected before storage planning.
-See [graph regions](docs/src/graph-regions.md) for the current scope and custom
-Julia callable contract.
+boundary or expand a reference implementation. With Statistics loaded, `mean`,
+`var` and `std` work too. Loading cuTile also enables graph fusion of supported
+pointwise work and dependent reductions over leading, trailing or all axes,
+selected before storage planning and kept only when estimated not to lose to
+the kernels it displaces. See [graph regions](docs/src/graph-regions.md) for
+the current scope and custom Julia callable contract.
 
 General scalar indexing, data-dependent host branches, arbitrary mutation,
 symbolic shapes and mixed-precision training are not
@@ -78,17 +80,18 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 
 GPU tests run when `CUDACore.functional()` is true. Tests cover finite-difference
 gradients, alias lifetimes, storage reuse, and repeated replay with rebound inputs.
+Speed guard rails, which compare default plans with the CUDA kernels by time,
+run on an idle GPU with `julia --project=test test/runtests.jl benchmarks`.
 
 ## Read more
 
+- [Architecture](docs/src/architecture.md): the compiler as it stands, and its open directions
 - [Functional updates and training state](docs/src/state.md)
-- [Many-array update measurements](docs/src/many-array-updates.md)
 - [Array and layout support](docs/src/layouts.md)
 - [Optional shared scalar rules](docs/src/scalar-rules.md)
 - [Semantic verbs and custom kernels](docs/src/verbs.md)
 - [Implementation selection](docs/src/implementations.md)
 - [Compiler source guide](docs/src/internals.md)
-- [A transformer training step](docs/src/transformer-step.md) and
-  [cuTile issues found along the way](docs/src/cutile-issues.md)
+- [History](docs/src/history.md) of decisions, and dated reports: [a transformer training step](docs/src/transformer-step.md),
+  [cuTile issues found along the way](docs/src/cutile-issues.md), the [outside review](docs/src/outside-review.md)
 - [Contributing](CONTRIBUTING.md)
-- [Compiler direction](docs/src/compiler-direction.md) and the [decision log](docs/src/review-decisions.md)

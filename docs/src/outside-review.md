@@ -1,5 +1,10 @@
 # Outside review
 
+!!! note "Historical report"
+    Written 15 October 2026. It records the state, measurements and plans of that
+    date; the current design is described in [Architecture](architecture.md),
+    whose open directions replace the plans here.
+
 An independent review of Tempest's compiler design, written 15 October 2026
 by a reviewer who had not seen the project before, after reading the
 documentation and source, running the examples and the test suite, and
@@ -422,6 +427,10 @@ Ranked by value against cost. Costs are for one engineer who knows the code.
 11. **Documentation consolidation** (small, ongoing): one current architecture
     page, with the dated reports as history.
 12. **MLIR export**: not now.
+
+Status on 16 October 2026: 2 (a cost check, by estimate rather than measured
+tables), 3, 10 and 11 were done on the `guard-rails` branch; the rest are in
+[Architecture](architecture.md#Open-directions).
 
 ## 8. Work done on this branch
 
