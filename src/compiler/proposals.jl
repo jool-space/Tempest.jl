@@ -200,8 +200,10 @@ implementation, proposals that save more memory traffic against the default
 partition come first (`proposal_benefit`, in bytes), then larger ones, then
 lower value IDs. Each proposal is then accepted when it is not blocked by an
 earlier construction failure, overlaps no accepted proposal, keeps the
-partition acyclic, and its proposer supports the complete request. Every
-outcome is appended to `records`.
+partition acyclic, its proposer supports the complete request, and, when the
+proposer estimates its launches (`region_cost`), it is not estimated to lose
+to the default kernels (`region_profit`). Every outcome is appended to
+`records`.
 """
 function select_proposed_regions(program, target, implementations, blocked, records)
     proposers = proposal_implementations(implementations)
@@ -231,6 +233,8 @@ function select_proposed_regions(program, target, implementations, blocked, reco
 
     claimed = zeros(Int, length(program.nodes))
     regions = ProposedRegion[]
+    rates = REGION_COSTS[] ? cost_rates(target) : nothing
+    defaults = nothing
     for (priority, implementation, proposal) in candidates
         name = implementation_name(implementation)
         members = proposal.members
@@ -260,14 +264,27 @@ function select_proposed_regions(program, target, implementations, blocked, reco
             continue
         end
         region = proposed_region(program, members, implementation, proposal.label, live)
-        verdict = checked_support(implementation, proposed_request(target, region))
+        request = proposed_request(target, region)
+        verdict = checked_support(implementation, request)
         if verdict isa Unsupported
             record(:declined, verdict.reason)
             continue
         end
+        # A proposer that estimates its launches is held to the same check as
+        # graph regions; one that gives no estimate decides in `support`.
+        estimate = ""
+        if rates !== nothing && region_cost(implementation, request) !== nothing
+            defaults = something(defaults, default_kernels(program, target, implementations, live))
+            keep, line = region_profit(region, implementation, request, defaults, rates, claimed .> 0)
+            if !keep
+                record(:declined, line)
+                continue
+            end
+            estimate = line
+        end
         push!(regions, region)
         claimed[members] .= length(regions)
-        record(:selected)
+        record(:selected, estimate)
     end
     regions
 end
@@ -281,6 +298,7 @@ function explain_proposals(io, records, steps)
             index = findfirst(step -> step.region isa ProposedRegion &&
                                   step.region.members == record.members, steps)
             text *= index === nothing ? "selected" : "selected as region $index"
+            isempty(record.reason) || (text *= "; $(record.reason)")
         elseif record.status === :fell_back
             text *= "fell back after construction: $(record.reason)"
         else

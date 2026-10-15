@@ -300,3 +300,52 @@ end
     @test count(id -> region.program.nodes[id].op isa Tempest.SumReduction, region.members) ==
           2
 end
+
+# The cost check (src/compiler/costs.jl): a supported region is kept only when
+# its implementation's launches are estimated to beat the default partition's
+# for the same members, priced with the target's rates.
+struct PricedTarget <: Tempest.ExecutionTarget end
+Tempest.cost_rates(::PricedTarget) = Tempest.CostRates(1.0e9, 1.0e-6, 1.0e-6, "test rates")
+
+struct PricedRegions <: Implementation
+    kernels::Any
+end
+Tempest.support(::PricedRegions, ::Tempest.GraphRequest) = Supported()
+Tempest.region_cost(implementation::PricedRegions, ::Tempest.GraphRequest) = implementation.kernels
+
+struct PricedScalars <: Implementation end
+Tempest.support(::PricedScalars, ::RegionRequest) = Supported()
+Tempest.region_cost(::PricedScalars, ::RegionRequest) = [Tempest.KernelCost(1000, 1.0e9)]
+
+@testset "Graph regions are kept only when estimated to pay" begin
+    x = reshape(collect(1.0:20.0), 5, 4) ./ 17
+    program = Tempest.ForwardProgram(trace(x -> graph_test_normalization(x).y, x))
+    select(kernels) = begin
+        notes = String[]
+        regions = Tempest.select_graph_regions(
+            program, PricedTarget(), (PricedRegions(kernels), PricedScalars()), Dict{Tuple, String}(), notes,
+        )
+        (regions, notes)
+    end
+    # One launch against the default partition's several: kept.
+    regions, notes = select([Tempest.KernelCost(1000, 1.0e9)])
+    @test length(regions) == 1
+    @test any(note -> occursin("kept by estimate", note), notes)
+    @test any(note -> occursin("region estimates: test rates", note), notes)
+    # A second of memory traffic: declined, and so is every smaller candidate.
+    regions, notes = select([Tempest.KernelCost(1.0e9, 1.0e9)])
+    @test isempty(regions)
+    @test any(note -> occursin("declined by estimate", note), notes)
+    @test !any(note -> occursin("kept by estimate", note), notes)
+    # Few bytes in flight make the same traffic slow: 1 MB at 1 KB per μs.
+    regions, _ = select([Tempest.KernelCost(1.0e6, 1.0e3)])
+    @test isempty(regions)
+    # Without an estimate, or with estimates turned off, supported regions stay.
+    regions, notes = select(nothing)
+    @test length(regions) == 1
+    @test any(note -> occursin("gives no estimate", note), notes)
+    regions, _ = Tempest.with(() -> select([Tempest.KernelCost(1.0e9, 1.0e9)]), Tempest.REGION_COSTS => false)
+    @test length(regions) == 1
+    # The CPU target has no rates, so its regions are never priced.
+    @test Tempest.cost_rates(CPUTarget()) === nothing
+end

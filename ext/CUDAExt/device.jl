@@ -85,3 +85,70 @@ function measured_rates(device)
         (; product_flops, memory_bandwidth, source = :measured, detail)
     end
 end
+
+## Region estimates (src/compiler/costs.jl)
+
+# Consecutive kernels of a captured graph start about a microsecond apart: on
+# GB10 a sum of 4096 values took 2.0 us in two launches and 3.1 in three, and a
+# one-launch softmax over 64 x 64 1.3 us.
+const LAUNCH_SECONDS = 1.0e-6
+
+# The latency of bytes in flight, with which a kernel's parallelism limits its
+# bandwidth. Fitted on GB10 to two kernels that keep few bytes in flight:
+# logsumexp down 128 columns of 65536, one warp per column, read at 37 GB/s
+# with 16 KiB in flight (4096 threads, one Float32 each): 0.44 us. The
+# completion of 16384 partial sums by one 256-lane block took about 29 us,
+# 64 loads of 1 KiB: 0.45 us a load.
+const MEMORY_LATENCY = 0.45e-6
+
+function Tempest.cost_rates(target::CUDATarget)
+    device = something(target.device, CUDACore.device())
+    rates = Tempest.device_rates(device)
+    detail = "memory at $(round(rates.memory_bandwidth / 1e9; digits = 1)) GB/s ($(rates.source): " *
+        "$(rates.detail.memory)), $(round(1e6 * MEMORY_LATENCY; digits = 2)) μs latency " *
+        "($(round(Int, rates.memory_bandwidth * MEMORY_LATENCY / 1024)) KiB in flight to saturate it), " *
+        "$(round(1e6 * LAUNCH_SECONDS; digits = 2)) μs per launch"
+    Tempest.CostRates(rates.memory_bandwidth, MEMORY_LATENCY, LAUNCH_SECONDS, detail)
+end
+
+# Bytes a scalar region moves: each dependency read once, its output written.
+function scalar_bytes(request)
+    reads = sum(zip(request.input_types, request.input_dims); init = 0) do (T, dims)
+        sizeof(T) * prod(dims; init = 1)
+    end
+    reads + sizeof(request.dtype) * prod(request.dims; init = 1)
+end
+
+# The launches of the kernels in kernels.jl and axis_reduction.jl, with the
+# threads each keeps busy, one element of the output's type each. A full
+# reduction's completion is one 256-thread block reading the partials.
+function Tempest.region_cost(::CUDAKernels, request::RegionRequest)
+    region = request.step.region
+    bytes = scalar_bytes(request)
+    element = sizeof(request.dtype)
+    if region isa Elementwise
+        return [Tempest.KernelCost(bytes, element * region.count)]
+    elseif region isa FullReduction
+        blocks = reduction_blocks(max(region.count, 1))
+        state = sizeof(typeof(region.init))
+        return [
+            Tempest.KernelCost(bytes, element * blocks * TILE_SIZE),
+            Tempest.KernelCost(state * blocks, state * TILE_SIZE),
+        ]
+    elseif region isa AxisReductionRegion
+        layout = region.layout
+        outputs = prod(request.dims; init = 1)
+        threads = if !(region.fold isa Tempest.SumFold)
+            32 * outputs
+        elseif contiguous_reduction(layout)
+            layout.count <= WARP_SUM_LIMIT ? 32 * outputs : outputs * lane_count(layout.count, 32, TILE_SIZE)
+        else
+            sms = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+            blocks = cld(outputs, OUTPUT_LANES)
+            lanes = min(blocks >= 2sms ? 8 : REDUCTION_LANES, lane_count(layout.count, 1, REDUCTION_LANES))
+            blocks * OUTPUT_LANES * lanes
+        end
+        return [Tempest.KernelCost(bytes, element * threads)]
+    end
+    nothing
+end

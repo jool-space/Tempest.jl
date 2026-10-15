@@ -454,9 +454,16 @@ end
     @testset "Scalar callables over two-axis tiles: $dims" for dims in ((64, 4), (300, 5))
         x = reshape(sin.(0.37f0 .* Float32.(1:prod(dims))), dims)
         f(x) = sum(sign.(x) .* ifelse.(x .> 0.0f0, 0.25f0, 0.125f0) .* exp.(x); dims = 1)
-        ex = prepare_forward(f, CuArray(x))
+        # The Bool comparison stays outside the region, which would then need
+        # boundary steps: by estimate one scalar column sum is faster, so the
+        # region is checked with estimates off.
+        ex = Tempest.with(() -> prepare_forward(f, CuArray(x)), Tempest.REGION_COSTS => false)
         @test length(graph_steps(ex)) == 1
         @test only(unique(ex.providers)) === :cutile
+        @test Array(execute!(ex)) ≈ f(x)
+        ex = prepare_forward(f, CuArray(x))
+        @test isempty(graph_steps(ex)) && length(ex.storage.steps) == 1
+        @test any(note -> occursin("declined by estimate", note), ex.semantic_notes)
         @test Array(execute!(ex)) ≈ f(x)
     end
 end
@@ -510,4 +517,22 @@ end
         @test occursin("split", summaries(ex))
         check_graph_outputs(execute!(ex), graph_row_normalization(x, bias, 0.05f0))
     end
+end
+
+# Each selected region is compared with the default kernels for its members by
+# estimate, and explain prints both estimates, the decision and the rates.
+@testset "Graph regions report their estimates" begin
+    x = CuArray(sin.(reshape(Float32.(1:(128 * 16384)), 128, 16384)))
+    ex = prepare_forward(x -> sum(x; dims = 2), x)
+    report = sprint(explain, ex)
+    @test occursin(r"region estimates: memory at [0-9.]+ GB/s", report)
+    # Split rows on cuTile against one CUDA block per 32 rows, which keeps few
+    # bytes in flight.
+    line = only(filter(l -> occursin("by estimate", l), split(report, '\n')))
+    @test occursin(r"kept by estimate: [0-9.]+ μs on cutile \(3 launches", line)
+    @test occursin(r"against [0-9.]+ μs on cuda \(1 launch", line)
+    @test Array(execute!(ex)) ≈ sum(Array(x); dims = 2) rtol = 1e-4
+    # A program whose region is estimated to lose keeps the default kernels.
+    slow = Tempest.CostRates(1.0e12, 1.0e-6, 1.0e-6, "slow tiles")
+    @test Tempest.estimated_seconds([Tempest.KernelCost(1.0e6, 1.0e3)], slow) ≈ 1.0e-6 + 1.0e-3
 end

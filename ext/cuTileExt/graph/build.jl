@@ -122,16 +122,19 @@ end
 
 # Full reductions cross blocks. Each dependency phase writes partial sums or
 # fold states, then completes them in a second launch. One final launch writes
-# escaping values.
+# escaping values; when the region's only output is its only reduction, as in
+# a loss or a dot product, the completing launch writes it instead, which
+# saves a launch (a sum of 4096 values took 3.1 us in three launches, 2.0 in
+# two, as the CUDA kernels do).
 # Scratch is visible to the common workspace planner and never survives a call.
-function build_full_graph(program, schedule, outputs, inputs)
+function build_full_graph(program, schedule, outputs, inputs; direct = false)
     blocks = prod(graph_grid(schedule))
     width = maximum(phase_widths(schedule))
     count = sum(length, schedule.groups)
     specifications = (WorkspaceSpec(Float32, blocks * width), WorkspaceSpec(Float32, count))
     bind = function (workspace)
         partials = reshape(view(workspace[1], 1:(blocks * width)), blocks, width)
-        statistics = view(workspace[2], 1:count)
+        statistics = direct ? reshape(only(outputs), 1) : view(workspace[2], 1:count)
         calls = Any[]
         owners = Any[]
         offset = 0
@@ -178,19 +181,21 @@ function build_full_graph(program, schedule, outputs, inputs)
             push!(owners, finish)
             offset += length(group)
         end
-        arrays = (statistics, outputs..., inputs...)
-        phase = ct.Constant(Val(0))
-        kernel = compile_graph_kernel(graph_output_kernel, program, schedule, phase, arrays)
-        # Only visit tiles containing an escaping output. A scalar-only result
-        # needs one block, regardless of the original reduction domain.
-        output_grid = ntuple(2) do axis
-            maximum(out -> cld(size(out, axis), schedule.tile[axis]), outputs)
+        if !direct
+            arrays = (statistics, outputs..., inputs...)
+            phase = ct.Constant(Val(0))
+            kernel = compile_graph_kernel(graph_output_kernel, program, schedule, phase, arrays)
+            # Only visit tiles containing an escaping output. A scalar-only result
+            # needs one block, regardless of the original reduction domain.
+            output_grid = ntuple(2) do axis
+                maximum(out -> cld(size(out, axis), schedule.tile[axis]), outputs)
+            end
+            push!(
+                calls,
+                graph_launcher(kernel, program, schedule, phase, arrays; grid = output_grid),
+            )
+            push!(owners, kernel)
         end
-        push!(
-            calls,
-            graph_launcher(kernel, program, schedule, phase, arrays; grid = output_grid),
-        )
-        push!(owners, kernel)
         launch = () -> begin
             foreach(call -> call(), calls)
             nothing
@@ -290,6 +295,12 @@ function build_split_graph(program, schedule, outputs, inputs)
     ImplementationPlan(bind, specifications)
 end
 
+# Whether a full reduction's only output is its only reduction, which the
+# completing launch can store directly.
+direct_statistic(region, schedule) =
+    length(region.outputs) == 1 && sum(length, schedule.groups) == 1 &&
+    only(region.outputs) == only(only(schedule.groups))
+
 function build_implementation(::CuTileKernels, request::GraphRequest, runtime, outputs, inputs)
     schedule = graph_reduction_schedule(request)
     schedule isa Unsupported && return schedule
@@ -302,7 +313,7 @@ function build_implementation(::CuTileKernels, request::GraphRequest, runtime, o
         request.inputs[input_order],
     )
     if schedule.axes == (1, 2)
-        return build_full_graph(program, schedule, destinations, sources)
+        return build_full_graph(program, schedule, destinations, sources; direct = direct_statistic(request.region, schedule))
     end
     if schedule.splits > 1
         return build_split_graph(program, schedule, destinations, sources)

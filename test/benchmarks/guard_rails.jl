@@ -3,8 +3,10 @@
 # Plan-shape tests pass while a plan is slow; these compare device time. For
 # each case the default plan (cuTile active) must not take longer than
 # RATIO_LIMIT times the CUDA kernels' plan (`Tempest.deactivate(cuTile)`), and
-# a memory-bound case larger than L2 must move its inputs and outputs at
+# a forward case larger than twice L2 must move its inputs and outputs at
 # BANDWIDTH_FLOOR or more of the copy bandwidth measured in the same run.
+#
+# The same run checks the cost model's choices (see below).
 #
 # Times are the minimum, over SAMPLES launches, of a captured CUDA graph of
 # enough executions to take a few milliseconds, with the two plans' launches
@@ -21,7 +23,7 @@ const RATIO_LIMIT = 1.25
 # Absolute slack for launch-bound cases, where one launch is a large ratio.
 const SLACK_MICROSECONDS = 0.5
 const BANDWIDTH_FLOOR = 0.5
-const SAMPLES = 9
+const SAMPLES = 15
 
 function replay_graph(ex; repetitions)
     execute!(ex)
@@ -34,7 +36,7 @@ function replay_graph(ex; repetitions)
     CUDACore.instantiate(graph)
 end
 
-function device_microseconds(executables; samples = SAMPLES, milliseconds = 3.0)
+function device_microseconds(executables; samples = SAMPLES, milliseconds = 4.0)
     once = map(executables) do ex
         graph = replay_graph(ex; repetitions = 1)
         CUDACore.launch(graph)
@@ -101,6 +103,9 @@ function guard_cases()
         ("full maximum and shifted sum, 1024×4096", x -> sum(exp.(x .- maximum(x))), (x,), false),
         ("x .- mean(x), 1024×4096", x -> x .- Statistics.mean(x), (x,), false),
         ("sum of 4096 values", x -> sum(abs2, x), (guard_data(4096),), false),
+        # Float16 values leave graph regions; cuTile's scalar kernels take them.
+        ("Float16 sum(abs2, x), 2048×4096", x -> sum(abs2, x), (Float16.(guard_data(2048, 4096)),), false),
+        ("Float16 column sums, 2048×4096", x -> sum(abs2, x; dims = 1), (Float16.(guard_data(2048, 4096)),), false),
         # Axis reductions: resident, streamed, split and packed.
         ("column sums, 1024×4096", x -> sum(abs2, x; dims = 1), (x,), false),
         ("row sums, 1024×4096", x -> sum(abs2, x; dims = 2), (x,), false),
@@ -130,28 +135,69 @@ function guard_cases()
         ("softmax training, 1024×4096", (x, t) -> sum(softmax_columns(x) .* t), (x, t), true),
         ("MLP block training, 512→2048→512 × 1024",
          (x, w1, b1, w2, b2) -> sum(abs2, mlp(x, w1, b1, w2, b2)), mlp_arguments, true),
+        # The attention reference: products and a softmax over 1024 × 1024 × 48.
+        ("causal attention reference training", (q, k, v, t) -> sum(Tempest.attention(q, k, v; causal = true) .* t),
+         Tuple(0.5f0 .* guard_data(64, 12, 1024, 4; scale) for scale in (0.3f0, 0.7f0, 1.1f0, 1.3f0)), true),
     ]
 end
 
 prepare_case(f, arguments, training) =
     training ? prepare(f, arguments...) : prepare_forward(f, arguments...)
 
-@testset "Default plans against the CUDA kernels" begin
+graph_regions(ex) = count(step -> step.region isa Tempest.GraphRegion, ex.storage.steps)
+# The largest ratio of a kept region's estimate to the default kernels'.
+function estimate_ratio(ex)
+    ratios = map(filter(note -> occursin("kept by estimate", note), ex.semantic_notes)) do note
+        m = match(r"estimate: ([0-9.]+) μs .* against ([0-9.]+) μs", note)
+        parse(Float64, m[1]) / parse(Float64, m[2])
+    end
+    isempty(ratios) ? NaN : maximum(ratios)
+end
+
+same_plan(a, b) = [Tempest.region_name(s.region) for s in a.storage.steps] ==
+    [Tempest.region_name(s.region) for s in b.storage.steps]
+
+# The cost model (src/compiler/costs.jl) keeps a graph region only when it is
+# estimated to beat the default kernels for its members. Its choice, the
+# default plan, is checked against both alternatives: every supported region
+# kept (estimates off) and none formed. A choice is wrong when the plan it
+# declined is faster by more than run-to-run variation.
+const CHOICE_LIMIT = 1.1
+
+@testset "Default plans against the CUDA kernels and the cost model's alternatives" begin
     copy = copy_bandwidth()
     l2 = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
     @printf("copy bandwidth %.1f GB/s; ratio limit %.2f; bandwidth floor %.0f%% above %d MiB\n",
             copy / 1.0e9, RATIO_LIMIT, 100 * BANDWIDTH_FLOOR, 2l2 >> 20)
-    @printf("%-44s %9s %9s %6s %6s  %s\n", "case", "default", "CUDA", "ratio", "copy", "steps")
+    @printf("%-44s %8s %8s %6s %6s %8s %8s %6s %6s\n", "case", "default", "CUDA", "ratio", "copy",
+            "regions", "none", "kept", "est")
+    wrong = String[]
     for (name, f, arguments, training) in guard_cases()
         default = prepare_case(f, arguments, training)
         baseline = without_cutile(() -> prepare_case(f, arguments, training))
+        forced = Tempest.with(() -> prepare_case(f, arguments, training), Tempest.REGION_COSTS => false)
+        unfused = training ? prepare(f, arguments...; fuse_regions = false) :
+            prepare_forward(f, arguments...; fuse_regions = false)
         @test results_agree(execute!(default), execute!(baseline))
-        fast, slow = device_microseconds((default, baseline))
+        fast, slow, all_regions, none = device_microseconds((default, baseline, forced, unfused))
         bytes = single_pass_bytes(default)
         share = bytes / (1.0e-6 * fast) / copy
-        @printf("%-44s %9.1f %9.1f %6.2f %5.0f%%  %d/%d\n", name, fast, slow, fast / slow,
-                100 * share, length(default.storage.steps), length(baseline.storage.steps))
+        kept = "$(graph_regions(default))/$(graph_regions(forced))"
+        @printf("%-44s %8.1f %8.1f %6.2f %5.0f%% %8.1f %8.1f %6s %6.2f\n", name, fast, slow, fast / slow,
+                100 * share, all_regions, none, kept, estimate_ratio(default))
         @test fast <= RATIO_LIMIT * slow + SLACK_MICROSECONDS
-        bytes >= 2l2 && @test share >= BANDWIDTH_FLOOR
+        !training && bytes >= 2l2 && @test share >= BANDWIDTH_FLOOR
+        # The default plan is one of the alternatives when the model kept every
+        # region or none: both timings sample that plan.
+        chosen, other = if same_plan(default, forced)
+            min(fast, all_regions), none
+        elseif same_plan(default, unfused)
+            min(fast, none), all_regions
+        else
+            fast, min(all_regions, none)
+        end
+        chosen <= CHOICE_LIMIT * other + SLACK_MICROSECONDS || push!(wrong, name)
     end
+    isempty(wrong) || println("the cost model chose the slower plan: ", join(wrong, "; "))
+    @test length(wrong) <= 1
 end

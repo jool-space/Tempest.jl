@@ -451,3 +451,39 @@ wave_epilogue(x) = (w = wave_pair(x); tanh.(w.s .* w.c .+ 0.5) .* 2)
     @test got[2] ≈ dx
     @test !isempty(proposed_steps(ex))
 end
+
+# A proposer that estimates its launches is held to the cost check of graph
+# regions; one that gives no estimate is not (src/compiler/costs.jl).
+struct PricedProposalTarget <: Tempest.ExecutionTarget end
+Tempest.cost_rates(::PricedProposalTarget) = Tempest.CostRates(1.0e9, 1.0e-6, 1.0e-6, "test rates")
+
+struct PricedProposer <: Implementation
+    kernels::Any
+end
+Tempest.propose_regions(::PricedProposer, request::ProposalRequest) =
+    [RegionProposal(findall(n -> n.op isa Union{Tempest.MatMul, Tempest.Pointwise}, request.program.nodes))]
+Tempest.support(::PricedProposer, ::ProposedRequest) = Supported()
+Tempest.region_cost(proposer::PricedProposer, ::ProposedRequest) = proposer.kernels
+Tempest.support(::PricedProposer, ::RegionRequest) = Supported()
+Tempest.region_cost(::PricedProposer, ::RegionRequest) = [Tempest.KernelCost(1000, 1.0e9)]
+
+@testset "Proposals that estimate their launches are checked" begin
+    x, w = reshape(collect(1.0:12.0), 3, 4) ./ 7, reshape(collect(1.0:6.0), 2, 3) ./ 5
+    program = Tempest.ForwardProgram(trace((x, w) -> tanh.(w * x) .+ 1.0, x, w))
+    select(kernels) = begin
+        records = Tempest.ProposalRecord[]
+        regions = Tempest.select_proposed_regions(
+            program, PricedProposalTarget(), (PricedProposer(kernels),), Dict{Tuple, String}(), records,
+        )
+        (regions, records)
+    end
+    regions, records = select([Tempest.KernelCost(1000, 1.0e9)])
+    @test length(regions) == 1
+    @test occursin("kept by estimate", only(records).reason)
+    regions, records = select([Tempest.KernelCost(1.0e9, 1.0e9)])
+    @test isempty(regions)
+    @test only(records).status === :declined
+    @test occursin("declined by estimate", only(records).reason)
+    regions, records = select(nothing)
+    @test length(regions) == 1 && isempty(only(records).reason)
+end

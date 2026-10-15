@@ -1,20 +1,21 @@
 
-# Read logical scalar lanes from flattened storage. Mask both loads and the final
-# reduction: f(0) can be nonzero, infinite, or NaN in padded lanes.
-@inline tile_eval(x::Literal, arrays, indices, valid) = x.value
+# Read logical scalar lanes from flattened storage, the `block`th tile of
+# TILE_SIZE lanes. Mask both loads and the final reduction: f(0) can be
+# nonzero, infinite, or NaN in padded lanes.
+@inline tile_eval(x::Literal, arrays, block, valid) = x.value
 
-@inline function tile_eval(x::Read{I}, arrays, indices, valid) where {I}
+@inline function tile_eval(x::Read{I}, arrays, block, valid) where {I}
     a = arrays[I]
     if prod(x.dims) == 1
         return a[1]
     end
     # Dense reads use tile loads; transpose and gather regions use CUDA. The
     # off-by-one of cuTile 1.0's dynamic gather no longer reproduces on main.
-    ct.load(a, (ct.bid(1),), (TILE_SIZE,); padding_mode = ct.PaddingMode.Zero)
+    ct.load(a, (block,), (TILE_SIZE,); padding_mode = ct.PaddingMode.Zero)
 end
 
-@inline function tile_eval(x::ScalarCall, arrays, indices, valid)
-    operands = map(a -> tile_eval(a, arrays, indices, valid), x.args)
+@inline function tile_eval(x::ScalarCall, arrays, block, valid)
+    operands = map(a -> tile_eval(a, arrays, block, valid), x.args)
     x.f.(operands...)
 end
 
@@ -26,19 +27,23 @@ end
 function pointwise_kernel(out, expression, arrays, count::Int32, tile::Int)
     indices = lane_indices(ct.bid(1), tile)
     valid = indices .<= count
-    y = tile_eval(expression, arrays, indices, valid)
+    y = tile_eval(expression, arrays, ct.bid(1), valid)
     # broadcast_to handles expressions containing only scalar constants;
     # ct.store's bounds check discards the final tile's padded lanes.
     ct.store(out, (ct.bid(1),), ct.broadcast_to(ct.Tile(y), (tile,)))
     return
 end
 
+# Each block sums REDUCTION_TILES consecutive tiles into one partial.
 function reduction_kernel(work, expression, arrays, count::Int32, tile::Int)
-    indices = lane_indices(ct.bid(1), tile)
-    valid = indices .<= count
-    y = tile_eval(expression, arrays, indices, valid)
-    masked = ifelse.(valid, y, zero(eltype(work)))
-    work[ct.bid(1)] = sum(masked)
+    acc = zeros(eltype(work), tile)
+    for k = Int32(1):Int32(REDUCTION_TILES)
+        block = (ct.bid(1) - Int32(1)) * Int32(REDUCTION_TILES) + k
+        valid = lane_indices(block, tile) .<= count
+        y = tile_eval(expression, arrays, block, valid)
+        acc = acc .+ ifelse.(valid, y, zero(eltype(work)))
+    end
+    work[ct.bid(1)] = sum(acc)
     return
 end
 
@@ -69,12 +74,20 @@ function tile_pointwise!(out, expression, arrays, count)
     nothing
 end
 
+# A block sums REDUCTION_TILES tiles of TILE_SIZE values, and the single block
+# that completes a full sum loads FINISH_TILE partials at a time. With one tile
+# per block and 256 partials per load, a Float16 sum over 2048 x 4096 took
+# 88 us against 24 on the CUDA kernels on GB10: 32768 blocks of 512 bytes, and
+# 128 dependent loads to complete them.
+const REDUCTION_TILES = 16
+const FINISH_TILE = 4096
+
 function tile_sum!(out, expression, arrays, count, work)
     if count == 0
         fill!(out, zero(eltype(out)))
         return nothing
     end
-    blocks = cld(count, TILE_SIZE)
+    blocks = cld(count, REDUCTION_TILES * TILE_SIZE)
     CUDACore.@cuda backend=ct occupancy=TILE_OCCUPANCY blocks=blocks reduction_kernel(
         work,
         ct.Constant(expression),
@@ -86,7 +99,7 @@ function tile_sum!(out, expression, arrays, count, work)
         out,
         work,
         Int32(blocks),
-        ct.Constant(TILE_SIZE),
+        ct.Constant(FINISH_TILE),
     )
     nothing
 end
@@ -230,7 +243,7 @@ function build_tile(region::FullReduction, out, arrays)
         launch = () -> tile_sum!(out, expression, arrays, count, nothing)
         return BuiltImplementation(launch, (out, arrays), 0)
     end
-    workspace = WorkspaceSpec(Tempest.sum_accumulator(region), cld(count, TILE_SIZE))
+    workspace = WorkspaceSpec(Tempest.sum_accumulator(region), cld(count, REDUCTION_TILES * TILE_SIZE))
     ImplementationPlan((workspace,)) do buffers
         work = only(buffers)
         launch = () -> tile_sum!(out, expression, arrays, count, work)

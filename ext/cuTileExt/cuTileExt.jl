@@ -40,6 +40,8 @@ include("graph/schedule.jl")
 include("graph/codegen.jl")
 include("graph/kernels.jl")
 include("graph/build.jl")
+# Launches for region estimates.
+include("costs.jl")
 
 # Active once loaded; Tempest.deactivate(cuTile) removes it.
 __init__() = Tempest.register!(ct, CuTileKernels; target = Tempest.CUDATarget, rank = 10)

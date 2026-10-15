@@ -244,6 +244,8 @@ function grow_graph_region(
     history
 end
 
+# The first implementation that supports the region, or Unsupported with
+# every candidate's reason.
 function graph_support(implementations, target, region)
     nodes = region.program.nodes
     boundary = (region.inputs..., region.outputs...)
@@ -253,7 +255,7 @@ function graph_support(implementations, target, region)
     reasons = String[]
     for implementation in implementations
         verdict = checked_support(implementation, request)
-        verdict isa Supported && return verdict
+        verdict isa Supported && return implementation
         push!(reasons, "$(implementation_name(implementation)): $(verdict.reason)")
     end
     Unsupported(join(reasons, "; "))
@@ -287,7 +289,10 @@ function graph_implementations(implementations)
 end
 
 # Growth starts after proposals are selected: their members are already claimed
-# and take part in the acyclicity check of every growth candidate.
+# and take part in the acyclicity check of every growth candidate. Of each
+# seed's growth, the largest unblocked candidate that is supported and, by
+# estimate, faster than the default kernels for its members is selected
+# (`region_profit`, src/compiler/costs.jl).
 function select_graph_regions(program, target, implementations, blocked, notes; selected = ())
     candidates = graph_implementations(implementations)
     isempty(candidates) && return GraphRegion[]
@@ -297,17 +302,24 @@ function select_graph_regions(program, target, implementations, blocked, notes; 
     regions = GraphRegion[]
     groups = Vector{Int}[region.members for region in selected]
     foreach(region -> claimed[region.members] .= true, selected)
-    verdicts = Dict{Tuple, Bool}()
-    function accepted(members)
+    verdicts = Dict{Tuple, Any}()
+    function supporter(members)
         get!(verdicts, Tuple(members)) do
             region = region_boundary(program, members, live)
             verdict = graph_support(candidates, target, region)
             if verdict isa Unsupported
                 push!(notes, "graph region $members declined: $(verdict.reason)")
-                return false
             end
-            true
+            verdict
         end
+    end
+    accepted(members) = !(supporter(members) isa Unsupported)
+    rates = REGION_COSTS[] ? cost_rates(target) : nothing
+    defaults = rates === nothing ? nothing : default_kernels(program, target, implementations, live)
+    if rates !== nothing
+        line = "region estimates: $(rates.detail); a region is kept unless estimated " *
+            "more than $(round(Int, 100 * (REGION_MARGIN - 1)))% slower than the default kernels"
+        line in notes || push!(notes, line)
     end
 
     for (seed, node) in enumerate(program.nodes)
@@ -323,11 +335,16 @@ function select_graph_regions(program, target, implementations, blocked, notes; 
             live,
         )
         # A construction rejection excludes this exact set, not its nodes. Keep
-        # growing through it, then select the largest unblocked supported prefix.
+        # growing through it, then select the largest unblocked supported prefix
+        # that pays.
         for members in Iterators.reverse(history)
             haskey(blocked, Tuple(members)) && continue
             accepted(members) || continue
-            push!(regions, region_boundary(program, members, live))
+            region = region_boundary(program, members, live)
+            keep, line = region_profit(region, supporter(members), graph_request(target, region), defaults, rates, claimed)
+            line === nothing || push!(notes, line)
+            keep || continue
+            push!(regions, region)
             push!(groups, members)
             claimed[members] .= true
             break
