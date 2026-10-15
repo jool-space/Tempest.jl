@@ -295,6 +295,7 @@ Base.@nospecializeinfer function prepare_schedule(
         selection.notes,
         String[],
         map(implementation_name, collect(implementations)),
+        [implementation_notes(candidate, target) for candidate in implementations],
         workspace_slots,
         StateBindings(),
         selection.groups,

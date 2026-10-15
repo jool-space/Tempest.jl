@@ -55,6 +55,7 @@ import Tempest:
 const TILE_SIZE = 256
 
 include("blas.jl")
+include("device.jl")
 include("runtime.jl")
 include("indexing.jl")
 include("scalar.jl")

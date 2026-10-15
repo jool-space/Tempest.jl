@@ -155,8 +155,10 @@ and their calls carry the implementation's summary.
 Proposals depend only on the program and the target; the sort key is a total
 order, duplicate proposals of one implementation are merged, and acceptance is
 a deterministic walk. The same program on the same device gives the same
-partition. cuDNN's chunking and cost estimate read the device's L2 size and SM
-count, which are properties of the device. Selection by timing was rejected for this reason.
+partition. cuDNN's chunking and cost estimate read the device's L2 size, SM
+count and rates, which are properties of the device. Selection by timing was
+rejected for this reason; the one measurement, of an architecture without
+derived rates, happens once per device and process, before any plan reads it.
 
 ## cuDNN: matrix products with epilogues
 
@@ -241,11 +243,30 @@ of the product's time, which grows with the inner dimension.
 - declines a product whose estimated fused time exceeds the default plan's:
   `T / (e u)` against `T + 2 s m n / bandwidth + launch`, with the product time
   `T = 2 m n k / product_flops`, `e = fused_efficiency`, and `u` the share of the
-  launched waves' tile slots that hold a tile. The defaults are GB10
-  measurements: cuBLAS's 108 TFLOP/s half-precision rate, 234 GB/s copy
-  bandwidth, 2 μs per launch, and an efficiency of 0.9.
+  launched waves' tile slots that hold a tile. Launches cost 2 μs and the
+  efficiency is 0.9, as measured on GB10. The product rate and the bandwidth
+  are the device's (`Tempest.device_rates`).
 
-All are `CuDNNKernels` keywords. On these single layers the estimate decided
+All are `CuDNNKernels` keywords. The two rates default to `nothing`, which
+derives them from device attributes: the product rate as SMs × clock × dense
+Float16 tensor FLOPs per clock per SM, from a table by compute capability, and
+the bandwidth as memory clock × transfers per clock × bus width. Each is
+scaled by the share of peak that cuBLAS and a copy reached on GB10: 108 of
+119 TFLOP/s (0.9) and 234 of 273 GB/s (0.85). On GB10 that derives 107.0
+TFLOP/s and 232.1 GB/s, and every decision in the tables below is unchanged.
+An architecture without a table entry is measured instead, once per device
+and process: a 256 MiB copy and a 4096³ cuBLAS Float16 product, which on GB10
+gave about 98 TFLOP/s and 220 GB/s. The values are fixed per device for the
+process, so the plan is deterministic. `explain` prints them under the
+candidate list, for example:
+
+```text
+  cuDNN cost model: products at 107.0 TFLOP/s (derived: 48 SMs × 2.42 GHz × 1024 FLOP/clock × 0.9), memory at 232.1 GB/s (derived: 8.53 GT/s × 256 bits × 0.85), 2.0 μs per launch, fused efficiency 0.9
+```
+
+A number given for either rate overrides it and prints as "given". GeForce
+boards of compute capability 7.5 to 8.9 accumulate Float32 at half the table's
+rate; give them `product_flops`. On these single layers the estimate decided
 right except within about 10% of even. Its misses are 1024 × 2048 × 8192, where
 two 16 MiB chunks were slower than four 8 MiB chunks would have been, and
 2048 × 4096 × 1024, a 6% win it declines. Single layers `tanh.(W * x .+ b)` in

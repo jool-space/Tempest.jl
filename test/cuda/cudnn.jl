@@ -309,6 +309,17 @@ end
     ex = prepare_forward((w, x) -> tanh.(w * x), w, x; implementations = (CuDNNKernels(),))
     @test :cuDNN ∉ ex.providers
     @test occursin("declined: cuDNN's fused product would take longer than cuBLAS", explanation(ex))
+    # The estimate's rates come from the device unless given; explain names
+    # their origin. Slow enough memory makes the epilogue pass the larger cost.
+    rates = Tempest.device_rates(CUDACore.device())
+    @test rates.source in (:derived, :measured)
+    @test rates.product_flops > 1e12 && rates.memory_bandwidth > 1e10
+    @test occursin("cuDNN cost model: products at", explanation(ex))
+    @test occursin("($(rates.source): ", explanation(ex))
+    slow = CuDNNKernels(memory_bandwidth = 1e9)
+    ex = prepare_forward((w, x) -> tanh.(w * x), w, x; implementations = (slow,))
+    @test ex.providers == [:cuDNN]
+    @test occursin("memory at 1.0 GB/s (given)", explanation(ex))
 
     # Construction declines buffers that are less aligned than the engines
     # assume, so preparation replans instead of failing.

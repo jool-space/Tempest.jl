@@ -250,6 +250,31 @@ function single_product(region)
     Supported()
 end
 
+# The rates of the cost model below: given keywords, or the device's rates.
+function cost_model(implementation)
+    rates = Tempest.device_rates(CUDACore.device())
+    (;
+        product_flops = something(implementation.product_flops, rates.product_flops),
+        memory_bandwidth = something(implementation.memory_bandwidth, rates.memory_bandwidth),
+        implementation.launch_seconds,
+        implementation.fused_efficiency,
+    )
+end
+
+function Tempest.implementation_notes(implementation::CuDNNKernels, ::CUDATarget)
+    rates = Tempest.device_rates(CUDACore.device())
+    costs = cost_model(implementation)
+    origin(given, detail) = given === nothing ? "$(rates.source): $detail" : "given"
+    product = origin(implementation.product_flops, rates.detail.product)
+    memory = origin(implementation.memory_bandwidth, rates.detail.memory)
+    [
+        "cost model: products at $(round(costs.product_flops / 1e12; digits = 1)) TFLOP/s ($product), " *
+        "memory at $(round(costs.memory_bandwidth / 1e9; digits = 1)) GB/s ($memory), " *
+        "$(round(1e6 * costs.launch_seconds; digits = 2)) μs per launch, " *
+        "fused efficiency $(costs.fused_efficiency)",
+    ]
+end
+
 # Whether fusing pays, from the two causes measured on GB10 (see the header).
 # The default plan runs the product on cuBLAS, writes it, and an epilogue
 # kernel rereads it: T + 2 s m n / bandwidth + one launch, for a product time
@@ -263,15 +288,15 @@ function profitable(implementation, region, chunks)
     rows, columns = product.dims
     inner = nodes[first(product.inputs)].dims[2]
     T = product.dtype
+    costs = cost_model(implementation)
     # TF32 products run at half the half-precision rate.
-    rate = implementation.product_flops / (T === Float32 ? 2 : 1)
+    rate = costs.product_flops / (T === Float32 ? 2 : 1)
     sms = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
     tiles = cld(rows, 128) * cld(columns ÷ chunks, 128)
     used = tiles / (cld(tiles, sms) * sms)
     work = 2 * rows * columns * inner / rate
-    fused = work / (implementation.fused_efficiency * used)
-    unfused = work + 2 * sizeof(T) * rows * columns / implementation.memory_bandwidth +
-              implementation.launch_seconds
+    fused = work / (costs.fused_efficiency * used)
+    unfused = work + 2 * sizeof(T) * rows * columns / costs.memory_bandwidth + costs.launch_seconds
     fused <= unfused || return Unsupported(
         "cuDNN's fused product would take longer than cuBLAS and an epilogue kernel " *
         "(estimated $(round(1e6 * fused; digits = 1)) against $(round(1e6 * unfused; digits = 1)) μs; " *

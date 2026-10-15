@@ -13,6 +13,7 @@ mutable struct Prepared{R <: AbstractRuntime}
     selection_notes::Vector{Vector{String}}
     semantic_notes::Vector{String}
     candidates::Vector{Symbol}
+    candidate_notes::Vector{Vector{String}} # implementation_notes, resolved at preparation
     workspace_slots::Vector{Vector{Int}}
     state::StateBindings
     groups::Vector{Vector{Int}}
@@ -103,6 +104,9 @@ function explain(io::IO, ex::Prepared)
         " bytes",
     )
     println(io, "Implementation candidates: ", join(ex.candidates, " → "))
+    for (name, notes) in zip(ex.candidates, ex.candidate_notes), note in notes
+        println(io, "  ", name, " ", note)
+    end
     for (index, slots) in enumerate(ex.workspace_slots)
         if !isempty(slots)
             println(io, "  region $index uses workspace slots $slots")
