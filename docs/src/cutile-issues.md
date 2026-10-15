@@ -8,7 +8,7 @@ failing is in `examples/cutile_issues/`.
 | Issue | Status on cuTile main |
 | --- | --- |
 | 1. Tuple argument read from two regions | fixed by cuTile.jl#315 |
-| 2. Register allocation and token order | probe no longer slow (cuTile.jl#318 and later) |
+| 2. Register allocation and token order | probe no longer slow (cuTile.jl#318 and later); Tempest's kernels still need occupancy hints |
 | 3. FMA with a scalar addend | fixed by cuTile.jl#316 |
 | 4. Scalars broadcast to multi-axis tiles | fixed by cuTile.jl#326 |
 | 5. Dynamic gather off-by-one | no longer reproduces |
@@ -117,8 +117,14 @@ registers and restores their earlier times
 
 On cuTile main of 15 October both entries of the probe still use 255
 registers, but both run in 21.5 μs, faster than either did before, so the
-probe and the patch were deleted. Tempest's occupancy hints were measured on
-its own kernels and have not been remeasured.
+probe and the patch were deleted. Remeasured the same day on Tempest's own
+kernels, the 255-register allocation still costs them: without a hint, resident
+reductions ran up to 5 times slower and the scalar-region reductions up to 8
+times slower. Both hints stay. Scalar-region kernels keep 8; resident kernels
+now choose by tile size: 8 for tiles of at most 512 values, which ran up to 40%
+faster than at 4, 4 for longer tiles up to 2048 rows, and no hint for
+4096-row tiles, which ran 2-5% faster without one. The measurements are next to
+the hints (`ext/cuTileExt/graph/build.jl`, `ext/cuTileExt/cuTileExt.jl`).
 
 ## 3. FMA fusion with a scalar addend: invalid bytecode (fixed upstream)
 

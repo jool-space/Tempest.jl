@@ -148,9 +148,11 @@ the block and recomputes permitted pointwise producers in each sweep.
 Kernels receive each array as a separate parameter, and cuTile gives each its
 own alias class, so stores need not wait for loads from other arrays. Without
 that ordering `tileiras` allocates 255 registers for resident kernels, which then
-run several times slower; they compile with an occupancy hint of 4, which limits
-registers instead. Resident kernels previously took one tuple argument, whose
-arrays shared an alias class, until cuTile.jl#318 gave them separate classes.
+run several times slower; they compile with an occupancy hint that limits
+registers instead: 8 for tiles of at most 512 values, 4 for longer tiles up to
+2048 rows, none for 4096-row tiles, where the allocation does not hurt.
+Resident kernels previously took one tuple argument, whose arrays shared an
+alias class, until cuTile.jl#318 gave them separate classes.
 See the [cuTile issues](cutile-issues.md) report for the measurements. Full reductions
 use workspace declared through `ImplementationPlan`, which the planner can
 reuse across successive regions. Every invocation overwrites the workspace it

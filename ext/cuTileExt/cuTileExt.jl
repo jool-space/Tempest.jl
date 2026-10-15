@@ -23,10 +23,12 @@ import cuTile as ct
 
 const TILE_SIZE = 256
 # Scalar-region kernels compile for 8 blocks per SM. Without a hint, tileiras
-# gave them 255 registers once cuTile placed each array in its own alias class;
-# on GB10 the residual RMSNorm fixture's unfused schedule then ran at 128 x 4096
-# in 132/160 us warm/cold and at 1024 x 1024 in 67/115 us. With occupancy 8 it
-# ran in 27/57 and 28/86 us; 16 matched 8, and 32 was slower at 1024 x 1024.
+# gives the reduction kernels 255 registers (the pointwise kernel uses 16
+# either way). Measured on GB10 with cuTile main d2fafa3, 15 October 2026, warm
+# us with no hint / 4 / 8: column sums over 256 x 32768 Float32 1164 / 326 / 155
+# and Float16 951 / 305 / 131, a sum of 2^24 values 1300 / 418 / 298, and the
+# residual RMSNorm fixture's unfused schedule at 128 x 4096 132 / 48 / 26.
+# 16 matched 8.
 const TILE_OCCUPANCY = 8
 
 # Scalar regions on tiles: pointwise, full and leading-axis reductions.

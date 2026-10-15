@@ -7,7 +7,7 @@ end
 # Kernels take each array as its own parameter. cuTile gives each its own alias
 # class, so a store need not wait for loads from other arrays. A tuple of arrays
 # once shared one class, which kept resident kernels at few registers, but since
-# cuTile.jl#318 its arrays are separate too; the occupancy hint below now limits
+# cuTile.jl#318 its arrays are separate too; the occupancy hints below now limit
 # registers instead.
 const graph_entry_points = Dict{Tuple{Function, Int}, Function}()
 const graph_entry_lock = ReentrantLock()
@@ -38,17 +38,29 @@ struct CompiledGraphKernel{K}
     kernel::K
 end
 
-# Resident kernels compile for 4 blocks per SM. Without a hint, tileiras gives
-# them 255 registers whenever their store is not ordered after their loads. On
-# GB10 the residual RMSNorm fixture at 128 x 4096 then ran in 23.3/43.9 us
-# warm/cold; with occupancy 4 (64 registers) in 9.0/38.8 us. A hint of 8 helped
-# packed tiles slightly more but was ignored for 1024-row tiles, which kept 255
-# registers and ran slower than with no hint.
-const RESIDENT_OCCUPANCY = 4
+# Blocks per SM that resident kernels compile for, by tile size; streamed kernels
+# take no hint. Without one, tileiras gives resident kernels 255 registers
+# whenever their store is not ordered after their loads. Measured on GB10 with
+# cuTile main d2fafa3, 15 October 2026: Float32 row sums, logsumexp, softmax and
+# LayerNorm, warm us with no hint / 4 / 8.
+# - Tiles of at most PACKED_ELEMENTS values: 8 (14-28 registers). Sum over
+#   256 x 32768 613 / 178 / 120, logsumexp over 512 x 8192 155 / 42 / 27. Kernels
+#   that write a full output and are bound by DRAM lose up to 5% to 4 (softmax
+#   over 512 x 32768 571 at 4, 590 at 8).
+# - Longer tiles below RESIDENT_ROWS: 4 (64 registers). With no hint, logsumexp
+#   over 2048 x 16384 ran 16% slower; at 8 the residual RMSNorm fixture at
+#   1024 x 1024 kept 255 registers and ran in 34 instead of 27.
+# - Tiles of RESIDENT_ROWS: no hint. Every kernel ran 2-5% slower at 4 (sum over
+#   4096 x 16384 1080 / 1130), and logsumexp 22% slower at 8.
+function resident_occupancy(schedule)
+    resident_schedule(schedule) || return nothing
+    values = prod(schedule.tile)
+    values <= PACKED_ELEMENTS ? 8 : values < RESIDENT_ROWS ? 4 : nothing
+end
 
 function compile_graph_kernel(kernel, program, schedule, phase, arrays)
     rows, columns = Int32.(schedule.dims)
-    occupancy = resident_schedule(schedule) ? RESIDENT_OCCUPANCY : nothing
+    occupancy = resident_occupancy(schedule)
     entry = graph_flat_entry(kernel, length(arrays))
     compiled = CUDACore.@cuda backend=ct launch=false occupancy=occupancy entry(program, rows, columns, phase, arrays...)
     CompiledGraphKernel(compiled)

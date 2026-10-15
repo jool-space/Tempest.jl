@@ -4,6 +4,32 @@ Dated review decisions, newest first. Each entry records priorities at that
 date, not promises that every proposal survives implementation and measurement;
 "next step" language in older entries describes the state at that time.
 
+## Occupancy hints remeasured — 15 October 2026
+
+Tempest's two cuTile occupancy hints were added when, without them, `tileiras`
+gave its kernels 255 registers and they ran several times slower. cuTile main
+(`d2fafa3`) made the token-order probe fast, so both were measured again on
+GB10. Each hint value was compiled in one process and timed in alternation
+from CUDA graphs. Identical kernels agreed within 1% on DRAM-bound shapes but
+differed by up to 25% on L2-sized softmax and LayerNorm, so only differences
+seen in both passes count.
+
+- **Scalar-region kernels keep 8.** Without a hint the reduction kernels still
+  get 255 registers and run up to 8 times slower (column sums over
+  256 × 32768: 1164 against 155 μs); 16 matches 8. Pointwise kernels use 16 registers
+  either way.
+- **Resident graph kernels choose by tile size.** No hint is still up to 5
+  times slower for tiles up to 2048 rows. Tiles of at most 512 values now
+  compile for 8 instead of 4: row sums and logsumexps ran 30-40% faster
+  (256 × 32768 sum: 178 to 120 μs), while DRAM-bound normalizations lost up to
+  5%. 1024- and 2048-row tiles keep 4: at 8 some kernels kept 255 registers.
+  4096-row tiles drop the hint: every kernel ran 2-5% faster without it.
+- **End to end the change is neutral.** The residual RMSNorm benchmark moved
+  within noise cold and gained warm at small shapes (256 × 4096: 29 to 23-26 μs).
+  The GPT training step, timed as captured replays, took 2.15 ms and 45.9 ms per
+  step at the default and an enlarged shape under both policies. Dropping
+  either hint cost it at most 2%, because matrix products dominate.
+
 ## An implementation registry; device rates; layout copies — 15 October 2026
 
 **Registry.** Default candidates come from a registry keyed by module:
