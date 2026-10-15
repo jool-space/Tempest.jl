@@ -22,7 +22,7 @@ pipeline: `ir/` (graph data and its meaning), `frontend/` (tracing), `verbs/`
 | Array frontend | `src/frontend/broadcast.jl`, `src/frontend/operations.jl` | `pointwise`, `trace_broadcast`, Base methods |
 | Folds | `src/frontend/folds.jl` | `Fold`, `fold`, `fold_pullback`, `fold_resident` |
 | Semantic contracts | `src/verbs/contract.jl` | `record_call`, `check_verb_result` |
-| Built-in verbs | `src/verbs/builtin.jl` | `batched_mul`, column gathers, `take_rows`, `dropout`, `attention`; `logsumexp` (a fold) |
+| Built-in verbs | `src/verbs/builtin.jl` | column gathers, `take_rows`, `dropout`, `attention`; `batched_mul` (a primitive product) and `logsumexp` (a fold) |
 | Derivatives | `src/transforms/reverse.jl` | `differentiate`, `pullback`, `local_partials`, `call_pullback`, `with_update` |
 | Placement | `src/implementations/targets.jl` | `CPUTarget`, `CUDATarget`, `infer_target` |
 | Implementation contract | `src/implementations/protocol.jl` | `support`, `build_implementation`, `choose_implementation`, `implementation_notes` |
@@ -136,7 +136,7 @@ region preserve their own alias relationships.
 5. `assign_slots` reuses matching type/size slots only after their last use.
 
 Generated kernels can read arbitrary supported mappings. GEMM requires a native
-dense or transpose presentation; opaque calls currently require dense inputs.
+dense or transpose presentation, and a batched GEMM dense operands; opaque calls currently require dense inputs.
 Materializations at those boundaries are explicit schedule steps. A returned
 alias keeps its storage root alive past the last launch. Sibling call outputs
 cannot reuse one another's slots because they are written at the same step.

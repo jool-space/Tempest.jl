@@ -123,7 +123,7 @@ end
         b = randn(Float32, tb ? (6, 3, 5) : (3, 6, 5))
         f(a, b) = sum(abs2, Tempest.batched_mul(a, b; transpose_a = ta, transpose_b = tb))
         ex = compare_prepared(f, a, b; target, atol = 1e-3, rtol = 1e-4)
-        @test occursin("call batched_mul [cuBLAS]", sprint(explain, ex))
+        @test occursin("batched_matmul [cuBLAS]", sprint(explain, ex))
     end
     x = 30 .* randn(Float32, 70, 33)
     ex = compare_prepared(x -> sum(abs2, Tempest.logsumexp(x)), x; target, atol = 1e-1, rtol = 1e-4)

@@ -1,33 +1,5 @@
-# Built-in verbs: batched products through cuBLAS, runtime-index verbs, dropout
-# and the causal fill. They write into planned output storage and capture like
-# other calls.
-function support(::CuBLASGemm, request::CallRequest)
-    request.target isa CUDATarget || return Unsupported("requires a CUDA target")
-    request.call.f === Tempest.batched_mul || return Unsupported("not a batched product")
-    T = request.inputs[1].dtype
-    if !(T in (Float32, Float64) && all(s -> s.dtype === T, request.inputs))
-        return Unsupported("batched GEMM operands must share a Float32/Float64 dtype")
-    end
-    Supported()
-end
-
-function build_implementation(::CuBLASGemm, request::CallRequest, runtime, out, inputs)
-    (; transpose_a, transpose_b) = request.call.kwargs
-    workspace = WorkspaceSpec(UInt8, runtime.target.blas_workspace_bytes)
-    ImplementationPlan((workspace,)) do buffers
-        if runtime.blas === nothing
-            runtime.blas = BlasResources(
-                runtime.target.blas_workspace_bytes,
-                runtime.target.matmul_precision,
-            )
-        end
-        work = only(buffers)
-        a, b = inputs
-        launch = batched_gemm_call(runtime.blas, out, a, b, transpose_a, transpose_b, work)
-        BuiltImplementation(launch, (runtime.blas, out, inputs, work), 0)
-    end
-end
-
+# Built-in verbs: runtime-index verbs, dropout and the causal fill. They write
+# into planned output storage and capture like other calls.
 function support(::CUDAKernels, request::CallRequest)
     request.target isa CUDATarget || return Unsupported("requires a CUDA target")
     if index_support(request.call.f) || request.call.f in (Tempest.dropout, Tempest.causal_fill)

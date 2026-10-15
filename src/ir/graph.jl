@@ -13,6 +13,13 @@ end
 
 struct MatMul <: Operation end
 
+# For each k along the third axis, op(a[:, :, k]) * op(b[:, :, k]), where op
+# transposes a matrix when its flag is set. The operands are dense arrays.
+struct BatchedMatMul <: Operation
+    transpose_a::Bool
+    transpose_b::Bool
+end
+
 struct Pointwise{F} <: Operation
     f::F
 end
@@ -76,6 +83,7 @@ operation_name(op::Operation) = Symbol(nameof(typeof(op)))
 operation_name(::Argument) = :argument
 operation_name(::Constant) = :constant
 operation_name(::MatMul) = :matmul
+operation_name(::BatchedMatMul) = :batched_matmul
 operation_name(::Pointwise) = :pointwise
 operation_name(op::FoldReduction) = fold_name(op.fold)
 operation_name(::TransposeOp) = :transpose

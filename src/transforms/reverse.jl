@@ -135,6 +135,15 @@ end
 # to the reverse traversal; the mathematical rules do not mutate that traversal.
 pullback(::MatMul, xs, y, g) = (g * transpose(xs[2]), transpose(xs[1]) * g)
 
+function pullback(op::BatchedMatMul, (a, b), c, dc)
+    ta, tb = op.transpose_a, op.transpose_b
+    da = ta ? batched_mul(b, dc; transpose_a = tb, transpose_b = true) :
+         batched_mul(dc, b; transpose_b = !tb)
+    db = tb ? batched_mul(dc, a; transpose_a = true, transpose_b = ta) :
+         batched_mul(a, dc; transpose_a = !ta)
+    (da, db)
+end
+
 function pullback(::TransposeOp, xs, y, g)
     x = only(xs)
     (present(transpose(g), size(x); scalar = x isa TracedScalar),)

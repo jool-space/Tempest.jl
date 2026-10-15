@@ -11,9 +11,9 @@ function source_layout(nodes, layouts, id)
 end
 
 requires_native_inputs(::Operation) = false
-requires_native_inputs(::Union{MatMul, CallResult}) = true
+requires_native_inputs(::Union{MatMul, BatchedMatMul, CallResult}) = true
 requires_dense_inputs(::Operation) = false
-requires_dense_inputs(::CallResult) = true
+requires_dense_inputs(::Union{BatchedMatMul, CallResult}) = true
 
 # Unknown operations are boundaries until they provide an explicit lowering.
 # Constant fills and layout aliases have their own treatment below.
@@ -168,6 +168,8 @@ function schedule_steps(program, live, layouts, materialized, regions = ())
 end
 
 schedule_region(::MatMul, nodes, id, dependencies, expression) = GemmRegion()
+schedule_region(op::BatchedMatMul, nodes, id, dependencies, expression) =
+    BatchedGemmRegion(op.transpose_a, op.transpose_b)
 schedule_region(op::CallResult, nodes, id, dependencies, expression) = OpaqueCall(op.call)
 
 function schedule_region(

@@ -41,7 +41,7 @@ include(joinpath(EXAMPLES, "gpt.jl"))
     end
     cpu = prepare(step, params, state, batches[1], c; donate = (1, 2))
     gpu = prepare(step, params, state, batches[1], c; target = CUDATarget(), donate = (1, 2))
-    @test occursin("call batched_mul [cuBLAS]", sprint(explain, gpu))
+    @test occursin("batched_matmul [cuBLAS]", sprint(explain, gpu))
     @test !occursin("call logsumexp", sprint(explain, gpu))
     capture!(gpu)
     for batch in batches

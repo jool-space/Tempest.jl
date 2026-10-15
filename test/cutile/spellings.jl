@@ -83,3 +83,27 @@ end
     @test plan_shape(a) == plan_shape(b)
     @test Array(execute!(a)[2]) ≈ Array(execute!(b)[2]) rtol = 1e-4 atol = 1e-6
 end
+
+# batched_mul is a primitive product like `*`, for every GEMM element type.
+@testset "Batched and plain products plan alike" begin
+    a = reshape(Float32.(sin.(1:(64 * 32))), 64, 32, 1)
+    b = reshape(Float32.(cos.(1:(32 * 48))), 32, 48, 1)
+    for T in (Float32, Float16)
+        A, B = CuArray(T.(a)), CuArray(T.(b))
+        batched(a, b) = tanh.(Tempest.batched_mul(a, b) .+ one(T))
+        plain(a, b) = tanh.(reshape(reshape(a, 64, 32) * reshape(b, 32, 48), 64, 48, 1) .+ one(T))
+        x, y = prepare_forward(batched, A, B), prepare_forward(plain, A, B)
+        @test first.(plan_shape(x)) == [:batched_matmul, :pointwise]
+        @test first.(plan_shape(y)) == [:matmul, :pointwise]
+        @test Array(execute!(x)) ≈ Array(execute!(y)) rtol = 1e-2
+    end
+    # Transposed operands, in Float16 and in training.
+    q = CuArray(Float16.(reshape(sin.(1:(16 * 24 * 3)), 16, 24, 3)))
+    k = CuArray(Float16.(reshape(cos.(1:(16 * 20 * 3)), 16, 20, 3)))
+    ex = prepare_forward((q, k) -> Tempest.batched_mul(k, q; transpose_a = true), q, k)
+    @test plan_shape(ex) == [(:batched_matmul, :cuBLAS)]
+    @test Array(execute!(ex)) ≈ Tempest.batched_mul(Array(k), Array(q); transpose_a = true) rtol = 1e-2
+    loss(q, k) = sum(abs2, Tempest.batched_mul(k, q; transpose_a = true))
+    ex = prepare(loss, Float32.(Array(q)), Float32.(Array(k)); target = CUDATarget())
+    @test count(s -> s.region isa Tempest.BatchedGemmRegion, ex.storage.steps) == 3
+end

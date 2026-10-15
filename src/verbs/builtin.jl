@@ -1,17 +1,21 @@
-# Built-in semantic verbs: operations that keep their identity through the
-# graph so providers can realize them directly. Their pullbacks are ordinary
-# array programs or further calls. `logsumexp` is a fold, not a call.
+# Built-in verbs. `batched_mul` is a primitive product and `logsumexp` a fold;
+# the others are semantic calls, which keep their identity through the graph
+# so providers can realize them directly. Their pullbacks are ordinary array
+# programs or further calls.
 
 """
     Tempest.batched_mul(a, b; transpose_a = false, transpose_b = false)
 
 For three-dimensional `a` and `b`, compute `op(a)[:, :, k] * op(b)[:, :, k]`
 for each `k` along the third axis, where `op` transposes each matrix when
-requested. Both operands need the same batch size. Plain arrays evaluate the
-reference; traced arrays record a semantic call.
+requested. Both operands need the same batch size. On traced arrays it is a
+primitive product, like `*`: one `BatchedMatMul` node, realized by a batched
+GEMM, that a proposal can claim with its neighbours.
 """
 function batched_mul(a, b; transpose_a::Bool = false, transpose_b::Bool = false)
-    reference(batched_mul, a, b; transpose_a, transpose_b)
+    dims = batched_dims(a, b, transpose_a, transpose_b)
+    out = Array{promote_type(eltype(a), eltype(b))}(undef, dims)
+    batched_mul!(out, a, b, transpose_a, transpose_b)
 end
 
 function batched_mul(
@@ -20,7 +24,10 @@ function batched_mul(
     transpose_a::Bool = false,
     transpose_b::Bool = false,
 )
-    record_call(batched_mul, a, b; transpose_a, transpose_b)
+    nodes = same_trace(a, b)
+    dims = batched_dims(a, b, transpose_a, transpose_b)
+    T = promote_type(eltype(a), eltype(b))
+    emit(nodes, BatchedMatMul(transpose_a, transpose_b), (a.id, b.id), dims, T; scalar = false)
 end
 
 function batched_dims(a, b, transpose_a, transpose_b)
@@ -38,24 +45,7 @@ function batched_dims(a, b, transpose_a, transpose_b)
     (m, n, size(a, 3))
 end
 
-function output_spec(::typeof(batched_mul), a, b; transpose_a, transpose_b)
-    T = promote_type(eltype(a), eltype(b))
-    TensorSpec(T, batched_dims(a, b, transpose_a, transpose_b))
-end
-
 batch_operand(x, transposed) = transposed ? transpose(x) : x
-
-function reference(
-    ::typeof(batched_mul),
-    a::AbstractArray,
-    b::AbstractArray;
-    transpose_a = false,
-    transpose_b = false,
-)
-    dims = batched_dims(a, b, transpose_a, transpose_b)
-    out = Array{promote_type(eltype(a), eltype(b))}(undef, dims)
-    batched_mul!(out, a, b, transpose_a, transpose_b)
-end
 
 function batched_mul!(out, a, b, transpose_a, transpose_b)
     for k in axes(out, 3)
@@ -68,36 +58,8 @@ function batched_mul!(out, a, b, transpose_a, transpose_b)
     out
 end
 
-# Without a provider, the product is a broadcast followed by a sum over the
-# inner axis. Correct everywhere, but it materializes an m × k × n × batch tile.
-function reference(
-    ::typeof(batched_mul),
-    a::TracedArray,
-    b::TracedArray;
-    transpose_a = false,
-    transpose_b = false,
-)
-    m, n, batch = batched_dims(a, b, transpose_a, transpose_b)
-    a = transpose_a ? permutedims(a, (2, 1, 3)) : a
-    b = transpose_b ? permutedims(b, (2, 1, 3)) : b
-    k = size(a, 2)
-    products = reshape(a, m, k, 1, batch) .* reshape(b, 1, k, n, batch)
-    reshape(sum(products; dims = 2), m, n, batch)
-end
-
-function verb_pullback(::typeof(batched_mul), (a, b), c, dc; transpose_a, transpose_b)
-    da = if transpose_a
-        batched_mul(b, dc; transpose_a = transpose_b, transpose_b = true)
-    else
-        batched_mul(dc, b; transpose_b = !transpose_b)
-    end
-    db = if transpose_b
-        batched_mul(dc, a; transpose_a = true, transpose_b = transpose_a)
-    else
-        batched_mul(a, dc; transpose_a = !transpose_a)
-    end
-    (da, db)
-end
+evaluate(op::BatchedMatMul, node, xs) =
+    batched_mul(xs...; transpose_a = op.transpose_a, transpose_b = op.transpose_b)
 
 """
     Tempest.logsumexp(x; dims = 1)

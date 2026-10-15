@@ -76,8 +76,12 @@ end
 
 function batched_gemm_call(resources::BlasResources, y, a, b, transpose_a, transpose_b, workspace)
     T = eltype(y)
-    alpha, beta = get!(resources.coefficients, T) do
-        (CUDACore.CuRef(one(T)), CUDACore.CuRef(zero(T)))
+    if !(eltype(a) == eltype(b) == T)
+        throw(ArgumentError("CUDA GEMM operands must have matching dtypes"))
+    end
+    C = T in HALF_GEMM_TYPES ? Float32 : T
+    alpha, beta = get!(resources.coefficients, C) do
+        (CUDACore.CuRef(one(C)), CUDACore.CuRef(zero(C)))
     end
     ta, tb = transpose_a ? 'T' : 'N', transpose_b ? 'T' : 'N'
     m, n, batch = size(y)
@@ -91,6 +95,12 @@ function batched_gemm_call(resources::BlasResources, y, a, b, transpose_a, trans
         cuBLAS.cublasSgemmStridedBatched
     elseif T === Float64
         cuBLAS.cublasDgemmStridedBatched
+    elseif T in HALF_GEMM_TYPES
+        (handle, ta, tb, m, n, k, alpha, a, lda, sa, b, ldb, sb, beta, y, ldc, sc, batch) ->
+            cuBLAS.cublasGemmStridedBatchedEx(
+                handle, ta, tb, m, n, k, alpha, a, T, lda, sa, b, T, ldb, sb, beta, y, T,
+                ldc, sc, batch, cuBLAS.CUBLAS_COMPUTE_32F, cuBLAS.CUBLAS_GEMM_DEFAULT,
+            )
     else
         throw(ArgumentError("unsupported GEMM dtype $T"))
     end
@@ -107,7 +117,7 @@ function support(::CuBLASGemm, request::RegionRequest)
     if !(request.target isa CUDATarget)
         return Unsupported("requires a CUDA target")
     end
-    if !(request.step.region isa GemmRegion)
+    if !(request.step.region isa Union{GemmRegion, BatchedGemmRegion})
         return Unsupported("requires a matrix product")
     end
     if !(request.dtype in (Float32, Float64, HALF_GEMM_TYPES...)) ||
@@ -116,7 +126,7 @@ function support(::CuBLASGemm, request::RegionRequest)
             "CUDA GEMM operands must have matching Float16, BFloat16, Float32 or Float64 dtypes",
         )
     end
-    if max(request.dims..., request.input_dims[1][2]) > typemax(Int32)
+    if max(request.dims..., request.input_dims[1][1:2]...) > typemax(Int32)
         return Unsupported("GEMM dimensions exceed Int32")
     end
     Supported()
@@ -132,7 +142,12 @@ function build_implementation(::CuBLASGemm, request::RegionRequest, runtime, out
             )
         end
         work = only(buffers)
-        launch = gemm_call(runtime.blas, out, arrays..., work)
+        region = request.step.region
+        launch = if region isa BatchedGemmRegion
+            batched_gemm_call(runtime.blas, out, arrays..., region.transpose_a, region.transpose_b, work)
+        else
+            gemm_call(runtime.blas, out, arrays..., work)
+        end
         BuiltImplementation(launch, (runtime.blas, out, arrays, work), 0)
     end
 end

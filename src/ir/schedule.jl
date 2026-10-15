@@ -103,6 +103,11 @@ end
 
 struct GemmRegion <: Region end
 
+struct BatchedGemmRegion <: Region
+    transpose_a::Bool
+    transpose_b::Bool
+end
+
 struct OpaqueCall{C <: SemanticCall} <: Region
     call::C
 end
@@ -114,6 +119,7 @@ region_name(r::FullReduction) = fold_name(r.fold)
 region_name(r::AxisReductionRegion) = Symbol(:axis_, fold_name(r.fold))
 region_name(::ScatterRegion) = :scatter
 region_name(::GemmRegion) = :matmul
+region_name(::BatchedGemmRegion) = :batched_matmul
 region_name(::OpaqueCall) = :call
 
 struct Step{R <: Region}

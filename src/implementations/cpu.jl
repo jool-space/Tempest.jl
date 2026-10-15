@@ -90,13 +90,16 @@ function support(::LinearAlgebraGemm, request::RegionRequest)
     if !(request.target isa CPUTarget)
         return Unsupported("requires a CPU target")
     end
-    request.step.region isa GemmRegion ? Supported() : Unsupported("requires a matrix product")
+    request.step.region isa Union{GemmRegion, BatchedGemmRegion} ? Supported() :
+    Unsupported("requires a matrix product")
 end
 
 function build_implementation(::LinearAlgebraGemm, request::RegionRequest, runtime, out, arrays)
-    launch = () -> begin
-        mul!(out, arrays...)
-        nothing
+    region = request.step.region
+    launch = if region isa BatchedGemmRegion
+        () -> (batched_mul!(out, arrays..., region.transpose_a, region.transpose_b); nothing)
+    else
+        () -> (mul!(out, arrays...); nothing)
     end
     BuiltImplementation(launch, (out, arrays), 0)
 end
@@ -136,24 +139,7 @@ function support(impl::CPUKernels, request::InPlaceRequest)
     support(impl, request.region)
 end
 
-# Built-in verbs on CPU: batched products through LinearAlgebra, the others
-# through their references.
-function support(::LinearAlgebraGemm, request::CallRequest)
-    request.target isa CPUTarget || return Unsupported("requires a CPU target")
-    request.call.f === batched_mul || return Unsupported("not a batched product")
-    Supported()
-end
-
-function build_implementation(::LinearAlgebraGemm, request::CallRequest, runtime, out, inputs)
-    (; transpose_a, transpose_b) = request.call.kwargs
-    a, b = inputs
-    launch = () -> begin
-        batched_mul!(out, a, b, transpose_a, transpose_b)
-        nothing
-    end
-    BuiltImplementation(launch, (out, inputs), 0)
-end
-
+# Built-in verbs on CPU, through their references.
 function support(::CPUKernels, request::CallRequest)
     request.target isa CPUTarget || return Unsupported("requires a CPU target")
     request.call.f in INDEX_VERBS || request.call.f === dropout ||

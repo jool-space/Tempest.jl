@@ -17,6 +17,7 @@ using Tempest:
     ScatterRegion,
     ScalarRegion,
     GemmRegion,
+    BatchedGemmRegion,
     region_name
 using LinearAlgebra
 using CUDACore

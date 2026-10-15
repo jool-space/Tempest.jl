@@ -193,7 +193,7 @@ function bind_step(program, step, lookup)
     elseif step.region isa OpaqueCall
         output = tree_map(lookup, step.region.call.results)
         inputs = map(lookup, program.nodes[step.output].inputs)
-    elseif step.region isa GemmRegion
+    elseif step.region isa Union{GemmRegion, BatchedGemmRegion}
         output = lookup(step.output)
         inputs = map(lookup, program.nodes[step.output].inputs)
     else
