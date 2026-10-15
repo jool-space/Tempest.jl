@@ -35,6 +35,7 @@ makedocs(;
         "API" => "api.md",
         "Reports" => [
             "Decision log" => "review-decisions.md",
+            "Outside review" => "outside-review.md",
             "Transformer training step" => "transformer-step.md",
             "Reduction domains and schedules" => "reduction-domains.md",
             "cuTile issues" => "cutile-issues.md",

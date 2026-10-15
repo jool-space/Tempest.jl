@@ -119,9 +119,11 @@ on cuTile unless stated.
 | computation | spellings | plan and time | why |
 |:--|:--|:--|:--|
 | mean-based norms | `Statistics.mean(x; dims)` | error | Tempest has no `mean` method; `sum(x; dims) ./ n` works |
-| dot product, 2²⁰ | `sum(a .* b)` / `reshape(a, 1, :) * reshape(b, :, 1)` | 61 / 10 μs | the full-reduction schedule's staged partial sums |
-| softmax over a 3-D array | rank 3 / reshaped to rank 2 | CUDA kernels / one graph region | cuTile graph regions are rank ≤ 2 |
-| softmax of a permuted matrix | `logsumexp(x; dims=2)` / `permutedims(logsumexp(permutedims(x)))` | 155 / 358 μs | layout operations end graph regions |
+| dot product, 2²⁰ | `sum(a .* b)` / `reshape(a, 1, :) * reshape(b, :, 1)` | 61 / 10 μs; now 14 / 7 | not the staged partial sums: their kernels compiled without an occupancy hint ([outside review](outside-review.md)) |
+| softmax over a 3-D array | rank 3 / reshaped to rank 2 | CUDA kernels / one graph region; now one graph region each, 145 / 136 μs | was: cuTile graph regions are rank ≤ 2; leading and trailing axes now collapse |
+| softmax of a permuted matrix | `logsumexp(x; dims=2)` / `permutedims(logsumexp(permutedims(x)))` | 155 / 358 μs; now one graph region each | was: layout operations end graph regions; a fold over a permutation now folds the source |
+| RMSNorm with dropped statistics | `(1, n)` statistics / `dropdims(…; dims = 1)` then `'` / `vec(…)` then `'` | 138 / 198 / 191 μs; now one graph region each | was: the reshape and the transpose back split the region; reshapes now sink to their source and exact aliases collapse |
+| sum of a flattened value | `sum(abs2, tanh.(x))` / `sum(abs2, vec(tanh.(x)))` | 251 / 374 μs; now 48 each | as above, with the occupancy hint |
 | Float16 MLP with cuDNN | `*` / doubly transposed products | 236 / 577 μs | cuDNN proposals stop at a layout operation on the product |
 | Float16 MLP with cuDNN | `*` / `batched_mul` | 236 / 379 μs; training 736 / 1126 μs | cuDNN proposals anchor on `MatMul` only |
 | Float16 MLP with cuDNN | `max.(h, 0)` / user `relu(v) = max(v, zero(v))` | 2 / 3 regions | cuDNN recognizes Base functions only |
@@ -320,6 +322,35 @@ replay, median of nine samples of 20) did not change beyond noise:
 The step's logsumexp is over a vocabulary of about a hundred characters, and
 its attention runs on cuTile under TF32 or as the reference otherwise.
 
+## Changes on the `outside-review` branch
+
+Made on 15 October 2026 after the [outside review](outside-review.md), which
+found the divergences added to the table above:
+
+1. **Occupancy hints for partial-sum kernels.** The cuTile kernels of full and
+   split reductions compiled without a hint and ran 4–5 times slower than the
+   CUDA kernels they displaced. See [graph regions](graph-regions.md#Native-cuTile-scope).
+2. **Exact canonical forms.** While tracing: a permutation of a permutation
+   composes, `permutedims(m, (2, 1))` is `transpose(m)`, a full reduction
+   reads through reshapes, and a reduction over a permuted array folds the
+   source and permutes the result. Before planning
+   (`src/compiler/canonical.jl`): reshapes and vector transposes sink through
+   single-use pointwise work to the value they present, and layout chains
+   that compose to the identity onto an ancestor of the same shape are
+   replaced by that ancestor. `dropdims(s; dims = 1)` followed by vector
+   arithmetic and `'`, `vec(h)` under a full reduction, `x[:, :]` and a
+   cancelled pair of transposes then plan as their direct spellings.
+3. **Rank-N graph domains.** A cuTile graph region collapses the leading or
+   trailing reduced axes of a fold input of any rank into one matrix axis and
+   the rest into the other. Softmax over a rank-3 array, a layer norm over
+   `(hidden, tokens, batch)` and the attention reference's softmax over
+   `(keys, queries, heads × batch)` form one region, with the kernel of their
+   reshaped spellings. The Float32 attention reference forward at
+   64 × 12 × 1024 × 4 went from 7.96 to 5.19 ms.
+
+`test/cutile/spellings.jl` asserts the plan shapes; `test/frontend/arrays.jl`
+and `test/compiler/planning.jl` the rewrites and the passes on the CPU.
+
 ## Remaining plan
 
 In order of the divergence each removes:
@@ -328,11 +359,19 @@ In order of the divergence each removes:
    `Positions` and graph regions take integer inputs. Dropout would then join
    graph regions, and `take_rows`/`put_rows` could become a positional select
    and a sum, fusing cross-entropy into one region.
-2. **Rank-3 graph domains.** Collapse kept axes of a reduction domain so that
-   softmax over `(keys, queries, heads × batch)`, the attention reference's,
-   forms one graph region.
-3. **Exact canonicalization.** A pass for the rewrites above (transposed
-   products, permuted reductions), applied before proposals.
+2. **Region inputs through index maps.** A graph region's inputs are dense
+   buffers, so every mapped input (a transpose, a slice with a step, a
+   gather) is copied first, and a reshape between pointwise values of
+   different shapes still splits a region (`sum(abs2, vec(tanh.(x)))` fuses
+   only because the reshape sinks; `tanh.(reshape(x, d, :))` under a reduction
+   over `x`'s own axes would not). The planner already has the maps; the
+   providers need to accept the affine ones.
+3. **A profitability check for graph regions.** A selected region is never
+   compared with the CUDA kernels it displaces. Rank-N collapse made that
+   visible: a last-axis softmax over 1024 × 256 × 16 collapses to a
+   262144 × 16 domain, where the second-axis schedule's 32 × 8 tile does
+   almost no work per block and takes 491 μs against 306 on the CUDA kernels
+   (at rank two the same schedule wins, 177 against 227 at 1024 × 4096).
 4. **cuDNN anchors on `BatchedMatMul`**, so batched products take epilogues.
 5. **A runtime-index read** for `gather_columns`, so a gather inlines into its
    consumer; `scatter_columns` stays a call.
