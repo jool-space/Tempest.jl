@@ -25,7 +25,7 @@ include("../fixtures/folds.jl")
     @test Tempest.fold(LogSumExpFold(), Float32[]) == -Inf32
 end
 
-@testset "logsumexp off the CUDA kernel's axis stays finite" begin
+@testset "logsumexp along either axis stays finite" begin
     x = 100.0f0 .* sin.(reshape(Float32.(1:(64 * 300)), 64, 300))
     for kwargs in ((;), (; fuse_regions = false))
         ex = prepare_forward(x -> Tempest.logsumexp(x; dims = 2), CuArray(x); kwargs...)

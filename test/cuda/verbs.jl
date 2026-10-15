@@ -127,17 +127,17 @@ end
     end
     x = 30 .* randn(Float32, 70, 33)
     ex = compare_prepared(x -> sum(abs2, Tempest.logsumexp(x)), x; target, atol = 1e-1, rtol = 1e-4)
-    @test occursin("call logsumexp [cuda]", sprint(explain, ex))
+    @test !occursin("call logsumexp", sprint(explain, ex))
     compare_prepared(x -> sum(abs2, exp.(x .- Tempest.logsumexp(x))), x; target, atol = 1e-3, rtol = 1e-4)
     # Masked columns: -Inf entries contribute nothing; the gradient stays finite.
     mask = Float32[k <= q ? 0 : -Inf for k = 1:8, q = 1:8]
     y = randn(Float32, 8, 8)
     ex = compare_prepared((y, m) -> sum(abs2, exp.((y .+ m) .- Tempest.logsumexp(y .+ m))), y, mask; target, atol = 1e-4, rtol = 1e-4)
     @test all(isfinite, Array(outputs(ex)[2]))
-    # Other axes fall back to the traced reference, a stable fold.
+    # Every axis is the same fold.
     ex = prepare_forward(x -> Tempest.logsumexp(x; dims = 2), CuArray(x))
     @test Array(execute!(ex)) ≈ Tempest.logsumexp(x; dims = 2) rtol = 1e-5
-    @test occursin("expanded reference", sprint(explain, ex))
+    @test !occursin("expanded reference", sprint(explain, ex))
 end
 
 @testset "Runtime integer indices on CUDA" begin

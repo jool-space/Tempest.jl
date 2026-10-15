@@ -5,20 +5,22 @@
 using Tempest, Test
 using MyLib
 
-f(x) = Tempest.logsumexp(x; dims = 1)
+g(x, rows) = Tempest.take_rows(x, rows)
 x = reshape(sin.(1.0:35.0), 5, 7)
-expected = log.(sum(exp.(x); dims = 1))
+rows = [3, 1, 5, 2, 2, 4, 1]
+expected = reshape([x[r, n] for (n, r) in enumerate(rows)], 1, 7)
+prep(; kwargs...) = prepare_forward(g, x, rows; kwargs...)
 
 @testset "An implementation package outside Tempest" begin
-    before = prepare_forward(f, x)
+    before = prep()
     @test :mylib ∉ before.candidates
     @test only(before.providers) === :cpu
 
     Tempest.activate(MyLib)
-    ex = prepare_forward(f, x)
+    ex = prep()
     explanation = sprint(explain, ex)
     @test occursin("Implementation candidates: mylib (registry) → cpu (target) → LinearAlgebra (target)", explanation)
-    @test occursin("call logsumexp [mylib]", explanation)
+    @test occursin("call take_rows [mylib]", explanation)
     @test execute!(ex) ≈ expected
     # Activation does not change an executable prepared before it.
     @test :mylib ∉ before.candidates
@@ -26,16 +28,16 @@ expected = log.(sum(exp.(x); dims = 1))
 
     # Keywords construct the instance; a scope overrides the registry.
     Tempest.activate(MyLib; name = :mine)
-    @test only(prepare_forward(f, x).providers) === :mine
-    scoped = Tempest.activate(() -> prepare_forward(f, x), MyLib.MyKernels(name = :scoped))
+    @test only(prep().providers) === :mine
+    scoped = Tempest.activate(prep, MyLib.MyKernels(name = :scoped))
     @test occursin("scoped (scoped)", sprint(explain, scoped))
-    @test only(Tempest.deactivate(() -> prepare_forward(f, x), MyLib).providers) === :cpu
-    @test only(prepare_forward(f, x).providers) === :mine
+    @test only(Tempest.deactivate(prep, MyLib).providers) === :cpu
+    @test only(prep().providers) === :mine
     # An explicit candidate precedes the registry and is not tried twice.
-    explicit = prepare_forward(f, x; implementations = (MyLib.MyKernels(name = :explicit),))
+    explicit = prep(; implementations = (MyLib.MyKernels(name = :explicit),))
     @test explicit.candidates == [:explicit, :cpu, :LinearAlgebra]
     @test explicit.candidate_sources == [:explicit, :target, :target]
 
     Tempest.deactivate(MyLib)
-    @test only(prepare_forward(f, x).providers) === :cpu
+    @test only(prep().providers) === :cpu
 end

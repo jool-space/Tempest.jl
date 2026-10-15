@@ -1,5 +1,6 @@
-# Built-in verbs: batched products through cuBLAS and a warp-per-slice
-# logsumexp. Both write into planned output storage and capture like other calls.
+# Built-in verbs: batched products through cuBLAS, runtime-index verbs, dropout
+# and the causal fill. They write into planned output storage and capture like
+# other calls.
 function support(::CuBLASGemm, request::CallRequest)
     request.target isa CUDATarget || return Unsupported("requires a CUDA target")
     request.call.f === Tempest.batched_mul || return Unsupported("not a batched product")
@@ -34,45 +35,11 @@ function support(::CUDAKernels, request::CallRequest)
             return Unsupported("index verbs need bits element types")
         return Supported()
     end
-    request.call.f === Tempest.logsumexp ||
-        return Unsupported("no CUDA kernel for $(request.call.f)")
-    request.call.kwargs.dims == (1,) ||
-        return Unsupported("the CUDA logsumexp reduces the first axis")
-    request.inputs[1].dtype in (Float32, Float64) ||
-        return Unsupported("logsumexp requires Float32/Float64")
-    Supported()
+    Unsupported("no CUDA kernel for $(request.call.f)")
 end
 
+# Warps per block of the one-warp-per-slice reduction kernels.
 const SLICE_WARPS = 8
-
-# One warp per column: the maximum, then the shifted sum of exponentials, each
-# combined across lanes in a fixed butterfly order.
-function logsumexp_kernel(out, x, rows, columns)
-    lane = (CUDACore.threadIdx().x - 1) % 32 + 1
-    column = (CUDACore.blockIdx().x - 1) * SLICE_WARPS + (CUDACore.threadIdx().x - 1) ÷ 32 + 1
-    column <= columns || return
-    base = (column - 1) * rows
-    T = eltype(out)
-    peak = typemin(T)
-    r = lane
-    while r <= rows
-        @inbounds peak = max(peak, x[base + r])
-        r += 32
-    end
-    peak = warp_reduce(max, peak)
-    shift = isfinite(peak) ? peak : zero(T)
-    total = zero(T)
-    r = lane
-    while r <= rows
-        @inbounds total += exp(x[base + r] - shift)
-        r += 32
-    end
-    total = warp_reduce(+, total)
-    if lane == 1
-        @inbounds out[column] = shift + log(total)
-    end
-    return
-end
 
 @inline function warp_reduce(op, value)
     offset = 16
@@ -119,19 +86,7 @@ function build_implementation(::CUDAKernels, request::CallRequest, runtime, out,
         x, seed = inputs
         return BuiltImplementation(dropout_call(out, x, seed, rate, stream), (out, inputs), 0)
     end
-    if index_support(request.call.f)
-        return BuiltImplementation(index_call(request.call.f, out, inputs), (out, inputs), 0)
-    end
-    x = only(inputs)
-    rows = size(x, 1)
-    columns = length(out)
-    kernel = CUDACore.@cuda launch=false logsumexp_kernel(out, x, rows, columns)
-    blocks = cld(columns, SLICE_WARPS)
-    launch = () -> begin
-        columns == 0 || kernel(out, x, rows, columns; threads = 32SLICE_WARPS, blocks)
-        nothing
-    end
-    BuiltImplementation(launch, (out, inputs), 0)
+    BuiltImplementation(index_call(request.call.f, out, inputs), (out, inputs), 0)
 end
 
 # Runtime-index verbs. Out-of-range indices read as NaN on the device rather

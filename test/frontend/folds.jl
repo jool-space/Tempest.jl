@@ -43,11 +43,12 @@ include("../fixtures/folds.jl")
         @test only(Tempest.interpret(Tempest.ForwardProgram(p), indices)) == f(indices; dims)
         @test Tempest.fold(g, indices; dims) == f(indices; dims)
     end
-    # Without a provider, logsumexp's traced reference is the stable fold.
+    # logsumexp is the stable fold itself, not a call.
     big = 1000 .* x
-    p = trace(x -> Tempest.reference(Tempest.logsumexp, x; dims = (2,)), big)
+    p = trace(x -> Tempest.logsumexp(x; dims = 2), big)
     @test only(Tempest.interpret(Tempest.ForwardProgram(p), big)) ≈ lse_reference(big; dims = 2)
     @test any(node -> node.op isa Tempest.FoldReduction{LogSumExpFold}, p.nodes)
+    @test !any(node -> node.op isa Tempest.CallResult, p.nodes)
     # Fold functions must keep the state type of fold_init.
     widening = GenericFold(; init = T -> (zero(T),), combine = (a, b) -> (a[1] + b[1],), lift = x -> (Float64(x),))
     @test_throws ArgumentError trace(x -> Tempest.fold(widening, x), Float32.(x))

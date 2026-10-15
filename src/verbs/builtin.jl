@@ -1,7 +1,6 @@
-# Built-in semantic verbs for operations the array vocabulary cannot express
-# efficiently: a batched matrix product and a numerically stable logsumexp.
-# Both keep their identity through the graph, so providers can realize them
-# directly; their pullbacks are ordinary array programs or further calls.
+# Built-in semantic verbs: operations that keep their identity through the
+# graph so providers can realize them directly. Their pullbacks are ordinary
+# array programs or further calls. `logsumexp` is a fold, not a call.
 
 """
     Tempest.batched_mul(a, b; transpose_a = false, transpose_b = false)
@@ -103,18 +102,14 @@ end
 """
     Tempest.logsumexp(x; dims = 1)
 
-`log.(sum(exp.(x); dims))`, computed without overflow by subtracting each
-slice's maximum. `dims = :` returns a number, like `sum(x)`. Softmax is `exp.(x .- logsumexp(x))`, and log-softmax is
-`x .- logsumexp(x)`; both remain ordinary, fusible array expressions.
+`log.(sum(exp.(x); dims))`, computed without overflow by shifting each slice by
+its maximum. `dims = :` returns a number, like `sum(x)`. It is the fold
+`Tempest.fold(LogSumExpFold(), x; dims)`: one reduction node that fuses with the
+work around it, so softmax `exp.(x .- logsumexp(x))` and log-softmax
+`x .- logsumexp(x)` each become one region with their neighbours.
 """
-# Over every element the result is a number, as for `sum(x)`. That is the fold
-# itself rather than a call: no provider implements the verb with that shape.
 logsumexp(x; dims = 1) =
-    dims isa Colon ? fold(LogSumExpFold(), x) :
-    reference(logsumexp, x; dims = reduction_axes(x, dims))
-logsumexp(x::TracedArray; dims = 1) =
-    dims isa Colon ? fold(LogSumExpFold(), x) :
-    record_call(logsumexp, x; dims = reduction_axes(x, dims))
+    fold(LogSumExpFold(), x; dims = dims isa Colon ? dims : reduction_axes(x, dims))
 
 function reduction_axes(x, dims)
     axes = dims isa Integer ? (Int(dims),) : Tuple(Int.(dims))
@@ -123,27 +118,6 @@ function reduction_axes(x, dims)
     end
     Tuple(sort!(collect(axes)))
 end
-
-function output_spec(::typeof(logsumexp), x; dims)
-    TensorSpec(eltype(x), ntuple(d -> d in dims ? 1 : size(x, d), ndims(x)))
-end
-
-function reference(::typeof(logsumexp), x::AbstractArray; dims)
-    # Half-precision elements accumulate in Float32, as the fold does.
-    T = eltype(x)
-    A = fold_accumulator(LogSumExpFold(), T)
-    A === T || return T.(reference(logsumexp, A.(x); dims))
-    peak = maximum(x; dims)
-    # A slice of -Inf has sum zero; keep the result -Inf rather than NaN.
-    shift = map(p -> isfinite(p) ? p : zero(p), peak)
-    shift .+ log.(sum(exp.(x .- shift); dims))
-end
-
-# Without a provider: one fold node, which keeps the running maximum and shift,
-# so it is stable on every backend and fuses into graph regions.
-reference(::typeof(logsumexp), x::TracedArray; dims) = fold(LogSumExpFold(), x; dims)
-
-verb_pullback(::typeof(logsumexp), (x,), y, dy; dims) = (dy .* exp.(x .- y),)
 
 # Runtime indices. Integer index arrays are traced inputs; these verbs read
 # through them. Their pullbacks give the indices no gradient, and accumulate

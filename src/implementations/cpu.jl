@@ -136,8 +136,8 @@ function support(impl::CPUKernels, request::InPlaceRequest)
     support(impl, request.region)
 end
 
-# Built-in verbs on CPU: batched products through LinearAlgebra, logsumexp as a
-# shifted loop over each slice.
+# Built-in verbs on CPU: batched products through LinearAlgebra, the others
+# through their references.
 function support(::LinearAlgebraGemm, request::CallRequest)
     request.target isa CPUTarget || return Unsupported("requires a CPU target")
     request.call.f === batched_mul || return Unsupported("not a batched product")
@@ -156,14 +156,13 @@ end
 
 function support(::CPUKernels, request::CallRequest)
     request.target isa CPUTarget || return Unsupported("requires a CPU target")
-    request.call.f === logsumexp || request.call.f in INDEX_VERBS || request.call.f === dropout ||
+    request.call.f in INDEX_VERBS || request.call.f === dropout ||
         request.call.f in (attention_forward, attention_backward, causal_fill) ||
         return Unsupported("no CPU kernel for $(request.call.f)")
     Supported()
 end
 
-# The references are the CPU kernels: logsumexp shifts each slice, and the
-# index verbs loop in index order.
+# The references are the CPU kernels: the index verbs loop in index order.
 function build_implementation(::CPUKernels, request::CallRequest, runtime, out, inputs)
     f, kwargs = request.call.f, request.call.kwargs
     launch = () -> begin
