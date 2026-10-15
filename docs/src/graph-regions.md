@@ -76,8 +76,9 @@ state updates use staged commits after their old-state reads finish.
 ## Recomputation is an explicit promise
 
 The cuTile provider may reevaluate pointwise producers after a reduction.
-`recomputable(f)` is the permission to do that. Unknown functions return false;
-a derivative rule or successful device compilation does not imply purity.
+`recomputable(f)` is the permission to do that. Base's arithmetic and elementary
+functions, conversions and `identity` have it; unknown functions return false.
+A derivative rule or successful device compilation does not imply purity.
 
 ```julia
 struct ExponentialScale

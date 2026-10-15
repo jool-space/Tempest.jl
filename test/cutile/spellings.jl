@@ -62,3 +62,24 @@ end
     @test all(step -> !(step.region isa Tempest.OpaqueCall), a.storage.steps)
     @test Array(execute!(a)[2]) ≈ Array(execute!(b)[2]) rtol = 1e-4 atol = 1e-6
 end
+
+# Base's functions are pure, so a graph region may recompute any of them.
+@testset "Spellings with other Base functions plan alike" begin
+    x = CuArray(sin.(reshape(Float32.(1:(256 * 40)), 256, 40)))
+    w = CuArray(Float32.(range(0.5, 1.5; length = 256)))
+    rms_sqrt(x, w) = x .* w ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0f-5)
+    rms_power(x, w) = w .* x .* (sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0f-5) .^ -0.5f0
+    a, b = prepare_forward(rms_sqrt, x, w), prepare_forward(rms_power, x, w)
+    @test plan_shape(a) == plan_shape(b) == [(:graph, :cutile)]
+    @test Array(execute!(a)) ≈ Array(execute!(b)) rtol = 1e-5
+    a = prepare_forward(x -> maximum(x; dims = 1), x)
+    b = prepare_forward(x -> reduce(max, x; dims = 1, init = -Inf32), x)
+    @test plan_shape(a) == plan_shape(b) == [(:graph, :cutile)]
+    # A sum's pullback broadcasts its cotangent with `identity`: the softmax
+    # spelled with maximum and sum trains in as many regions as the fold.
+    t = CuArray(cos.(reshape(Float32.(1:(256 * 40)), 256, 40)))
+    loss(f) = (x, t) -> sum(f(x) .* t)
+    a, b = prepare(loss(softmax_naive), x, t), prepare(loss(softmax_fold), x, t)
+    @test plan_shape(a) == plan_shape(b)
+    @test Array(execute!(a)[2]) ≈ Array(execute!(b)[2]) rtol = 1e-4 atol = 1e-6
+end

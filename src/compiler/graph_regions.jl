@@ -52,8 +52,19 @@ The declaration is independent of backend support. A backend can reject a
 recomputable function it cannot compile, or keep an unproven function outside a
 region that requires recomputation.
 """
-recomputable(f) = f in (+, -, *, /, sin, cos, exp, log, sqrt, inv, abs2, tanh)
-recomputable(::LiteralPower) = true
+recomputable(f) = f in PURE_BASE_FUNCTIONS
+recomputable(::Union{LiteralPower, Cast}) = true
+
+# Base's scalar arithmetic and elementary functions are pure. Listing all of
+# them keeps the recomputation permission from depending on spelling: `x .^ -0.5f0`
+# and `inv.(sqrt.(x))`, or a broadcast `identity` emitted by a sum's pullback,
+# plan alike. A provider may still decline a function it cannot compile.
+const PURE_BASE_FUNCTIONS = (
+    identity, +, -, *, /, \, ^, inv, abs, abs2, sign, copysign, flipsign, min, max,
+    clamp, muladd, fma, ifelse, sqrt, cbrt, hypot, exp, exp2, exp10, expm1, log,
+    log2, log10, log1p, sin, cos, tan, sinh, cosh, tanh, asin, acos, atan, asinh,
+    acosh, atanh, sinpi, cospi, sec, csc, cot, deg2rad, rad2deg, float,
+)
 
 # Construction rejected a selected region, growth-based or proposed. Preparation
 # excludes this exact member set and replans.
