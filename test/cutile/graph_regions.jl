@@ -9,11 +9,7 @@ struct GraphWarp
     parameters::GraphWarpParameters
 end
 
-function (f::GraphWarp)(x)
-    # The installed cuTile scalar overlay requires lane-dependent select arms.
-    # Selecting scalar slopes first currently fails its tile-rank check.
-    exp(ifelse(x > 0.0f0, f.parameters.positive * x, f.parameters.negative * x))
-end
+(f::GraphWarp)(x) = exp(ifelse(x > 0.0f0, f.parameters.positive, f.parameters.negative) * x)
 Tempest.recomputable(::GraphWarp) = true
 
 const graph_warp = GraphWarp(GraphWarpParameters(0.25f0, 0.125f0))
@@ -445,6 +441,17 @@ end
         ex = prepare_forward(x -> sum(abs2, x), CuArray(x))
         @test isempty(graph_steps(ex))
         @test only(Array(execute!(ex))) ≈ sum(abs2, x)
+    end
+
+    # Scalar callables broadcast over the two-axis tiles of column reductions:
+    # `sign`, and selects and constants of other shapes than their lanes.
+    @testset "Scalar callables over two-axis tiles: $dims" for dims in ((64, 4), (300, 5))
+        x = reshape(sin.(0.37f0 .* Float32.(1:prod(dims))), dims)
+        f(x) = sum(sign.(x) .* ifelse.(x .> 0.0f0, 0.25f0, 0.125f0) .* exp.(x); dims = 1)
+        ex = prepare_forward(f, CuArray(x))
+        @test length(graph_steps(ex)) == 1
+        @test only(unique(ex.providers)) === :cutile
+        @test Array(execute!(ex)) ≈ f(x)
     end
 end
 

@@ -160,9 +160,9 @@ Computed contributions are masked before reduction: zero-padding loads alone
 would be incorrect for functions such as `exp` or `log`. Singleton outputs have
 one writer even when the grid spans an axis absent from their logical shape.
 Each original pointwise conversion remains explicit. Custom scalar callables
-are broadcast over flattened tiles at the call boundary, working around a
-multi-axis scalar-broadcast shape bug that cuTile 1.0.0 and current `main`
-share; logical indexing and reduction scheduling remain two-dimensional.
+are broadcast over the two-dimensional tiles directly; until cuTile.jl#326
+they went through flattened tiles, because cuTile reversed the dimensions of
+scalars broadcast to multi-axis tiles.
 
 `explain` and `Tempest.profile` print the chosen schedule of each cuTile graph
 call on one line: the reduced axes and domain, the tile, whether a column stays

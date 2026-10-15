@@ -358,12 +358,10 @@ no shared workspace.
 Reductions with their pointwise producers and consumers are handled by graph
 regions; see [Graph regions](graph-regions.md). The earlier scalar-binding
 reduction path and its `fuse_reductions` flag were retired once the graph
-provider's resident schedule matched its measured performance. Two standalone
-compiler probes from that work remain: `examples/cutile_issues/wrapped_reduction.jl`
-reproduces cuTile 1.0's loop failure with wrapped kernel arguments, and
-`examples/cutile_issues/scalar_derivative.jl` reproduces an FMA type-verification
-failure for the polynomial derivative `x -> 1 + 3x*x`. Metadata acceptance does
-not prove scalar compilation; compiler errors propagate.
+provider's resident schedule matched its measured performance. The compiler
+problems met along the way, and their upstream fixes, are recorded in
+[cuTile issues](cutile-issues.md). Metadata acceptance does not prove scalar
+compilation; compiler errors propagate.
 
 ## What an opaque operation means
 

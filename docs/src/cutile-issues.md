@@ -1,12 +1,24 @@
 # cuTile issues found by Tempest
 
-23 September 2026. cuTile 1.0.0, CUDA_Tile_jll `tileiras` as resolved in the
-workspace manifest, GB10 (sm_121), Julia 1.13. Two separate problems, both
-reached through the kernel entry the graph-region provider generates, and a
-third found by an older reproducer. The repro scripts are in
-`examples/cutile_issues/` and `examples/cutile_issues/scalar_derivative.jl`.
+First written 23 September 2026 against cuTile 1.0.0 on GB10 (sm_121), Julia
+1.13. Rechecked on 15 October 2026 against cuTile `main` (`d2fafa3`, which
+includes cuTile.jl#315, #316, #318 and #326). The one reproducer still
+failing is in `examples/cutile_issues/`.
 
-## 1. Tuple argument read from two regions: invalid bytecode (fixed locally)
+| Issue | Status on cuTile main |
+| --- | --- |
+| 1. Tuple argument read from two regions | fixed by cuTile.jl#315 |
+| 2. Register allocation and token order | probe no longer slow (cuTile.jl#318 and later) |
+| 3. FMA with a scalar addend | fixed by cuTile.jl#316 |
+| 4. Scalars broadcast to multi-axis tiles | fixed by cuTile.jl#326 |
+| 5. Dynamic gather off-by-one | no longer reproduces |
+| 6. Eager `mapreduce` counts padded lanes | still reproduces (`padding_probe.jl`) |
+| 7. `log1p`, `expm1`, `asin`, `acos`, one-argument `atan` | still excluded; fixes on an unreleased cuTile branch |
+
+The probes for issues 1 to 5 were deleted once they passed; this page keeps
+what they showed.
+
+## 1. Tuple argument read from two regions: invalid bytecode (fixed upstream)
 
 A kernel that reads an array passed inside a tuple argument from two sibling
 regions, such as two loops, fails in `tileiras`:
@@ -16,8 +28,8 @@ error: 'cuda_tile.make_tensor_view' op operand #0 must be 0D tile of Pointer
 type values, but got '!cuda_tile.tile<f32>'
 ```
 
-`tuple_two_regions.jl` reproduces it in 20 lines. The same kernel with separate
-array parameters compiles.
+A 20-line probe reproduced it; the same kernel with separate array parameters
+compiled.
 
 **Cause.** `wrap_for` (`src/compiler/intrinsics/views.jl`) caches the
 `AssumeOp`-wrapped value of each source value for the whole kernel. Kernel
@@ -43,20 +55,17 @@ cleanly onto `origin/main` (`485137d`), which still has the bug.
   `codegen/operations` (a bytecode-version FileCheck case) and `device/random`
   (worker terminated), which fail identically on unmodified v1.0.0 here.
 
-**To do:** push `tempest-fixes-main` to a fork and open a PR against
-JuliaGPU/cuTile.jl; it carries this fix and the fma fix below as separate
-commits, each with its explanation and tests.
+**Upstream.** cuTile.jl#315 ("Keep AssumeOp wraps within the region that
+emits them") fixed it, and #318 gave arrays inside tuple and struct arguments
+their own alias classes. On cuTile main the probe compiles and is correct, as
+do two older probes of the same failure through streamed loops (a tuple entry
+against a flat one, and a two-pass column normalization with wrapped
+arguments).
 
-Tempest does not depend on the fix, because its streamed kernels use separate
-parameters for performance (below). The workspace currently develops the local
-checkout; `examples/Project.toml` has an uncommitted `[sources]` entry for it.
-`Pkg.free("cuTile")` from the examples project returns to the registered
-release.
+## 2. `tileiras` register allocation depends on cross-array token ordering (no longer slow)
 
-## 2. `tileiras` register allocation depends on cross-array token ordering
-
-`store_ordering_registers.jl` loads a column of `x`, reduces it, and stores a
-scaled column into `y`:
+The probe loaded a column of `x`, reduced it, and stored a scaled column into
+`y`:
 
 | Entry | Registers | Time (1024 × 1024) |
 | --- | ---: | ---: |
@@ -83,8 +92,7 @@ pipeline:
 
 The last column is an experiment in cuTile's token-order pass (a store also
 joins the `LAST_OP` token of every other alias class; loads unchanged;
-`examples/cutile_issues/stores_after_all.patch`, enabled by
-`CUTILE_EXPERIMENT=stores_after_all`). It
+a patch enabled by `CUTILE_EXPERIMENT=stores_after_all`). It
 recovers the resident kernels completely but still slows the streamed one
 2.4×. The streamed kernel uses 255 registers with separate parameters and
 30 with a tuple, yet is fastest with 255: occupancy is not what limits it.
@@ -93,7 +101,7 @@ This looks like a `tileiras` scheduling problem rather than a cuTile bug:
 removing a token edge that the data dependence already implies should not
 raise register allocation from 25 to 255. Next steps, in order of value:
 
-1. Report `store_ordering_registers.jl` to NVIDIA (the `tileiras` team, or the
+1. Report the probe to NVIDIA (the `tileiras` team, or the
    cuTile Python project, which has the same token-order design), with the two
    Tile IR listings (`SHOW_TILE_IR=true`).
 2. Ask cuTile maintainers whether Julia-side control is wanted: an alias hint
@@ -107,10 +115,14 @@ resident kernels compile with an occupancy hint of 4, which limits them to 64
 registers and restores their earlier times
 (`ext/cuTileExt/graph/build.jl`).
 
-## 3. FMA fusion with a scalar addend: invalid bytecode (fixed locally)
+On cuTile main of 15 October both entries of the probe still use 255
+registers, but both run in 21.5 μs, faster than either did before, so the
+probe and the patch were deleted. Tempest's occupancy hints were measured on
+its own kernels and have not been remeasured.
 
-`examples/cutile_issues/scalar_derivative.jl` broadcasts `v -> 1 + 3v * v` over a
-tile. cuTile's FMA fusion rewrites `addf(mulf(x, y), z)` into `fma(x, y, z)`.
+## 3. FMA fusion with a scalar addend: invalid bytecode (fixed upstream)
+
+The probe broadcast `v -> 1 + 3v * v` over a tile. cuTile's FMA fusion rewrites `addf(mulf(x, y), z)` into `fma(x, y, z)`.
 Here `z` is the constant `1`, a 0-D tile that `addf` would have broadcast, but
 the `fma` emitter passed it through, and `tileiras` rejected the module:
 
@@ -121,6 +133,44 @@ have same type
 
 The emitter now broadcasts all three operands to a common shape, as the
 binary operations do (`93de217` on `tempest-fixes`, `1bca3d2` on
-`tempest-fixes-main`). A device test in `test/device/math.jl` fails without the
-change and passes with it. The example passes with the local checkout; with
-the registered release it still fails.
+`tempest-fixes-main`). cuTile.jl#316 ("Broadcast 0-D operands of fma and
+select") made the same change upstream, and the probe passes on main.
+Tempest's tanh derivative keeps its factored form `(1 - y)(1 + y)`, now for
+accuracy: as `|y| → 1`, `1 - y` is exact while `1 - y²` cancels the rounding
+of `y²`.
+
+## 4. Scalars broadcast to multi-axis tiles: reversed dimensions (fixed upstream)
+
+A scalar callable containing constants, such as `ifelse(x > zero(x), x,
+zero(x))`, broadcast over a 64 × 4 tile failed to compile: cuTile compared it
+against a 4 × 64 tile. `sign` failed the same way over the two-axis tiles of
+column reductions. Tempest flattened every scalar call to one axis and
+reshaped the result back, and excluded `sign` from cuTile regions.
+cuTile.jl#326 ("Fix dimension order of scalars broadcast to
+multi-dimensional tiles") fixed it; both workarounds are removed, and
+`test/cutile/graph_regions.jl` covers `sign` and selects of constants over
+two-axis tiles.
+
+## 5. Dynamic gather off-by-one (no longer reproduces)
+
+A `ct.gather` with indices built from `ct.bid` and `ct.arange` read shifted
+lanes on cuTile 1.0. On main it reads every lane correctly. Tempest's scalar
+regions on cuTile still read dense storage with tile loads only; transposed
+and gathered reads stay on CUDA, since a gather path would be new code rather
+than a re-enabled one.
+
+## 6. Eager `mapreduce` counts padded lanes (open)
+
+`examples/cutile_issues/padding_probe.jl` sums `exp` over the columns of a
+zero matrix with cuTile's eager `mapreduce` on `Tiled` arrays. With 8 rows it
+is correct; with 259 rows every column sums to 512, the padded tile size,
+instead of 259: padded lanes contribute `exp(0)`. Tempest's own kernels mask
+computed contributions before reducing and are not affected.
+
+## 7. Functions without a tile lowering (open)
+
+`log1p`, `expm1`, `asin` and `acos` fail to compile over tiles, comparing a
+0-D tile with a 256-lane one, and one-argument `atan` needs a `copysign`
+without a Tile IR equivalent. Their fixes are on a cuTile branch that is not
+yet released, so cuTile regions decline them (`ext/cuTileExt/scalar.jl`) and
+CUDA runs them.

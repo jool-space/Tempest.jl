@@ -28,9 +28,10 @@ separated by a GEMM exercise shared workspace with different capacities.
 
 A cuTile 1.0 bug appeared when a custom scalar callable containing constants was
 broadcast over a two-dimensional tile: its inferred and emitted shapes disagreed.
-The lowering now expands singleton operands, flattens only the scalar-call
-boundary, and restores the tile shape. This preserves the actual Julia callable;
-it does not introduce a separate scalar operation vocabulary.
+The lowering expanded singleton operands, flattened only the scalar-call
+boundary, and restored the tile shape. cuTile.jl#326 fixed the bug, and the
+callable is now broadcast over the tile directly. Either way the actual Julia
+callable is preserved; there is no separate scalar operation vocabulary.
 
 Empty input arrays remain rejected by the frontend. Rank-three graph domains
 fall back to the existing execution path. A single region still cannot mix

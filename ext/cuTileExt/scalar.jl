@@ -8,8 +8,8 @@
     if prod(x.dims) == 1
         return a[1]
     end
-    # Dense reads use tile loads. cuTile 1.0's dynamic gather/scatter path
-    # exhibited an off-by-one on this toolchain; transpose regions use CUDA.
+    # Dense reads use tile loads; transpose and gather regions use CUDA. The
+    # off-by-one of cuTile 1.0's dynamic gather no longer reproduces on main.
     ct.load(a, (ct.bid(1),), (TILE_SIZE,); padding_mode = ct.PaddingMode.Zero)
 end
 
@@ -152,11 +152,11 @@ function tile_expression_support(x::ScalarCall)
     # cuTile has no overlays for these Base implementations. Their scalar
     # branches do not lower correctly to tile-shaped values. Keep Julia's CUDA
     # implementations rather than replacing log1p/expm1 with less accurate formulas.
-    # Still so on cuTile main (86b1f83): log1p, expm1, asin and acos fail to
+    # Still so on cuTile main (d2fafa3): log1p, expm1, asin and acos fail to
     # compile, comparing a 0-D tile with a 256-lane one; one-argument atan needs
-    # a copysign without a Tile IR equivalent; sign compiles over one-axis tiles
-    # but not over the two-axis tiles of column reductions (see graph/codegen.jl).
-    if x.f in (log1p, expm1, asin, acos, sign) || (x.f === atan && length(x.args) == 1)
+    # a copysign without a Tile IR equivalent. Their fixes are on a cuTile
+    # branch that is not yet released.
+    if x.f in (log1p, expm1, asin, acos) || (x.f === atan && length(x.args) == 1)
         return Unsupported(
             "cuTile has no verified lowering for $(x.f) with $(length(x.args)) argument(s)",
         )

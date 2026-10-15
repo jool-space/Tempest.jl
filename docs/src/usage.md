@@ -323,15 +323,13 @@ independent elementwise updates; other updates retain staged commits.
 Pol allocator integration is not yet implemented. The planner directly owns reusable arrays. Neither the node representation nor the
 public API is settled.
 
-Two cuTile/toolchain issues were encountered on GB10 with cuTile 1.0 and Julia
-1.12.7: an indexed gather/scatter off-by-one with dynamically constructed indices,
-and a mixed scalar/tile FMA verifier failure for some scalar expressions. Dense
-regions use tiled loads/stores; transposed reads use CUDA scalar indexing. Some
-derivatives are factored to avoid the FMA issue. Regions containing Float64
-literals use CUDA because cuTile scalar/tile promotion can otherwise narrow
-intermediate arithmetic. `examples/cutile_issues/diagnostics.jl`
-contains standalone reproducers. Compilation failures are not silently hidden;
-`CUDATarget(kernels=:cuda)` is an explicit alternative for scalar expressions.
+Scalar regions on cuTile use tiled loads and stores of dense storage;
+transposed and gathered reads use CUDA scalar indexing. Regions containing
+Float64 literals use CUDA because cuTile scalar/tile promotion can otherwise
+narrow intermediate arithmetic. [cuTile issues](cutile-issues.md) lists the
+compiler problems found so far and their status. Compilation failures are not
+silently hidden; `CUDATarget(kernels=:cuda)` is an explicit alternative for
+scalar expressions.
 
 ## Tests
 

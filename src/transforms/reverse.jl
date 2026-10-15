@@ -8,7 +8,8 @@ not automatic differentiation of arbitrary Julia or quantization algorithms.
 """
 function scalar_partials end
 
-# Factored form also avoids a mixed-shape FMA verifier issue in cuTile 1.0.
+# Factored, (1 - t)(1 + t) stays accurate as |t| → 1: 1 - t is exact there,
+# while 1 - t² cancels the rounding error of t².
 scalar_partials(::typeof(tanh)) = (x -> (one(x) - tanh(x)) * (one(x) + tanh(x)),)
 scalar_partials(::typeof(abs2)) = (x -> 2x,)
 scalar_partials(::typeof(sin)) = (cos,)
@@ -80,8 +81,8 @@ local_partials(::typeof(sqrt), xs, y) = (inv.(2 .* y),)
 local_partials(::typeof(inv), xs, y) = (-inv.(xs[1] .* xs[1]),)
 
 function local_partials(::typeof(tanh), xs, y)
-    # Reuse the forward result. The factored form avoids a mixed-shape FMA
-    # verifier issue in cuTile 1.0, so keep it as two factors rather than 1 - y².
+    # Reuse the forward result. Two factors rather than 1 - y²: as |y| → 1,
+    # 1 - y is exact while 1 - y² cancels the rounding error of y².
     one_y = unit(y)
     ((one_y .- y) .* (one_y .+ y),)
 end
