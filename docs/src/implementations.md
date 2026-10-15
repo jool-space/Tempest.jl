@@ -286,6 +286,45 @@ the table without being profiled.
   operations that fuse with their neighbors.
 - **cuTile's 128-feature backward collapses** to about 3 TFLOP/s.
 
+### Layout copies around attention
+
+Stiletto described permuted, sliced and reshaped inputs to cuDNN as tensor
+strides. Tempest's attention implementations take dense operands, so a layout
+operation between a producer and the call is a copy step, unless a pointwise
+region reads it anyway. `examples/benchmarks/attention_layouts.jl` counts
+those steps with `explain` and times them with `Tempest.profile`, at
+768 features, 12 heads, 1024 positions and batch 8 (GPT: 2 layers, batch 4),
+on GB10 on 15 October 2026. Times are μs per execution; "share" is the layout
+copies' part of the summed call times.
+
+| case | pass | data, attention | copies | their time | attention | total | share |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| GPT example | fwd | Float32, cuDNN cast / cuTile | 0 | 0 | 596 / 668 | 8083 / 7069 | 0% |
+| GPT example | fwd+bwd | Float32, cuDNN cast / cuTile | 0 | 0 | 1700 / 3837 | 25089 / 26190 | 0% |
+| heads by reshape | fwd, fwd+bwd | Float16, BFloat16 cuDNN; Float32 cuTile | 0 | 0 | | | 0% |
+| rows: `permutedims` split | fwd | Float16 cuDNN | 3 | 510 | 291 | 1335 | 38% |
+| rows: `permutedims` split | fwd+bwd | Float16 cuDNN | 4 | 719 | 1600 | 4124 | 17% |
+| rows: `permutedims` split | fwd | Float32 cuTile | 3 | 1048 | 651 | 2816 | 37% |
+| rows: `permutedims` split | fwd+bwd | Float32 cuTile | 4 | 1312 | 3706 | 9519 | 14% |
+| packed `[q; k; v]` slices | fwd | Float16 cuDNN | 3 | 332 | 281 | 1202 | 28% |
+| packed `[q; k; v]` slices | fwd+bwd | Float16 cuDNN | 3 | 336 | 1611 | 5060 | 7% |
+| packed `[q; k; v]` slices | fwd | Float32 cuTile | 3 | 668 | 662 | 2505 | 27% |
+| packed `[q; k; v]` slices | fwd+bwd | Float32 cuTile | 3 | 668 | 3716 | 11334 | 6% |
+
+BFloat16 matched Float16 within 6%. A head split and merge by `reshape`, the
+order attention takes, costs nothing, and so does the GPT example, whose
+rotary embedding reads its operands in a pointwise region. The GPT training
+step has eight other copies, 0.6% of its time: weight gradients reshaped
+from a transposed product into three-dimensional weights. A merge by
+`permutedims` before a matrix product is a transposed operand and also
+free. Copies appear when operands are written as `(tokens, features)` rows
+(`permutedims(reshape(x * w, ...))`, about 170 μs per Float16 copy, a
+strided transpose) or sliced from one packed projection (about 110 μs, at
+copy bandwidth). In training they are 6 to 17% of the step; forward-only,
+27 to 38%. The row form's feature axis is not unit-stride, which cuDNN's
+attention engines likely require, so strides would absorb the packed slices
+but probably not the row permutation.
+
 ### Next
 
 Norms are the next cuDNN pattern: `norm_fwd!`/`norm_bwd!` with saved statistics,
