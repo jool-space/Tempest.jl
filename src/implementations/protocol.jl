@@ -167,7 +167,8 @@ struct CuTileKernels <: Implementation end
 struct CuBLASGemm <: Implementation end
 
 """
-    CuDNNKernels(; float32_cast = nothing)
+    CuDNNKernels(; float32_cast = nothing, l2_fraction = 0.75, product_flops = 108e12,
+                 memory_bandwidth = 234e9, launch_seconds = 2e-6, fused_efficiency = 0.9)
 
 Semantic verbs realized as cuDNN graphs; load CUDACore and cuDNN. Currently
 scaled dot-product attention, forward and backward. cuDNN's attention engines
@@ -179,16 +180,38 @@ results return as Float32. The rounding is opt-in, like TF32 through
 
 It also proposes regions around Float16 and BFloat16 matrix products: the
 product with its pointwise epilogue and the sums after it, forward and backward
-(Float32 products only under TF32). `float32_cast` does not apply to them.
+(Float32 products only under TF32). `float32_cast` does not apply to them. The
+other keywords are measured on GB10 and describe where that fusion pays (see
+the proposed-regions guide). A product whose right operand exceeds
+`l2_fraction` of the device's L2 cache is launched in column chunks that fit
+it, or declined when its region sums across columns. A product is declined when
+its estimated fused time, at `fused_efficiency` of cuBLAS's half-precision
+`product_flops` on the waves it fills, exceeds cuBLAS plus an epilogue pass at
+`memory_bandwidth` and one `launch_seconds`.
 """
 struct CuDNNKernels <: Implementation
     float32_cast::Union{Nothing, DataType}
+    l2_fraction::Float64
+    product_flops::Float64
+    memory_bandwidth::Float64
+    launch_seconds::Float64
+    fused_efficiency::Float64
 
-    function CuDNNKernels(; float32_cast = nothing)
+    function CuDNNKernels(;
+        float32_cast = nothing,
+        l2_fraction = 0.75,
+        product_flops = 108e12,
+        memory_bandwidth = 234e9,
+        launch_seconds = 2e-6,
+        fused_efficiency = 0.9,
+    )
         if !(float32_cast === nothing || float32_cast in (Float16, Core.BFloat16))
             throw(ArgumentError("float32_cast must be nothing, Float16 or BFloat16"))
         end
-        new(float32_cast)
+        all(>(0), (l2_fraction, product_flops, memory_bandwidth, fused_efficiency)) ||
+            throw(ArgumentError("CuDNNKernels rates and fractions must be positive"))
+        launch_seconds >= 0 || throw(ArgumentError("launch_seconds must be nonnegative"))
+        new(float32_cast, l2_fraction, product_flops, memory_bandwidth, launch_seconds, fused_efficiency)
     end
 end
 

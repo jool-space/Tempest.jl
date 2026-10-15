@@ -4,6 +4,32 @@ Dated review decisions, newest first. Each entry records priorities at that
 date, not promises that every proposal survives implementation and measurement;
 "next step" language in older entries describes the state at that time.
 
+## Why cuDNN's fused products lose, and the rule that replaced 4096 — 15 October 2026
+
+The first cuDNN consumer declined products whose right operand exceeded three
+quarters of L2 or whose inner dimension exceeded 4096, from measurements alone.
+Kernel traces with `nsys` (performance counters are not available to this
+user, so no `ncu`) found two causes, recorded in
+[proposed regions](proposed-regions.md#Where-fusion-pays):
+
+- **Tile order.** The runtime-compiled fused kernels walk output tiles along
+  columns and reread the whole right operand for each row of tiles; beyond L2
+  it streams from memory once per row. Split-K and stream-K knobs and other
+  kernel configurations did not fix the order; launching the plan over column
+  chunks of the operand did (1024 × 2048 × 8192: 1216 to 475 μs).
+- **Product throughput.** Without the L2 effect the fused kernels ran at about
+  0.9 of cuBLAS's rate, less with a mostly empty last wave of output tiles, so
+  fusion pays only while the epilogue traffic it saves exceeds that loss.
+
+The 4096 limit is gone. `CuDNNKernels` launches a region in column chunks when
+the right operand exceeds `l2_fraction` of L2, and declines a product when an
+estimate of its fused time, from cuBLAS's rate, the fused efficiency, wave
+occupancy, copy bandwidth and launch cost, exceeds the default plan's. All are
+keywords with GB10 defaults. Other kernel configurations shortened the rows of
+tiles (709 μs) but kept the column-first order and lost to the chunked launch,
+so the heuristic's first configuration stays. Choosing one by timing stays
+rejected for determinism.
+
 ## Float32 accumulation for half-precision folds — 15 October 2026
 
 A Float16 sum accumulated in Float16 on the CPU and CUDA kernels and in the

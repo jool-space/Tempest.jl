@@ -18,8 +18,9 @@
 # forward + backward.
 #
 # With LAYERS=m×k×n,... it instead times single layers tanh.(w * x .+ b) in
-# Float16 with cuDNN's profitability policy switched off, the measurement
-# behind that policy.
+# Float16: the default plan, cuDNN with its limits switched off (one launch,
+# never declined), and cuDNN with them (column chunks within L2, the cost
+# estimate), the measurements behind those limits.
 # Run: julia --project=examples examples/benchmarks/matmul_epilogue.jl
 using Tempest, CUDACore, Statistics
 import cuBLAS, cuTile, cuDNN
@@ -105,18 +106,26 @@ end
 
 layer(w, b, x) = tanh.(w * x .+ b)
 
+# cuDNN with its limits off (one launch, any inner dimension), and with them.
+const LAYER_CANDIDATES = (
+    CANDIDATES[1],
+    (name = "cuDNN unlimited", flags = (; implementations = (CuDNNKernels(l2_fraction = Inf, fused_efficiency = Inf),))),
+    CANDIDATES[2],
+)
+
 function run_layers(shapes)
-    Base.get_extension(Tempest, :cuDNNExt).PROFITABILITY[] = false
-    println(CUDACore.name(CUDACore.device()), "; cuDNN ", cuDNN.version(), "; profitability policy off")
-    println("m×k×n | right operand | default | cuDNN (μs) | speedup")
+    println(CUDACore.name(CUDACore.device()), "; cuDNN ", cuDNN.version())
+    println("m×k×n | right operand | ", join((c.name for c in LAYER_CANDIDATES), " | "), " (μs) | cuDNN plan")
     for (m, k, n) in shapes
         shaped(s, dims...) = CuArray(Float16.(reshape(sin.((1:prod(dims)) .* s), dims...) ./ sqrt(dims[end])))
         args = (shaped(0.3, m, k), shaped(0.5, m), shaped(0.7, k, n))
-        executables = map(c -> prepare_forward(layer, args...; c.flags...), CANDIDATES)
+        executables = map(c -> prepare_forward(layer, args...; c.flags...), LAYER_CANDIDATES)
         foreach(execute!, executables)
         times = measure(executables)
-        println(m, "×", k, "×", n, " | ", (2k * n) >> 20, " MiB | ", join(round.(times; digits = 1), " | "),
-                " | ", round(times[1] / times[2]; digits = 2))
+        summary = something(Tempest.implementation_summary(last(executables).calls[1]), "default plan")
+        plan = occursin("chunks", summary) ? match(r"in (\d+) column chunks", summary)[1] * " chunks" :
+               :cuDNN in last(executables).providers ? "one launch" : "declined"
+        println(m, "×", k, "×", n, " | ", (2k * n) >> 20, " MiB | ", join(round.(times; digits = 1), " | "), " | ", plan)
     end
 end
 

@@ -245,7 +245,7 @@ end
 
 function bound_launch(runtime, graph, values, engine, before, after, summary)
     pack, scalars = bind_graph(graph, values, engine)
-    GraphLaunch(runtime_handle(runtime), graph, pack, scalars, before, after, summary)
+    GraphLaunch(runtime_handle(runtime), graph, [pack], scalars, before, after, summary)
 end
 
 ## Construction

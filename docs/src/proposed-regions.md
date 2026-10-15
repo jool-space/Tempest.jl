@@ -143,7 +143,7 @@ Region proposals:
   cuDNN matmul → -, +, *, *, sum dims=(2,) [30, 31, 32, 33, 34, 35, 38]: selected as region 4
   cuDNN matmul → +, tanh [6, 7, 8]: selected as region 1
   cuDNN matmul → +, tanh, -, +, * [6, 7, 8, 31, 32, 33, 34]: conflict: its alternative [6, 7, 8] ranked higher
-  cuDNN matmul → tanh [3, 4]: declined: cuDNN's fused engines were slower than cuBLAS for an inner dimension above 4096
+  cuDNN matmul → tanh [3, 4]: declined: cuDNN's fused product would take longer than cuBLAS and an epilogue kernel (estimated 265.1 against 179.0 μs; 67% of tile slots used)
   cuDNN … : fell back after construction: …
 ```
 
@@ -155,8 +155,8 @@ and their calls carry the implementation's summary.
 Proposals depend only on the program and the target; the sort key is a total
 order, duplicate proposals of one implementation are merged, and acceptance is
 a deterministic walk. The same program on the same device gives the same
-partition. cuDNN's profitability rule reads the device's L2 size, which is a
-property of the device. Selection by timing was rejected for this reason.
+partition. cuDNN's chunking and cost estimate read the device's L2 size and SM
+count, which are properties of the device. Selection by timing was rejected for this reason.
 
 ## cuDNN: matrix products with epilogues
 
@@ -206,37 +206,75 @@ Float32 products round to TF32, which matched cuBLAS's TF32 error exactly, so
 cuDNN proposes them only under `CUDATarget(matmul_precision = :tf32)`. Float64
 is never proposed.
 
-### Profitability
+### Where fusion pays
 
-Every fused engine on GB10 is runtime-compiled; the cuBLASLt engine serves a
-lone product only. The fused engines were fast while the right operand
-(`k × n`) fit in about three quarters of the 24 MiB L2, and two to three times
-slower beyond it, regardless of either operand's layout. Single layers
-`tanh.(W * x .+ b)` in Float16, with the policy below switched off
-(`LAYERS=... examples/benchmarks/matmul_epilogue.jl`), device time per
-execution in μs:
+Every fused engine on GB10 is runtime-compiled (`cudnn_generated_fort_native`
+kernels for sm80 and sm120, without TMA); the cuBLASLt engine serves a lone
+product only. Two causes made the fused engines lose to cuBLAS plus Tempest's
+epilogue kernels, found with `nsys` kernel traces (GPU performance counters,
+and so `ncu`, are not available to this user):
 
-| m × k × n | right operand | default | cuDNN | speedup |
-| --- | --- | --- | --- | --- |
-| 1024 × 1024 × 8192 | 16 MiB | 335.8 | 241.1 | 1.39 |
-| 1024 × 1152 × 8192 | 18 MiB | 364.7 | 284.9 | 1.28 |
-| 1024 × 1024 × 10240 | 20 MiB | 428.3 | 491.5 | 0.87 |
-| 1024 × 2048 × 8192 | 32 MiB | 495.6 | 1293.0 | 0.38 |
-| 4096 × 2048 × 2048 | 8 MiB | 493.3 | 342.5 | 1.44 |
-| 2048 × 4096 × 1024 | 8 MiB | 187.7 | 177.8 | 1.06 |
-| 1024 × 8192 × 1024 | 16 MiB | 202.5 | 237.1 | 0.85 |
+**Tile order.** The fused kernel's grid walks 128 × 128 output tiles along
+columns, `columns / 128` by `rows / 128`, and every row of tiles reads the
+whole right operand (`k × n`). While it fits in L2 that costs nothing. Beyond
+it, the operand streams from memory once per row of tiles: 1024 × 2048 × 8192
+(a 32 MiB operand, 8 rows of tiles) took 1216 μs on 128 × 128 tiles, 709 μs on
+64 × 256 tiles (4 rows), while cuBLAS's `nvjet_sm121` kernel, with TMA loads
+and its own tile order, took 351 μs for the product alone. Splitting K
+(`SPLIT_K_SLC` knob) only slowed it, and swapping the operands did not change
+the order. Launching the same plan over column chunks of the right operand,
+each a pointer offset into the same buffers, keeps the chunk in L2: four chunks
+took 475 μs. The default epilogue kernels are single streaming passes, which no
+cache reuse would speed up, which is why the default plan does not suffer.
 
-`support` therefore declines a product whose right operand exceeds three
-quarters of the device's L2, or whose inner dimension exceeds 4096, with that
-reason in `explain`. This is a measured policy, not a capability limit, and it
-was measured on one device.
+**Product throughput.** With L2 not the limit, the fused kernels reached about
+0.9 of cuBLAS's rate on full waves, less when a launch's last wave is mostly
+empty: 1024 × 8192 × 1024 has 64 output tiles for 48 SMs. Fusion saves writing
+and rereading the product, a fixed cost per output element, and loses a share
+of the product's time, which grows with the inner dimension.
+
+`CuDNNKernels` therefore:
+
+- launches a region in equal column chunks when the right operand exceeds
+  `l2_fraction` of L2 (default 3/4: at 18 MiB one launch still held, at 20 MiB
+  it did not); a region that sums across columns cannot be cut and is declined;
+- declines a product whose estimated fused time exceeds the default plan's:
+  `T / (e u)` against `T + 2 s m n / bandwidth + launch`, with the product time
+  `T = 2 m n k / product_flops`, `e = fused_efficiency`, and `u` the share of the
+  launched waves' tile slots that hold a tile. The defaults are GB10
+  measurements: cuBLAS's 108 TFLOP/s half-precision rate, 234 GB/s copy
+  bandwidth, 2 μs per launch, and an efficiency of 0.9.
+
+All are `CuDNNKernels` keywords. On these single layers the estimate decided
+right except within about 10% of even. Its misses are 1024 × 2048 × 8192, where
+two 16 MiB chunks were slower than four 8 MiB chunks would have been, and
+2048 × 4096 × 1024, a 6% win it declines. Single layers `tanh.(W * x .+ b)` in
+Float16 (`LAYERS=... examples/benchmarks/matmul_epilogue.jl`), device time per
+execution in μs, "unlimited" being one launch never declined:
+
+| m × k × n | right operand | default | cuDNN unlimited | cuDNN | plan | speedup |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1024 × 1024 × 8192 | 16 MiB | 409.9 | 235.9 | 239.3 | one launch | 1.71 |
+| 1024 × 1152 × 8192 | 18 MiB | 362.0 | 333.8 | 360.5 | one launch | 1.00 |
+| 1024 × 1024 × 10240 | 20 MiB | 430.2 | 499.2 | 352.7 | 2 chunks | 1.22 |
+| 1024 × 2048 × 8192 | 32 MiB | 526.7 | 1255.6 | 565.2 | 2 chunks | 0.93 |
+| 1024 × 4096 × 8192 | 64 MiB | 839.7 | 2942.8 | 828.8 | declined | 1.01 |
+| 4096 × 1024 × 8192 | 16 MiB | 1442.7 | 980.2 | 1008.5 | one launch | 1.43 |
+| 4096 × 2048 × 2048 | 8 MiB | 498.4 | 366.2 | 358.5 | one launch | 1.39 |
+| 4096 × 4096 × 4096 | 32 MiB | 1726.6 | 2333.6 | 1551.3 | 2 chunks | 1.11 |
+| 2048 × 4096 × 1024 | 8 MiB | 190.8 | 178.6 | 190.7 | declined | 1.00 |
+| 1024 × 8192 × 1024 | 16 MiB | 249.7 | 246.6 | 263.0 | declined | 0.95 |
+| 512 × 2048 × 4096 | 16 MiB | 114.9 | 107.1 | 108.1 | one launch | 1.06 |
+| 512 × 512 × 2048 | 2 MiB | 25.5 | 16.4 | 16.6 | one launch | 1.54 |
+
+Successive runs of the same shape varied by up to 10%.
 
 ### Measured against the default plan
 
 `examples/benchmarks/matmul_epilogue.jl` times the block
 `w2 * tanh.(w1 * x .+ b1) .+ b2`, a transformer feed-forward layer with hidden
 width `4d` and `n` tokens, and the training step of `sum(abs2, block)`. It ran
-on GB10 with cuDNN 9.27 on 14 October 2026, with no other GPU process. Each
+on GB10 with cuDNN 9.27 on 15 October 2026, with no other GPU process. Each
 figure is the median device time per step in μs, over CUDA graphs of 20
 back-to-back executions; TFLOP/s counts the products only. "default" is
 Tempest's plan without cuDNN: cuBLAS products with Float32 accumulation and
@@ -244,31 +282,30 @@ generated epilogue kernels.
 
 | pass | type | d × n | default | cuDNN | speedup |
 | --- | --- | --- | --- | --- | --- |
-| fwd | Float16 | 256 × 4096 | 142.7 (30.1) | 63.2 (68.0) | 2.26 |
-| fwd | Float16 | 512 × 4096 | 395.3 (43.5) | 231.4 (74.2) | 1.71 |
-| fwd | Float16 | 768 × 8192 | 1461.5 (52.9) | 1038.7 (74.4) | 1.41 |
-| fwd | Float16 | 1024 × 8192 | 2263.0 (60.7) | 1754.2 (78.3) | 1.29 |
-| fwd | BFloat16 | 256 × 4096 | 142.6 (30.1) | 66.9 (64.2) | 2.13 |
-| fwd | BFloat16 | 512 × 4096 | 377.2 (45.5) | 233.2 (73.7) | 1.62 |
-| fwd | BFloat16 | 768 × 8192 | 1503.1 (51.4) | 1037.1 (74.5) | 1.45 |
-| fwd | BFloat16 | 1024 × 8192 | 2266.2 (60.6) | 1796.0 (76.5) | 1.26 |
-| fwd+bwd | Float16 | 256 × 4096 | 450.9 (28.6) | 248.2 (51.9) | 1.82 |
-| fwd+bwd | Float16 | 512 × 4096 | 1154.7 (44.6) | 688.6 (74.9) | 1.68 |
-| fwd+bwd | Float16 | 768 × 8192 | 4519.1 (51.3) | 3166.5 (73.2) | 1.43 |
-| fwd+bwd | Float16 | 1024 × 8192 | 6876.0 (60.0) | 5870.8 (70.2) | 1.17 |
-| fwd+bwd | BFloat16 | 256 × 4096 | 413.3 (31.2) | 246.7 (52.2) | 1.67 |
-| fwd+bwd | BFloat16 | 512 × 4096 | 1151.8 (44.7) | 683.9 (75.4) | 1.68 |
-| fwd+bwd | BFloat16 | 768 × 8192 | 4514.2 (51.4) | 3221.9 (72.0) | 1.40 |
-| fwd+bwd | BFloat16 | 1024 × 8192 | 6852.6 (60.2) | 5635.0 (73.2) | 1.22 |
+| fwd | Float16 | 256 × 4096 | 143.2 (30.0) | 65.9 (65.1) | 2.17 |
+| fwd | Float16 | 512 × 4096 | 375.9 (45.7) | 232.4 (73.9) | 1.62 |
+| fwd | Float16 | 768 × 8192 | 1486.6 (52.0) | 970.1 (79.7) | 1.53 |
+| fwd | Float16 | 1024 × 8192 | 2252.4 (61.0) | 1736.0 (79.2) | 1.3 |
+| fwd | BFloat16 | 256 × 4096 | 143.9 (29.9) | 64.6 (66.4) | 2.23 |
+| fwd | BFloat16 | 512 × 4096 | 378.4 (45.4) | 225.5 (76.2) | 1.68 |
+| fwd | BFloat16 | 768 × 8192 | 1489.9 (51.9) | 964.2 (80.2) | 1.55 |
+| fwd | BFloat16 | 1024 × 8192 | 2256.4 (60.9) | 1777.5 (77.3) | 1.27 |
+| fwd+bwd | Float16 | 256 × 4096 | 414.3 (31.1) | 250.8 (51.4) | 1.65 |
+| fwd+bwd | Float16 | 512 × 4096 | 1152.5 (44.7) | 700.5 (73.6) | 1.65 |
+| fwd+bwd | Float16 | 768 × 8192 | 4502.5 (51.5) | 3202.5 (72.4) | 1.41 |
+| fwd+bwd | Float16 | 1024 × 8192 | 6820.9 (60.4) | 5948.3 (69.3) | 1.15 |
+| fwd+bwd | BFloat16 | 256 × 4096 | 419.1 (30.7) | 253.0 (50.9) | 1.66 |
+| fwd+bwd | BFloat16 | 512 × 4096 | 1144.1 (45.1) | 683.6 (75.4) | 1.67 |
+| fwd+bwd | BFloat16 | 768 × 8192 | 4506.4 (51.5) | 3161.7 (73.4) | 1.43 |
+| fwd+bwd | BFloat16 | 1024 × 8192 | 6852.1 (60.2) | 5691.9 (72.4) | 1.2 |
 
-With the profitability rule, fusion won at every shape, 1.2 to 2.3 times. At
-`d = 768` and `1024` the second product's right operand, the hidden activation,
-is 48 or 64 MiB, so that product and its bias stay with cuBLAS and the generated
-kernels; the first product, and in training the backward product with the
-activation derivative and bias gradient, are fused. Without the rule, the
-forward at `d = 1024` ran at 0.61 times the default, and training at 0.86.
-Preparation is not slower once warm (10 ms either way); the first cuDNN
-preparation compiles the fused engines, about 5 s in this process.
+Fusion won at every shape, 1.15 to 2.2 times. At `d = 1024` the second
+product's right operand, the 64 MiB hidden activation, would need eight chunks
+of 64 tiles each, and the estimate declines it; the first product runs as one
+launch, and in training the backward product with the activation derivative
+and bias gradient is fused too. The first rule, which declined products past
+three quarters of L2 or an inner dimension of 4096, gave 1.26 to 2.26 times;
+column chunks raised the forward at `d = 768` from 1.41 to 1.53.
 
 ## Not done
 

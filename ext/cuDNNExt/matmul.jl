@@ -20,17 +20,25 @@
 #   Float16 or BFloat16 sum output has no engine.
 # - Half-precision intermediate tensors build, so each epilogue value is
 #   declared in its Tempest type and rounds where Tempest rounds it.
-# - Every fused engine is runtime-compiled; the cuBLASLt engine serves a lone
-#   product only. On single layers the fused engines beat cuBLAS plus Tempest's
-#   epilogue kernels while the right operand (k × n) fit in about three
-#   quarters of the 24 MiB L2, and ran at 0.4-0.9 times their speed beyond it
-#   (examples/benchmarks/matmul_epilogue.jl with LAYERS). An inner dimension
-#   of 8192 was also slower. `profitable` declines those products.
+# - Every fused engine is runtime-compiled (sm80/sm120 "fort native" kernels
+#   without TMA); the cuBLASLt engine serves a lone product only. Two causes
+#   made them lose to cuBLAS plus Tempest's epilogue kernels (nsys traces in
+#   docs/src/proposed-regions.md):
+#   1. Tile order. The grid walks output tiles along columns and reloads the
+#      right operand (k × n) for every row of tiles. Beyond L2 it streams from
+#      memory once per row of tiles: 1024 × 2048 × 8192 took 1216 μs on 128 ×
+#      128 tiles (8 rows), 709 μs on 64 × 256 tiles (4 rows). `column_chunks`
+#      launches such a region in column chunks that fit L2: 475 μs.
+#   2. Product throughput. With L2 not the limit, the fused kernels reached
+#      about 0.9 of cuBLAS's rate on full waves, less when a launch's last wave
+#      of 128 × 128 tiles is mostly empty (1024 × 8192 × 1024: 64 tiles on 48
+#      SMs). Fusion saves writing and rereading the product, a fixed cost per
+#      output element; the loss grows with the inner dimension. `profitable`
+#      compares the two estimates.
+# Split-K and stream-K knobs did not help; other kernel configurations changed
+# the tile size but not the tile order.
 
 const MAX_EPILOGUE_MEMBERS = 32
-const MAX_INNER_DIMENSION = 4096
-# Off only to measure the declined shapes (matmul_epilogue.jl with LAYERS).
-const PROFITABILITY = Ref(true)
 
 ## Pointwise modes
 #
@@ -189,7 +197,7 @@ function proposal_operand_type(region)
     nodes[first(products)].dtype
 end
 
-function support(::CuDNNKernels, request::ProposedRequest)
+function support(implementation::CuDNNKernels, request::ProposedRequest)
     request.target isa CUDATarget || return Unsupported("requires a CUDA target")
     region = request.region
     nodes = region.program.nodes
@@ -211,11 +219,12 @@ function support(::CuDNNKernels, request::ProposedRequest)
             return Unsupported("cuDNN has no engine for work after a sum")
         end
     end
-    for id in region.members
-        nodes[id].op isa MatMul || continue
-        verdict = profitable(nodes, id)
-        verdict isa Unsupported && return verdict
-    end
+    verdict = single_product(region)
+    verdict isa Unsupported && return verdict
+    chunks = column_chunks(implementation, region)
+    chunks isa Unsupported && return chunks
+    verdict = profitable(implementation, region, chunks)
+    verdict isa Unsupported && return verdict
     all(id -> nodes[id].dtype in EPILOGUE_TYPES, region.inputs) ||
         return Unsupported("cuDNN region inputs must be Float16, BFloat16 or Float32")
     # Construction needs buffers; the engine check does not. Checking it here
@@ -225,28 +234,102 @@ function support(::CuDNNKernels, request::ProposedRequest)
     presentations = map(region.inputs) do id
         nodes[id].op isa Tempest.TransposeOp && Tempest.native_region_input(region, id) ? :transpose : :dense
     end
-    graph = region_graph(region, presentations)
+    graph = region_graph(region, presentations, chunks)
     graph isa Unsupported ? graph : Supported()
 end
 
 region_users(region, id) =
     [user for (user, node) in enumerate(region.program.nodes) if id in node.inputs]
 
-# A measured policy for the fused engines, not a capability limit.
-function profitable(nodes, product)
-    PROFITABILITY[] || return Supported()
-    left, right = nodes[product].inputs
-    inner, columns = nodes[right].dims
-    inner <= MAX_INNER_DIMENSION || return Unsupported(
-        "cuDNN's fused engines were slower than cuBLAS for an inner dimension above $MAX_INNER_DIMENSION",
-    )
-    bytes = inner * columns * sizeof(nodes[right].dtype)
-    limit = 3 * CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE) ÷ 4
-    bytes <= limit || return Unsupported(
-        "cuDNN's fused engines were slower than cuBLAS once the right operand " *
-        "($(bytes >> 20) MiB) exceeded three quarters of L2 ($(limit >> 20) MiB)",
+the_product(region) = only(filter(id -> region.program.nodes[id].op isa MatMul, region.members))
+
+# One product per region, so chunks and costs have one shape to follow.
+function single_product(region)
+    count(id -> region.program.nodes[id].op isa MatMul, region.members) == 1 ||
+        return Unsupported("cuDNN proposes one matrix product per region")
+    Supported()
+end
+
+# Whether fusing pays, from the two causes measured on GB10 (see the header).
+# The default plan runs the product on cuBLAS, writes it, and an epilogue
+# kernel rereads it: T + 2 s m n / bandwidth + one launch, for a product time
+# T = 2 m n k / rate and s bytes per element. The fused engines run the product
+# at `fused_efficiency` of cuBLAS's rate on full waves of 128 × 128 output
+# tiles, and a launch whose last wave is partly empty leaves SMs idle: T / (e u),
+# with u the fraction of the launched waves' tile slots that hold a tile.
+function profitable(implementation, region, chunks)
+    nodes = region.program.nodes
+    product = nodes[the_product(region)]
+    rows, columns = product.dims
+    inner = nodes[first(product.inputs)].dims[2]
+    T = product.dtype
+    # TF32 products run at half the half-precision rate.
+    rate = implementation.product_flops / (T === Float32 ? 2 : 1)
+    sms = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+    tiles = cld(rows, 128) * cld(columns ÷ chunks, 128)
+    used = tiles / (cld(tiles, sms) * sms)
+    work = 2 * rows * columns * inner / rate
+    fused = work / (implementation.fused_efficiency * used)
+    unfused = work + 2 * sizeof(T) * rows * columns / implementation.memory_bandwidth +
+              implementation.launch_seconds
+    fused <= unfused || return Unsupported(
+        "cuDNN's fused product would take longer than cuBLAS and an epilogue kernel " *
+        "(estimated $(round(1e6 * fused; digits = 1)) against $(round(1e6 * unfused; digits = 1)) μs; " *
+        "$(round(Int, 100 * used))% of tile slots used)",
     )
     Supported()
+end
+
+# A chunk takes every value's columns at the product's column positions, except
+# the product's left operand, which each chunk reads whole.
+left_operand(region) = first(region.program.nodes[the_product(region)].inputs)
+
+function sliced(region, id, columns)
+    dims = region.program.nodes[id].dims
+    id != left_operand(region) && length(dims) >= 2 && dims[2] == columns
+end
+
+# Whether every value of the region can be cut into column chunks: values span
+# the product's columns or broadcast across them, the left operand feeds only
+# the product, and no sum reduces across columns.
+function chunkable(region, columns)
+    nodes = region.program.nodes
+    left = left_operand(region)
+    count(id -> left in nodes[id].inputs, region.members) == 1 || return false
+    all(Iterators.flatten((region.members, region.inputs))) do id
+        node = nodes[id]
+        id == left && return true
+        length(node.dims) <= 2 || return false
+        length(node.dims) < 2 || node.dims[2] in (columns, 1) || return false
+        node.op isa FoldReduction || return true
+        node.op.axes isa Tuple && !(2 in node.op.axes)
+    end
+end
+
+# The fused engines walk output tiles along columns and reload the right
+# operand for every row of tiles, without the L2-aware tile order cuBLAS uses.
+# Once that operand outgrows L2 it streams from memory once per row of tiles.
+# Launching the region in column chunks whose share of the right operand fits
+# keeps it resident. The left operand's row blocks are each read by one row of
+# tiles and did not need to fit. Return the chunk count, one when it fits whole.
+function column_chunks(implementation, region)
+    nodes = region.program.nodes
+    right = nodes[last(nodes[the_product(region)].inputs)]
+    inner, columns = right.dims
+    budget = implementation.l2_fraction *
+             CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
+    bytes = inner * columns * sizeof(right.dtype)
+    bytes <= budget && return 1
+    mib(n) = round(Int, n) >> 20
+    reason = "the right operand ($(mib(bytes)) MiB) exceeds the L2 budget ($(mib(budget)) MiB)"
+    chunkable(region, columns) ||
+        return Unsupported("$reason, and the region sums across the columns a chunked launch would split")
+    # Equal chunks share one plan; multiples of 8 columns keep chunks 16-byte aligned.
+    for chunks = 2:64
+        width, rest = divrem(columns, chunks)
+        rest == 0 && width % 8 == 0 && bytes / chunks <= budget && return chunks
+    end
+    Unsupported("$reason, and no equal split of $columns columns fits")
 end
 
 ## Graphs
@@ -265,19 +348,35 @@ end
 input_strides(dims, presentation) =
     presentation === :transpose ? (dims[2], 1) : Tuple(dense_strides(dims))
 
+# A tensor's strides in its whole buffer, in elements, for inputs and outputs.
+function buffer_strides(region, id, presentation, rank)
+    dims = region.program.nodes[id].dims
+    strides = id in region.inputs ? input_strides(dims, presentation[id]) : Tuple(dense_strides(dims))
+    lift_strides(dims, strides, rank)
+end
+
+# A value's dims in one chunk of `width` of the product's `columns`.
+function chunk_dims(region, id, rank, columns, width)
+    lifted = lift_dims(region.program.nodes[id].dims, rank)
+    sliced(region, id, columns) && (lifted[2] = width)
+    lifted
+end
+
 # Half-precision sums write Float32: no engine wrote a Float16 or BFloat16 sum.
 sum_output_type(node) = node.op isa FoldReduction && node.dtype in HALF_TYPES ? Float32 : node.dtype
 
 """
-    region_graph(region, presentations) -> Graph | Unsupported
+    region_graph(region, presentations, chunks) -> Graph | Unsupported
 
 The built cuDNN graph for a proposed region whose inputs have the given
-presentations (`:dense` or `:transpose`). Values are numbered in Tempest's
-standard form and named by that number, so equivalent regions share one cached
-execution plan. Constants are by-value scalars bound at launch, so regions that
-differ only in a constant's value share it too.
+presentations (`:dense` or `:transpose`), covering one of `chunks` equal column
+chunks: inputs and outputs keep their whole buffers' strides, so each chunk is
+the same plan at an offset. Values are numbered in Tempest's standard form and
+named by that number, so equivalent regions share one cached execution plan.
+Constants are by-value scalars bound at launch, so regions that differ only in
+a constant's value share it too.
 """
-function region_graph(region, presentations)
+function region_graph(region, presentations, chunks)
     nodes = region.program.nodes
     (; local_id, operands) = standard_numbering(region)
     ordered = sort!(collect(keys(local_id)); by = id -> local_id[id])
@@ -286,10 +385,10 @@ function region_graph(region, presentations)
     describe(id) = id in region.inputs ? (:input, nodes[id].dims, nodes[id].dtype, presentation[id]) :
         (nodes[id].op isa Constant ? :constant : nodes[id].op, nodes[id].dims, nodes[id].dtype,
          Tuple(local_id[i] for i in operands(id)), id in region.outputs)
-    key = (:tempest_proposed_region, rank, map(describe, ordered)...)
+    key = (:tempest_proposed_region, rank, chunks, map(describe, ordered)...)
     try
         cuDNN.cached_graph(key) do
-            graph = emit_region(region, local_id, operands, ordered, rank, presentation)
+            graph = emit_region(region, local_id, operands, ordered, rank, presentation, chunks)
             cuDNN.build!(graph; math_mode = CUDACore.DEFAULT_MATH, deterministic = true)
             graph
         end
@@ -301,17 +400,19 @@ end
 
 value_name(local_id, id) = "v$(local_id[id])"
 
-function emit_region(region, local_id, operands, ordered, rank, presentation)
+function emit_region(region, local_id, operands, ordered, rank, presentation, chunks)
     nodes = region.program.nodes
     T = proposal_operand_type(region)
+    columns = nodes[the_product(region)].dims[2]
+    width = columns ÷ chunks
     graph = Graph(; io_dtype = T, intermediate_dtype = Float32, compute_dtype = Float32)
     tensors = Dict{Int, cuDNN.Tensor}()
     for id in ordered
         node = nodes[id]
         name = value_name(local_id, id)
-        dims = lift_dims(node.dims, rank)
+        dims = chunk_dims(region, id, rank, columns, width)
         if id in region.inputs
-            strides = lift_strides(node.dims, input_strides(node.dims, presentation[id]), rank)
+            strides = buffer_strides(region, id, presentation, rank)
             tensors[id] = tensor!(graph; dims, strides, dtype = node.dtype, name)
             continue
         end
@@ -322,7 +423,8 @@ function emit_region(region, local_id, operands, ordered, rank, presentation)
         xs = [tensors[i] for i in operands(id)]
         output = id in region.outputs
         y = if output
-            tensor!(graph; dims, dtype = sum_output_type(node), name, output = true)
+            strides = buffer_strides(region, id, presentation, rank)
+            tensor!(graph; dims, strides, dtype = sum_output_type(node), name, output = true)
         else
             tensor!(graph; dims, dtype = node.dtype, virtual = true, name)
         end
@@ -364,10 +466,13 @@ end
 presentation(array) = array isa Transpose ? :transpose : :dense
 dense_buffer(array) = array isa Transpose ? parent(array) : array
 
-function build_implementation(::CuDNNKernels, request::ProposedRequest, runtime, outputs, inputs)
+function build_implementation(implementation::CuDNNKernels, request::ProposedRequest, runtime, outputs, inputs)
     region = request.region
     nodes = region.program.nodes
-    graph = region_graph(region, map(presentation, inputs))
+    chunks = column_chunks(implementation, region)
+    chunks isa Unsupported && return chunks
+    presentations = map(presentation, inputs)
+    graph = region_graph(region, presentations, chunks)
     graph isa Unsupported && return graph
     (; local_id) = standard_numbering(region)
     # Engines assume their declared 16-byte alignment.
@@ -381,8 +486,10 @@ function build_implementation(::CuDNNKernels, request::ProposedRequest, runtime,
     )
     T = proposal_operand_type(region)
     operands = T === Float32 ? "Float32 operands rounded to TF32" : "$(nameof(T)) operands"
-    summary = "cuDNN $(region.label): $operands, Float32 accumulation; " *
+    split = chunks == 1 ? "" : " in $chunks column chunks"
+    summary = "cuDNN $(region.label)$split: $operands, Float32 accumulation; " *
               "engine workspace $(graph.workspace_size) bytes"
+    offsets = chunk_offsets(region, presentations, chunks, local_id)
     ImplementationPlan(specs) do buffers
         values = Dict{String, Any}()
         for (id, array) in zip(region.inputs, inputs)
@@ -403,7 +510,35 @@ function build_implementation(::CuDNNKernels, request::ProposedRequest, runtime,
                 push!(after, conversion(array, wide))
             end
         end
-        launch = bound_launch(runtime, graph, values, buffers[1], (), Tuple(after), summary)
+        launch = if chunks == 1
+            bound_launch(runtime, graph, values, buffers[1], (), Tuple(after), summary)
+        else
+            scalars = Any[]
+            packs = map(offsets) do elements
+                bytes = Dict(name => n * sizeof(eltype(values[name])) for (name, n) in elements)
+                pack, held = bind_graph(graph, values, buffers[1]; offsets = bytes)
+                append!(scalars, held)
+                pack
+            end
+            GraphLaunch(runtime_handle(runtime), graph, packs, scalars, (), Tuple(after), summary)
+        end
         BuiltImplementation(launch, (outputs, inputs, buffers), 0)
     end
+end
+
+# For each chunk, the element offset of every bound array: chunk `j` starts
+# `j * width` columns in, at the array's column stride; arrays that broadcast
+# across columns start at zero.
+function chunk_offsets(region, presentations, chunks, local_id)
+    nodes = region.program.nodes
+    columns = nodes[the_product(region)].dims[2]
+    width = columns ÷ chunks
+    presentation = Dict(zip(region.inputs, presentations))
+    rank = max(3, maximum(id -> length(nodes[id].dims), keys(local_id)))
+    stride = Dict{String, Int}()
+    for id in (region.inputs..., region.outputs...)
+        spans = sliced(region, id, columns)
+        stride[value_name(local_id, id)] = spans ? buffer_strides(region, id, presentation, rank)[2] : 0
+    end
+    [Dict(name => j * width * s for (name, s) in stride) for j = 0:(chunks - 1)]
 end

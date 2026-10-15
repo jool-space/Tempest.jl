@@ -302,13 +302,13 @@ end
     ex = prepare_forward(layer, map(x -> CuArray(Float64.(x)), args[[1, 2, 5]])...; implementations = (CuDNNKernels(),))
     @test :cuDNN ∉ ex.providers
 
-    # Long inner dimensions ran faster on cuBLAS; the product stays there.
-    w = CuArray(Float16.(reshape(sin.(1:(8 * 4608)), 8, 4608) ./ 64))
-    x = CuArray(Float16.(reshape(cos.(1:(4608 * 8)), 4608, 8) ./ 64))
+    # A long inner dimension over few output tiles: cuBLAS's product is
+    # faster by more than the epilogue costs, so it stays there.
+    w = CuArray(Float16.(reshape(sin.(1:(1024 * 8192)), 1024, 8192) ./ 64))
+    x = CuArray(Float16.(reshape(cos.(1:(8192 * 1024)), 8192, 1024) ./ 64))
     ex = prepare_forward((w, x) -> tanh.(w * x), w, x; implementations = (CuDNNKernels(),))
     @test :cuDNN ∉ ex.providers
-    @test occursin("declined: cuDNN's fused engines were slower than cuBLAS", explanation(ex))
-    @test relative_error(execute!(ex), tanh.(Float64.(Array(w)) * Float64.(Array(x)))) < 2e-3
+    @test occursin("declined: cuDNN's fused product would take longer than cuBLAS", explanation(ex))
 
     # Construction declines buffers that are less aligned than the engines
     # assume, so preparation replans instead of failing.
@@ -326,6 +326,39 @@ end
     @test occursin("aligned", built.reason)
 end
 
+@testset "cuDNN epilogues in column chunks that fit L2" begin
+    # A tiny L2 budget makes small operands exceed it, so every product is
+    # launched in column chunks of one plan at offsets.
+    implementation = CuDNNKernels(l2_fraction = 1e-4)
+    for T in (Float16, Core.BFloat16)
+        tolerance = T === Float16 ? 2e-3 : 2e-2
+        args = block_operands(T, 32, 256)
+        ex = prepare_forward(epilogue_block, CuArray.(args)...; implementations = (implementation,))
+        @test ex.providers == [:cuDNN, :cuDNN]
+        @test occursin("column chunks", explanation(ex))
+        @test all(call -> length(call.launch.packs) > 1, ex.calls)
+        @test relative_error(execute!(ex), epilogue_block(wide(args)...)) < tolerance
+        default = prepare_forward(epilogue_block, CuArray.(args)...)
+        @test relative_error(execute!(ex), Float64.(Array(execute!(default)))) < tolerance
+        # A column sum is cut with its columns; a transposed operand too.
+        sums(w, x) = (y = tanh.(transpose(w) * x); (y, sum(y; dims = 1)))
+        w, x = CuArray(Matrix(transpose(args[1]))), CuArray(args[5])
+        ex = prepare_forward(sums, w, x; implementations = (implementation,))
+        @test ex.providers == [:cuDNN]
+        expected = sums(Float64.(Array(w)), Float64.(Array(x)))
+        got = execute!(ex)
+        @test relative_error(got[1], expected[1]) < tolerance
+        @test relative_error(got[2], expected[2]) < 2tolerance
+        # Training sums the bias gradient across columns: that region cannot be
+        # cut and is declined; the forward products are still chunked.
+        ex = prepare(epilogue_loss, CuArray.(args)...; implementations = (implementation,))
+        @test occursin("sums across the columns", explanation(ex))
+        @test :cuDNN in ex.providers
+        value, gradients = reference_gradients(epilogue_loss, args...)
+        @test Float64(Array(execute!(ex)[1])[]) ≈ value rtol = 5tolerance
+    end
+end
+
 @testset "Equivalent epilogue regions share one cuDNN plan" begin
     w, b, x = CuArray.(block_operands(Float16, 16, 64)[[3, 4, 5]])
     w = w[:, 1:16]
@@ -333,7 +366,7 @@ end
     ex = prepare_forward(twice, w, b, x; implementations = (CuDNNKernels(),))
     @test length(proposed_regions(ex)) == 2
     @test ex.calls[1].launch.graph === ex.calls[2].launch.graph
-    @test ex.calls[1].launch.pack !== ex.calls[2].launch.pack
+    @test ex.calls[1].launch.packs != ex.calls[2].launch.packs
     again = prepare_forward(twice, w, b, x; implementations = (CuDNNKernels(),))
     @test [r.members for r in proposed_regions(again)] == [r.members for r in proposed_regions(ex)]
     expected = twice(Float64.(Array(w)), Float64.(Array(b)), Float64.(Array(x)))

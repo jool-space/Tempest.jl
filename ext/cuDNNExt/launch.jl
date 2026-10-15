@@ -30,13 +30,15 @@ const HANDLES = WeakKeyDict{Any, HandleOwner}()
 runtime_handle(runtime) = get!(HandleOwner, HANDLES, runtime)
 
 """
-A built cuDNN graph bound to final buffers. `before` and `after` are dtype
-conversions around the graph; `summary` is the line `explain` prints.
+A built cuDNN graph bound to final buffers. Each variant pack in `packs` is one
+execution of the plan, in order: a graph split into column chunks binds one
+pack per chunk. `before` and `after` are dtype conversions around the graph;
+`summary` is the line `explain` prints.
 """
 struct GraphLaunch{B, A}
     handle::HandleOwner
     graph::Graph
-    pack::cuDNN.BackendDescriptor
+    packs::Vector{cuDNN.BackendDescriptor}
     scalars::Vector{Any}
     before::B
     after::A
@@ -47,7 +49,9 @@ function (launch::GraphLaunch)()
     foreach(convert! -> convert!(), launch.before)
     handle = launch.handle.handle
     cuDNN.cudnnSetStream(handle, CUDACore.stream())
-    cuDNN.cudnnBackendExecute(handle, launch.graph.plan.ptr, launch.pack.ptr)
+    for pack in launch.packs
+        cuDNN.cudnnBackendExecute(handle, launch.graph.plan.ptr, pack.ptr)
+    end
     foreach(convert! -> convert!(), launch.after)
     nothing
 end
@@ -55,13 +59,17 @@ end
 Tempest.implementation_summary(launch::GraphLaunch) = launch.summary
 
 """
-    bind_graph(graph, values, workspace) -> (pack, scalars)
+    bind_graph(graph, values, workspace; offsets = nothing) -> (pack, scalars)
 
 Build the variant pack for a built `graph`. `values` maps the name of every
 non-virtual tensor to a dense CUDA array or, for by-value tensors, a number.
-The arrays must outlive the pack; `scalars` holds the numbers' storage.
+The arrays must outlive the pack; `scalars` holds the numbers' storage. With
+`offsets`, a map from names to byte offsets, the graph covers part of each
+array (a column chunk) at that offset: its tensors are laid out with the whole
+array's strides, which the caller guarantees, so only the element type is
+checked.
 """
-function bind_graph(graph::Graph, values::AbstractDict{String}, workspace)
+function bind_graph(graph::Graph, values::AbstractDict{String}, workspace; offsets = nothing)
     scalars = Any[]
     pointers = map(graph.variant_tensors) do t
         value = values[t.name]
@@ -70,7 +78,13 @@ function bind_graph(graph::Graph, values::AbstractDict{String}, workspace)
             push!(scalars, ref)
             return Base.unsafe_convert(Ptr{eltype(ref)}, ref)
         end
-        pointer = cuDNN.checked_array_pointer(t, value)
+        pointer = if offsets === nothing
+            cuDNN.checked_array_pointer(t, value)
+        else
+            cuDNN.cudnnDataType(eltype(value)) == t.dtype ||
+                throw(ArgumentError("binding for $(t.name) has eltype $(eltype(value))"))
+            Base.pointer(value) + offsets[t.name]
+        end
         if UInt(pointer) % t.alignment != 0
             throw(ArgumentError("buffer for cuDNN tensor $(t.name) is less aligned than declared"))
         end
