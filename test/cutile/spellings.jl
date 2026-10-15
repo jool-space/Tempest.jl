@@ -129,3 +129,62 @@ end
         @test Array(execute!(ex)) ≈ Tempest.attention(Array(q), Array(k), Array(v); causal) rtol = 1e-4
     end
 end
+
+# Reductions over leading or trailing axes of any rank collapse to a matrix
+# domain: rank-3 softmax plans as its reshaped rank-2 spelling and shares its
+# kernel. Interior axes and partial broadcasts within a collapsed group are
+# declined, and the CUDA kernels run them.
+@testset "Rank-N reductions collapse to matrix domains" begin
+    x = CuArray(sin.(reshape(Float32.(1:(96 * 24 * 5)), 96, 24, 5)))
+    h = Array(x)
+    softmax(x; dims) = exp.(x .- Tempest.logsumexp(x; dims))
+    rank3 = prepare_forward(x -> softmax(x; dims = 1), x)
+    rank2 = prepare_forward(x -> softmax(reshape(x, 96, :); dims = 1), x)
+    @test plan_shape(rank3) == plan_shape(rank2) == [(:graph, :cutile)]
+    @test Array(execute!(rank3)) ≈ reshape(Array(execute!(rank2)), 96, 24, 5) rtol = 1e-5
+    @test occursin("of 96×24×5 as 96×120", Tempest.implementation_summary(only(rank3.calls)))
+    naive(x) = (e = exp.(x .- maximum(x; dims = 1)); e ./ sum(e; dims = 1))
+    ex = prepare_forward(naive, x)
+    @test plan_shape(ex) == [(:graph, :cutile)]
+    @test Array(execute!(ex)) ≈ naive(h) rtol = 1e-5
+    # A weight over the leading axis and statistics over the rest collapse too.
+    w = CuArray(Float32.(range(0.5, 1.5; length = 96)))
+    layernorm(x, w) = (m = sum(x; dims = 1) ./ 96; c = x .- m; c .* inv.(sqrt.(sum(abs2, c; dims = 1) ./ 96 .+ 1.0f-5)) .* w)
+    ex = prepare_forward(layernorm, x, w)
+    @test plan_shape(ex) == [(:graph, :cutile)]
+    @test Array(execute!(ex)) ≈ layernorm(h, Array(w)) rtol = 1e-4
+    # Trailing axes, all axes, rank four, and the gradient of a rank-3 softmax.
+    ex = prepare_forward(x -> sum(x; dims = (2, 3)) .+ sum(abs2, x; dims = (2, 3)), x)
+    @test plan_shape(ex) == [(:graph, :cutile)]
+    @test Array(execute!(ex)) ≈ sum(h; dims = (2, 3)) .+ sum(abs2, h; dims = (2, 3)) rtol = 1e-5
+    ex = prepare_forward(x -> softmax(x; dims = 3), x)
+    @test plan_shape(ex) == [(:graph, :cutile)]
+    @test Array(execute!(ex)) ≈ softmax(h; dims = 3) rtol = 1e-5
+    ex = prepare_forward(x -> sum(abs2, x) + sum(x), x)
+    @test plan_shape(ex) == [(:graph, :cutile)]
+    @test Array(execute!(ex))[] ≈ sum(abs2, h) + sum(h) rtol = 1e-5
+    x4 = CuArray(sin.(reshape(Float32.(1:(32 * 4 * 24 * 3)), 32, 4, 24, 3)))
+    ex = prepare_forward(x -> softmax(x; dims = 1), x4)
+    @test plan_shape(ex) == [(:graph, :cutile)]
+    @test Array(execute!(ex)) ≈ softmax(Array(x4); dims = 1) rtol = 1e-5
+    t = CuArray(cos.(reshape(Float32.(1:(96 * 24 * 5)), 96, 24, 5)))
+    a = prepare((x, t) -> sum(softmax(x; dims = 1) .* t), x, t)
+    b = prepare((x, t) -> sum(softmax(reshape(x, 96, :); dims = 1) .* reshape(t, 96, :)), x, t)
+    @test plan_shape(a) == [(:graph, :cutile), (:graph, :cutile)]
+    @test length(plan_shape(a)) <= length(plan_shape(b))
+    @test Array(execute!(a)[2]) ≈ reshape(Array(execute!(b)[2]), 96, 24, 5) rtol = 1e-4 atol = 1e-6
+    # Declined: an interior axis, and a bias over one axis of a collapsed group.
+    ex = prepare_forward(x -> x .- sum(x; dims = 2) ./ 24, x)
+    @test all(step -> !(step.region isa Tempest.GraphRegion), ex.storage.steps)
+    @test Array(execute!(ex)) ≈ h .- sum(h; dims = 2) ./ 24 rtol = 1e-5
+    bias = CuArray(Float32.(reshape(range(-0.2, 0.3; length = 24), 1, 24, 1)))
+    ex = prepare_forward((x, b) -> softmax(x .+ b; dims = 1), x, bias)
+    @test Array(execute!(ex)) ≈ softmax(h .+ Array(bias); dims = 1) rtol = 1e-5
+    @test any(note -> occursin("does not collapse", note), ex.semantic_notes)
+    # The attention reference's softmax over (keys, queries, heads × batch) is
+    # one graph region.
+    q, k, v = (CuArray(Float32.(reshape(sin.((1:(16 * 2 * 64 * 2)) .* s), 16, 2, 64, 2))) for s in (0.3, 0.7, 1.1))
+    ex = prepare_forward((q, k, v) -> Tempest.attention(q, k, v), q, k, v)
+    @test count(step -> step.region isa Tempest.GraphRegion, ex.storage.steps) == 1
+    @test Array(execute!(ex)) ≈ Tempest.attention(Array(q), Array(k), Array(v)) rtol = 1e-4
+end

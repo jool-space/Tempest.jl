@@ -30,19 +30,21 @@ function graph_flat_entry(kernel, count)
     end
 end
 
-function graph_matrix(array, spec)
-    reshape(array, matrix_shape(spec.dims))
+# Boundary buffers are dense, so a value's collapsed shape is a reshape.
+function graph_matrix(array, spec, schedule)
+    reshape(array, value_shape(schedule, spec.dims))
 end
 
 struct CompiledGraphKernel{K}
     kernel::K
 end
 
-# Blocks per SM that resident kernels compile for, by tile size; streamed kernels
-# take no hint. Without one, tileiras gives resident kernels 255 registers
-# whenever their store is not ordered after their loads. Measured on GB10 with
-# cuTile main d2fafa3, 15 October 2026: Float32 row sums, logsumexp, softmax and
-# LayerNorm, warm us with no hint / 4 / 8.
+# Blocks per SM that the kernels compile for. Without a hint, tileiras gives a
+# kernel 255 registers whenever its store is not ordered after its loads, and
+# the kernel then runs several times slower. Measured on GB10 with cuTile main
+# d2fafa3, 15 October 2026, warm us.
+#
+# Resident kernels, by tile size (no hint / 4 / 8):
 # - Tiles of at most PACKED_ELEMENTS values: 8 (14-28 registers). Sum over
 #   256 x 32768 613 / 178 / 120, logsumexp over 512 x 8192 155 / 42 / 27. Kernels
 #   that write a full output and are bound by DRAM lose up to 5% to 4 (softmax
@@ -52,15 +54,31 @@ end
 #   1024 x 1024 kept 255 registers and ran in 34 instead of 27.
 # - Tiles of RESIDENT_ROWS: no hint. Every kernel ran 2-5% slower at 4 (sum over
 #   4096 x 16384 1080 / 1130), and logsumexp 22% slower at 8.
-function resident_occupancy(schedule)
-    resident_schedule(schedule) || return nothing
+#
+# Kernels that write partial sums or states, full and split (no hint / 8):
+# `sum(a .* b)` over 2^20 values 60 / 14, `sum(abs2, tanh.(x))` over 1024 x 4096
+# 256 / 48, `sum(abs2, x)` over 4096 x 4096 1294 / 283 (copy bandwidth), a full
+# logsumexp over 2048 x 2048 473 / 208, a full maximum and shifted sum over
+# 1024 x 4096 468 / 104; split row sums over 128 x 16384 22.5 / 8.2 and over
+# 1024 x 4096 210 / 166; split column sums over 65536 x 16 unchanged.
+#
+# Unsplit streamed kernels lose with any hint, on either axis: column logsumexp
+# over 16384 x 512 295 / 420, residual RMSNorm over 16384 x 1024 594 / 866 (741
+# at 4), row logsumexp over 4096 x 4096 938 / 1076, row sums over 2048 x 8192
+# 994 / 1169.
+function kernel_occupancy(schedule)
+    if !resident_schedule(schedule)
+        return schedule.axes == (1, 2) || schedule.splits > 1 ? PARTIAL_OCCUPANCY : nothing
+    end
     values = prod(schedule.tile)
     values <= PACKED_ELEMENTS ? 8 : values < RESIDENT_ROWS ? 4 : nothing
 end
 
+const PARTIAL_OCCUPANCY = 8
+
 function compile_graph_kernel(kernel, program, schedule, phase, arrays)
     rows, columns = Int32.(schedule.dims)
-    occupancy = resident_occupancy(schedule)
+    occupancy = kernel_occupancy(schedule)
     entry = graph_flat_entry(kernel, length(arrays))
     compiled = CUDACore.@cuda backend=ct launch=false occupancy=occupancy entry(program, rows, columns, phase, arrays...)
     CompiledGraphKernel(compiled)
@@ -277,8 +295,12 @@ function build_implementation(::CuTileKernels, request::GraphRequest, runtime, o
     schedule isa Unsupported && return schedule
     program, input_order = graph_sweep_program(request.region, schedule)
     program = ct.Constant(program)
-    destinations = map(graph_matrix, outputs, request.outputs)
-    sources = map(graph_matrix, inputs[input_order], request.inputs[input_order])
+    destinations = map((array, spec) -> graph_matrix(array, spec, schedule), outputs, request.outputs)
+    sources = map(
+        (array, spec) -> graph_matrix(array, spec, schedule),
+        inputs[input_order],
+        request.inputs[input_order],
+    )
     if schedule.axes == (1, 2)
         return build_full_graph(program, schedule, destinations, sources)
     end

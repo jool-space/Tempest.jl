@@ -122,12 +122,20 @@ from the discarded graph are cleared before selection resumes.
 
 ## Native cuTile scope
 
-The provider handles nonempty Float32 domains of rank zero, one, or two. Each
-region uses one reduction domain and one set of axes. Singleton broadcasts,
-scalar inputs, irregular tile tails, several independent or dependent folds
-(sums, products, maxima, logsumexp, and zero-size user folds with Float32 or
-Int32 state, among them `reduce` by a singleton operator), and multiple escaping
-outputs are supported.
+The provider handles nonempty Float32 domains of any rank whose reduced axes
+are all of them, the leading ones or the trailing ones. The fold input's axes
+collapse into a matrix: the leading group becomes the rows and the rest the
+columns, so softmax over `(keys, queries, heads × batch)` and a layer norm over
+`(hidden, tokens, batch)` run the schedules below as their reshaped matrix
+spellings do, with the same compiled kernel. Every value in the region must
+collapse the same way: in each group its axes equal the input's or are all
+singletons. A bias over one axis of a collapsed group, or a reduction over an
+interior axis, is declined and the CUDA kernels run it. Each region uses one
+reduction domain and one set of axes. Singleton broadcasts, scalar inputs,
+irregular tile tails, several independent or dependent folds (sums, products,
+maxima, logsumexp, and zero-size user folds with Float32 or Int32 state, among
+them `reduce` by a singleton operator), and multiple escaping outputs are
+supported.
 
 | Axes | Execution | Shared workspace |
 | --- | --- | --- |
@@ -135,7 +143,7 @@ outputs are supported.
 | Second axis | One block per row tile, streaming eight columns at a time | None |
 | All axes | Parallel partial sums (unobserved state tuples for other folds), then a finishing kernel for each dependency phase; a final kernel writes escaping outputs | Partial sums or states, and completed statistics |
 
-Second-axis tiles hold up to 32 rows. Full-reduction tiles contain 256 elements,
+Second-axis tiles hold up to 128 rows (32 rows at 32 × 32 when split). Full-reduction tiles contain 256 elements,
 with their shape chosen from the domain. A first-axis reduction over fewer than
 32 streamed columns splits each column across blocks; its tiles shorten, down to
 256 rows, until the grid holds 128 blocks. The streamed tile height and the split
@@ -151,7 +159,11 @@ own alias class, so stores need not wait for loads from other arrays. Without
 that ordering `tileiras` allocates 255 registers for resident kernels, which then
 run several times slower; they compile with an occupancy hint that limits
 registers instead: 8 for tiles of at most 512 values, 4 for longer tiles up to
-2048 rows, none for 4096-row tiles, where the allocation does not hurt.
+2048 rows, none for 4096-row tiles, where the allocation does not hurt. The
+kernels that write partial sums or states, of full and split reductions, take
+8 as well: without it a full `sum(abs2, x)` over 4096 × 4096 took 1294 μs and
+with it 283, copy bandwidth, and `sum(a .* b)` over 2²⁰ values 60 against 14.
+Unsplit streamed kernels take none; any hint slowed them by 12–40%.
 Resident kernels previously took one tuple argument, whose arrays shared an
 alias class, until cuTile.jl#318 gave them separate classes.
 See the [cuTile issues](cutile-issues.md) report for the measurements. Full reductions
@@ -175,15 +187,16 @@ many blocks it is split), the launch grid, dependency phases, and kernel count.
 ```text
 call 1: cuTile reductions over axis 1 of 128×1024: resident tile 128×4, 4 columns per block, grid 256; 2 phases, 1 kernel
 call 1: cuTile reductions over axis 1 of 8193×5: streamed tile 256×1, split 32 ways, grid 5×32; 2 phases, 5 kernels
+call 1: cuTile reductions over axis 1 of 1024×256×16 as 1024×4096: resident tile 1024×1, grid 4096; 1 phase, 1 kernel
 ```
 
 For full and split reductions the grid is that of the partial-sum launches.
 Scheduled calls and captured kernels are different counts: a full-reduction or
 split region launches several kernels.
 
-Regions with different reduction axes remain separate. Rank-three domains,
-mixed precision, layout operations inside a region, contractions, and opaque
-calls remain outside this provider. The frontend currently rejects empty array
+Regions with different reduction axes remain separate. Interior reduction
+axes, mixed precision, layout operations inside a region, contractions, and
+opaque calls remain outside this provider. The frontend currently rejects empty array
 inputs. Grid and indexing limits are checked during support. Unknown scalar
 functions still need the recomputation promise and a compilable body.
 

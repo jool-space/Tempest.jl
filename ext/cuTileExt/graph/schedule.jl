@@ -1,6 +1,8 @@
 # Host-side analysis of a semantic region. The schedule records an execution
 # choice; original operations remain in the graph and in the typed bindings.
 struct GraphReductionSchedule
+    # The matrix domain the kernels iterate: the fold input's `leading` axes
+    # collapsed into rows and the rest into columns.
     dims::Tuple{Int, Int}
     axes::Tuple{Vararg{Int}}
     tile::Tuple{Int, Int}
@@ -9,10 +11,14 @@ struct GraphReductionSchedule
     splits::Int
     # The fold of each reduction in `groups`, with the same nesting.
     folds::Tuple
+    # The fold input's logical shape and how many of its leading axes form the
+    # domain's rows (`collapsed_shape`).
+    shape::Tuple{Vararg{Int}}
+    leading::Int
 end
 
 GraphReductionSchedule(dims, axes, tile, groups, folds) =
-    GraphReductionSchedule(dims, axes, tile, groups, 1, folds)
+    GraphReductionSchedule(dims, axes, tile, groups, 1, folds, dims, 1)
 
 # Partials hold every state component of a phase's folds, one column each.
 phase_widths(schedule) = map(folds -> sum(f -> fold_width(f, Float32), folds), schedule.folds)
@@ -44,6 +50,13 @@ const STREAMED_ROWS = 1024
 
 resident_schedule(schedule) = schedule.axes == (1,) && schedule.tile[1] >= schedule.dims[1]
 
+# Unsplit second-axis reductions stream eight columns at a time over tiles of
+# this many rows. Measured on GB10 with row softmax, warm us at 32 / 128 / 256
+# rows: 262144 x 16 (a rank-3 array reduced over its last axis) 498 / 149 / 149,
+# 65536 x 64 207 / 153 / 148, 16384 x 256 166 / 157 / 171, 4096 x 4096
+# 933 / 895 / 947. The CUDA kernels take 306 us on the first shape.
+const STREAMED_ROW_TILE = 128
+
 # Short columns share a block: columns of at most PACKED_ROWS rows are packed
 # into tiles of about PACKED_ELEMENTS values, keeping at least MINIMUM_BLOCKS
 # blocks. Measured on GB10 (cold, share of copy bandwidth): 128 x 1024 rose
@@ -64,8 +77,53 @@ end
 
 matrix_shape(shape) = (get(shape, 1, 1), get(shape, 2, 1))
 
-function fits_graph_domain(shape, domain)
-    length(shape) <= 2 && all(i -> shape[i] == 1 || shape[i] == domain[i], eachindex(shape))
+# A value's shape in the reduction domain. The fold input's axes are grouped
+# into the `leading` ones, the domain's rows, and the rest, its columns. A value
+# takes part when, in each group, its axes equal the input's or are all
+# singletons (Julia pads missing trailing axes with singletons); the group then
+# collapses to the product of the input's extents or to one. A partial
+# broadcast within a group, such as a bias over the second of three axes that
+# merge into one column axis, does not collapse, and the value is declined.
+# Boundary buffers are dense, so a collapsed value is a reshape of its buffer.
+# A reduction over all axes has no axis semantics: any value with as many
+# elements as the input is the same dense storage in the domain's shape, so
+# `sum(abs2, vec(x)) + sum(x)` is one region.
+function collapsed_shape(dims, shape, leading, full = false)
+    if length(dims) <= length(shape)
+        padded = ntuple(i -> get(dims, i, 1), length(shape))
+        rows = collapse_group(padded, shape, 1:leading)
+        columns = collapse_group(padded, shape, (leading + 1):length(shape))
+        rows === nothing || columns === nothing || return (rows, columns)
+    end
+    full && prod(dims; init = 1) == prod(shape; init = 1) ? collapsed_shape(shape, shape, leading) : nothing
+end
+
+# A value's shape in the domain of a schedule or geometry.
+value_shape(geometry, dims) =
+    collapsed_shape(dims, geometry.shape, geometry.leading, geometry.axes == (1, 2))
+
+function collapse_group(padded, shape, group)
+    isempty(group) && return 1
+    all(i -> padded[i] == shape[i], group) && return prod(shape[i] for i in group)
+    all(i -> padded[i] == 1, group) ? 1 : nothing
+end
+
+# Which axis group a fold reduces: all of them, the leading ones, or the
+# trailing ones. Each gives one matrix schedule; a reduction over interior
+# axes, or over the leading and trailing but not the middle ones, has none.
+# A vector reduced with `dims = 1` is a one-column matrix, as it was when the
+# domains were matrices; `dims = :` over any rank is the all-axes schedule.
+function fold_geometry(op::FoldReduction, shape)
+    rank = length(shape)
+    reduced = op.axes isa Colon ? Tuple(1:rank) : op.axes
+    if reduced == Tuple(1:rank) && (op.axes isa Colon || rank >= 2)
+        return (; leading = min(rank, 1), axes = (1, 2))
+    elseif reduced == Tuple(1:length(reduced))
+        return (; leading = length(reduced), axes = (1,))
+    elseif reduced == Tuple((rank - length(reduced) + 1):rank)
+        return (; leading = rank - length(reduced), axes = (2,))
+    end
+    Unsupported("cuTile graph reductions reduce leading or trailing axes, not $reduced of a rank-$rank array")
 end
 
 # Captured arrays would hide reads from lifetime planning and AD. The callable
@@ -86,9 +144,9 @@ function graph_pointwise_support(op::Pointwise, arity)
     tile_expression_support(expression)
 end
 
-function graph_value_support(node, domain, id)
-    fits_graph_domain(node.dims, domain) ||
-        return Unsupported("value %$id is outside the matrix reduction domain")
+function graph_value_support(node, geometry, id)
+    value_shape(geometry, node.dims) !== nothing ||
+        return Unsupported("value %$id does not collapse into the reduction domain $(shape_text(geometry.shape))")
     if node.op isa Constant
         node.op.value isa Union{Float32, Integer} &&
         isbits(node.op.value) &&
@@ -120,23 +178,21 @@ function graph_fold_support(fold)
     Supported()
 end
 
-reduction_axes(op::FoldReduction) = op.axes isa Colon ? (1, 2) : op.axes
-
 function graph_reduction_domain(region)
     nodes = region.program.nodes
     position = findfirst(id -> nodes[id].op isa FoldReduction, region.members)
     position === nothing && return Unsupported("cuTile graph scheduling requires a reduction")
     reduction = nodes[region.members[position]]
     shape = nodes[only(reduction.inputs)].dims
-    length(shape) <= 2 || return Unsupported("cuTile graph reductions support rank at most two")
-    domain = matrix_shape(shape)
-    all(>(0), domain) ||
+    all(>(0), shape) ||
         return Unsupported("cuTile graph reductions require nonempty dimensions")
+    geometry = fold_geometry(reduction.op, shape)
+    geometry isa Unsupported && return geometry
+    (; leading, axes) = geometry
+    domain = collapsed_shape(shape, shape, leading)
     domain[1] <= div(typemax(Int32), domain[2]) ||
         return Unsupported("graph reduction domain exceeds Int32 indexing")
-    axes = reduction_axes(reduction.op)
-    axes in ((1,), (2,), (1, 2)) || return Unsupported("unsupported graph reduction axes $axes")
-    (; domain, axes)
+    (; domain, axes, shape, leading)
 end
 
 function graph_reduction_schedule(request::GraphRequest)
@@ -144,13 +200,13 @@ function graph_reduction_schedule(request::GraphRequest)
     nodes = region.program.nodes
     geometry = graph_reduction_domain(region)
     geometry isa Unsupported && return geometry
-    (; domain, axes) = geometry
+    (; domain, axes, shape, leading) = geometry
     for (ids, specs) in ((region.inputs, request.inputs), (region.outputs, request.outputs))
         for (id, spec) in zip(ids, specs)
             spec.dtype === Float32 ||
                 return Unsupported("cuTile graph boundaries must be Float32")
-            fits_graph_domain(spec.dims, domain) || return Unsupported(
-                "boundary value %$id cannot broadcast into the reduction domain",
+            value_shape(geometry, spec.dims) !== nothing || return Unsupported(
+                "boundary value %$id does not collapse into the reduction domain $(shape_text(shape))",
             )
         end
     end
@@ -159,15 +215,16 @@ function graph_reduction_schedule(request::GraphRequest)
     reductions = Int[]
     for id in sort(region.members)
         node = nodes[id]
-        verdict = graph_value_support(node, domain, id)
+        verdict = graph_value_support(node, geometry, id)
         verdict isa Unsupported && return verdict
         all(input -> haskey(phases, input), node.inputs) ||
             return Unsupported("value %$id reads an undeclared region input")
         phase = maximum((phases[input] for input in node.inputs); init = 0)
         if node.op isa FoldReduction
-            reduction_axes(node.op) == axes ||
+            input_shape = nodes[only(node.inputs)].dims
+            fold_geometry(node.op, input_shape) == (; leading, axes) ||
                 return Unsupported("mixed reduction axes require separate graph regions")
-            matrix_shape(nodes[only(node.inputs)].dims) == domain ||
+            value_shape(geometry, input_shape) == domain ||
                 return Unsupported("value %$id reduces a different iteration domain")
             phase += 1
             push!(reductions, id)
@@ -182,12 +239,12 @@ function graph_reduction_schedule(request::GraphRequest)
     tile = if axes == (1,)
         domain[1] <= RESIDENT_ROWS ? resident_tile(domain) : (STREAMED_ROWS, 1)
     elseif axes == (2,)
-        (min(32, nextpow(2, domain[1])), 8)
+        (min(STREAMED_ROW_TILE, nextpow(2, domain[1])), 8)
     else
         rows = min(256, nextpow(2, domain[1]))
         (rows, div(256, rows))
     end
-    schedule = split_schedule(GraphReductionSchedule(domain, axes, tile, groups, folds))
+    schedule = split_schedule(GraphReductionSchedule(domain, axes, tile, groups, 1, folds, shape, leading))
     all(n -> n < (1 << 24), graph_grid(schedule)) ||
         return Unsupported("graph reduction launch exceeds cuTile's 24-bit grid limit")
     schedule
@@ -230,7 +287,10 @@ function split_schedule(schedule)
         splits = split_count(schedule.dims[1], tile[1], kept)
     end
     splits > 1 || return schedule
-    GraphReductionSchedule(schedule.dims, schedule.axes, tile, schedule.groups, splits, schedule.folds)
+    GraphReductionSchedule(
+        schedule.dims, schedule.axes, tile, schedule.groups, splits, schedule.folds,
+        schedule.shape, schedule.leading,
+    )
 end
 
 # Blocks sharing one kept tile: a power of two, at most one per tile of the
@@ -256,9 +316,16 @@ end
 # One line for `explain` and `profile`. A resident tile holds whole columns, and
 # a packed one several of them; a streamed tile loops along the reduced axis, and
 # a split schedule shares that loop among several blocks per kept tile.
+# Rank-two domains print as before; a collapsed domain names the logical
+# shape and the matrix it became.
 function schedule_description(schedule::GraphReductionSchedule)
-    reduced = schedule.axes == (1, 2) ? "all axes" : "axis $(only(schedule.axes))"
-    "over $reduced of $(shape_text(schedule.dims)): $(tile_description(schedule)), " *
+    rank = length(schedule.shape)
+    group = schedule.axes == (1,) ? (1:schedule.leading) : ((schedule.leading + 1):rank)
+    reduced = schedule.axes == (1, 2) ? "all axes" :
+        length(group) == 1 ? "axis $(only(group))" : "axes $(first(group)):$(last(group))"
+    domain = rank <= 2 ? shape_text(schedule.dims) :
+        "$(shape_text(schedule.shape)) as $(shape_text(schedule.dims))"
+    "over $reduced of $domain: $(tile_description(schedule)), " *
     "grid $(shape_text(graph_grid(schedule)))"
 end
 
@@ -302,7 +369,7 @@ function graph_sweep_program(region::GraphRegion, schedule)
                 local_id[id],
                 typeof(operation),
                 dependencies,
-                node.dims,
+                value_shape(schedule, node.dims),
                 node.dtype,
                 init,
                 resident,

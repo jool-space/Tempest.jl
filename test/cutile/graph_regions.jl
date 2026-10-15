@@ -437,10 +437,16 @@ end
         for dims in ((0, 7), (7, 0))
             @test_throws ArgumentError trace(x -> sum(abs2, x), zeros(Float32, dims))
         end
+        # Any rank collapses when the reduced axes are all, leading or trailing;
+        # an interior axis stays with the CUDA kernels.
         x = fill(0.2f0, 3, 5, 7)
         ex = prepare_forward(x -> sum(abs2, x), CuArray(x))
-        @test isempty(graph_steps(ex))
+        @test length(graph_steps(ex)) == 1
         @test only(Array(execute!(ex))) ≈ sum(abs2, x)
+        ex = prepare_forward(x -> sum(abs2, x; dims = 2), CuArray(x))
+        @test isempty(graph_steps(ex))
+        @test any(note -> occursin("leading or trailing axes", note), ex.semantic_notes)
+        @test Array(execute!(ex)) ≈ sum(abs2, x; dims = 2)
     end
 
     # Scalar callables broadcast over the two-axis tiles of column reductions:
