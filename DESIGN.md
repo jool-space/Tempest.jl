@@ -8,17 +8,23 @@ describes today's code.
 
 ## The idea
 
-Tempest is three small algebras and one decision.
+Tempest describes every computation with three things and plans it with one
+decision. Each of the three comes with rules for rewriting it without changing
+its result, and those rules are what let the planner rearrange work freely.
 
-- **Formulas.** Every read is a quasi-affine index formula. Layout operations
-  only compose formulas, so how a layout is spelled does not matter.
-- **Folds.** Every reduction is a monoid: lift each element, combine two
-  states, observe the result. Associativity makes every grouping legal, so
-  resident, streamed, split, partial-then-merge and online evaluation are one
-  fold grouped differently.
-- **Scalar functions.** Julia functions, traced into primitives with derivative
-  rules. They are pure, so recomputing a value instead of storing it is always
-  legal.
+- **Formulas: where a value reads from.** Every read is `x[f(i)]`, where `f`
+  is index arithmetic: sums, constant multiples, and floor division and
+  remainder by constants. Transposes, reshapes, slices, broadcasts and
+  concatenations only change `f`, and formulas have one canonical form, so how
+  a layout is spelled does not matter.
+- **Folds: how a value reduces over axes.** Every reduction is three
+  functions: lift an element into a state, combine two states, observe the
+  result. Combining is associative, so every grouping is legal: resident,
+  streamed, split, partial-then-merge and online evaluation are one fold
+  grouped differently.
+- **Scalar functions: what happens to each element.** Julia functions, traced
+  into primitives with derivative rules. They are pure, so recomputing a value
+  instead of storing it is always legal.
 - **The decision.** For each value: store it, or recompute it wherever it is
   read. A kernel is a set of maps and folds over one shared index domain, each
   fold reducing its own subset of the axes, laid over tiles by a schedule.
@@ -53,6 +59,42 @@ It exists because no other system combines three things:
   when no kernel claims it, and is replaced whole when one does.
 - **The whole step is prepared once,** with fixed storage, and replayed as one
   captured graph.
+
+## Scope
+
+Tempest is a foundation. jool-space builds new infrastructure for deep
+learning in Julia rather than extending today's frameworks, and Tempest is the
+compiler at its base: it turns array programs written in plain Julia (a forward
+pass, a loss, a training step) into fused, explained, captured programs on one
+GPU.
+
+- **What sits above it is separate.** Layers, optimizers, data loading and
+  models are packages built on Tempest, not parts of it. Libraries of
+  operations such as NNlib sit beside it. Integration with today's frameworks
+  is welcome where it comes nearly free, and does not shape the design.
+- **The same code runs eagerly.** Every function Tempest adds (folds with
+  custom operators, `logsumexp`, positions, verbs such as attention and
+  dropout) has a method on plain arrays, on the CPU or a GPU, so one source
+  runs untraced, array by array, and traced. The coverage goal is that slice:
+  Julia array code that runs eagerly should trace, except control flow on
+  array values.
+
+## Non-goals
+
+- A layer library, optimizers, data loading or a model zoo.
+- Another framework's operator list as a checklist. Coverage follows the array
+  code people write.
+- A code path per model or pattern. Every feature is formulas, folds and
+  scalar functions, or a claim at the edge.
+- Ambient numerics. There is no global or task-local math mode: the precision
+  a program computes in is written in the program, per operation, and printed
+  by `explain` (see Numerics).
+- Speed claims without their method. Every published number names the
+  hardware, the clocks, the precision, the harness and the baseline's
+  configuration, and can be reproduced from the repository.
+- Hardware in the core. Formulas, folds, scalar functions, the planner and the
+  generator's input are backend-neutral; vendor specifics live in
+  implementations and device defaults.
 
 ## What makes it a leap
 
@@ -100,8 +142,9 @@ What a user can rely on. Each one is checked by tests.
    measurement does: never because of which code path found it, and never by
    noise. A measurement overrides the estimate only beyond the device's noise
    margin, and the plan is deterministic given the record.
-4. **Every implementation meets the declared numerics policy,** and removing a
-   buffer never removes a rounding the program states.
+4. **Every implementation computes what the program states,** its types and
+   rounding functions included, up to summation order; removing a buffer
+   never removes a rounding the program states.
 5. **Every decision is visible and can be overridden.** The plan is data.
    `explain` prints each decision with its reason and whether it was estimated
    or measured; tests compare plans; a user pins a value's storage or a group's
@@ -272,8 +315,8 @@ Regions, calls, proposals and groups are all claims. The roles:
 - **cuBLAS and cuDNN are schedules without tile programs.** They claim
   products, products with epilogues and attention, and are chosen when they
   win, usually by measurement.
-- **The floor realizes any single value alone:** generic CUDA kernels, with
-  cuBLAS for products. It covers what tile programs cannot express, such as
+- **The floor realizes any single value alone** with generic kernels. It
+  covers what tile programs cannot express, such as
   deterministic scatters and opaque bodies. Because the floor always exists, a
   plan always exists; a claim whose build fails is removed and the cover is
   recomputed.
@@ -282,6 +325,15 @@ Regions, calls, proposals and groups are all claims. The roles:
 An implementation may claim a written-out pattern (attention spelled as two
 products around a softmax) as well as the named call. The index level is
 canonical, so the match does not depend on spelling.
+
+Loading a package makes its implementations available; the target decides
+which are used. Each implementation is an extension that registers itself when
+its packages load (the generator with cuTile, the product claims with cuBLAS).
+A target lists the implementations it may use: by default every available one
+at preparation, printed by `explain`, and narrowed by naming them, as in
+`CUDATarget(cuTile)`, so a session that loads cuBLAS for other reasons can still
+plan without it. The floor is always included. Which implementation runs a
+kernel changes speed and summation order, never what the program computes.
 
 ## The decision procedure
 
@@ -331,12 +383,30 @@ measured; for each buffer, its lifetime and slot.
 
 ## Numerics
 
-One policy object, set on the target, read by every implementation and part of
-every cache key. It covers product precision (full, TF32, half with Float32
-accumulation), accumulator types for folds, the rewrites that may be applied
-(reassociation, scaling forms, online softmax), allowed approximations and
-determinism. An implementation that cannot meet the policy does not claim.
-Removing a buffer never removes a rounding the program states.
+A program computes in the types it states, and nothing changes that silently.
+
+- **The defaults are the program's types.** Float32 values multiply and add in
+  Float32. Folds over half-precision elements accumulate in Float32 and round
+  once, at the end.
+- **Reduced precision is written in the program.** TF32 is a rounding function
+  on a product's operands: a product of two rounded numbers is exact in
+  Float32, so the interpreter computes what tensor cores compute, up to
+  summation order. Three-TF32 products split each operand into a rounded part
+  and a rounded remainder and sum three products in one fold. BFloat16 and
+  Float16 are conversions. An implementation reads these functions on a
+  product's operands and chooses its instructions from them; it never takes
+  precision from a mode.
+- **A policy is a rewrite, not a mode.** A policy such as "TF32 for every
+  Float32 product" inserts those functions into a program, or into one region
+  of it, before planning. The result is an ordinary program that the
+  interpreter, `explain` and the cache key all see.
+- **Rewrites that change rounding** (reassociation beyond regrouping a fold,
+  scaling forms, online softmax, approximate functions) happen only where the
+  policy permits them, and `explain` names them. Regrouping a fold is always
+  permitted: it changes summation order, as tile sizes and implementations
+  do. Determinism, when asked for, fixes the order.
+- An implementation that cannot compute what the program states does not
+  claim it. Removing a buffer never removes a rounding the program states.
 
 ## Runtime
 
@@ -377,8 +447,9 @@ records for known devices can ship with the package.
 
 ## Not now
 
-Control flow on traced values, mutation, sharding across devices, budgeted
-checkpointing, and an MLIR core. An explicit plan leaves room for each later.
+Control flow on traced values, mutation, several devices, budgeted
+checkpointing, symbolic sizes beyond bounded ones, serving, and an MLIR core.
+An explicit plan leaves room for each later.
 
 ## Open questions
 
