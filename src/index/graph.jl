@@ -35,7 +35,7 @@ struct ConstantArray{A} <: Definition
 end
 
 "`f` applied to the operands at each index of the value's domain."
-struct Map{F} <: Definition
+struct Pointwise{F} <: Definition
     f::F
     operands::Tuple{Vararg{Operand}}
 end
@@ -45,7 +45,7 @@ A fold of `operand` over the `reduced` axes of `iteration`. The operand is read
 over the iteration domain; the value's own domain is the iteration domain with
 the reduced axes of extent one, or no axes for a full reduction.
 """
-struct Fold{F} <: Definition
+struct Reduction{F} <: Definition
     fold::F
     operand::Operand
     iteration::Tuple{Vararg{Int}}
@@ -57,7 +57,7 @@ A program-level operation the index level does not model yet, realized on its
 operands materialized in their program shapes. Only the floor realizes it.
 """
 struct Opaque <: Definition
-    node::Tempest.Node
+    node::Node
     operands::Tuple{Vararg{Read}}
     shapes::Tuple{Vararg{Tuple{Tuple{Vararg{Int}}, Bool}}} # each operand's dims and scalar flag
 end
@@ -70,7 +70,7 @@ struct Value
 end
 
 domain(v::Value) = Domain(v.dims)
-iteration_domain(v::Value) = v.definition isa Fold ? Domain(v.definition.iteration) : domain(v)
+iteration_domain(v::Value) = v.definition isa Reduction ? Domain(v.definition.iteration) : domain(v)
 
 """
     IndexGraph
@@ -89,8 +89,8 @@ struct IndexGraph
 end
 
 operands(d::Definition) = ()
-operands(d::Map) = d.operands
-operands(d::Fold) = (d.operand,)
+operands(d::Pointwise) = d.operands
+operands(d::Reduction) = (d.operand,)
 operands(d::Opaque) = d.operands
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
@@ -107,9 +107,9 @@ end
 
 describe(d::Input) = "input $(d.argument)"
 describe(d::ConstantArray) = "constant array $(size(d.data))"
-describe(d::Map) = "map($(d.f))"
-describe(d::Fold) = "fold($(Tempest.fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
-describe(d::Opaque) = "opaque $(Tempest.operation_name(d.node.op))"
+describe(d::Pointwise) = "pointwise($(d.f))"
+describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
+describe(d::Opaque) = "opaque $(op_name(d.node.op))"
 
 show_operand(io, o::Read) = print(io, "%", o.value, "[", join(map(string, o.index), ", "), "]")
 show_operand(io, o::Literal) = print(io, repr(o.value))

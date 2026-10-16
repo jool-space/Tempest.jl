@@ -1,12 +1,10 @@
-name = "TempestSeed"
-uuid = "764c75ae-da20-4b0a-b983-46742decac95"
-version = "0.0.1"
+name = "Tempest"
+uuid = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
+version = "0.2.0-DEV"
 
 [deps]
-Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
-
-[sources]
-Tempest = {path = "../Tempest"}
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 
 [compat]
+LinearAlgebra = "1.11"
 julia = "1.11"

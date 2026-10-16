@@ -2,7 +2,7 @@
 
 Written 16 October 2026, and revised the same day after an adversarial review.
 This is the design Tempest is built toward, stated on its own terms rather than
-as a distance from the current code. It lives with the new core on the `seed`
+as a distance from the current code. It lives with the new code on the `next`
 branch. Tempest's architecture page (`docs/src/architecture.md` on `main`)
 describes today's code.
 
@@ -110,13 +110,15 @@ backward graph is ordinary program code and is planned together with the
 forward. A library may claim a whole named call here, as cuDNN claims
 `attention`; a call nobody claims is replaced by its reference.
 
-**Scalar functions.** Tempest lowers a callable's typed IR into a scalar
-expression graph of arithmetic, elementary functions, conversions and selects.
-The graph gives the derivative, the cost and the canonical form. A kernel runs
-the callable itself where its backend compiles it, and the lowered graph
-otherwise. Branches whose arms are safe to evaluate either way
-become selects, and loops with a constant trip count are unrolled. Three rules
-keep that sound:
+**Scalar functions.** A callable broadcast over traced arrays enters the
+program as primitives: during tracing it runs on tracers that record each
+primitive operation it performs (arithmetic, elementary functions, conversions,
+comparisons, selects). Its derivative, cost and canonical form follow from the
+primitives' rules. A callable that branches on an element value or loops
+cannot be traced that way; for those, Tempest lowers the callable's typed IR
+into the same primitives, turning branches whose arms are safe to evaluate
+either way into selects and unrolling loops with a constant trip count. Three
+rules keep that sound:
 
 - Functions that throw on the CPU and trap on the device (`sqrt`, `log`, `^`,
   integer `div` and `rem`) are lowered to total forms: the IEEE operation that
@@ -130,11 +132,9 @@ keep that sound:
 
 A callable with side effects, an unbounded loop or an arm that cannot be
 evaluated speculatively stays opaque: it runs on the floor and needs a user
-derivative. The seed starts by tracing callables on scalar stand-ins, as
-today's code does, and lowers typed IR after that. Branches reach tile programs
-through if-conversion in cuTile's broadcast, upstream. Loops do not need it: for
-a tile program the generator emits the lowered graph, with constant-trip loops
-unrolled, instead of the callable.
+derivative. Tile programs receive primitives, not callables, so loops never
+reach cuTile; if-conversion in cuTile's own broadcast, upstream, lets opaque
+callables with branches reach tile programs too.
 
 ### 2. The index level
 
@@ -207,7 +207,7 @@ formulas, bodies, folds, contracts, sweeps and stores. A sketch only decides
 bindings and extents; it contributes no code. One lowering rule is specific: a
 fold whose lift is bilinear in the swept tile lowers its combine to a contract.
 That rule is how attention's forward pass is a contract scheduled with an online
-softmax. Attention's backward pass is, in the seed, a hand-written schedule of
+softmax. Attention's backward pass is, at first, a hand-written schedule of
 three launches attached to the verb's reverse rule, in the same language;
 deriving it from differentiation and planning comes later.
 
@@ -366,54 +366,51 @@ checkpointing, and an MLIR core. An explicit plan leaves room for each later.
 
 ## How we get there
 
-Not by migrating today's planner. A seed is built beside it.
+Tempest is rebuilt from scratch on the branch `next`, as the package Tempest
+itself. The new code owns every level, from tracing to the runtime, and imports
+nothing from the code it replaces. That code is history and reading material.
+Where a piece of it proved itself (the fold algebra, the measured thresholds
+and workarounds in the cuTile schedules, cuDNN graph building, capture and state
+donation, device rates, the guard-rail cases), it is rewritten into this design
+deliberately. What it accreted is left behind: separate paths for calls,
+proposals, graph regions and scalar regions, six request kinds, and decisions
+about what forms a kernel made in five places. Comparisons with it, and with
+torch, run as separate processes against recorded numbers.
 
-- **The seed** is a new core implementing the four levels, the claim protocol
-  and the decision procedure: the package `TempestSeed` on the orphan branch
-  `seed`, checked out as its own worktree beside the main one. It shares no
-  files or history with today's code, and loads today's Tempest from the main
-  checkout, so old and new run in one session.
-- **Today's Tempest is frozen except for fixes,** and serves as the oracle and
-  the parts bin. The seed's results and speeds are compared with it, and the
-  speed guard rails run on the seed from the start. What today's code
-  learned the hard way carries over: the tracing frontend, verbs and fold
-  algebra, reverse rules, capture and state donation, cuDNN graph building,
-  device rates, and the guard-rail cases. The cuTile schedules are ported as
-  schedule records that the one generator compiles, not copied as code; their
-  measured thresholds become the per-device defaults. What today's code
-  accreted does not carry over: separate paths for calls, proposals, graph
-  regions and scalar regions, six request kinds, and decisions about what
-  forms a kernel made in five places.
 - **Milestones**, each closed by its gate:
-  1. The index level with formulas, body lowering, the
-     interpreter and generated-program tests, the schedule language with
-     sweeps, folds and contracts from the start, and the generator. Today's
-     fold schedules are ported as records. Gate: the forward guard-rail cases
-     run within the guard rails' limits of today's times, with no special case
-     in the generator for any sketch.
-  2. Contracts on cuTile with prologues and epilogues, cuBLAS as a
-     schedule, forms, the greedy cover, the tuning record, differentiation.
-     Gate: the MLP's forward and backward products with bias and GELU pick the
-     measured winner for each product and replay it from the record.
-  3. Training steps of the MLP, RMSNorm and softmax cases; the kernel cache.
-  4. Attention: the forward as a scheduled contract, the backward as a
-     hand-written record, cuDNN as a rival. Gate: the GPT step at parity with
-     today's Tempest or better, then measured against torch at the same
-     precision.
+  1. The program level: tracing of broadcasts, folds, products, layout,
+     gathers and positions; scalar functions traced into primitives; the
+     interpreter; differentiation. Gate: forward and training programs, and
+     generated programs with their respellings, agree with the interpreter,
+     and gradients with finite differences.
+  2. The index level, the schedule language with sweeps, folds and contracts
+     from the start, the cuTile generator and the CUDA floor, for pointwise
+     work, folds and layout; the plan printed. Today's fold schedules are
+     ported as records. Gate: the forward guard-rail cases within 1.10 times
+     today's default plan in two consecutive runs, with no special case in the
+     generator for any sketch.
+  3. Contracts on cuTile with prologues and epilogues, cuBLAS as a schedule,
+     forms, the greedy cover, the tuning record, the kernel cache, and the
+     training steps of the MLP, RMSNorm and softmax cases. Gate: each product
+     picks the measured winner and replays it from the record, and the guard
+     rails' training cases hold.
+  4. Attention (the forward as a scheduled contract, the backward as a
+     hand-written record, cuDNN as a rival), functional updates and the GPT
+     step. Gate: parity with today's Tempest or better, then measured against
+     torch at the same precision.
   5. Bounded sizes and decode.
-- **Stopping rule.** Stop the seed when a gate fails for a reason the design
-  cannot address: the forward guard-rail cases cannot come within 1.10 times
-  today's default plan in two consecutive runs; today's fold schedules cannot be
-  ported as records without a special case in the generator for some sketch;
-  the MLP, RMSNorm and softmax training steps cannot match the interpreter and
-  today's Tempest to a relative 1e-5; or the GPT step cannot reach parity. A
-  gate not yet met because the work is unfinished is not a reason to stop. On
-  stopping, fold what the seed proved (formulas on region inputs, forms, the
-  kernel cache, the tuning record) back into today's code step by step.
+- **Stopping rule.** Stop when a gate fails for a reason the design cannot
+  address: the forward guard-rail cases cannot come within 1.10 times today's
+  default plan; today's fold schedules cannot be ported as records without a
+  special case in the generator for some sketch; training steps cannot match
+  the interpreter; or the GPT step cannot reach parity. A gate not yet met
+  because the work is unfinished is not a reason to stop. On stopping, fold
+  what the new code proved (formulas on region inputs, forms, the kernel cache,
+  the tuning record) back into today's code step by step.
 - **The scorecard:** the spelling battery gives identical plans; generated
-  programs agree with the interpreter; the guard rails pass on the seed; the
-  GPT step matches or beats today's and holds up against torch at the same
-  precision; one place decides what forms a kernel.
+  programs agree with the interpreter; the guard rails pass; the GPT step
+  matches or beats today's and holds up against torch at the same precision;
+  one place decides what forms a kernel.
 
-When the seed passes milestone 4 it becomes Tempest: the main line moves to it,
-and today's code, docs and reports stay in history.
+When `next` passes milestone 4 it becomes `main`. Today's code, docs and
+reports stay in history.
