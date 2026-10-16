@@ -37,5 +37,8 @@ include("plan/explain.jl")
 include("codegen/scalar.jl")
 include("runtime/runtime.jl")
 include("runtime/decide.jl")
+include("runtime/cache.jl")
+
+include("precompile.jl")
 
 end

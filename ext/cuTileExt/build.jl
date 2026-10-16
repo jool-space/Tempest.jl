@@ -398,21 +398,15 @@ end
 function Tempest.build_claim(::Tempest.cuTileGenerator, claim::Claim, target, p::Plan, g::Group, buffers)
     c = Context(p.graph, p.stored, g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
-    launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule)
+    launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule, target)
 end
 
-function launch_kernels(kernels, workspaces, buffers, schedule)
+function launch_kernels(kernels, workspaces, buffers, schedule, target)
     scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in workspaces)
-    launches = map(kernels) do k
-        f = Core.eval(Tempest.Generated, source(k))
+    launches = Tempest.concurrently(kernels, target) do k
+        f = Tempest.generated(source(k))
         arrays = map(spec -> tile_array(spec.buffer isa Int ? buffers[spec.buffer] : scratch[spec.buffer], spec), k.args)
-        occupancy = k.occupancy
-        compiled = Base.invokelatest(f, arrays, occupancy) do f, arrays, occupancy
-            occupancy === nothing ? CUDACore.@cuda(backend = ct, launch = false, f(arrays...)) :
-            CUDACore.@cuda(backend = ct, launch = false, occupancy = occupancy, f(arrays...))
-        end
-        grid = k.grid
-        () -> compiled(arrays...; blocks = grid)
+        tile_launch(f, arrays, k.grid; k.occupancy)
     end
     keep = (scratch, buffers)
     launch = () -> (foreach(l -> l(), launches); keep; nothing)

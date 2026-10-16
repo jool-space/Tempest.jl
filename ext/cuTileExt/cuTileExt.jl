@@ -301,10 +301,13 @@ function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Pl
 end
 
 include("emit.jl")
+include("cache.jl")
 include("build.jl")
 include("contract.jl")
 include("attention.jl")
 
 __init__() = Tempest.register!(ct, Tempest.cuTileGenerator(), cuTileAttention())
+
+include("precompile.jl")
 
 end

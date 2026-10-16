@@ -205,3 +205,5 @@ if CUDACore.functional()
         end
     end
 end
+
+include("cache.jl")

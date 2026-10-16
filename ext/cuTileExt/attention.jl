@@ -222,16 +222,13 @@ function epilogue_for(p, g, o, buffers, shape)
         push!(body, :($name = $expr))
         names[s] = name
     end
-    f = Core.eval(Tempest.Generated, :(function (y, arrays, index)
+    f = Tempest.generated(:(function (y, arrays, index)
         $(body...)
         return $(names[t])
     end))
     Epilogue(f, Tuple(arrays)), e
 end
 
-compile(f, args) = Base.invokelatest(f, args) do f, args
-    CUDACore.@cuda(backend = ct, launch = false, f(args...))
-end
 
 struct BuiltAttention
     f::Any
@@ -262,8 +259,7 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
         epilogue, target_o = epilogue_for(p, g, o, buffers, (D, 1, ATTENTION_TILE, 1))
         lse_array = buffers[lse] === nothing ? nothing : tile_array(buffers[lse], (1, H, T, B))
         args = (tile_array(buffers[target_o], (D, H, T, B)), lse_array, arrays..., epilogue, s, constants...)
-        kernel = compile(attention_forward_kernel, args)
-        return (() -> kernel(args...; blocks = grid), BuiltAttention(op.f, !(epilogue isa NoEpilogue), tf32))
+        return (tile_launch(attention_forward_kernel, args, grid), BuiltAttention(op.f, !(epilogue isa NoEpilogue), tf32))
     end
     qa, ka, va, oa, lsea, douta, dlsea = arrays
     # The kernels write all three gradients; one nobody reads goes to scratch.
@@ -274,14 +270,10 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     delta_args = (delta, oa, douta, dlsea, ct.Constant(D), tile, ct.Constant(H))
     dkdv_args = (dk, dv, qa, ka, va, lsea, delta, douta, s, constants...)
     dq_args = (dq, qa, ka, va, lsea, delta, douta, s, constants...)
-    kernels = map(compile, (attention_delta_kernel, attention_dkdv_kernel, attention_dq_kernel), (delta_args, dkdv_args, dq_args))
     kv_grid = (cld(keys, ATTENTION_TILE), KV * B)
-    launch = () -> begin
-        kernels[1](delta_args...; blocks = grid)
-        kernels[2](dkdv_args...; blocks = kv_grid)
-        kernels[3](dq_args...; blocks = grid)
-        workspace, places
-        nothing
-    end
+    kernels = ((attention_delta_kernel, delta_args, grid), (attention_dkdv_kernel, dkdv_args, kv_grid),
+        (attention_dq_kernel, dq_args, grid))
+    launches = Tempest.concurrently(k -> tile_launch(k...), kernels, target)
+    launch = () -> (foreach(l -> l(), launches); workspace; places; nothing)
     (launch, BuiltAttention(op.f, false, tf32))
 end

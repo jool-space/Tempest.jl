@@ -158,7 +158,7 @@ Plan `program` for the shapes and types of `inputs` and build its kernels on
 claims are timed when `measure` allows and the target can, and kept in the
 tuning record.
 """
-function prepare(program::Program, inputs...; target = default_target(inputs), measure::Bool = true)
+function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true)
     graph = lower(program;
         keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
         epilogue = (n, nodes) -> takes_epilogue(target, nodes, n))
@@ -178,15 +178,54 @@ function prepare(program::Program, inputs...; target = default_target(inputs), m
             buffers[id] = nothing # stored only in a plan not taken
         end
     end
-    built = map((g, x) -> build_group(d, p, g, x, buffers), p.groups, ds)
+    built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built],
         Any[last(b) for b in built], Any[ds...], accepted)
     bind!(ex, inputs...)
     ex
 end
 
+"""
+    task_state(target) -> function
+
+A function that, called first in a new task, gives the task the state on
+`target` of the task that asked for it (for CUDA, its context and stream).
+"""
+task_state(target) = () -> nothing
+
+"""
+    concurrently(f, xs, target) -> results
+
+`f` of each of `xs`, in tasks that take turns on the calling thread, each in
+the calling task's state on `target`. Groups and kernels are built this way:
+while one task waits for a compilation running `elsewhere`, the others start
+theirs. Device objects are made on the calling thread, so at exit they are
+finalized after what the caller made from them later (a module unloaded before
+a captured graph that launches it crashes the driver).
+"""
+function concurrently(f, xs, target)
+    enter = task_state(target)
+    map(fetch_result, [@async((enter(); f(x))) for x in xs])
+end
+
+"""
+    elsewhere(f) -> f()
+
+Run `f` on another thread, if there is one, and wait for it while the calling
+thread's other tasks run. For compilation, which makes no device objects.
+"""
+elsewhere(f) = fetch_result(Threads.@spawn f())
+
+function fetch_result(t::Task)
+    try
+        fetch(t)
+    catch err
+        err isa TaskFailedException ? throw(err.task.exception) : rethrow()
+    end
+end
+
 "Copy `inputs` into the executable's input buffers."
-function bind!(ex::Executable, inputs...)
+function bind!(ex::Executable, @nospecialize(inputs...))
     arguments = leaves(inputs)
     for (id, v) in enumerate(ex.plan.graph.values)
         d = v.definition
@@ -247,7 +286,7 @@ Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, 
 function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
     ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
     launches = map(ks) do k
-        f = Core.eval(Generated, :(function (buffers, n)
+        f = generated(:(function (buffers, n)
             for lin in 0:(n - 1)
                 $(k.body)
             end
