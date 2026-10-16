@@ -109,6 +109,10 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
     p = expand_calls(p, n -> keep_call(n, p.nodes))
     nodes = p.nodes
     keep = live(nodes, p.results)
+    # A claimed call computes all its results, used or not.
+    for (id, n) in enumerate(nodes)
+        n.op isa Call && keep[id] && foreach(r -> keep[r] = true, results_of(nodes, n.op.instance))
+    end
     values = Value[]
     access = Vector{Access}(undef, length(nodes))
     gathers = IdDict{Any, Int}()

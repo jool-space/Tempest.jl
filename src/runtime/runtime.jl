@@ -5,8 +5,15 @@ abstract type Target end
 "Run on the CPU, through the same generated floor code CUDA runs."
 struct CPUTarget <: Target end
 
-"Run on an NVIDIA GPU; needs CUDACore loaded."
-struct CUDATarget <: Target end
+"""
+Run on an NVIDIA GPU; needs CUDACore loaded. `matmul_precision = :tf32` lets
+products run in TensorFloat-32; the default keeps full precision.
+"""
+struct CUDATarget <: Target
+    matmul_precision::Symbol
+end
+
+CUDATarget(; matmul_precision::Symbol = :full) = CUDATarget(matmul_precision)
 
 target_for(x::AbstractArray) = CPUTarget()
 target_for(x) = nothing

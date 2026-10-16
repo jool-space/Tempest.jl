@@ -50,3 +50,26 @@ results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(exec
         filter!(i -> !(i isa HostAttention), T.EXTRA_IMPLEMENTATIONS)
     end
 end
+
+using CUDACore, cuTile
+if CUDACore.functional()
+    @testset "cuTile attention claims" begin
+        single(dims...; scale) = Float32.(data(dims...; scale))
+        q, k, v = single(16, 4, 64, 2; scale = 0.1), single(16, 2, 64, 2; scale = 0.2), single(16, 2, 64, 2; scale = 0.3)
+        x = single(16, 4, 64, 2; scale = 0.5)
+        device(xs) = map(CuArray, xs)
+        close(a, b; rtol) = all(map((x, y) -> isapprox(ndims(x) == 0 ? Array(x)[] : Array(x), y; rtol), a, b))
+        for (target, rtol) in ((T.CUDATarget(), 1.0e-4), (T.CUDATarget(matmul_precision = :tf32), 5.0e-3))
+            p = trace(residual, q, k, v, x)
+            ex = prepare(p, device((q, k, v, x))...; target)
+            g = only(opaque_groups(ex))
+            @test length(g.epilogues) == 1
+            @test any(d -> d isa Base.get_extension(Tempest, :CuTileExt).BuiltAttention, ex.kernels)
+            @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(p, q, k, v, x)]; rtol)
+            d = differentiate(p)
+            ex = prepare(d, device((q, k, v, x))...; target)
+            @test length(opaque_groups(ex)) == 2
+            @test close(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))); rtol)
+        end
+    end
+end
