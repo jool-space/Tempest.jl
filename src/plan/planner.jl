@@ -12,7 +12,7 @@
 # a block and which by merging partial states, is the schedule's choice.
 
 struct Group
-    kind::Symbol # :reduction, :pointwise, :contraction or :opaque
+    kind::Symbol # :reduction, :pointwise or :opaque
     domain::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
@@ -47,9 +47,13 @@ end
 function placement(graph, g::Group, v)
     val = graph.values[v]
     (val.scalar || isempty(val.dims)) && return ()
-    length(val.dims) == length(g.domain) || return nothing
-    all(k -> val.dims[k] == g.domain[k] || val.dims[k] == 1, eachindex(val.dims)) || return nothing
-    identity_index(val.dims)
+    # A value with fewer axes than the domain has the missing trailing ones at
+    # extent one, as a product's value lacks its summed axes.
+    n = length(val.dims)
+    n <= length(g.domain) || return nothing
+    padded = ntuple(k -> k <= n ? val.dims[k] : 1, length(g.domain))
+    all(k -> padded[k] == g.domain[k] || padded[k] == 1, eachindex(padded)) || return nothing
+    identity_index(padded)[1:n]
 end
 
 struct OutsideGroup <: Exception end
@@ -155,10 +159,10 @@ function plan(graph::IndexGraph)
     for r in results
         readers[r] += 1
     end
-    # Products and opaque operations read their operands from storage.
+    # Opaque operations read their operands from storage.
     materialized = falses(n)
     for v in values
-        v.definition isa Union{Contraction, Opaque} || continue
+        v.definition isa Opaque || continue
         foreach(o -> materialized[o.value] = true, operands(v.definition))
     end
     stored = map(eachindex(values)) do id
@@ -216,10 +220,6 @@ function plan(graph::IndexGraph)
             push!(g.outputs, id)
             g.terms[id] = value_term(graph, stored, g, id, identity_index(values[id].dims))
             g.phase[id] = 0
-            g
-        elseif d isa Contraction
-            g = Group(:contraction, d.iteration)
-            push!(g.outputs, id)
             g
         else
             g = Group(:opaque, values[id].dims)

@@ -15,6 +15,9 @@ function layernorm(x, w)
     (x .- m) ./ sqrt.(v .+ 1.0e-5) .* w
 end
 mlp(x, w1, b1, w2, b2) = w2 * tanh.(w1 * x .+ b1) .+ b2
+gelu(x) = x / 2 * (1 + tanh(oftype(x, 0.7978846) * (x + oftype(x, 0.044715) * x * x * x)))
+# A product spelled as a broadcast and a sum over the shared axis.
+spelled_product(a, b) = dropdims(sum(reshape(a, size(a, 1), size(a, 2), 1) .* reshape(b, 1, size(b, 1), size(b, 2)); dims = 2); dims = 2)
 
 data(dims...; scale = 1.0) = 2.0 .* sin.(scale .* reshape(Float64.(1:prod(dims)), dims...))
 
@@ -35,6 +38,11 @@ const PROGRAMS = [
     ("MLP", (x, w1, b1, w2, b2) -> sum(abs2, mlp(x, w1, b1, w2, b2)),
      (data(6, 10), data(7, 6; scale = 0.1), data(7), data(6, 7; scale = 0.2), data(6))),
     ("adjoint product", (a, b) -> sum(tanh.(a' * b)), (data(6, 4), data(6, 5; scale = 0.3))),
+    ("product spelled as a broadcast sum", (a, b) -> sum(abs2, spelled_product(a, b)), (data(5, 7; scale = 0.3), data(7, 6))),
+    ("linear, bias, GELU", (w, x, b) -> sum(abs2, gelu.(w * x .+ b)), (data(9, 7; scale = 0.2), data(7, 10), data(9))),
+    ("residual epilogue", (w, x) -> sum(abs2, w * x .+ x), (data(7, 7; scale = 0.2), data(7, 10))),
+    ("scaling prologue", (w, x) -> sum(abs2, w * (x .* 0.5) ./ 3), (data(9, 7; scale = 0.2), data(7, 10))),
+    ("products of transposes", (a, b) -> sum(abs2, a' * b' .+ 1), (data(7, 5; scale = 0.2), data(6, 7))),
     ("batched product", (a, b) -> sum(abs2, T.batched_mul(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
     ("matrix vector", (a, v) -> sum(abs2, a * v), (data(5, 4), data(4; scale = 0.5))),
     ("swish", x -> sum(swish.(x)), (data(8, 6),)),

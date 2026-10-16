@@ -1,11 +1,46 @@
 # Emitting tile programs from a group and its schedule.
 
-"A kernel argument: a buffer as a two-dimensional strided view."
+"A kernel argument: a buffer as a strided view."
 struct ArgSpec
     buffer::Any # a value id, or a key into the kernel's workspace
     offset::Int
-    sizes::Tuple{Int, Int}
-    strides::Tuple{Int, Int}
+    sizes::Tuple{Vararg{Int}}
+    strides::Tuple{Vararg{Int}}
+end
+
+# A view keeps only the tile axes it spans, in the order of their strides, so
+# loads and stores have the shape and order a hand-written kernel would give
+# them: the unit-stride axis first. Tiles are permuted and reshaped to the
+# kernel's tile axes in registers (a transposed operand is loaded in storage
+# order, then permuted).
+compact(spans, xs) = Tuple(x for (s, x) in zip(spans, xs) if s)
+storage_order(v) = sortperm(collect(compact(v.spans, v.strides)))
+
+function spec(v, extents)
+    any(v.spans) || return ArgSpec(v.value, v.offset, (1,), (1,))
+    order = storage_order(v)
+    ArgSpec(v.value, v.offset, compact(v.spans, extents)[order], compact(v.spans, v.strides)[order])
+end
+
+function load_nd(sym, v, tiles, indices)
+    full = map((s, t) -> s ? t : 1, v.spans, tiles)
+    any(v.spans) || return :(reshape($(ct.load)($sym; index = (Int32(1),), shape = (1,)), $full))
+    order = storage_order(v)
+    shape, index = compact(v.spans, tiles), compact(v.spans, indices)
+    loaded = :($(ct.load)($sym; index = ($(index[order]...),), shape = $(shape[order]), padding_mode = $(ct.PaddingMode.Zero)))
+    order == 1:length(order) || (loaded = :(permutedims($loaded, $(Tuple(invperm(order))))))
+    shape == full ? loaded : :(reshape($loaded, $full))
+end
+
+function store_nd(sym, v, tiles, indices, value)
+    full = map((s, t) -> s ? t : 1, v.spans, tiles)
+    tile = :($(ct.broadcast_to)($value, $full))
+    any(v.spans) || return :($(ct.store)($sym; index = (Int32(1),), tile = reshape($tile, (1,))))
+    order = storage_order(v)
+    shape, index = compact(v.spans, tiles), compact(v.spans, indices)
+    shape == full || (tile = :(reshape($tile, $shape)))
+    order == 1:length(order) || (tile = :(permutedims($tile, $(Tuple(order)))))
+    :($(ct.store)($sym; index = ($(index[order]...),), tile = $tile))
 end
 
 struct Workspace
@@ -45,19 +80,15 @@ struct Context
     stored::Vector{Bool}
     g::Group
     s::TileSchedule
-    axes::Tuple
 end
 
-tile(c::Context) = c.s.tile
-reduced_dims(c::Context) = c.s.reduced == 3 ? (1, 2) : c.s.reduced
+tile(c::Context) = tiles(c.s)
+groups(c::Context) = groups(c.s)
+reduced_dims(c::Context) = code(c.s) == 3 ? (1, 2) : only(swept(c.s))
 
-value_spec(c::Context, v::View) = ArgSpec(
-    v.value,
-    v.offset,
-    (v.spans[1] ? c.s.extent[1] : 1, v.spans[2] ? c.s.extent[2] : 1),
-    (v.spans[1] ? v.strides[1] : 1, v.spans[2] ? v.strides[2] : 1),
-)
+value_spec(c::Context, v::View) = spec(v, extent(c.s))
 
+# The workspace views of split schedules (partials, statistics) stay two-axis.
 function load_expr(sym, spans, ta, tb, ia, ib)
     shape = (spans[1] ? ta : 1, spans[2] ? tb : 1)
     index = (spans[1] ? ia : :(Int32(1)), spans[2] ? ib : :(Int32(1)))
@@ -70,11 +101,10 @@ store_expr(sym, spans, ta, tb, ia, ib, value) = :($(ct.store)(
     tile = $(ct.broadcast_to)($value, $((spans[1] ? ta : 1, spans[2] ? tb : 1))),
 ))
 
-# Statements for `roots`, each subterm once. `names` maps terms already in
-# scope (loads hoisted out of a loop, reductions) to their symbols.
-function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, ia, ib)
-    ta, tb = tile(c)
-    A, B = c.axes
+# Statements for `roots`, each subterm once, at the tile of block indices
+# `indices` (one per tile axis). `names` maps terms already in scope (loads
+# hoisted out of a loop, reductions) to their symbols.
+function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indices...)
     for t in Tempest.subterms(roots)
         haskey(names, t) && continue
         if t isa Lit
@@ -83,8 +113,8 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, ia, ib
         end
         name = gensym(:t)
         expr = if t isa Load
-            v = view_of(c.graph, t.value, t.index, c.g, A, B)
-            load_expr(argument!(k, value_spec(c, v)), v.spans, ta, tb, ia, ib)
+            v = view_of(c.graph, t.value, t.index, c.g, groups(c)...)
+            load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices)
         elseif t isa Apply
             args = map(a -> names[a], t.args)
             t.f isa Tempest.Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
@@ -220,48 +250,30 @@ end
 
 # A mask of the lanes of tile `t` along the reduced axis inside the domain.
 function valid_mask!(st, c::Context, t)
-    ta, tb = tile(c)
-    a, b = c.s.extent
+    p = only(swept(c.s))
+    T, E = c.s.tiling[p].tile, c.s.tiling[p].extent
+    shape = ntuple(i -> i == p ? T : 1, length(c.s.tiling))
     name = gensym(:valid)
-    if c.s.reduced == 1
-        push!(st, :($name = reshape($(ct.arange)($ta), ($ta, 1)) .<= Int32($a) - ($t - Int32(1)) * Int32($ta)))
-    else
-        push!(st, :($name = reshape($(ct.arange)($tb), (1, $tb)) .<= Int32($b) - ($t - Int32(1)) * Int32($tb)))
+    push!(st, :($name = reshape($(ct.arange)($T), $shape) .<= Int32($E) - ($t - Int32(1)) * Int32($T)))
+    name
+end
+
+# A mask of the tile's lanes inside the domain, along every tile axis.
+function tile_mask!(st, c::Context, indices)
+    n = length(c.s.tiling)
+    terms = map(1:n) do i
+        T, E = c.s.tiling[i].tile, c.s.tiling[i].extent
+        shape = ntuple(q -> q == i ? T : 1, n)
+        :(reshape($(ct.arange)($T), $shape) .<= Int32($E) - ($(indices[i]) - Int32(1)) * Int32($T))
     end
-    name
-end
-
-function full_mask!(st, c::Context, ia, ib)
-    ta, tb = tile(c)
-    a, b = c.s.extent
     name = gensym(:valid)
-    push!(st, :($name = (reshape($(ct.arange)($ta), ($ta, 1)) .<= Int32($a) - ($ia - Int32(1)) * Int32($ta)) .&
-        (reshape($(ct.arange)($tb), (1, $tb)) .<= Int32($b) - ($ib - Int32(1)) * Int32($tb))))
+    push!(st, :($name = $(foldl((a, b) -> :($a .& $b), terms))))
     name
 end
 
-# Where a reduction or a reduction-shaped output lives in storage, as a view
-# of the collapsed kept axis.
-function statistic_spec(c::Context, r, buffer)
-    a, b = c.s.extent
-    c.s.reduced == 1 && return ArgSpec(buffer, 0, (1, b), (1, 1))
-    c.s.reduced == 2 && return ArgSpec(buffer, 0, (a, 1), (1, 1))
-    ArgSpec(buffer, 0, (1, 1), (1, 1))
-end
-
-statistic_spans(c::Context) = c.s.reduced == 1 ? (false, true) : c.s.reduced == 2 ? (true, false) : (false, false)
-
-function statistic_buffer(c::Context, r, workspaces)
-    c.stored[r] && return r
-    key = (:statistic, r)
-    a, b = c.s.extent
-    n = c.s.reduced == 1 ? b : c.s.reduced == 2 ? a : 1
-    workspaces[key] = Workspace(key, c.graph.values[r].eltype, n)
-    key
-end
-
-# Folds over the swept axes, completed by the schedule before what reads them,
-# in phases; and folds over other axes, completed by merging partial states.
+# Folds over the swept axes complete in a block (or by merging splits) before
+# what reads them, in phases; folds over other axes complete by merging
+# partial states.
 primary_folds(c::Context) = [r for r in c.g.reductions if Tempest.primary(c.graph, c.g, r)]
 partial_folds(c::Context) = [r for r in c.g.reductions if !Tempest.primary(c.graph, c.g, r)]
 
@@ -271,27 +283,191 @@ function reduction_phases(c::Context)
     [[r for r in folds if c.g.phase[r] == p] for p in phases]
 end
 
-"The collapsed axes fold `r` reduces: 1, 2 or (1, 2)."
-fold_dims(c::Context, r) = collapsed_reduce(c.axes[1], c.axes[2], Tempest.fold_axes(c.graph, r))
+"The tile axes fold `r` reduces, or nothing when its axes are not whole tile axes."
+function fold_tiles(c::Context, r)
+    S = Tempest.fold_axes(c.graph, r)
+    tiles = [i for (i, ax) in enumerate(c.s.tiling) if issubset(ax.axes, S)]
+    covered = reduce(vcat, (c.s.tiling[i].axes for i in tiles); init = Int[])
+    all(k -> k in covered || c.g.domain[k] == 1, S) ? tiles : nothing
+end
 
-"The collapsed axis fold `r` keeps (0 for none), and its extent."
-function fold_kept(c::Context, r)
-    d = fold_dims(c, r)
-    q = d == (1, 2) ? 0 : 3 - d
-    (q, q == 0 ? 1 : c.s.extent[q])
+kept_tiles_of(c::Context, r) = [i for i in eachindex(c.s.tiling) if !(i in fold_tiles(c, r))]
+fold_tile_shape(c::Context, r) = ntuple(i -> i in fold_tiles(c, r) ? 1 : tile(c)[i], length(c.s.tiling))
+
+# A fold's value as a view over the tiling: its own buffer when stored, else a
+# workspace of its shape (a fold that later launches read).
+function fold_spec!(c::Context, r, workspaces)
+    v = output_view(c, r)
+    spec = value_spec(c, v)
+    c.stored[r] && return (v, spec)
+    key = (:fold, r)
+    workspaces[key] = Workspace(key, c.graph.values[r].eltype, Tempest.storage_length(c.graph.values[r]))
+    (v, ArgSpec(key, spec.offset, spec.sizes, spec.strides))
+end
+
+# Load the values of folds `rs` at the tile of block indices `indices`.
+function load_folds!(k, st, c::Context, rs, names, indices, workspaces)
+    for r in rs
+        v, spec = fold_spec!(c, r, workspaces)
+        index = ntuple(i -> i in fold_tiles(c, r) ? :(Int32(1)) : indices[i], length(c.s.tiling))
+        name = gensym(:stat)
+        push!(st, :($name = $(load_nd(argument!(k, spec), v, tile(c), index))))
+        names[Stat(r)] = name
+    end
+end
+
+# Partial states. A fold a block does not complete leaves its partial state per
+# slot in a workspace laid out as (the extents of the tile axes it keeps...,
+# slots); `merge_kernel` completes it.
+partial_key(r, i) = (:partials, r, i)
+
+function partial_spec!(c::Context, r, i, slots, workspaces)
+    sizes = (Tuple(c.s.tiling[q].extent for q in kept_tiles_of(c, r))..., slots)
+    strides = Tuple(prod(sizes[1:(d - 1)]; init = 1) for d in eachindex(sizes))
+    key = partial_key(r, i)
+    workspaces[key] = Workspace(key, accumulator(c, r), prod(sizes))
+    ArgSpec(key, 0, sizes, strides)
+end
+
+# Store fold `r`'s partial state (a tile with its reduced tile axes at one) at
+# block indices `indices` along the axes it keeps, in `slot`.
+function store_partial!(k, st, c::Context, r, state, indices, slot, slots, workspaces)
+    kept = kept_tiles_of(c, r)
+    shape = (Tuple(tile(c)[q] for q in kept)..., 1)
+    index = (Tuple(indices[q] for q in kept)..., slot)
+    for (i, s) in enumerate(state)
+        sym = argument!(k, partial_spec!(c, r, i, slots, workspaces))
+        value = :(reshape($(ct.broadcast_to)($s, $(fold_tile_shape(c, r))), $shape))
+        push!(st, :($(ct.store)($sym; index = ($(index...),), tile = $value)))
+    end
+end
+
+# The partial state of each fold in `rs` over the tile at `indices`.
+function tile_states!(k, st, c::Context, rs, names, indices)
+    states = Dict{Int, Vector{Symbol}}()
+    isempty(rs) && return states
+    emit_tiles!(k, st, c, [c.g.terms[r] for r in rs], names, indices...)
+    valid = tile_mask!(st, c, indices)
+    for r in rs
+        f, A = fold_of(c, r), accumulator(c, r)
+        x = as_accumulator(st, names[c.g.terms[r]], A, Tempest.term_eltype(c.g.terms[r], c.graph), tile(c))
+        states[r] = direct_state!(st, f, A, x, valid, Tuple(fold_tiles(c, r)))
+    end
+    states
+end
+
+# A linear slot from block indices along tile axes `axes`, whose counts are
+# `counts`; the number of slots.
+function slot_expr(indices, axes, counts)
+    isempty(axes) && return (:(Int32(1)), 1)
+    expr = :(Int32(0))
+    stride = 1
+    for (q, n) in zip(axes, counts)
+        expr = :($expr + ($(indices[q]) - Int32(1)) * Int32($stride))
+        stride *= n
+    end
+    (:($expr + Int32(1)), stride)
 end
 
 statistic_outputs(c::Context) = [m for m in c.g.outputs if c.graph.values[m].dims != c.g.domain]
 full_outputs(c::Context) = [m for m in c.g.outputs if c.graph.values[m].dims == c.g.domain]
 
-output_view(c::Context, m) =
-    view_of(c.graph, m, Tempest.placement(c.graph, c.g, m), c.g, c.axes[1], c.axes[2])
+output_view(c::Context, m) = view_of(c.graph, m, Tempest.placement(c.graph, c.g, m), c.g, groups(c)...)
 
-# Store full-domain outputs of the tile at (ia, ib).
-function store_outputs!(k, st, c, ms, names, ia, ib)
-    ta, tb = tile(c)
-    for m in ms
+# Store values the group computes (outputs, or reductions as `Stat`s) at the
+# tile of block indices `indices`.
+function store_values!(k, st, c, vs, names, indices...)
+    for m in vs
         v = output_view(c, m)
-        push!(st, store_expr(argument!(k, value_spec(c, v)), v.spans, ta, tb, ia, ib, names[c.g.terms[m]]))
+        value = m in c.g.reductions ? names[Stat(m)] : names[c.g.terms[m]]
+        push!(st, store_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, value))
     end
 end
+
+store_outputs!(k, st, c, ms, names, indices...) = store_values!(k, st, c, ms, names, indices...)
+
+# The one product rule of the fold algebra: a sum whose contribution is `x * y`,
+# where x and y each span the swept axis and a different one of two kept tiled
+# axes (around it in tile order), accumulates as a matrix product of their
+# tiles, `muladd` on tensor cores. Returns the factors in matrix order and the
+# kept axes, or nothing.
+function bilinear(c::Context, r)
+    fold_of(c, r) isa Tempest.SumFold || return nothing
+    t = c.g.terms[r]
+    t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
+    sw = swept(c.s)
+    length(sw) == 1 || return nothing
+    p = only(sw)
+    x, y = t.args
+    sx, sy = term_spans(c, x), term_spans(c, y)
+    (sx === nothing || sy === nothing) && return nothing
+    sx[p] && sy[p] || return nothing
+    kept = [i for i in eachindex(sx) if i != p && c.s.tiling[i].tile > 1]
+    length(kept) == 2 || return nothing
+    i, j = kept
+    i < p < j || return nothing
+    sx[i] && !sx[j] && sy[j] && !sy[i] && return (x, y, i, j)
+    sy[i] && !sy[j] && sx[j] && !sx[i] && return (y, x, i, j)
+    nothing
+end
+
+# The tile axes a term's loads span, or nothing if it reads positions or
+# reductions.
+function term_spans(c::Context, t::Term)
+    spans = fill(false, length(c.s.tiling))
+    for s in Tempest.subterms((t,))
+        s isa Union{Ix, Stat} && return nothing
+        s isa Load || continue
+        v = view_of(c.graph, s.value, s.index, c.g, groups(c)...)
+        v === nothing && return nothing
+        spans .|= collect(v.spans)
+    end
+    spans
+end
+
+# A half-precision factor converted to Float32 enters the matrix product as
+# it is: tensor cores accumulate its products in Float32 exactly.
+function product_factor(c::Context, t::Term)
+    t isa Apply && t.f isa Tempest.Cast{Float32} || return t
+    inner = only(t.args)
+    Tempest.term_eltype(inner, c.graph) <: Tempest.HalfFloat ? inner : t
+end
+
+function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t)
+    shape = tile(c)
+    p = only(swept(c.s))
+    tm, tk, tn = shape[i], shape[p], shape[j]
+    n = length(shape)
+    fa, fb = product_factor(c, a), product_factor(c, b)
+    xa, xb = gensym(:a), gensym(:b)
+    push!(st, :($xa = reshape($(ct.broadcast_to)($(names[fa]), $(ntuple(k -> k == i ? tm : k == p ? tk : 1, n))), ($tm, $tk))))
+    push!(st, :($xb = reshape($(ct.broadcast_to)($(names[fb]), $(ntuple(k -> k == p ? tk : k == j ? tn : 1, n))), ($tk, $tn))))
+    # Padded steps of the swept axis read zeros from loads, but a computed
+    # factor need not vanish there.
+    E = c.s.tiling[p].extent
+    if E % tk != 0 && !(fa isa Load && fb isa Load)
+        push!(st, :($xa = ifelse.(reshape($(ct.arange)($tk), (1, $tk)) .<= Int32($E) - ($t - Int32(1)) * Int32($tk), $xa,
+            $(zero(Tempest.term_eltype(fa, c.graph))))))
+    end
+    single = Tempest.term_eltype(fa, c.graph) === Float32
+    if c.s.precision === :tf32x3 && single
+        # Each factor as a TF32 high part and a TF32 remainder; the product of
+        # the remainders is below Float32 rounding and is dropped.
+        TF = :($(ct.Tile){$(ct.TFloat32)})
+        F = :($(ct.Tile){Float32})
+        ah, al, bh, bl = gensym(:ah), gensym(:al), gensym(:bh), gensym(:bl)
+        push!(st, :($ah = convert($TF, $xa)), :($al = convert($TF, $xa .- convert($F, $ah))))
+        push!(st, :($bh = convert($TF, $xb)), :($bl = convert($TF, $xb .- convert($F, $bh))))
+        push!(st, :($acc = muladd($al, $bh, $acc)), :($acc = muladd($ah, $bl, $acc)), :($acc = muladd($ah, $bh, $acc)))
+        return
+    end
+    if c.s.precision === :tf32 && single
+        push!(st, :($xa = convert($(ct.Tile){$(ct.TFloat32)}, $xa)))
+        push!(st, :($xb = convert($(ct.Tile){$(ct.TFloat32)}, $xb)))
+    end
+    push!(st, :($acc = muladd($xa, $xb, $acc)))
+end
+
+# The accumulator of a product, as a state over the tile axes.
+product_state(c::Context, (a, b, i, j), acc) =
+    [:(reshape($acc, $(ntuple(k -> k == only(swept(c.s)) ? 1 : tile(c)[k], length(c.s.tiling)))))]

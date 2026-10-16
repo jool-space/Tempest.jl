@@ -15,9 +15,9 @@ const THREADS = 256
 function Tempest.build(target::CUDATarget, p::Plan, g::Group, buffers)
     g.kind === :opaque && return Tempest.opaque_launch(p, g, buffers)
     for implementation in Tempest.EXTRA_IMPLEMENTATIONS
-        for claim in Tempest.claims(implementation, p, g)
+        for claim in Tempest.claims(implementation, target, p, g)
             built = try
-                Tempest.build_claim(implementation, claim, p, g, buffers)
+                Tempest.build_claim(implementation, claim, target, p, g, buffers)
             catch err
                 @debug "claim failed to build; trying the next" implementation exception = err
                 nothing

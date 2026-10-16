@@ -1,12 +1,13 @@
 # cuTile: one generator for every group a sketch can schedule.
 #
-# A group's domain collapses into two axes, A and B: each load or store must be
-# a strided view of its buffer in those axes (a formula affine in the group's
-# variables, with coefficients that chain within each collapsed group of axes).
-# A schedule picks the tile, which collapsed axis is reduced, how the reduced
-# axis is swept (resident in one tile, streamed, or split across blocks with a
-# finishing launch), and hints. The generator turns any schedule into kernels;
-# a sketch contributes parameters, never code.
+# A schedule collapses the group's domain into tile axes: each a group of the
+# domain's axes, with an extent, a tile size, and whether it is reduced. Every
+# load and store must be a strided view of its buffer over those groups (a
+# formula affine in the group's variables, with coefficients that chain within
+# each group). A schedule also picks how the reduced axis is swept (resident in
+# one tile, streamed, or split across blocks with a merging launch), the grid
+# (plain or swizzled), hints and the precision of products. The generator turns
+# any schedule into kernels; a sketch contributes parameters, never code.
 module CuTileExt
 
 using Tempest
@@ -27,33 +28,73 @@ const SPLIT_TARGET_BLOCKS = 256
 const FULL_TILE_ELEMENTS = 1024
 const POINTWISE_ELEMENTS = 1024
 
-struct TileSchedule
-    sketch::Symbol            # :pointwise, :resident, :streamed, :split, :full
-    extent::Tuple{Int, Int}   # the collapsed domain
-    reduced::Int              # 0 none, 1 or 2 one axis, 3 both
-    tile::Tuple{Int, Int}
-    splits::Int               # blocks sharing one kept tile
-    chunk::Int                # kept tiles one block sweeps, one after another
-    occupancy::Union{Nothing, Int}
+"""
+A tile axis: a group of the domain's axes, collapsed, tiled, and reduced (swept)
+or kept. A kept axis's `chunk` is how many of its tiles one block covers, one
+after another.
+"""
+struct TileAxis
+    axes::Vector{Int}
+    extent::Int
+    tile::Int
+    reduced::Bool
+    chunk::Int
 end
 
-TileSchedule(sketch, extent, reduced, tile, splits, occupancy) =
-    TileSchedule(sketch, extent, reduced, tile, splits, 1, occupancy)
-with_chunk(s::TileSchedule, chunk) = TileSchedule(s.sketch, s.extent, s.reduced, s.tile, s.splits, chunk, s.occupancy)
+TileAxis(axes, extent, tile, reduced) = TileAxis(axes, extent, tile, reduced, 1)
+with_chunk(ax::TileAxis, chunk) = TileAxis(ax.axes, ax.extent, ax.tile, ax.reduced, chunk)
+
+struct TileSchedule
+    sketch::Symbol            # :pointwise, :resident, :streamed, :split, :full
+    tiling::Vector{TileAxis}
+    splits::Int               # blocks sharing one kept tile
+    occupancy::Union{Nothing, Int}
+    swizzle::Int              # grouping of the first two kept axes on the grid; 0 for a plain grid
+    precision::Symbol         # of products: :full or :tf32
+end
+
+# The two-axis sketches over groups A and B, `reduced` naming the reduced one
+# (1 or 2), both (3) or neither (0).
+TileSchedule(sketch, A, B, extent, reduced, tile, splits, occupancy) = TileSchedule(
+    sketch,
+    [TileAxis(collect(A), extent[1], tile[1], reduced in (1, 3)), TileAxis(collect(B), extent[2], tile[2], reduced in (2, 3))],
+    splits, occupancy, 0, :full,
+)
+
+extent(s::TileSchedule) = Tuple(ax.extent for ax in s.tiling)
+tiles(s::TileSchedule) = Tuple(ax.tile for ax in s.tiling)
+groups(s::TileSchedule) = Tuple(ax.axes for ax in s.tiling)
+swept(s::TileSchedule) = findall(ax -> ax.reduced, s.tiling)
+function code(s::TileSchedule)
+    r = swept(s)
+    isempty(r) ? 0 : length(r) == 2 ? 3 : only(r)
+end
+
+sweeps(s::TileSchedule) = (r = swept(s); length(r) == 1 ? cld(s.tiling[only(r)].extent, s.tiling[only(r)].tile) : 1)
+kept_tiles(s::TileSchedule) = prod((cld(ax.extent, ax.tile) for ax in s.tiling if !ax.reduced); init = 1)
 
 function Base.show(io::IO, s::TileSchedule)
-    print(io, s.sketch, " ", s.extent[1], "×", s.extent[2], ", tile ", s.tile[1], "×", s.tile[2])
-    s.reduced in (1, 2) && print(io, ", reducing axis ", s.reduced)
+    if s.sketch === :product
+        m, k, n = s.tiling[1:3]
+        print(io, "product ", m.extent, "×", n.extent, " summing ", k.extent)
+        length(s.tiling) > 3 && print(io, ", batch ", s.tiling[4].extent)
+        print(io, ", tile ", m.tile, "×", n.tile, "×", k.tile, ", ",
+            s.precision === :tf32 ? "TF32" : s.precision === :tf32x3 ? "3×TF32" : "full precision")
+        s.splits > 1 && print(io, ", summing split ", s.splits, " ways")
+        return
+    end
+    e, t = extent(s), tiles(s)
+    print(io, s.sketch, " ", e[1], "×", e[2], ", tile ", t[1], "×", t[2])
+    code(s) in (1, 2) && print(io, ", reducing axis ", code(s))
     s.splits > 1 && print(io, ", split ", s.splits, " ways")
-    s.chunk > 1 && print(io, ", ", s.chunk, " kept tiles per block")
+    for ax in s.tiling
+        ax.chunk > 1 && print(io, ", ", ax.chunk, " tiles per block")
+    end
     s.occupancy === nothing || print(io, ", occupancy ", s.occupancy)
 end
 
-sweeps(s::TileSchedule) = s.reduced in (1, 2) ? cld(s.extent[s.reduced], s.tile[s.reduced]) : 1
-kept_tiles(s::TileSchedule) = s.reduced in (1, 2) ? cld(s.extent[3 - s.reduced], s.tile[3 - s.reduced]) : 1
-
 # Which axes of the group's domain collapse into A and B, and which one the
-# schedule sweeps: the group's primary axes.
+# schedule sweeps: the group's primary axes (those of its first fold).
 function collapse_axes(graph, g::Group)
     r = length(g.domain)
     R = collect(Tempest.primary_axes(graph, g))
@@ -69,12 +110,12 @@ function collapse_axes(graph, g::Group)
     nothing
 end
 
-"A load or store: a value's buffer as a strided view over the collapsed axes."
+"A load or store: a value's buffer as a strided view over collapsed groups of axes."
 struct View
     value::Int
     offset::Int
-    strides::Tuple{Int, Int}
-    spans::Tuple{Bool, Bool} # whether the view extends along A and B
+    strides::Tuple{Vararg{Int}}
+    spans::Tuple{Vararg{Bool}} # whether the view extends along each group
 end
 
 # The stride along one collapsed group of axes, or nothing when the address's
@@ -96,13 +137,18 @@ function group_stride(e::Affine, axes, domain)
     something(stride, 0)
 end
 
-function view_of(graph, v, index, g, A, B)
+# The view of value `v` read at `index` over the groups of axes; nothing when the
+# address is not affine, does not chain within a group, or depends on an axis
+# outside the groups.
+function view_of(graph, v, index, g, groups...)
     e = Tempest.address(graph, v, index, Tempest.Domain(g.domain))
     Tempest.is_affine(e) || return nothing
-    sa = group_stride(e, A, g.domain)
-    sb = group_stride(e, B, g.domain)
-    (sa === nothing || sb === nothing || sa < 0 || sb < 0) && return nothing
-    View(v, e.constant, (sa, sb), (sa != 0, sb != 0))
+    for k in 1:length(g.domain)
+        g.domain[k] > 1 && Tempest.coefficient(e, k) != 0 && !any(grp -> k in grp, groups) && return nothing
+    end
+    strides = map(grp -> group_stride(e, grp, g.domain), groups)
+    any(s -> s === nothing || s < 0, strides) && return nothing
+    View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)))
 end
 
 const FOLDS = Union{Tempest.SumFold, Tempest.MaxFold, Tempest.MinFold, Tempest.ProdFold, Tempest.LogSumExpFold}
@@ -111,15 +157,11 @@ const TILE_TYPES = Union{Float32, Float16, Core.BFloat16, Bool, Int32}
 # Whether the generator can express a group: tile-typed values, supported
 # folds, no positions or gathers, and every load and store a strided view.
 function expressible(graph, stored, g::Group)
-    axes = collapse_axes(graph, g)
-    axes === nothing && return false
+    collapse_axes(graph, g) === nothing && return false
     for m in Tempest.members(g)
         val = graph.values[m]
         val.eltype <: TILE_TYPES || return false
-        if m in g.reductions
-            val.definition.fold isa FOLDS || return false
-            collapsed_reduce(axes[1], axes[2], val.definition.reduced) === nothing && return false
-        end
+        m in g.reductions && !(val.definition.fold isa FOLDS) && return false
         for t in Tempest.subterms((g.terms[m],))
             t isa Ix && return false
             t isa Apply && !(t.eltype <: TILE_TYPES) && return false
@@ -150,22 +192,25 @@ function split_count(extent, tile_extent, kept)
 end
 
 "The default schedule of a group over the collapsed domain `extent`."
-function default_schedule(g::Group, extent, reduced)
+default_schedule(g::Group, A, B, extent, reduced) =
+    (s -> TileSchedule(s.sketch, A, B, extent, reduced, s.tile, s.splits, s.occupancy))(default_tiles(extent, reduced))
+
+function default_tiles(extent, reduced)
     a, b = extent
     if reduced == 0
         ta = min(nextpow(2, a), POINTWISE_ELEMENTS)
         tb = max(1, min(nextpow(2, b), POINTWISE_ELEMENTS ÷ ta))
-        return TileSchedule(:pointwise, extent, 0, (ta, tb), 1, nothing)
+        return (sketch = :pointwise, tile = (ta, tb), splits = 1, occupancy = nothing)
     elseif reduced == 3
         ta = min(FULL_TILE_ELEMENTS, nextpow(2, a))
         tb = min(max(1, FULL_TILE_ELEMENTS ÷ ta), nextpow(2, b))
-        return TileSchedule(:full, extent, 3, (ta, tb), 1, 8)
+        return (sketch = :full, tile = (ta, tb), splits = 1, occupancy = 8)
     elseif reduced == 1
         if a <= RESIDENT_ROWS
             tile = resident_tile(a, b)
             values = prod(tile)
             occupancy = values <= PACKED_ELEMENTS ? 8 : values < RESIDENT_ROWS ? 4 : nothing
-            return TileSchedule(:resident, extent, 1, tile, 1, occupancy)
+            return (sketch = :resident, tile, splits = 1, occupancy)
         end
         tile = (STREAMED_ROWS, 1)
         kept = b
@@ -175,9 +220,9 @@ function default_schedule(g::Group, extent, reduced)
                 tile = (tile[1] ÷ 2, 1)
                 splits = split_count(a, tile[1], kept)
             end
-            splits > 1 && return TileSchedule(:split, extent, 1, tile, splits, 8)
+            splits > 1 && return (sketch = :split, tile, splits, occupancy = 8)
         end
-        return TileSchedule(:streamed, extent, 1, tile, 1, nothing)
+        return (sketch = :streamed, tile, splits = 1, occupancy = nothing)
     else
         tile = (streamed_row_tile(a), min(STREAMED_ROW_COLUMNS, nextpow(2, b)))
         kept = cld(a, tile[1])
@@ -185,35 +230,26 @@ function default_schedule(g::Group, extent, reduced)
             tile = (min(32, nextpow(2, a)), 32)
             kept = cld(a, tile[1])
             splits = split_count(b, tile[2], kept)
-            splits > 1 && return TileSchedule(:split, extent, 2, tile, splits, 8)
+            splits > 1 && return (sketch = :split, tile, splits, occupancy = 8)
             tile = (streamed_row_tile(a), min(STREAMED_ROW_COLUMNS, nextpow(2, b)))
         end
-        return TileSchedule(cld(b, tile[2]) == 1 ? :resident : :streamed, extent, 2, tile, 1, nothing)
+        return (sketch = cld(b, tile[2]) == 1 ? :resident : :streamed, tile, splits = 1, occupancy = nothing)
     end
 end
 
 struct Claim
     schedule::TileSchedule
-    axes::Tuple
 end
 
-# The collapsed axes a fold reduces (1, 2 or both), or nothing when its axes
-# are not whole collapsed groups.
-function collapsed_reduce(A, B, axes)
-    S = Set(axes)
-    # An empty group of axes (B of a vector) is reduced by any fold.
-    a = issubset(A, S)
-    b = issubset(B, S)
-    S == union(Set(a ? A : Int[]), Set(b ? B : Int[])) || return nothing
-    a && b ? (1, 2) : a ? 1 : b ? 2 : nothing
-end
-
-# Blocks aim for this many when a fold over other than the swept axis keeps an
-# axis: each block sweeps several kept tiles, so its partial states stay small.
+# Blocks aim for this many when a fold over other than the swept axis keeps the
+# swept axis: each block covers several kept tiles, so its partial states stay
+# small.
 const PARTIAL_BLOCKS = 256
 
-function Tempest.claims(::Tempest.CuTileGenerator, p::Plan, g::Group)
+function Tempest.claims(::Tempest.CuTileGenerator, target, p::Plan, g::Group)
     g.kind in (:pointwise, :reduction) || return Claim[]
+    product = product_claim(target, p, g)
+    product === nothing || return [product]
     expressible(p.graph, p.stored, g) || return Claim[]
     A, B, reduced = collapse_axes(p.graph, g)
     extent = (prod(k -> g.domain[k], A; init = 1), prod(k -> g.domain[k], B; init = 1))
@@ -221,15 +257,27 @@ function Tempest.claims(::Tempest.CuTileGenerator, p::Plan, g::Group)
     for m in Tempest.members(g), l in Tempest.loads(g.terms[m])
         view_of(p.graph, l.value, l.index, g, A, B) === nothing && return Claim[]
     end
-    s = default_schedule(g, extent, reduced)
-    keeping = any(r -> !Tempest.primary(p.graph, g, r) &&
-        collapsed_reduce(A, B, Tempest.fold_axes(p.graph, r)) != (1, 2), g.reductions)
-    s.sketch === :resident && keeping && (s = with_chunk(s, max(1, cld(kept_tiles(s), PARTIAL_BLOCKS))))
-    [Claim(s, (A, B))]
+    s = default_schedule(g, A, B, extent, reduced)
+    c = Context(p.graph, p.stored, g, s)
+    partial = partial_folds(c)
+    any(r -> fold_tiles(c, r) === nothing, partial) && return Claim[]
+    # A resident kernel with folds that keep the swept axis covers several kept
+    # tiles per block; each such fold reduces every kept axis.
+    if s.sketch === :resident && any(r -> !(only(swept(s)) in fold_tiles(c, r)), partial)
+        kept = findfirst(ax -> !ax.reduced, s.tiling)
+        if kept !== nothing && all(r -> kept in fold_tiles(c, r), partial)
+            chunk = max(1, cld(cld(s.tiling[kept].extent, s.tiling[kept].tile), PARTIAL_BLOCKS))
+            tiling = copy(s.tiling)
+            tiling[kept] = with_chunk(tiling[kept], chunk)
+            s = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
+        end
+    end
+    [Claim(s)]
 end
 
 include("cutile/emit.jl")
 include("cutile/build.jl")
+include("cutile/contract.jl")
 
 function __init__()
     push!(Tempest.EXTRA_IMPLEMENTATIONS, Tempest.CuTileGenerator())

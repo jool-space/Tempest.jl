@@ -5,8 +5,23 @@ abstract type Target end
 "Run on the CPU, through the same generated floor code CUDA runs."
 struct CPUTarget <: Target end
 
-"Run on an NVIDIA GPU; needs CUDACore loaded."
-struct CUDATarget <: Target end
+"""
+    CUDATarget(; precision = :full)
+
+Run on an NVIDIA GPU; needs CUDACore loaded. `precision` is the numerics policy
+for products: `:full` keeps Float32 products in Float32, `:tf32` allows TF32
+tensor cores for them, and `:tf32x3` splits each Float32 factor into two TF32
+parts and sums three tensor-core products (close to Float32 accuracy). Half-
+precision products always accumulate in Float32.
+"""
+struct CUDATarget <: Target
+    precision::Symbol
+end
+
+function CUDATarget(; precision::Symbol = :full)
+    precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
+    CUDATarget(precision)
+end
 
 target_for(x::AbstractArray) = CPUTarget()
 target_for(x) = nothing
@@ -23,9 +38,9 @@ end
 module Generated end
 
 """
-An implementation realizes kernels. `claims(implementation, plan, group)`
+An implementation realizes kernels. `claims(implementation, target, plan, group)`
 returns the ways it can realize a group (empty when it cannot), and
-`build_claim(implementation, claim, plan, group, buffers)` returns a launch and
+`build_claim(implementation, claim, target, plan, group, buffers)` returns a launch and
 a description. A target's floor realizes any group.
 """
 abstract type Implementation end
@@ -33,7 +48,7 @@ abstract type Implementation end
 "cuTile's generator; active when cuTile is loaded."
 struct CuTileGenerator <: Implementation end
 
-claims(::Implementation, plan, group) = ()
+claims(::Implementation, target, plan, group) = ()
 function build_claim end
 
 "Implementations offered before the floor, in order."
@@ -101,6 +116,9 @@ end
 
 function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
+    ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
+        ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
+        "; half-precision products accumulate in Float32")
     println(io, "implementations:")
     for (k, d) in enumerate(ex.kernels)
         println(io, "  kernel ", k, ": ", d)

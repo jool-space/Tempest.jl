@@ -35,6 +35,34 @@ if CUDACore.functional()
     @testset "prepared on CUDA with cuTile, Float32" begin
         check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget(); rtol = 2.0e-4, precision = single)
     end
+    @testset "products on cuTile" begin
+        w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
+        for target in (T.CUDATarget(), T.CUDATarget(precision = :tf32))
+            p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
+            ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target)
+            @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
+            @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, w, x, b); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
+        end
+        # Half operands accumulate in Float32 and round once.
+        h, y = Float16.(data(64, 48; scale = 0.1)), Float16.(data(48, 32))
+        p = trace((h, y) -> h * y, h, y)
+        ex = prepare(p, CuArray(h), CuArray(y))
+        @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
+        @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, h, y); rtol = eps(Float16))
+        # A product spelled as a broadcast and a sum is a product too.
+        a, c = Float32.(data(64, 48; scale = 0.1)), Float32.(data(48, 80))
+        ex = prepare(trace(spelled_product, a, c), CuArray(a), CuArray(c))
+        @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
+        @test isapprox(Array(only(T.leaves(execute!(ex)))), a * c; rtol = 1.0e-4)
+        # A long sum over a small output splits among blocks (split-K) and merges.
+        u, z = Float32.(data(64, 3000; scale = 0.01)), Float32.(data(3000, 48))
+        for target in (T.CUDATarget(), T.CUDATarget(precision = :tf32))
+            p = trace((u, z) -> u * z, u, z)
+            ex = prepare(p, CuArray(u), CuArray(z); target)
+            @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product && d.schedule.splits > 1, ex.kernels)
+            @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, u, z); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
+        end
+    end
 end
 
 # Sizes that take several blocks: full reductions merge partial states, and
