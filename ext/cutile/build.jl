@@ -96,8 +96,10 @@ end
 function merge_kernel(c::Context, rs, slots, workspaces)
     _, extent = fold_kept(c, first(rs))
     column = extent == 1
-    tm = min(nextpow(2, extent), 128)
-    width = min(nextpow(2, slots), column ? FULL_TILE_ELEMENTS : max(1, 2048 ÷ tm))
+    # All slots in one step where they fit, and as many blocks along the kept
+    # extent as tiles of about 2048 values allow.
+    width = min(nextpow(2, slots), FULL_TILE_ELEMENTS)
+    tm = column ? 1 : min(nextpow(2, extent), max(1, 2048 ÷ width))
     shape = column ? (width, 1) : (tm, width)
     k = TileKernel("merge", (cld(extent, tm),), nothing)
     st = k.body
