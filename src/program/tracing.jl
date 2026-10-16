@@ -189,31 +189,46 @@ operand_dims(x::Traced) = node(x).dims
 operand_dims(x::AbstractArray{<:Number}) = size(x)
 operand_dims(x) = ()
 
-function Base.copy(bc::Broadcast.Broadcasted{TracedStyle})
-    flat = Broadcast.flatten(bc)
-    tape = tape_of(flat.args...)
-    args = map(a -> handle(a, tape), flat.args)
-    dims = broadcast_dims(map(operand_dims, flat.args)...)
+# Each function of a broadcast, nested ones included, runs on handles by
+# itself, so a function that cannot be traced is recorded whole without taking
+# the functions around it along.
+function trace_broadcast(f, args, tape)
     mark = length(tape.nodes)
     result = try
-        flat.f(args...)
+        f(args...)
     catch
         resize!(tape.nodes, mark)
         nothing
     end
-    id = if result isa Traced
-        result.id
-    elseif result isa Number
-        constant!(tape, result)
-    else
-        # The function did not run on handles: record it whole, with its
-        # arguments that are neither traced nor numbers bound into it.
-        result === nothing || resize!(tape.nodes, mark)
-        inputs = filter(a -> a isa Union{Traced, Number}, collect(args))
-        f = length(inputs) == length(args) ? flat.f :
-            Bound(flat.f, map(a -> a isa Union{Traced, Number} ? Slot() : a, args))
-        record_map(f, inputs...).id
+    result isa Traced && return result
+    result isa Number && return Traced(tape, constant!(tape, result))
+    # The function did not run on handles: record it whole, with its arguments
+    # that are neither traced nor numbers bound into it.
+    result === nothing || resize!(tape.nodes, mark)
+    inputs = filter(a -> a isa Union{Traced, Number}, collect(args))
+    g = length(inputs) == length(args) ? f : Bound(f, map(a -> a isa Union{Traced, Number} ? Slot() : a, args))
+    record_map(g, inputs...)
+end
+
+broadcast_handle(bc::Broadcast.Broadcasted, tape) =
+    trace_broadcast(bc.f, map(a -> broadcast_handle(a, tape), bc.args), tape)
+broadcast_handle(x, tape) = handle(x, tape)
+
+broadcast_dims_of(bc::Broadcast.Broadcasted) = broadcast_dims(map(broadcast_dims_of, bc.args)...)
+broadcast_dims_of(x) = operand_dims(x)
+
+function tape_in(bc::Broadcast.Broadcasted)
+    for a in bc.args
+        t = a isa Broadcast.Broadcasted ? tape_in(a) : a isa Union{Traced, TracedArray} ? a.tape : nothing
+        t === nothing || return t
     end
+    nothing
+end
+
+function Base.copy(bc::Broadcast.Broadcasted{TracedStyle})
+    tape = tape_in(bc)
+    dims = broadcast_dims_of(bc)
+    id = broadcast_handle(bc, tape).id
     # A result smaller than the broadcast, or a scalar, is filled out to it.
     n = tape.nodes[id]
     if n.dims != dims || n.scalar
@@ -380,6 +395,16 @@ Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
 
 "The one-based linear index of each element of `x`, as `Int32`."
 positions(x::TracedArray) = TracedArray(x.tape, record!(x.tape, Positions(), (), size(x), Int32))
+positions(x::AbstractArray) = reshape(Int32.(1:length(x)), size(x))
+
+"The one-based index of each element of `x` along `axis`, as `Int32`, in the shape of `x`."
+axis_positions(x::TracedArray, axis::Integer) =
+    TracedArray(x.tape, record!(x.tape, Positions(Int(axis)), (), size(x), Int32))
+function axis_positions(x::AbstractArray, axis::Integer)
+    out = Array{Int32}(undef, size(x))
+    out .= reshape(Int32.(1:size(x, axis)), ntuple(k -> k == axis ? size(x, k) : 1, ndims(x)))
+    out
+end
 
 # Tracing a function.
 

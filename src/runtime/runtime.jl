@@ -113,6 +113,7 @@ explain(ex::Executable) = explain(stdout, ex)
 function outputs(ex::Executable)
     graph = ex.plan.graph
     rebuild(ex.program.output_structure) do k
+        k === nothing && return nothing
         r = graph.results[k]
         reshape(ex.buffers[r.value], graph.result_scalar[k] ? () : graph.result_dims[k])
     end

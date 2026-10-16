@@ -7,16 +7,16 @@ scalar(x) = ndims(x) == 0 ? x[] : x
 agree(a, b; rtol = 1.0e-10) = all(map((x, y) -> isapprox(scalar(Array(x)), y; rtol, atol = rtol * 1.0e-2), a, b))
 host(x) = x isa AbstractArray ? x : x
 
-single(x) = x isa AbstractArray ? Float32.(x) : x isa Number ? Float32(x) : x
+single(x) = x isa AbstractArray{<:AbstractFloat} ? Float32.(x) : x isa AbstractFloat ? Float32(x) : x
 
 function check_prepared(device, expected_target; rtol = 1.0e-10, precision = identity)
     @testset "$name" for (name, f, args) in PROGRAMS
         args = map(precision, args)
         for p in (trace(f, args...), differentiate(trace(f, args...)))
-            reference = T.leaves(interpret(p, args...))
+            reference = filter(!isnothing, T.leaves(interpret(p, args...)))
             ex = prepare(p, map(device, args)...)
             @test ex.target == expected_target
-            got = T.leaves(execute!(ex))
+            got = filter(!isnothing, T.leaves(execute!(ex)))
             @test agree(got, reference; rtol)
         end
     end

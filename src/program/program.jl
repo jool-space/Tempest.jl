@@ -33,8 +33,15 @@ struct Contract <: Operation
     out::Tuple{Vararg{Int}}
 end
 
-"The one-based linear index of each element, as `Int32`."
-struct Positions <: Operation end
+"""
+The one-based index of each element as `Int32`: its linear index for `axis`
+zero, else its index along that axis.
+"""
+struct Positions <: Operation
+    axis::Int
+end
+
+Positions() = Positions(0)
 
 "The input in another shape with the same elements in the same linear order."
 struct Reshape <: Operation end
@@ -102,6 +109,7 @@ op_detail(op::Map) = " " * string(op.f)
 op_detail(op::Reduce) = " " * string(fold_name(op.fold)) * " over " * string(op.axes)
 op_detail(op::Contract) = " " * string(op.a) * "·" * string(op.b) * "→" * string(op.out)
 op_detail(op::Permute) = " " * string(op.perm)
+op_detail(op::Positions) = op.axis == 0 ? "" : " along axis $(op.axis)"
 op_detail(op::Union{Select, Scatter}) = " " * join(map(index_summary, op.indices), ", ")
 
 index_summary(i::Integer) = string(i)

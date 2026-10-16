@@ -105,7 +105,8 @@ end
 
 The program at the index level.
 """
-function lower(p::Program)
+function lower(p::Program; keep_call = n -> false, epilogue = n -> false)
+    p = expand_calls(p, keep_call)
     nodes = p.nodes
     keep = live(nodes, p.results)
     values = Value[]
@@ -136,7 +137,7 @@ function lower(p::Program)
         access[id] = if op isa Constant
             op.value isa AbstractArray ? value!(ConstantArray(op.value), n) : LiteralAccess(op.value)
         elseif op isa Positions
-            IndexAccess(add(linear_index(n.dims, d), 1, d), Int32)
+            IndexAccess(add(op.axis == 0 ? linear_index(n.dims, d) : identity_index(n.dims)[op.axis], 1, d), Int32)
         elseif op isa Map && all(a -> a isa LiteralAccess, inputs)
             # Constants fold: a map of constants is a constant.
             LiteralAccess(convert(n.eltype, op.f(map(a -> a.value, inputs)...)))
