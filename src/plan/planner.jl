@@ -14,10 +14,13 @@ struct Group
     outputs::Vector{Int}
     terms::Dict{Int, Term}
     phase::Dict{Int, Int}
+    # An opaque group's epilogues: a result, and the value its kernel writes
+    # in its place, computed by `terms` from the result's tile (`Stat`).
+    epilogues::Dict{Int, Int}
 end
 
 Group(kind, domain, reduced = ()) =
-    Group(kind, domain, reduced, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}())
+    Group(kind, domain, reduced, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}(), Dict{Int, Int}())
 
 members(g::Group) = [g.reductions; g.outputs]
 
@@ -97,7 +100,7 @@ function try_add!(graph, stored, up, g::Group, v; reduction)
     val = graph.values[v]
     index = reduction ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    candidate = Group(g.kind, g.domain, g.reduced, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase))
+    candidate = Group(g.kind, g.domain, g.reduced, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase), copy(g.epilogues))
     reduction || push!(candidate.outputs, v)
     t = try
         reduction ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
@@ -129,13 +132,13 @@ function plan(graph::IndexGraph)
     graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
-    readers = zeros(Int, n)
+    counts = zeros(Int, n)
     for v in values, o in operands(v.definition)
-        o isa Read && (readers[o.value] += 1)
+        o isa Read && (counts[o.value] += 1)
     end
     results = Set(o.value for o in graph.results if o isa Read)
     for r in results
-        readers[r] += 1
+        counts[r] += 1
     end
     # Products and opaque operations read their operands from storage.
     materialized = falses(n)
@@ -145,7 +148,7 @@ function plan(graph::IndexGraph)
     end
     stored = map(eachindex(values)) do id
         d = values[id].definition
-        d isa Pointwise ? (readers[id] != 1 || id in results || materialized[id]) : true
+        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : true
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
     for id in eachindex(values)
@@ -167,6 +170,25 @@ function plan(graph::IndexGraph)
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
+    # Opaque work first, one group per operation (all results of a claimed
+    # call together), which may absorb the pointwise work after a result as an
+    # epilogue its kernel applies over the result's output tile.
+    instances = Dict{Int, Int}()
+    for id in 1:n
+        d = values[id].definition
+        d isa Opaque || continue
+        key = d.node.op isa Call ? d.node.op.instance : -id
+        k = get!(instances, key) do
+            push!(groups, Group(:opaque, values[id].dims))
+            length(groups)
+        end
+        push!(groups[k].outputs, id)
+        owner[id] = k
+    end
+    users = map(unique, readers(graph))
+    for (k, g) in enumerate(groups), o in copy(g.outputs)
+        values[o].definition.epilogue && absorb_epilogue!(graph, stored, users, results, owner, g, k, o)
+    end
     for id in 1:n
         live[id] && owner[id] == 0 || continue
         d = values[id].definition
@@ -204,9 +226,7 @@ function plan(graph::IndexGraph)
             push!(g.outputs, id)
             g
         else
-            g = Group(:opaque, values[id].dims)
-            push!(g.outputs, id)
-            g
+            error("value %$id has no kernel")
         end
         push!(groups, g)
         owner[id] = length(groups)
@@ -230,6 +250,58 @@ function plan(graph::IndexGraph)
     order = order_groups(graph, groups, owner)
     position = invperm(order)
     Plan(graph, stored, groups[order], map(o -> o == 0 ? 0 : position[o], owner))
+end
+
+# An epilogue: the chain of pointwise values after an opaque result, each read
+# only by the next, over the result's domain, whose other reads align with the
+# result's tile (the same index, or zero along an axis of extent one).
+# Limits: pointwise work only, aligned reads only, no positions; the last value
+# of the chain is written in the result's place.
+function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
+    values = graph.values
+    D = values[o].dims
+    chain = Int[]
+    current, final, final_term = o, nothing, nothing
+    while !(current in results) && length(users[current]) == 1
+        c = only(users[current])
+        values[c].definition isa Pointwise && values[c].dims == D && owner[c] == 0 || break
+        trial = Group(:opaque, D)
+        push!(trial.reductions, o)
+        append!(trial.outputs, chain)
+        push!(trial.outputs, c)
+        t = try
+            value_term(graph, stored, trial, c, identity_index(D))
+        catch e
+            e isa OutsideGroup || rethrow()
+            break
+        end
+        aligned(graph, t, D) || break
+        push!(chain, c)
+        current, final, final_term = c, c, t
+    end
+    final === nothing && return
+    stored[o] = false
+    foreach(c -> stored[c] = false, chain)
+    stored[final] = true
+    g.epilogues[o] = final
+    g.terms[final] = final_term
+    push!(g.outputs, final)
+    foreach(c -> owner[c] = k, chain)
+end
+
+function aligned(graph, t, D)
+    whole = identity_index(D)
+    for s in subterms((t,))
+        s isa Ix && return false
+        s isa Load || continue
+        Dv = graph.values[s.value].dims
+        length(s.index) == length(Dv) <= length(D) || return false
+        for k in eachindex(Dv)
+            e = s.index[k]
+            (Dv[k] == D[k] && e == whole[k]) || (Dv[k] == 1 && e == constant(0)) || return false
+        end
+    end
+    true
 end
 
 # Every result becomes a value read whole, so results are buffers: a result

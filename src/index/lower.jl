@@ -105,8 +105,8 @@ end
 
 The program at the index level.
 """
-function lower(p::Program; keep_call = n -> false, epilogue = n -> false)
-    p = expand_calls(p, keep_call)
+function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes) -> false)
+    p = expand_calls(p, n -> keep_call(n, p.nodes))
     nodes = p.nodes
     keep = live(nodes, p.results)
     values = Value[]
@@ -149,6 +149,20 @@ function lower(p::Program; keep_call = n -> false, epilogue = n -> false)
         elseif op isa Contract
             all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
             value!(contraction(op, inputs, input_dims, n, values), n)
+        elseif op isa Call
+            # A claimed call reads its operands densely, in their program
+            # shapes; anything else (a layout, a constant) is materialized.
+            reads = map(inputs, n.inputs) do a, i
+                dims = nodes[i].dims
+                if a isa ValueAccess && a.index == identity_index(dims) && values[a.value].dims == dims &&
+                   values[a.value].scalar == nodes[i].scalar
+                    return Read(a.value, identity_index(dims))
+                end
+                push!(values, Value(Pointwise(identity, (operand(a, dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
+                Read(length(values), identity_index(dims))
+            end
+            shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
+            value!(Opaque(n, reads, shapes, epilogue(n, nodes)), n)
         elseif op isa Union{Reshape, Permute, Select}
             compose(only(inputs), layout_index(op, n.dims, only(input_dims), d, gather), d)
         else

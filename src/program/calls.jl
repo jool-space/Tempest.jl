@@ -117,6 +117,9 @@ function expand_calls(p::Program, keep)
     Program(tape.nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure)
 end
 
+# One result of a call, through the reference.
+evaluate(op::Call, n, xs) = leaves(reference(op.f, xs...; op.kwargs...))[op.output]
+
 # The interpreter evaluates a call through its reference, once for all results.
 function evaluate_call!(values, p_nodes, id)
     n = p_nodes[id]

@@ -36,6 +36,48 @@ struct CuTileGenerator <: Implementation end
 claims(::Implementation, plan, group) = ()
 function build_claim end
 
+"""
+    claims_call(implementation, target, f, kwargs, inputs) -> Bool
+
+Whether `implementation` realizes calls of the verb `f` with these keyword
+arguments on `target`; `inputs` holds the `(dims, eltype)` of each argument.
+A claimed call is one opaque group whose kernel computes all its results; an
+unclaimed call expands to its reference.
+"""
+claims_call(::Implementation, target, f, kwargs, inputs) = false
+
+"""
+    epilogue_results(implementation, f, kwargs) -> results
+
+The results of a claimed call over whose output tiles the implementation's
+kernel applies an epilogue: pointwise work after the result, absorbed by the
+planner when its reads align with the result's tile.
+"""
+epilogue_results(::Implementation, f, kwargs) = ()
+
+"""
+    build_call(implementation, plan, group, buffers, target) -> (launch, description)
+
+Build the kernels of a claimed call: the group's opaque results, each written
+to its buffer or, where `group.epilogues` names a value, that value computed
+from the result's tile by the group's terms.
+"""
+function build_call end
+
+implementations(target) = EXTRA_IMPLEMENTATIONS
+
+call_inputs(nodes, n) = map(i -> (nodes[i].dims, nodes[i].eltype), n.inputs)
+
+function call_claimant(target, nodes, n)
+    k = findfirst(i -> claims_call(i, target, n.op.f, n.op.kwargs, call_inputs(nodes, n)), implementations(target))
+    k === nothing ? nothing : implementations(target)[k]
+end
+
+function takes_epilogue(target, nodes, n)
+    c = call_claimant(target, nodes, n)
+    c !== nothing && n.op.output in epilogue_results(c, n.op.f, n.op.kwargs)
+end
+
 "Implementations offered before the floor, in order."
 const EXTRA_IMPLEMENTATIONS = Implementation[]
 
@@ -64,7 +106,9 @@ Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default.
 """
 function prepare(program::Program, inputs...; target = default_target(inputs))
-    p = plan(lower(program))
+    p = plan(lower(program;
+        keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
+        epilogue = (n, nodes) -> takes_epilogue(target, nodes, n)))
     graph = p.graph
     buffers = Vector{Any}(nothing, length(graph.values))
     for (id, v) in enumerate(graph.values)
@@ -125,8 +169,8 @@ upload(::CPUTarget, x) = x
 
 kernel_slots(p, g) = sort!(collect(union(group_reads(p.graph, g), [v for v in members(g) if p.stored[v]])))
 
-function build(::CPUTarget, p::Plan, g::Group, buffers)
-    g.kind === :opaque && return opaque_launch(p, g, buffers)
+function build(target::CPUTarget, p::Plan, g::Group, buffers)
+    g.kind === :opaque && return build_opaque(target, p, g, buffers)
     k = scalar_kernel(p.graph, p.stored, g, kernel_slots(p, g))
     f = Core.eval(Generated, :(function (buffers, n)
         for lin in 0:(n - 1)
@@ -138,9 +182,21 @@ function build(::CPUTarget, p::Plan, g::Group, buffers)
     (() -> Base.invokelatest(f, args, k.items), k)
 end
 
-# Opaque operations run their reference on dense host copies of their operands.
+# A claimed call is built by its claimant; other opaque work runs through
+# `opaque_launch`.
+function build_opaque(target, p::Plan, g::Group, buffers)
+    n = p.graph.values[first(g.outputs)].definition.node
+    n.op isa Call || return opaque_launch(p, g, buffers)
+    # The claimant is found again from the call itself.
+    d = p.graph.values[first(g.outputs)].definition
+    inputs = map((o, (dims, _)) -> (dims, p.graph.values[o.value].eltype), d.operands, d.shapes)
+    k = findfirst(i -> claims_call(i, target, n.op.f, n.op.kwargs, inputs), implementations(target))
+    k === nothing && error("no implementation builds the claimed call of $(n.op.f)")
+    build_call(implementations(target)[k], p, g, buffers, target)
+end
+
+# Opaque work runs its reference, and its epilogues, on dense host copies.
 function opaque_launch(p, g, buffers)
-    v = only(g.outputs)
     graph = p.graph
     function launch()
         arrays = Vector{Any}(undef, length(graph.values))
@@ -149,8 +205,12 @@ function opaque_launch(p, g, buffers)
             val = graph.values[id]
             arrays[id] = val.scalar ? Array(b)[1] : reshape(Array(b), val.dims)
         end
-        y = evaluate_value(graph.values[v].definition, graph.values[v], arrays, graph, ())
-        copyto!(buffers[v], y isa Number ? [y] : vec(y))
+        run_opaque!(g, arrays, graph)
+        for v in g.outputs
+            p.stored[v] || continue
+            y = arrays[v]
+            copyto!(buffers[v], y isa Number ? [y] : vec(y))
+        end
     end
     (launch, :opaque)
 end

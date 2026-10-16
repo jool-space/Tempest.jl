@@ -13,7 +13,7 @@ Tempest.upload(::CUDATarget, x) = CuArray(x)
 const THREADS = 256
 
 function Tempest.build(target::CUDATarget, p::Plan, g::Group, buffers)
-    g.kind === :opaque && return Tempest.opaque_launch(p, g, buffers)
+    g.kind === :opaque && return Tempest.build_opaque(target, p, g, buffers)
     for implementation in Tempest.EXTRA_IMPLEMENTATIONS
         for claim in Tempest.claims(implementation, p, g)
             built = try
