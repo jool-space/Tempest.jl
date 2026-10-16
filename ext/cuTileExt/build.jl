@@ -276,7 +276,7 @@ function Base.show(io::IO, b::BuiltTiles)
     print(io, "cuTile ", b.schedule, ": ", join((string(k.name, " grid ", k.grid) for k in b.kernels), "; "))
 end
 
-function Tempest.build_claim(::Tempest.CuTileGenerator, claim::Claim, p::Plan, g::Group, buffers)
+function Tempest.build_claim(::Tempest.cuTileGenerator, claim::Claim, p::Plan, g::Group, buffers)
     c = Context(p.graph, p.stored, g, claim.schedule, claim.axes)
     workspaces = Dict{Any, Workspace}()
     kernels = schedule_kernels(c, workspaces)

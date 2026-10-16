@@ -7,7 +7,7 @@
 # axis is swept (resident in one tile, streamed, or split across blocks with a
 # finishing launch), and hints. The generator turns any schedule into kernels;
 # a sketch contributes parameters, never code.
-module CuTileExt
+module cuTileExt
 
 using Tempest
 using CUDACore
@@ -186,7 +186,7 @@ struct Claim
     axes::Tuple
 end
 
-function Tempest.claims(::Tempest.CuTileGenerator, p::Plan, g::Group)
+function Tempest.claims(::Tempest.cuTileGenerator, p::Plan, g::Group)
     g.kind in (:pointwise, :reduction) || return Claim[]
     expressible(p.graph, p.stored, g) || return Claim[]
     A, B, reduced = collapse_axes(g)
@@ -198,11 +198,11 @@ function Tempest.claims(::Tempest.CuTileGenerator, p::Plan, g::Group)
     [Claim(default_schedule(g, extent, reduced), (A, B))]
 end
 
-include("cutile/emit.jl")
-include("cutile/build.jl")
+include("emit.jl")
+include("build.jl")
 
 function __init__()
-    push!(Tempest.EXTRA_IMPLEMENTATIONS, Tempest.CuTileGenerator())
+    push!(Tempest.EXTRA_IMPLEMENTATIONS, Tempest.cuTileGenerator())
 end
 
 end

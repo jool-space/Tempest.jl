@@ -31,7 +31,7 @@ a description. A target's floor realizes any group.
 abstract type Implementation end
 
 "cuTile's generator; active when cuTile is loaded."
-struct CuTileGenerator <: Implementation end
+struct cuTileGenerator <: Implementation end
 
 claims(::Implementation, plan, group) = ()
 function build_claim end
