@@ -10,6 +10,11 @@ Tempest.target_for(::CuArray) = CUDATarget()
 Tempest.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
 Tempest.upload(::CUDATarget, x) = CuArray(x)
 
+function Tempest.task_state(::CUDATarget)
+    context, stream = CUDACore.context(), CUDACore.stream()
+    () -> (CUDACore.context!(context); CUDACore.stream!(stream))
+end
+
 const THREADS = 256
 
 function Tempest.build(target::CUDATarget, p::Plan, g::Group, buffers)

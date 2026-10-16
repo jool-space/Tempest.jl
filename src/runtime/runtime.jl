@@ -134,10 +134,36 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
             buffers[id] = allocate(target, v.eltype, storage_length(v))
         end
     end
-    built = map(g -> build(target, p, g, buffers), p.groups)
+    built = concurrently(g -> build(target, p, g, buffers), p.groups, target)
     ex = Executable(program, p, target, buffers, Any[first(b) for b in built], Any[last(b) for b in built])
     bind!(ex, inputs...)
     ex
+end
+
+"""
+    task_state(target) -> function
+
+A function that, called first in a new task, gives the task the state on
+`target` of the task that asked for it (for CUDA, its context and stream).
+"""
+task_state(target) = () -> nothing
+
+"""
+    concurrently(f, xs, target) -> results
+
+`f` of each of `xs`, in tasks that run at once, each in the calling task's
+state on `target`. Kernels compile this way, a group or a kernel per task.
+"""
+function concurrently(f, xs, target)
+    enter = task_state(target)
+    tasks = [Threads.@spawn((enter(); f(x))) for x in xs]
+    map(tasks) do t
+        try
+            fetch(t)
+        catch err
+            err isa TaskFailedException ? throw(err.task.exception) : rethrow()
+        end
+    end
 end
 
 "Copy `inputs` into the executable's input buffers."

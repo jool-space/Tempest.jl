@@ -267,8 +267,9 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     dkdv_args = (dk, dv, qa, ka, va, lsea, delta, douta, s, constants...)
     dq_args = (dq, qa, ka, va, lsea, delta, douta, s, constants...)
     kv_grid = (cld(keys, ATTENTION_TILE), KV * B)
-    launches = map(tile_launch, (attention_delta_kernel, attention_dkdv_kernel, attention_dq_kernel),
-        (delta_args, dkdv_args, dq_args), (grid, kv_grid, grid))
+    kernels = ((attention_delta_kernel, delta_args, grid), (attention_dkdv_kernel, dkdv_args, kv_grid),
+        (attention_dq_kernel, dq_args, grid))
+    launches = Tempest.concurrently(k -> tile_launch(k...), kernels, target)
     launch = () -> (foreach(l -> l(), launches); workspace; nothing)
     (launch, BuiltAttention(op.f, false, tf32))
 end
