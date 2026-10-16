@@ -154,6 +154,46 @@ function scalar_kernel(graph, stored, g::Group, slots)
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 
+# A term with the group's reductions read from storage, at their placements,
+# for a launch that runs after the group's own.
+stored_statistics(t::Stat, graph, g) = Load(t.value, placement(graph, g, t.value))
+stored_statistics(t::Apply, graph, g) = Apply(t.f, map(a -> stored_statistics(a, graph, g), t.args), t.eltype)
+stored_statistics(t::Term, graph, g) = t
+
+# A cross reduction on the floor: one item per position of its kept axes,
+# sweeping its reduced axes and recomputing its operand.
+function cross_kernel(graph, g::Group, slots, r)
+    D = g.domain
+    vars = index_vars(length(D))
+    c = EmitContext(graph, slots, vars, Domain(D))
+    val = graph.values[r]
+    d = val.definition
+    fold = d.fold
+    t = stored_statistics(g.terms[r], graph, g)
+    A = fold_types(fold, term_eltype(t, graph)).accumulator
+    kept = [k for k in 1:length(D) if !(k in d.reduced)]
+    reduced = collect(d.reduced)
+    body = Expr(:block)
+    s = body.args
+    delinearize_expr(s, :lin, kept, D, vars)
+    loop = Expr(:block)
+    delinearize_expr(loop.args, :sweep, reduced, D, vars)
+    names = emit_terms!(loop.args, [t], c)
+    push!(loop.args, :(state = $fold_combine($fold, state, $fold_lift($fold, convert($A, $(names[t]))))))
+    push!(s, :(state = $fold_init($fold, $A)))
+    push!(s, :(for sweep in 0:$(prod(k -> D[k], reduced; init = 1) - 1)
+        $loop
+    end))
+    foreach(k -> push!(s, :($(vars[k]) = 0)), reduced)
+    index = val.scalar ? () : identity_index(ntuple(k -> k in d.reduced ? 1 : D[k], length(D)))
+    push!(s, store_expr(c, r, index, :(convert($(val.eltype), $fold_observe($fold, state)))))
+    ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
+end
+
+"The floor's launches for a group: its kernel, then one per cross reduction."
+scalar_kernels(graph, stored, g::Group, slots) =
+    [scalar_kernel(graph, stored, g, slots); [cross_kernel(graph, g, slots, r) for r in g.cross]]
+
 # A product, one output element per item, summing sequentially.
 function contraction_kernel(graph, g, slots, c)
     v = only(g.outputs)

@@ -5,6 +5,13 @@
 # iteration domain of its reductions: it holds reductions over the same axes,
 # later ones reading earlier ones at the group's position along the kept axes
 # (phases), and pointwise outputs that read those reductions there.
+#
+# A group may also hold cross reductions: reductions over the same domain but
+# other axes (all of them, or exactly the axes the group keeps). They run with
+# the outputs, after every phase, and no other member reads them: each block of
+# a kernel reduces what it covers into partial states, and a second launch
+# merges them. Their operands, often values the group already computes, are
+# never written.
 
 struct Group
     kind::Symbol # :reduction, :pointwise, :contraction or :opaque
@@ -12,14 +19,27 @@ struct Group
     reduced::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
+    cross::Vector{Int}
     terms::Dict{Int, Term}
     phase::Dict{Int, Int}
 end
 
 Group(kind, domain, reduced = ()) =
-    Group(kind, domain, reduced, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}())
+    Group(kind, domain, reduced, Int[], Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}())
 
-members(g::Group) = [g.reductions; g.outputs]
+members(g::Group) = [g.reductions; g.outputs; g.cross]
+
+# The axes a cross reduction of group `g` may reduce: all of the domain, or
+# exactly the axes the group keeps. The group's own reduced axes must be a
+# leading or trailing run, and must not be all of them.
+function cross_axes(g::Group, reduced)
+    r = length(g.domain)
+    R = collect(g.reduced)
+    (isempty(R) || length(R) == r) && return false
+    (R == collect(1:length(R)) || R == collect((r - length(R) + 1):r)) || return false
+    S = collect(reduced)
+    S == collect(1:r) || S == setdiff(1:r, R)
+end
 
 struct Plan
     graph::IndexGraph
@@ -91,16 +111,19 @@ function ancestors(graph)
     up
 end
 
-# Try to add a reduction or an output to a group: its term must stay inside the
-# group's domain, and nothing it loads may depend on the group.
-function try_add!(graph, stored, up, g::Group, v; reduction)
+# Try to add a member to a group: a reduction over the group's axes, an output,
+# or a cross reduction. Its term must stay inside the group's domain, nothing it
+# loads may depend on the group, and no member may already load it.
+function try_add!(graph, stored, up, g::Group, v; kind)
     val = graph.values[v]
-    index = reduction ? identity_index(g.domain) : placement(graph, g, v)
+    reduces = kind in (:reduction, :cross)
+    index = reduces ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    candidate = Group(g.kind, g.domain, g.reduced, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase))
-    reduction || push!(candidate.outputs, v)
+    any(m -> any(l -> l.value == v, loads(g.terms[m])), members(g)) && return false
+    candidate = Group(g.kind, g.domain, g.reduced, copy(g.reductions), copy(g.outputs), copy(g.cross), copy(g.terms), copy(g.phase))
+    kind === :output && push!(candidate.outputs, v)
     t = try
-        reduction ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
+        reduces ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
         value_term(graph, stored, candidate, v, index)
     catch e
         e isa OutsideGroup || rethrow()
@@ -114,9 +137,9 @@ function try_add!(graph, stored, up, g::Group, v; reduction)
     shared = Set(l.value for m in members(g) for l in loads(g.terms[m]))
     connected = isempty(g.reductions) || !isempty(stats(t)) || any(l -> l.value in shared, loads(t))
     connected || return false
-    reduction ? push!(g.reductions, v) : push!(g.outputs, v)
+    push!(kind === :reduction ? g.reductions : kind === :output ? g.outputs : g.cross, v)
     g.terms[v] = t
-    g.phase[v] = maximum(s -> g.phase[s], stats(t); init = 0) + (reduction ? 1 : 0)
+    g.phase[v] = maximum(s -> g.phase[s], stats(t); init = 0) + (kind === :reduction ? 1 : 0)
     true
 end
 
@@ -172,7 +195,7 @@ function plan(graph::IndexGraph)
         d = values[id].definition
         d isa Reduction || continue
         g = Group(:reduction, d.iteration, d.reduced)
-        try_add!(graph, stored, up, g, id; reduction = true)
+        try_add!(graph, stored, up, g, id; kind = :reduction)
         changed = true
         while changed
             changed = false
@@ -180,11 +203,20 @@ function plan(graph::IndexGraph)
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
                 if od isa Reduction && od.iteration == g.domain && od.reduced == g.reduced
-                    changed |= try_add!(graph, stored, up, g, other; reduction = true)
+                    changed |= try_add!(graph, stored, up, g, other; kind = :reduction)
                 elseif od isa Pointwise && stored[other]
-                    changed |= try_add!(graph, stored, up, g, other; reduction = false)
+                    changed |= try_add!(graph, stored, up, g, other; kind = :output)
                 end
             end
+        end
+        # Cross reductions come last: no other member reads them, and nothing
+        # they add lets more members in.
+        for other in (id + 1):n
+            live[other] && owner[other] == 0 && !(other in members(g)) || continue
+            od = values[other].definition
+            od isa Reduction && od.iteration == g.domain && od.reduced != g.reduced &&
+                cross_axes(g, od.reduced) || continue
+            try_add!(graph, stored, up, g, other; kind = :cross)
         end
         push!(groups, g)
         foreach(m -> owner[m] = length(groups), members(g))
@@ -219,6 +251,11 @@ function plan(graph::IndexGraph)
     for (k, g) in enumerate(groups), r in group_reads(graph, g)
         owner[r] != k && (external[r] = true)
     end
+    # The reductions a cross reduction reads stay stored: a realization that
+    # computes it in a launch of its own loads them.
+    for g in groups, c in g.cross, s in stats(g.terms[c])
+        external[s] = true
+    end
     for g in groups
         g.kind === :reduction || continue
         for m in members(g)
@@ -243,10 +280,26 @@ function with_stored_results(graph::IndexGraph)
            values[r.value].scalar == graph.result_scalar[k]
             continue
         end
+        # A reshape of a value's dense storage presents that storage as it is.
+        if r isa Read && !graph.result_scalar[k] && !values[r.value].scalar &&
+           prod(values[r.value].dims; init = 1) == prod(dims; init = 1) &&
+           dense_address(values[r.value].dims, r.index, Domain(dims)) == dense_address(dims, identity_index(dims), Domain(dims))
+            continue
+        end
         push!(values, Value(Pointwise(identity, (r,)), dims, graph.result_eltype[k], graph.result_scalar[k]))
         results[k] = Read(length(values), identity_index(dims))
     end
     IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype)
+end
+
+function dense_address(dims, index, d::Domain)
+    total = constant(0)
+    stride = 1
+    for (e, n) in zip(index, dims)
+        total = add(total, scale(e, stride), d)
+        stride *= n
+    end
+    total
 end
 
 # The values a group reads from storage.

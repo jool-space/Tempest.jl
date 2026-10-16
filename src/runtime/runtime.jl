@@ -103,7 +103,7 @@ function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
     println(io, "implementations:")
     for (k, d) in enumerate(ex.kernels)
-        println(io, "  kernel ", k, ": ", d isa ScalarKernel ? "floor, $(d.items) items" : d)
+        println(io, "  kernel ", k, ": ", d)
     end
 end
 
@@ -124,17 +124,27 @@ upload(::CPUTarget, x) = x
 
 kernel_slots(p, g) = sort!(collect(union(group_reads(p.graph, g), [v for v in members(g) if p.stored[v]])))
 
+"The floor's kernels for one group, in launch order."
+struct FloorKernels
+    kernels::Vector{ScalarKernel}
+end
+
+Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, " items") for k in f.kernels), " then "))
+
 function build(::CPUTarget, p::Plan, g::Group, buffers)
     g.kind === :opaque && return opaque_launch(p, g, buffers)
-    k = scalar_kernel(p.graph, p.stored, g, kernel_slots(p, g))
-    f = Core.eval(Generated, :(function (buffers, n)
-        for lin in 0:(n - 1)
-            $(k.body)
-        end
-        nothing
-    end))
-    args = Tuple(buffers[v] for v in k.slots)
-    (() -> Base.invokelatest(f, args, k.items), k)
+    ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
+    launches = map(ks) do k
+        f = Core.eval(Generated, :(function (buffers, n)
+            for lin in 0:(n - 1)
+                $(k.body)
+            end
+            nothing
+        end))
+        args = Tuple(buffers[v] for v in k.slots)
+        () -> Base.invokelatest(f, args, k.items)
+    end
+    (() -> foreach(l -> l(), launches), FloorKernels(ks))
 end
 
 # Opaque operations run their reference on dense host copies of their operands.

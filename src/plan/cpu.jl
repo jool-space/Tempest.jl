@@ -76,6 +76,26 @@ function run_reduction!(g::Group, buffers, graph)
         end
         buffers[m] = out
     end
+    for r in g.cross
+        val = graph.values[r]
+        d = val.definition
+        fold = d.fold
+        A = fold_types(fold, term_eltype(g.terms[r], graph)).accumulator
+        kept_c = ntuple(k -> k in d.reduced ? 1 : D[k], length(D))
+        swept_c = ntuple(k -> k in d.reduced ? D[k] : 1, length(D))
+        out = Array{val.eltype}(undef, kept_c)
+        for Kc in CartesianIndices(kept_c)
+            state = fold_init(fold, A)
+            for Sc in CartesianIndices(swept_c)
+                x = ntuple(k -> k in d.reduced ? Sc[k] - 1 : Kc[k] - 1, length(D))
+                K = CartesianIndex(ntuple(k -> k in g.reduced ? 1 : x[k] + 1, length(D)))
+                e = evaluate_term(g.terms[r], x, K, buffers, stats, graph)
+                state = fold_combine(fold, state, fold_lift(fold, A(e)))
+            end
+            out[Kc] = val.eltype(fold_observe(fold, state))
+        end
+        buffers[r] = val.scalar ? only(out) : reshape(out, val.dims)
+    end
 end
 
 """

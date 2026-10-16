@@ -188,6 +188,7 @@ end
 
 function Tempest.claims(::Tempest.CuTileGenerator, p::Plan, g::Group)
     g.kind in (:pointwise, :reduction) || return Claim[]
+    isempty(g.cross) || return Claim[]
     expressible(p.graph, p.stored, g) || return Claim[]
     A, B, reduced = collapse_axes(g)
     extent = (prod(k -> g.domain[k], A; init = 1), prod(k -> g.domain[k], B; init = 1))

@@ -22,6 +22,11 @@ function explain(io::IO, p::Plan)
         for m in g.outputs
             println(io, "  writes ", describe_value(graph, m), haskey(g.terms, m) ? string(" = ", g.terms[m]) : "")
         end
+        for r in g.cross
+            d = graph.values[r].definition
+            println(io, "  across axes ", d.reduced, ": ", describe_value(graph, r), " = ",
+                fold_name(d.fold), " of ", g.terms[r])
+        end
     end
 end
 
