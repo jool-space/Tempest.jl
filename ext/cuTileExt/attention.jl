@@ -220,16 +220,13 @@ function epilogue_for(p, g, o, buffers, shape)
         push!(body, :($name = $expr))
         names[s] = name
     end
-    f = Core.eval(Tempest.Generated, :(function (y, arrays, index)
+    f = Tempest.generated(:(function (y, arrays, index)
         $(body...)
         return $(names[t])
     end))
     Epilogue(f, Tuple(arrays)), e
 end
 
-compile(f, args) = Base.invokelatest(f, args) do f, args
-    CUDACore.@cuda(backend = ct, launch = false, f(args...))
-end
 
 struct BuiltAttention
     f::Any
@@ -260,8 +257,7 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
         epilogue, target_o = epilogue_for(p, g, o, buffers, (D, 1, ATTENTION_TILE, 1))
         args = (tile_array(buffers[target_o], (D, H, T, B)), tile_array(buffers[lse], (1, H, T, B)),
             arrays..., epilogue, s, constants...)
-        kernel = compile(attention_forward_kernel, args)
-        return (() -> kernel(args...; blocks = grid), BuiltAttention(op.f, !(epilogue isa NoEpilogue), tf32))
+        return (tile_launch(attention_forward_kernel, args, grid), BuiltAttention(op.f, !(epilogue isa NoEpilogue), tf32))
     end
     qa, ka, va, oa, lsea, douta, dlsea = arrays
     dq, dk, dv = map(r -> tile_array(buffers[r], p.graph.values[r].dims), outs)
@@ -270,14 +266,9 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     delta_args = (delta, oa, douta, dlsea, ct.Constant(D), tile, ct.Constant(H))
     dkdv_args = (dk, dv, qa, ka, va, lsea, delta, douta, s, constants...)
     dq_args = (dq, qa, ka, va, lsea, delta, douta, s, constants...)
-    kernels = map(compile, (attention_delta_kernel, attention_dkdv_kernel, attention_dq_kernel), (delta_args, dkdv_args, dq_args))
     kv_grid = (cld(keys, ATTENTION_TILE), KV * B)
-    launch = () -> begin
-        kernels[1](delta_args...; blocks = grid)
-        kernels[2](dkdv_args...; blocks = kv_grid)
-        kernels[3](dq_args...; blocks = grid)
-        workspace
-        nothing
-    end
+    launches = map(tile_launch, (attention_delta_kernel, attention_dkdv_kernel, attention_dq_kernel),
+        (delta_args, dkdv_args, dq_args), (grid, kv_grid, grid))
+    launch = () -> (foreach(l -> l(), launches); workspace; nothing)
     (launch, BuiltAttention(op.f, false, tf32))
 end

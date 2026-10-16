@@ -35,5 +35,6 @@ include("plan/explain.jl")
 # Code generation and prepared programs.
 include("codegen/scalar.jl")
 include("runtime/runtime.jl")
+include("runtime/cache.jl")
 
 end

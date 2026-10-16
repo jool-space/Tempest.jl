@@ -198,7 +198,7 @@ function build(target::CPUTarget, p::Plan, g::Group, buffers)
     g.kind === :opaque && return build_opaque(target, p, g, buffers)
     ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
     launches = map(ks) do k
-        f = Core.eval(Generated, :(function (buffers, n)
+        f = generated(:(function (buffers, n)
             for lin in 0:(n - 1)
                 $(k.body)
             end

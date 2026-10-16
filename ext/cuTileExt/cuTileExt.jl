@@ -276,6 +276,7 @@ function Tempest.claims(::Tempest.cuTileGenerator, target, p::Plan, g::Group)
 end
 
 include("emit.jl")
+include("cache.jl")
 include("build.jl")
 include("contract.jl")
 include("attention.jl")
