@@ -27,7 +27,7 @@ results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(exec
     @test interpret(p, q, k, v, x) ≈ residual(q, k, v, x)
     @test !any(v -> v.definition isa T.Opaque, T.lower(p).values)
 
-    push!(T.EXTRA_IMPLEMENTATIONS, HostAttention())
+    T.register!(@__MODULE__, HostAttention())
     try
         ex = prepare(p, q, k, v, x)
         g = only(opaque_groups(ex))
@@ -47,7 +47,7 @@ results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(exec
         @test length(opaque_groups(ex)) == 2
         @test agree(results(ex), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))))
     finally
-        filter!(i -> !(i isa HostAttention), T.EXTRA_IMPLEMENTATIONS)
+        T.register!(@__MODULE__)
     end
 end
 

@@ -6,21 +6,25 @@ abstract type Target end
 struct CPUTarget <: Target end
 
 """
-    CUDATarget(; precision = :full)
+    CUDATarget(packages...; precision = :full)
 
-Run on an NVIDIA GPU; needs CUDACore loaded. `precision` is the numerics policy
-for products: `:full` keeps Float32 products in Float32, `:tf32` allows TF32
-tensor cores for them, and `:tf32x3` splits each Float32 factor into two TF32
-parts and sums three tensor-core products (close to Float32 accuracy). Half-
-precision products always accumulate in Float32.
+Run on an NVIDIA GPU; needs CUDACore loaded. `packages` names the packages whose
+implementations the target may use, as in `CUDATarget(cuTile)`; by default it
+uses every implementation available when a program is prepared. The floor is
+always used. `precision` is the numerics policy for products: `:full` keeps
+Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
+`:tf32x3` splits each Float32 factor into two TF32 parts and sums three
+tensor-core products (close to Float32 accuracy). Half-precision products
+always accumulate in Float32.
 """
 struct CUDATarget <: Target
     precision::Symbol
+    packages::Union{Nothing, Tuple{Vararg{Module}}}
 end
 
-function CUDATarget(; precision::Symbol = :full)
+function CUDATarget(packages::Module...; precision::Symbol = :full)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision)
+    CUDATarget(precision, isempty(packages) ? nothing : packages)
 end
 
 target_for(x::AbstractArray) = CPUTarget()
@@ -79,7 +83,38 @@ from the result's tile by the group's terms.
 """
 function build_call end
 
-implementations(target) = EXTRA_IMPLEMENTATIONS
+# Implementations by the package that provides them, ordered by its name.
+const REGISTERED = Pair{Module, Vector{Implementation}}[]
+
+"""
+    register!(package::Module, implementations...)
+
+Make `implementations` available under `package`, replacing what it registered
+before; extensions call this when their packages load.
+"""
+function register!(package::Module, implementations::Implementation...)
+    filter!(p -> p.first !== package, REGISTERED)
+    isempty(implementations) || push!(REGISTERED, package => Implementation[implementations...])
+    sort!(REGISTERED; by = p -> string(nameof(p.first)))
+    nothing
+end
+
+"The packages a target names, or nothing for every registered one."
+packages(::Target) = nothing
+packages(target::CUDATarget) = target.packages
+
+"The packages whose implementations a target uses, in order."
+function used_packages(target)
+    named = packages(target)
+    named === nothing && return Module[p.first for p in REGISTERED]
+    for m in named
+        any(p -> p.first === m, REGISTERED) || throw(ArgumentError("$m provides no implementations; is its extension loaded?"))
+    end
+    Module[p.first for p in REGISTERED if p.first in named]
+end
+
+"The implementations a target uses, in order: by package name, then as registered."
+implementations(target) = Implementation[i for (m, is) in REGISTERED if m in used_packages(target) for i in is]
 
 call_inputs(nodes, n) = map(i -> (nodes[i].dims, nodes[i].eltype), n.inputs)
 
@@ -93,9 +128,6 @@ function takes_epilogue(target, nodes, n)
     c !== nothing && n.op.output in epilogue_results(c, n.op.f, n.op.kwargs)
 end
 
-"Implementations offered before the floor, in order."
-const EXTRA_IMPLEMENTATIONS = Implementation[]
-
 """
     Executable
 
@@ -107,6 +139,7 @@ struct Executable{T <: Target}
     program::Program
     plan::Plan
     target::T
+    packages::Vector{Module}
     buffers::Vector{Any}
     launches::Vector{Any}
     kernels::Vector{Any}
@@ -135,7 +168,7 @@ function prepare(program::Program, inputs...; target = default_target(inputs))
         end
     end
     built = map(g -> build(target, p, g, buffers), p.groups)
-    ex = Executable(program, p, target, buffers, Any[first(b) for b in built], Any[last(b) for b in built])
+    ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built], Any[last(b) for b in built])
     bind!(ex, inputs...)
     ex
 end
@@ -163,7 +196,8 @@ function explain(io::IO, ex::Executable)
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
         "; half-precision products accumulate in Float32")
-    println(io, "implementations:")
+    println(io, "implementations from ", isempty(ex.packages) ? "no package" : join(map(string ∘ nameof, ex.packages), ", "),
+        ", and the floor:")
     for (k, d) in enumerate(ex.kernels)
         println(io, "  kernel ", k, ": ", d)
     end

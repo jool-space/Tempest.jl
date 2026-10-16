@@ -14,7 +14,7 @@ const THREADS = 256
 
 function Tempest.build(target::CUDATarget, p::Plan, g::Group, buffers)
     g.kind === :opaque && return Tempest.build_opaque(target, p, g, buffers)
-    for implementation in Tempest.EXTRA_IMPLEMENTATIONS
+    for implementation in Tempest.implementations(target)
         for claim in Tempest.claims(implementation, target, p, g)
             built = try
                 Tempest.build_claim(implementation, claim, target, p, g, buffers)

@@ -71,6 +71,17 @@ if CUDACore.functional()
             @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, u, z); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
     end
+    @testset "implementation sets" begin
+        w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
+        p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
+        # Loading a package makes its implementations available; a target
+        # names the ones it uses, and the floor is always there.
+        @test cuTile in T.used_packages(T.CUDATarget())
+        ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile))
+        @test ex.packages == [cuTile]
+        @test occursin("implementations from cuTile, and the floor", sprint(explain, ex))
+        @test_throws ArgumentError prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(Test))
+    end
 end
 
 # Sizes that take several blocks: full reductions merge partial states, and

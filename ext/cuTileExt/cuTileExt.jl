@@ -280,9 +280,6 @@ include("build.jl")
 include("contract.jl")
 include("attention.jl")
 
-function __init__()
-    push!(Tempest.EXTRA_IMPLEMENTATIONS, Tempest.cuTileGenerator())
-    push!(Tempest.EXTRA_IMPLEMENTATIONS, cuTileAttention())
-end
+__init__() = Tempest.register!(ct, Tempest.cuTileGenerator(), cuTileAttention())
 
 end
