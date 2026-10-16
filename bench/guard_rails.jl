@@ -88,6 +88,10 @@ gelu(x) = 0.5f0 * x * (1.0f0 + tanh(0.7978846f0 * (x + 0.044715f0 * x * x * x)))
 mlp_arguments = (guard_data(512, 1024; scale = 0.5f0), 0.05f0 .* guard_data(2048, 512), guard_data(2048; scale = 0.1f0),
                  0.05f0 .* guard_data(512, 2048; scale = 0.3f0), guard_data(512; scale = 0.2f0))
 
+# Products with few output tiles and a long sum: split-K's case.
+push!(CASES, ("product with a small output, 256×8192 · 8192×256", (a, b) -> a * b,
+    (guard_data(256, 8192; scale = 0.01f0), guard_data(8192, 256))))
+
 const TRAINING = [
     ("MLP block training, 512→2048→512 × 1024", (x, w1, b1, w2, b2) -> sum(abs2, mlp(x, w1, b1, w2, b2)), mlp_arguments),
     ("RMSNorm training, 1024×4096", (x, w) -> sum(abs2, rmsnorm(x, w)), (x, guard_weight(1024))),
