@@ -19,6 +19,7 @@ function explain(io::IO, p::Plan)
                 fold_name(graph.values[r].definition.fold), " over axes ", fold_axes(graph, r), " of ", g.terms[r])
         end
         for m in g.outputs
+            p.stored[m] || continue
             println(io, "  writes ", describe_value(graph, m), haskey(g.terms, m) ? string(" = ", g.terms[m]) : "")
         end
     end

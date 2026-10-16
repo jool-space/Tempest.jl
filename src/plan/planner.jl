@@ -158,31 +158,7 @@ function plan(graph::IndexGraph)
     graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
-    counts = zeros(Int, n)
-    for v in values, o in operands(v.definition)
-        o isa Read && (counts[o.value] += 1)
-    end
-    results = Set(o.value for o in graph.results if o isa Read)
-    for r in results
-        counts[r] += 1
-    end
-    # Opaque operations read their operands from storage.
-    materialized = falses(n)
-    for v in values
-        v.definition isa Opaque || continue
-        foreach(o -> materialized[o.value] = true, operands(v.definition))
-    end
-    stored = map(eachindex(values)) do id
-        d = values[id].definition
-        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : true
-    end
-    # A pointwise value that reads nothing stored is cheaper to recompute.
-    for id in eachindex(values)
-        d = values[id].definition
-        d isa Pointwise && stored[id] && !(id in results) && !materialized[id] || continue
-        all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
-        all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
-    end
+    # What the results read, directly or through others: nothing else runs.
     live = falses(n)
     for o in graph.results, r in read_values(o)
         live[r] = true
@@ -193,6 +169,36 @@ function plan(graph::IndexGraph)
             live[r] = true
         end
     end
+    counts = zeros(Int, n)
+    for (id, v) in enumerate(values), o in operands(v.definition)
+        live[id] && o isa Read && (counts[o.value] += 1)
+    end
+    results = Set(o.value for o in graph.results if o isa Read)
+    for r in results
+        counts[r] += 1
+    end
+    # An opaque operation runs when any of its results is read (a call's
+    # results run together), and reads its operands from storage.
+    instance(id) = (op = values[id].definition.node.op; op isa Call ? op.instance : -id)
+    running = Set(instance(id) for id in 1:n if live[id] && values[id].definition isa Opaque)
+    materialized = falses(n)
+    for id in 1:n
+        values[id].definition isa Opaque && instance(id) in running || continue
+        foreach(o -> materialized[o.value] = true, operands(values[id].definition))
+    end
+    # A result of an opaque operation that nobody reads is not stored: its
+    # kernel leaves it unwritten.
+    stored = map(eachindex(values)) do id
+        d = values[id].definition
+        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : d isa Opaque ? live[id] : true
+    end
+    # A pointwise value that reads nothing stored is cheaper to recompute.
+    for id in eachindex(values)
+        d = values[id].definition
+        d isa Pointwise && stored[id] && !(id in results) && !materialized[id] || continue
+        all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
+        all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
+    end
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
@@ -202,16 +208,15 @@ function plan(graph::IndexGraph)
     instances = Dict{Int, Int}()
     for id in 1:n
         d = values[id].definition
-        d isa Opaque || continue
-        key = d.node.op isa Call ? d.node.op.instance : -id
-        k = get!(instances, key) do
+        d isa Opaque && instance(id) in running || continue
+        k = get!(instances, instance(id)) do
             push!(groups, Group(:opaque, values[id].dims))
             length(groups)
         end
         push!(groups[k].outputs, id)
         owner[id] = k
     end
-    users = map(unique, readers(graph))
+    users = map(u -> unique(filter(i -> live[i], u)), readers(graph))
     for (k, g) in enumerate(groups), o in copy(g.outputs)
         values[o].definition.epilogue && absorb_epilogue!(graph, stored, users, results, owner, g, k, o)
     end

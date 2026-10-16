@@ -35,6 +35,11 @@ results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(exec
         @test !ex.plan.stored[o] # the residual is written in the output's place
         @test agree(results(ex), [residual(q, k, v, x)])
 
+        # A result nobody reads is not stored.
+        ex = prepare(trace((q, k, v) -> T.attention(q, k, v; causal = true), q, k, v), q, k, v)
+        @test count(v -> ex.plan.stored[v], only(opaque_groups(ex)).outputs) == 1
+        @test agree(results(ex), [T.attention(q, k, v; causal = true)])
+
         # A permuted read does not align with the output tile: no epilogue.
         ex = prepare(trace(permuted, q, k, v, y), q, k, v, y)
         @test isempty(only(opaque_groups(ex)).epilogues)
@@ -75,6 +80,11 @@ if CUDACore.functional()
             @test length(g.epilogues) == 1
             @test any(d -> d isa Base.get_extension(Tempest, :cuTileExt).BuiltAttention, ex.kernels)
             @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(p, q, k, v, x)]; rtol)
+            # The kernel leaves the log-sum-exp unwritten when nobody reads it.
+            f = trace((q, k, v) -> T.attention(q, k, v; causal = true), q, k, v)
+            ex = prepare(f, device((q, k, v))...; target)
+            @test count(v -> ex.plan.stored[v], only(opaque_groups(ex)).outputs) == 1
+            @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(f, q, k, v)]; rtol)
             d = differentiate(p)
             ex = prepare(d, device((q, k, v, x))...; target)
             @test length(opaque_groups(ex)) == 2
