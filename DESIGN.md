@@ -6,6 +6,33 @@ as a distance from the current code. It lives with the new code on the `next`
 branch. Tempest's architecture page (`docs/src/architecture.md` on `main`)
 describes today's code.
 
+## The idea
+
+Tempest is three small algebras and one decision.
+
+- **Formulas.** Every read is a quasi-affine index formula. Layout operations
+  only compose formulas, so how a layout is spelled does not matter.
+- **Folds.** Every reduction is a monoid: lift each element, combine two
+  states, observe the result. Associativity makes every grouping legal, so
+  resident, streamed, split, partial-then-merge and online evaluation are one
+  fold grouped differently.
+- **Scalar functions.** Julia functions, traced into primitives with derivative
+  rules. They are pure, so recomputing a value instead of storing it is always
+  legal.
+- **The decision.** For each value: store it, or recompute it wherever it is
+  read. A kernel is a set of maps and folds over one shared index domain, each
+  fold reducing its own subset of the axes, laid over tiles by a schedule.
+
+Nothing else is special. A matrix product is a sum fold of a product over
+`(m, n, k)`; split-K is the split schedule; an epilogue is a map over the
+fold's kept axes. Layer norm's forward and backward are folds in phases. Flash
+attention is a fold over keys whose state is the running maximum, the running
+sum and the weighted accumulator, with the rescale as the combine. Kernels
+follow from the program and a schedule; a hand-written kernel is an escape
+hatch at the edge, never a new kind in the core. The core (formulas, folds,
+scalar functions, the planner and the generator) stays small enough to read in
+an afternoon; backends are realizations of it.
+
 ## Purpose
 
 Tempest turns ordinary Julia array code (a loss, a training step, a forward
@@ -96,8 +123,10 @@ vocabulary is small.
   accumulator type. A fold's state may be a tuple, as in the online softmax's
   running maximum, sum and accumulator.
 - `contract(a, b, axes)`: a product over named axes. Matrix, batched and
-  attention products are all this. Its meaning is a fold of products; it stays
-  a primitive because libraries and tensor cores realize it directly.
+  attention products are all this. It is a primitive at this level for
+  readable programs and derivatives; at the index level it is a sum fold of a
+  pointwise product, and the generator recognizes that bilinear term for tensor
+  cores.
 - `gather` and `scatter` by runtime integer indices.
 - `positions`: the index itself, for masks, dropout and embeddings.
 - Layout: reshape, permute, view, slice, broadcast, concatenate.
