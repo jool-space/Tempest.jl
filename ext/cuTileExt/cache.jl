@@ -109,7 +109,7 @@ end
 
 # One thread per block lets the driver take the thread count from the CUBIN.
 function (l::TileLaunch)()
-    l.seed[] = rand(UInt32)
+    l.seed[] = rand(CUDACore.launch_rng(), UInt32)
     GC.@preserve l begin
         CUDACore.cuLaunchKernel(l.fun, l.grid..., 1, 1, 1, 0, CUDACore.stream(), l.pointers, C_NULL)
     end

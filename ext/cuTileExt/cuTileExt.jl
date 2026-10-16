@@ -286,4 +286,6 @@ function __init__()
     push!(Tempest.EXTRA_IMPLEMENTATIONS, cuTileAttention())
 end
 
+include("precompile.jl")
+
 end

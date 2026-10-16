@@ -38,18 +38,17 @@ function floor(p::Plan, g::Group, buffers)
             return
         end))
         args = CUDACore.cudaconvert(Tuple(buffers[v] for v in k.slots))
-        kernel = floor_kernel(f, args, k.items)
         threads = min(THREADS, k.items)
-        blocks = cld(k.items, threads)
-        items = k.items
-        () -> kernel(args, items; threads, blocks)
+        FloorLaunch(floor_function(f, args, k.items)..., (args, k.items), cld(k.items, threads), threads)
     end
     (() -> foreach(l -> l(), launches), Tempest.FloorKernels(ks))
 end
 
-# A floor kernel from the kernel cache, or compiled and kept. Kernels that refer
-# to Julia values in the session (relocations) are compiled every time.
-function floor_kernel(f, args, n)
+# A floor kernel and its exception slot, from the kernel cache or compiled and
+# kept. Kernels that refer to Julia values in the session (relocations) are
+# compiled every time.
+function floor_function(@nospecialize(f), @nospecialize(args), n)
+    Base.issingletontype(typeof(f)) || error("a floor kernel captures values, which its launch does not pass")
     tt = Tuple{typeof(args), typeof(n)}
     device = CUDACore.device()
     key = Tempest.content_key("CUDA kernel", f, tt, CUDACore.capability(device), CUDACore.GPUCompiler,
@@ -58,8 +57,7 @@ function floor_kernel(f, args, n)
     if found !== nothing
         entry, image = found
         fun = CUDACore.link_kernel(image, entry, CUDACore.GPUCompiler.Relocations())
-        state = CUDACore.KernelState(CUDACore.create_exceptions!(fun.mod), UInt32(0))
-        return CUDACore.HostKernel{typeof(f), tt}(f, fun, state)
+        return fun, CUDACore.create_exceptions!(fun.mod)
     end
     Base.invokelatest(f, args, n) do f, args, n
         kernel = CUDACore.@cuda(launch = false, f(args, n))
@@ -70,8 +68,36 @@ function floor_kernel(f, args, n)
         else
             Threads.atomic_add!(Tempest.CACHE_COUNTS.compiled, 1)
         end
-        kernel
+        kernel.fun, kernel.state.exception_info
     end
+end
+
+"""
+A launch of a floor kernel on fixed arguments. Its parameters are those CUDA.jl
+gives a kernel: the kernel state, then each argument by value.
+"""
+struct FloorLaunch
+    fun::CuFunction
+    exceptions::Any
+    state::Base.RefValue{CUDACore.KernelState}
+    boxes::Vector{Any}
+    pointers::Vector{Ptr{Cvoid}}
+    blocks::Int
+    threads::Int
+end
+
+function FloorLaunch(fun, exceptions, @nospecialize(args::Tuple), blocks, threads)
+    state = Base.RefValue(CUDACore.KernelState(exceptions, UInt32(0)))
+    boxes = Any[state; [Base.RefValue{typeof(a)}(a) for a in args]]
+    FloorLaunch(fun, exceptions, state, boxes, Ptr{Cvoid}[pointer_from_objref(b) for b in boxes], blocks, threads)
+end
+
+function (l::FloorLaunch)()
+    l.state[] = CUDACore.KernelState(l.exceptions, rand(CUDACore.launch_rng(), UInt32))
+    GC.@preserve l begin
+        CUDACore.cuLaunchKernel(l.fun, l.blocks, 1, 1, l.threads, 1, 1, 0, CUDACore.stream(), l.pointers, C_NULL)
+    end
+    nothing
 end
 
 end

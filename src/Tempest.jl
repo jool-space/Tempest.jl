@@ -37,4 +37,6 @@ include("codegen/scalar.jl")
 include("runtime/runtime.jl")
 include("runtime/cache.jl")
 
+include("precompile.jl")
+
 end

@@ -19,8 +19,9 @@ const PROGRAMS = [
 function prepare_times()
     results = Any[]
     totals = zeros(4)
-    @printf("%-44s %8s %8s %8s %8s\n", "case", "trace", "plan", "build", "execute")
+    @printf("%-44s %8s %8s %8s %8s %7s %8s\n", "case", "trace", "plan", "build", "execute", "loaded", "compiled")
     for (name, training, f, args, target) in PROGRAMS
+        counts = T.cache_counts()
         t0 = time()
         p = training ? differentiate(trace(f, args...)) : trace(f, args...)
         t1 = time()
@@ -34,7 +35,8 @@ function prepare_times()
         # Preparing plans again; the build is the rest.
         times = (t1 - t0, t2 - t1, (t3 - t2) - (t2 - t1), t4 - t3)
         totals .+= times
-        @printf("%-44s %8.2f %8.2f %8.2f %8.2f\n", name, times...)
+        @printf("%-44s %8.2f %8.2f %8.2f %8.2f %7d %8d\n", name, times...,
+            T.cache_counts().loaded - counts.loaded, T.cache_counts().compiled - counts.compiled)
         push!(results, name => got)
     end
     @printf("%-44s %8.2f %8.2f %8.2f %8.2f\n", "total", totals...)
