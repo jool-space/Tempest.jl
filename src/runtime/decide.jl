@@ -94,7 +94,7 @@ end
 
 # The floor reads every load at every point of the domain, one item a thread.
 function floor_estimate(p::Plan, g::Group)
-    g.kind in (:opaque, :region) && return [Work(group_bytes(p, g))]
+    g.kind === :opaque && return [Work(group_bytes(p, g))]
     points = prod(g.domain; init = 1)
     per_point = sum(m -> sum(l -> sizeof(p.graph.values[l.value].eltype), loads(g.terms[m]); init = 0), members(g); init = 0)
     items = g.kind === :reduction ? prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1) : points
@@ -308,8 +308,7 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers)
         end
         built === nothing || return built
     end
-    # A region no claim builds runs its reference on the host.
-    g.kind === :region ? opaque_launch(p, g, buffers) : build_floor(d.target, p, g, buffers)
+    build_floor(d.target, p, g, buffers)
 end
 
 function measure!(d::Decider, p::Plan, g::Group, o::Choice)

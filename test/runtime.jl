@@ -26,25 +26,33 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
-# An implementation whose candidates span several domains: a product, the
-# work after it and a sum over the result, realized whole on the host.
-struct HostRegions <: T.Implementation end
-T.candidates(::HostRegions, ::T.CPUTarget, p) = [T.grow(p.graph, r, set -> length(set) <= 3)
+# An implementation that proposes each product alone, grown from its fold, in
+# place of the generator's product with the work after it; it claims a lone
+# product as free, so the cover takes it. A candidate over several domains
+# (the product and a sum over its result) does not form a group.
+struct HostProducts <: T.Implementation end
+lone_product(p, g) = g.kind === :reduction && all(in(g.reductions), T.members(g)) && T.product_axes(p.graph, g) !== nothing
+T.candidates(::HostProducts, ::T.CPUTarget, p) = [T.grow(p.graph, r, set -> length(set) <= 1)
     for g in p.groups if g.kind === :reduction && T.product_axes(p.graph, g) !== nothing for r in g.reductions]
-T.claims(::HostRegions, ::T.CPUTarget, p, g) = g.kind === :region ? [:host] : []
-T.estimate(::HostRegions, claim, target, p, g) = [T.Work(0.0)]
-T.build_claim(::HostRegions, claim, target, p, g, buffers) = T.opaque_launch(p, g, buffers)
+T.claims(::HostProducts, ::T.CPUTarget, p, g) = lone_product(p, g) ? [:host] : []
+T.estimate(::HostProducts, claim, target, p, g) = [T.Work(0.0)]
+T.build_claim(::HostProducts, claim, target, p, g, buffers) = T.build_floor(target, p, g, buffers)
 
-@testset "candidates over several domains" begin
+@testset "candidates from implementations" begin
     a, b = data(6, 5; scale = 0.3), data(5, 4)
-    p = trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b)
-    T.register!(@__MODULE__, HostRegions())
+    p = trace((a, b) -> tanh.(a * b), a, b)
+    @test length(T.plan(T.lower(p)).groups) == 1 # the generator fuses the tanh
+    T.register!(@__MODULE__, HostProducts())
     try
         ex = prepare(p, a, b)
-        region = only(filter(g -> g.kind === :region, ex.plan.groups))
-        @test length(region.outputs) == 3 && length(ex.accepted) == 1
+        @test length(ex.accepted) == 1 && length(first(first(ex.accepted))) == 1
+        @test length(ex.plan.groups) == 2
         @test isapprox(only(T.leaves(execute!(ex))), interpret(p, a, b); rtol = 1.0e-12)
-        @test occursin("from HostRegions replaces", sprint(explain, ex))
+        @test occursin("from HostProducts replaces", sprint(explain, ex))
+        # The product, the tanh and a sum over the result span two domains.
+        graph = T.lower(trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b))
+        r = only(g.reductions[1] for g in T.plan(graph).groups if T.product_axes(graph, g) !== nothing)
+        @test_throws T.NotAGroup T.plan(graph; fixed = [T.grow(graph, r, set -> length(set) <= 3)])
     finally
         T.register!(@__MODULE__)
     end

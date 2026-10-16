@@ -12,7 +12,7 @@
 # a block and which by merging partial states, is the schedule's choice.
 
 struct Group
-    kind::Symbol # :reduction, :pointwise, :opaque or :region
+    kind::Symbol # :reduction, :pointwise or :opaque
     domain::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
@@ -225,7 +225,7 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[])
         values[o].definition.epilogue && absorb_epilogue!(graph, stored, users, results, owner, g, k, o)
     end
     for set in fixed
-        push!(groups, fixed_group(graph, stored, up, owner, users, results, set))
+        push!(groups, fixed_group(graph, stored, up, owner, set))
         foreach(m -> owner[m] = length(groups), set)
     end
     for id in 1:n
@@ -293,38 +293,28 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[])
     Plan(graph, stored, groups[order], map(o -> o == 0 ? 0 : position[o], owner))
 end
 
-"A candidate that overlaps a group already formed."
+"A candidate whose values do not form one group."
 struct NotAGroup <: Exception
     values::Vector{Int}
 end
 
-Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%$v", e.values), " "), " overlap a group")
+Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%$v", e.values), " "), " do not form one group")
 
 # The group of exactly the values in `set`: its folds over one domain, then
-# stored pointwise values over it. Otherwise a region, which only the
-# implementation that proposed it realizes, whole: it computes its values in
-# order, reads what lies outside it from storage, and stores what is read
-# outside it.
-function fixed_group(graph, stored, up, owner, users, results, set)
+# stored pointwise values over it. A candidate spanning several domains waits
+# for groups that span them: a kernel is maps and folds over one domain.
+function fixed_group(graph, stored, up, owner, set)
     values = graph.values
     all(v -> owner[v] == 0, set) || throw(NotAGroup(set))
     d = values[first(set)].definition
     g = d isa Reduction ? Group(:reduction, d.iteration) : Group(:pointwise, values[first(set)].dims)
-    one_group = all(set) do v
-        dv = values[v].definition
-        dv isa Reduction ? dv.iteration == g.domain && try_add!(graph, stored, up, g, v; fold = true) :
-            dv isa Pointwise && stored[v] && try_add!(graph, stored, up, g, v; fold = false)
-    end
-    one_group && return g
-    region = Group(:region, values[last(set)].dims)
     for v in set
-        push!(region.outputs, v)
-        stored[v] = v in results || any(u -> !(u in set), users[v])
-        for o in operands(values[v].definition), r in read_values(o)
-            r in set || (stored[r] = true)
-        end
+        dv = values[v].definition
+        added = dv isa Reduction ? dv.iteration == g.domain && try_add!(graph, stored, up, g, v; fold = true) :
+            dv isa Pointwise && stored[v] && try_add!(graph, stored, up, g, v; fold = false)
+        added || throw(NotAGroup(set))
     end
-    region
+    g
 end
 
 # An epilogue: the chain of pointwise values after an opaque result, each read

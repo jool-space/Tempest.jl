@@ -272,8 +272,7 @@ function build_opaque(target, p::Plan, g::Group, buffers)
     build_call(implementations(target)[k], p, g, buffers, target)
 end
 
-# Opaque work and regions run their references, and epilogues, on dense host
-# copies.
+# Opaque work runs its reference, and its epilogues, on dense host copies.
 function opaque_launch(p, g, buffers)
     graph = p.graph
     function launch()
