@@ -41,22 +41,6 @@ function evaluate_value(d::Reduction, v, arrays, graph, arguments)
     v.scalar ? only(y) : y
 end
 
-function evaluate_value(d::Contraction, v, arrays, graph, arguments)
-    A = v.eltype <: HalfFloat ? Float32 : v.eltype
-    free = d.iteration[1:(end - d.summed)]
-    summed = d.iteration[(end - d.summed + 1):end]
-    out = Array{v.eltype}(undef, v.dims)
-    for I in CartesianIndices(free)
-        total = zero(A)
-        for J in CartesianIndices(summed)
-            x = (Tuple(I)..., Tuple(J)...) .- 1
-            total += A(read_operand(d.a, x, arrays, graph)) * A(read_operand(d.b, x, arrays, graph))
-        end
-        out[I] = v.eltype(total)
-    end
-    out
-end
-
 function evaluate_value(d::Opaque, v, arrays, graph, arguments)
     xs = map((o, (dims, scalar)) -> materialize(o, dims, arrays, graph; scalar), d.operands, d.shapes)
     evaluate(d.node.op, d.node, xs)

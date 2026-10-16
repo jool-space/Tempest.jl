@@ -7,7 +7,7 @@
 # (phases), and pointwise outputs that read those reductions there.
 
 struct Group
-    kind::Symbol # :reduction, :pointwise, :contraction or :opaque
+    kind::Symbol # :reduction, :pointwise or :opaque
     domain::Tuple{Vararg{Int}}
     reduced::Tuple{Vararg{Int}}
     reductions::Vector{Int}
@@ -36,6 +36,10 @@ function placement(graph, g::Group, v)
     val.dims == g.domain && return identity_index(g.domain)
     kept = ntuple(k -> k in g.reduced ? 1 : g.domain[k], length(g.domain))
     val.dims == kept && return identity_index(kept)
+    # Reduced trailing axes may be dropped, as a product's summed axes are.
+    n = length(val.dims)
+    n < length(kept) && val.dims == kept[1:n] && all(k -> k > n, g.reduced) &&
+        return identity_index(kept)[1:n]
     nothing
 end
 
@@ -137,10 +141,10 @@ function plan(graph::IndexGraph)
     for r in results
         readers[r] += 1
     end
-    # Products and opaque operations read their operands from storage.
+    # Opaque operations read their operands from storage.
     materialized = falses(n)
     for v in values
-        v.definition isa Union{Contraction, Opaque} || continue
+        v.definition isa Opaque || continue
         foreach(o -> materialized[o.value] = true, operands(v.definition))
     end
     stored = map(eachindex(values)) do id
@@ -198,10 +202,6 @@ function plan(graph::IndexGraph)
             push!(g.outputs, id)
             g.terms[id] = value_term(graph, stored, g, id, identity_index(values[id].dims))
             g.phase[id] = 0
-            g
-        elseif d isa Contraction
-            g = Group(:contraction, d.iteration)
-            push!(g.outputs, id)
             g
         else
             g = Group(:opaque, values[id].dims)

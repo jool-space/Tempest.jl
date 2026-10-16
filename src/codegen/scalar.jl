@@ -99,7 +99,6 @@ function scalar_kernel(graph, stored, g::Group, slots)
         end
         return ScalarKernel(slots, prod(D; init = 1), body)
     end
-    g.kind === :contraction && return contraction_kernel(graph, g, slots, c)
     kept = [k for k in 1:length(D) if !(k in g.reduced)]
     reduced = collect(g.reduced)
     delinearize_expr(s, :lin, kept, D, vars)
@@ -152,28 +151,4 @@ function scalar_kernel(graph, stored, g::Group, slots)
         end))
     end
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
-end
-
-# A product, one output element per item, summing sequentially.
-function contraction_kernel(graph, g, slots, c)
-    v = only(g.outputs)
-    val = graph.values[v]
-    d = val.definition
-    D = d.iteration
-    free = 1:(length(D) - d.summed)
-    summed = (length(D) - d.summed + 1):length(D)
-    A = val.eltype <: HalfFloat ? Float32 : val.eltype
-    body = Expr(:block)
-    s = body.args
-    delinearize_expr(s, :lin, free, D, c.vars)
-    loop = Expr(:block)
-    delinearize_expr(loop.args, :sweep, summed, D, c.vars)
-    names = emit_terms!(loop.args, [Load(d.a.value, d.a.index), Load(d.b.value, d.b.index)], c)
-    push!(loop.args, :(total += convert($A, $(names[Load(d.a.value, d.a.index)])) * convert($A, $(names[Load(d.b.value, d.b.index)]))))
-    push!(s, :(total = zero($A)))
-    push!(s, :(for sweep in 0:$(prod(k -> D[k], summed; init = 1) - 1)
-        $loop
-    end))
-    push!(s, store_expr(c, v, identity_index(val.dims), :(convert($(val.eltype), total))))
-    ScalarKernel(slots, prod(k -> D[k], free; init = 1), body)
 end

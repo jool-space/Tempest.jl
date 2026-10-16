@@ -1,11 +1,30 @@
 # Emitting tile programs from a group and its schedule.
 
-"A kernel argument: a buffer as a two-dimensional strided view."
+"A kernel argument: a buffer as a strided view."
 struct ArgSpec
     buffer::Any # a value id, or a key into the kernel's workspace
     offset::Int
-    sizes::Tuple{Int, Int}
-    strides::Tuple{Int, Int}
+    sizes::Tuple{Vararg{Int}}
+    strides::Tuple{Vararg{Int}}
+end
+
+spec(v, extents) = ArgSpec(
+    v.value,
+    v.offset,
+    map((s, e) -> s ? e : 1, v.spans, extents),
+    map((s, st) -> s ? st : 1, v.spans, v.strides),
+)
+
+function load_nd(sym, spans, tiles, indices)
+    shape = map((s, t) -> s ? t : 1, spans, tiles)
+    index = map((s, i) -> s ? i : :(Int32(1)), spans, indices)
+    :($(ct.load)($sym; index = ($(index...),), shape = $shape, padding_mode = $(ct.PaddingMode.Zero)))
+end
+
+function store_nd(sym, spans, tiles, indices, value)
+    shape = map((s, t) -> s ? t : 1, spans, tiles)
+    index = map((s, i) -> s ? i : :(Int32(1)), spans, indices)
+    :($(ct.store)($sym; index = ($(index...),), tile = $(ct.broadcast_to)($value, $shape)))
 end
 
 struct Workspace
@@ -45,18 +64,13 @@ struct Context
     stored::Vector{Bool}
     g::Group
     s::TileSchedule
-    axes::Tuple
 end
 
-tile(c::Context) = c.s.tile
-reduced_dims(c::Context) = c.s.reduced == 3 ? (1, 2) : c.s.reduced
+tile(c::Context) = tiles(c.s)
+groups(c::Context) = groups(c.s)
+reduced_dims(c::Context) = code(c.s) == 3 ? (1, 2) : only(swept(c.s))
 
-value_spec(c::Context, v::View) = ArgSpec(
-    v.value,
-    v.offset,
-    (v.spans[1] ? c.s.extent[1] : 1, v.spans[2] ? c.s.extent[2] : 1),
-    (v.spans[1] ? v.strides[1] : 1, v.spans[2] ? v.strides[2] : 1),
-)
+value_spec(c::Context, v::View) = spec(v, extent(c.s))
 
 function load_expr(sym, spans, ta, tb, ia, ib)
     shape = (spans[1] ? ta : 1, spans[2] ? tb : 1)
@@ -70,11 +84,10 @@ store_expr(sym, spans, ta, tb, ia, ib, value) = :($(ct.store)(
     tile = $(ct.broadcast_to)($value, $((spans[1] ? ta : 1, spans[2] ? tb : 1))),
 ))
 
-# Statements for `roots`, each subterm once. `names` maps terms already in
-# scope (loads hoisted out of a loop, reductions) to their symbols.
-function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, ia, ib)
-    ta, tb = tile(c)
-    A, B = c.axes
+# Statements for `roots`, each subterm once, at the tile of block indices
+# `indices` (one per tile axis). `names` maps terms already in scope (loads
+# hoisted out of a loop, reductions) to their symbols.
+function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indices...)
     for t in Tempest.subterms(roots)
         haskey(names, t) && continue
         if t isa Lit
@@ -83,8 +96,8 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, ia, ib
         end
         name = gensym(:t)
         expr = if t isa Load
-            v = view_of(c.graph, t.value, t.index, c.g, A, B)
-            load_expr(argument!(k, value_spec(c, v)), v.spans, ta, tb, ia, ib)
+            v = view_of(c.graph, t.value, t.index, c.g, groups(c)...)
+            load_nd(argument!(k, value_spec(c, v)), v.spans, tile(c), indices)
         elseif t isa Apply
             args = map(a -> names[a], t.args)
             t.f isa Tempest.Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
@@ -199,20 +212,17 @@ end
 
 # A mask of the lanes of tile `t` along the reduced axis inside the domain.
 function valid_mask!(st, c::Context, t)
-    ta, tb = tile(c)
-    a, b = c.s.extent
+    p = only(swept(c.s))
+    T, E = c.s.tiling[p].tile, c.s.tiling[p].extent
+    shape = ntuple(i -> i == p ? T : 1, length(c.s.tiling))
     name = gensym(:valid)
-    if c.s.reduced == 1
-        push!(st, :($name = reshape($(ct.arange)($ta), ($ta, 1)) .<= Int32($a) - ($t - Int32(1)) * Int32($ta)))
-    else
-        push!(st, :($name = reshape($(ct.arange)($tb), (1, $tb)) .<= Int32($b) - ($t - Int32(1)) * Int32($tb)))
-    end
+    push!(st, :($name = reshape($(ct.arange)($T), $shape) .<= Int32($E) - ($t - Int32(1)) * Int32($T)))
     name
 end
 
 function full_mask!(st, c::Context, ia, ib)
     ta, tb = tile(c)
-    a, b = c.s.extent
+    a, b = extent(c.s)
     name = gensym(:valid)
     push!(st, :($name = (reshape($(ct.arange)($ta), ($ta, 1)) .<= Int32($a) - ($ia - Int32(1)) * Int32($ta)) .&
         (reshape($(ct.arange)($tb), (1, $tb)) .<= Int32($b) - ($ib - Int32(1)) * Int32($tb))))
@@ -222,19 +232,19 @@ end
 # Where a reduction or a reduction-shaped output lives in storage, as a view
 # of the collapsed kept axis.
 function statistic_spec(c::Context, r, buffer)
-    a, b = c.s.extent
-    c.s.reduced == 1 && return ArgSpec(buffer, 0, (1, b), (1, 1))
-    c.s.reduced == 2 && return ArgSpec(buffer, 0, (a, 1), (1, 1))
+    a, b = extent(c.s)
+    code(c.s) == 1 && return ArgSpec(buffer, 0, (1, b), (1, 1))
+    code(c.s) == 2 && return ArgSpec(buffer, 0, (a, 1), (1, 1))
     ArgSpec(buffer, 0, (1, 1), (1, 1))
 end
 
-statistic_spans(c::Context) = c.s.reduced == 1 ? (false, true) : c.s.reduced == 2 ? (true, false) : (false, false)
+statistic_spans(c::Context) = code(c.s) == 1 ? (false, true) : code(c.s) == 2 ? (true, false) : (false, false)
 
 function statistic_buffer(c::Context, r, workspaces)
     c.stored[r] && return r
     key = (:statistic, r)
-    a, b = c.s.extent
-    n = c.s.reduced == 1 ? b : c.s.reduced == 2 ? a : 1
+    a, b = extent(c.s)
+    n = code(c.s) == 1 ? b : code(c.s) == 2 ? a : 1
     workspaces[key] = Workspace(key, c.graph.values[r].eltype, n)
     key
 end
@@ -247,14 +257,90 @@ end
 statistic_outputs(c::Context) = [m for m in c.g.outputs if c.graph.values[m].dims != c.g.domain]
 full_outputs(c::Context) = [m for m in c.g.outputs if c.graph.values[m].dims == c.g.domain]
 
-output_view(c::Context, m) =
-    view_of(c.graph, m, Tempest.placement(c.graph, c.g, m), c.g, c.axes[1], c.axes[2])
+output_view(c::Context, m) = view_of(c.graph, m, Tempest.placement(c.graph, c.g, m), c.g, groups(c)...)
 
-# Store full-domain outputs of the tile at (ia, ib).
-function store_outputs!(k, st, c, ms, names, ia, ib)
-    ta, tb = tile(c)
-    for m in ms
+# Store values the group computes (outputs, or reductions as `Stat`s) at the
+# tile of block indices `indices`.
+function store_values!(k, st, c, vs, names, indices...)
+    for m in vs
         v = output_view(c, m)
-        push!(st, store_expr(argument!(k, value_spec(c, v)), v.spans, ta, tb, ia, ib, names[c.g.terms[m]]))
+        value = m in c.g.reductions ? names[Stat(m)] : names[c.g.terms[m]]
+        push!(st, store_nd(argument!(k, value_spec(c, v)), v.spans, tile(c), indices, value))
     end
 end
+
+store_outputs!(k, st, c, ms, names, indices...) = store_values!(k, st, c, ms, names, indices...)
+
+# The one product rule of the fold algebra: a sum whose contribution is `x * y`,
+# where x and y each span the swept axis and a different one of two kept tiled
+# axes (around it in tile order), accumulates as a matrix product of their
+# tiles, `muladd` on tensor cores. Returns the factors in matrix order and the
+# kept axes, or nothing.
+function bilinear(c::Context, r)
+    fold_of(c, r) isa Tempest.SumFold || return nothing
+    t = c.g.terms[r]
+    t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
+    sw = swept(c.s)
+    length(sw) == 1 || return nothing
+    p = only(sw)
+    x, y = t.args
+    sx, sy = term_spans(c, x), term_spans(c, y)
+    (sx === nothing || sy === nothing) && return nothing
+    sx[p] && sy[p] || return nothing
+    kept = [i for i in eachindex(sx) if i != p && c.s.tiling[i].tile > 1]
+    length(kept) == 2 || return nothing
+    i, j = kept
+    i < p < j || return nothing
+    sx[i] && !sx[j] && sy[j] && !sy[i] && return (x, y, i, j)
+    sy[i] && !sy[j] && sx[j] && !sx[i] && return (y, x, i, j)
+    nothing
+end
+
+# The tile axes a term's loads span, or nothing if it reads positions or
+# reductions.
+function term_spans(c::Context, t::Term)
+    spans = fill(false, length(c.s.tiling))
+    for s in Tempest.subterms((t,))
+        s isa Union{Ix, Stat} && return nothing
+        s isa Load || continue
+        v = view_of(c.graph, s.value, s.index, c.g, groups(c)...)
+        v === nothing && return nothing
+        spans .|= collect(v.spans)
+    end
+    spans
+end
+
+# A half-precision factor converted to Float32 enters the matrix product as
+# it is: tensor cores accumulate its products in Float32 exactly.
+function product_factor(c::Context, t::Term)
+    t isa Apply && t.f isa Tempest.Cast{Float32} || return t
+    inner = only(t.args)
+    Tempest.term_eltype(inner, c.graph) <: Tempest.HalfFloat ? inner : t
+end
+
+function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t)
+    shape = tile(c)
+    p = only(swept(c.s))
+    tm, tk, tn = shape[i], shape[p], shape[j]
+    n = length(shape)
+    fa, fb = product_factor(c, a), product_factor(c, b)
+    xa, xb = gensym(:a), gensym(:b)
+    push!(st, :($xa = reshape($(ct.broadcast_to)($(names[fa]), $(ntuple(k -> k == i ? tm : k == p ? tk : 1, n))), ($tm, $tk))))
+    push!(st, :($xb = reshape($(ct.broadcast_to)($(names[fb]), $(ntuple(k -> k == p ? tk : k == j ? tn : 1, n))), ($tk, $tn))))
+    # Padded steps of the swept axis read zeros from loads, but a computed
+    # factor need not vanish there.
+    E = c.s.tiling[p].extent
+    if E % tk != 0 && !(fa isa Load && fb isa Load)
+        push!(st, :($xa = ifelse.(reshape($(ct.arange)($tk), (1, $tk)) .<= Int32($E) - ($t - Int32(1)) * Int32($tk), $xa,
+            $(zero(Tempest.term_eltype(fa, c.graph))))))
+    end
+    if c.s.precision === :tf32 && Tempest.term_eltype(fa, c.graph) === Float32
+        push!(st, :($xa = convert($(ct.Tile){$(ct.TFloat32)}, $xa)))
+        push!(st, :($xb = convert($(ct.Tile){$(ct.TFloat32)}, $xb)))
+    end
+    push!(st, :($acc = muladd($xa, $xb, $acc)))
+end
+
+# The accumulator of a product, as a state over the tile axes.
+product_state(c::Context, (a, b, i, j), acc) =
+    [:(reshape($acc, $(ntuple(k -> k == only(swept(c.s)) ? 1 : tile(c)[k], length(c.s.tiling)))))]
