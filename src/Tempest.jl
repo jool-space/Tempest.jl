@@ -13,7 +13,12 @@ include("program/program.jl")
 include("program/folds.jl")
 include("program/tracing.jl")
 include("program/interpret.jl")
+include("program/calls.jl")
 include("program/differentiate.jl")
+
+# Verbs.
+include("verbs/attention.jl")
+include("verbs/dropout.jl")
 
 # The index level.
 include("index/expressions.jl")

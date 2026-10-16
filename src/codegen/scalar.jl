@@ -99,13 +99,15 @@ function scalar_kernel(graph, stored, g::Group, slots)
         end
         return ScalarKernel(slots, prod(D; init = 1), body)
     end
-    g.kind === :contraction && return contraction_kernel(graph, g, slots, c)
-    kept = [k for k in 1:length(D) if !(k in g.reduced)]
-    reduced = collect(g.reduced)
+    # Items are the positions of the primary folds; other folds get launches of
+    # their own (`fold_kernel`).
+    reduced = collect(primary_axes(graph, g))
+    kept = [k for k in 1:length(D) if !(k in reduced)]
+    folds = [r for r in g.reductions if primary(graph, g, r)]
     delinearize_expr(s, :lin, kept, D, vars)
     count = prod(k -> D[k], reduced; init = 1)
-    for phase in sort!(unique(g.phase[r] for r in g.reductions))
-        phase_reductions = [r for r in g.reductions if g.phase[r] == phase]
+    for phase in sort!(unique(g.phase[r] for r in folds))
+        phase_reductions = [r for r in folds if g.phase[r] == phase]
         loop = Expr(:block)
         states = Dict{Int, Symbol}()
         for r in phase_reductions
@@ -131,7 +133,7 @@ function scalar_kernel(graph, stored, g::Group, slots)
     end
     # Reductions other kernels read, and outputs shaped like a reduction, once.
     foreach(k -> push!(s, :($(vars[k]) = 0)), reduced)
-    for r in g.reductions
+    for r in folds
         stored[r] && push!(s, store_expr(c, r, placement(graph, g, r), Symbol(:stat_, r)))
     end
     statistic_outputs = [m for m in g.outputs if graph.values[m].dims != D && !(m in g.reductions)]
@@ -154,26 +156,42 @@ function scalar_kernel(graph, stored, g::Group, slots)
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 
-# A product, one output element per item, summing sequentially.
-function contraction_kernel(graph, g, slots, c)
-    v = only(g.outputs)
-    val = graph.values[v]
+# A term with the group's reductions read from storage, at their placements,
+# for a launch that runs after the group's own.
+stored_statistics(t::Stat, graph, g) = Load(t.value, placement(graph, g, t.value))
+stored_statistics(t::Apply, graph, g) = Apply(t.f, map(a -> stored_statistics(a, graph, g), t.args), t.eltype)
+stored_statistics(t::Term, graph, g) = t
+
+# A fold the group's items do not cover, on the floor: one item per position of
+# its kept axes, sweeping its reduced axes and recomputing its operand.
+function fold_kernel(graph, g::Group, slots, r)
+    D = g.domain
+    vars = index_vars(length(D))
+    c = EmitContext(graph, slots, vars, Domain(D))
+    val = graph.values[r]
     d = val.definition
-    D = d.iteration
-    free = 1:(length(D) - d.summed)
-    summed = (length(D) - d.summed + 1):length(D)
-    A = val.eltype <: HalfFloat ? Float32 : val.eltype
+    fold = d.fold
+    t = stored_statistics(g.terms[r], graph, g)
+    A = fold_types(fold, term_eltype(t, graph)).accumulator
+    kept = [k for k in 1:length(D) if !(k in d.reduced)]
+    reduced = collect(d.reduced)
     body = Expr(:block)
     s = body.args
-    delinearize_expr(s, :lin, free, D, c.vars)
+    delinearize_expr(s, :lin, kept, D, vars)
     loop = Expr(:block)
-    delinearize_expr(loop.args, :sweep, summed, D, c.vars)
-    names = emit_terms!(loop.args, [Load(d.a.value, d.a.index), Load(d.b.value, d.b.index)], c)
-    push!(loop.args, :(total += convert($A, $(names[Load(d.a.value, d.a.index)])) * convert($A, $(names[Load(d.b.value, d.b.index)]))))
-    push!(s, :(total = zero($A)))
-    push!(s, :(for sweep in 0:$(prod(k -> D[k], summed; init = 1) - 1)
+    delinearize_expr(loop.args, :sweep, reduced, D, vars)
+    names = emit_terms!(loop.args, [t], c)
+    push!(loop.args, :(state = $fold_combine($fold, state, $fold_lift($fold, convert($A, $(names[t]))))))
+    push!(s, :(state = $fold_init($fold, $A)))
+    push!(s, :(for sweep in 0:$(prod(k -> D[k], reduced; init = 1) - 1)
         $loop
     end))
-    push!(s, store_expr(c, v, identity_index(val.dims), :(convert($(val.eltype), total))))
-    ScalarKernel(slots, prod(k -> D[k], free; init = 1), body)
+    foreach(k -> push!(s, :($(vars[k]) = 0)), reduced)
+    index = val.scalar ? () : identity_index(ntuple(k -> k in d.reduced ? 1 : D[k], length(D)))
+    push!(s, store_expr(c, r, index, :(convert($(val.eltype), $fold_observe($fold, state)))))
+    ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
+
+"The floor's launches for a group: its kernel, then one per fold over other axes."
+scalar_kernels(graph, stored, g::Group, slots) =
+    [scalar_kernel(graph, stored, g, slots); [fold_kernel(graph, g, slots, r) for r in g.reductions if !primary(graph, g, r)]]

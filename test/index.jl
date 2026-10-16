@@ -4,7 +4,7 @@
 using Test
 include("cases.jl")
 
-flat(x) = T.leaves(x)
+flat(x) = filter(!isnothing, T.leaves(x))
 agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), a, b))
 
 @testset "index level" begin

@@ -84,9 +84,12 @@ compose(a::ValueAccess, index, d) = ValueAccess(a.value, map(e -> substitute(e, 
 compose(a::LiteralAccess, index, d) = a
 compose(a::IndexAccess, index, d) = IndexAccess(substitute(a.expr, index, d), a.eltype)
 
-# A contraction's domain: the result's axes, then the summed ones. Each operand
-# is read with its labels' variables.
-function contraction(op::Contract, inputs, input_dims, n, values)
+# A product is a sum fold of a pointwise product: over the domain of the
+# result's axes then the summed ones, the two operands (converted to Float32
+# when they are half precision) are multiplied and summed over the summed axes.
+# The result reads that reduction through a formula. Kernels recognize the
+# pattern; nothing else needs to.
+function contraction!(value!, op::Contract, inputs, input_dims, n)
     summed = [l for l in op.a if l in op.b && !(l in op.out)]
     labels = [collect(op.out); summed]
     extent = Dict{Int, Int}()
@@ -97,7 +100,19 @@ function contraction(op::Contract, inputs, input_dims, n, values)
         access.value,
         map(e -> substitute(e, Tuple(var(findfirst(==(l), labels)) for l in ls), d), access.index),
     )
-    Contraction(read(inputs[1], op.a), read(inputs[2], op.b), iteration, length(summed))
+    A = n.eltype <: HalfFloat ? Float32 : n.eltype
+    function factor(access, ls)
+        r = read(access, ls)
+        A === n.eltype && return r
+        cast = value!(Pointwise(Cast{A}(), (r,)), iteration, A)
+        Read(cast.value, identity_index(iteration))
+    end
+    product = value!(Pointwise(*, (factor(inputs[1], op.a), factor(inputs[2], op.b))), iteration, A)
+    reduced = Tuple((length(op.out) + 1):length(labels))
+    kept = ntuple(k -> k in reduced ? 1 : iteration[k], length(iteration))
+    sum = value!(Reduction(SumFold(), Read(product.value, identity_index(iteration)), iteration, reduced), kept, n.eltype)
+    out = identity_index(n.dims)
+    ValueAccess(sum.value, ntuple(k -> k in reduced ? constant(0) : out[k], length(iteration)))
 end
 
 """
@@ -105,9 +120,14 @@ end
 
 The program at the index level.
 """
-function lower(p::Program)
+function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes) -> false)
+    p = expand_calls(p, n -> keep_call(n, p.nodes))
     nodes = p.nodes
     keep = live(nodes, p.results)
+    # A claimed call computes all its results, used or not.
+    for (id, n) in enumerate(nodes)
+        n.op isa Call && keep[id] && foreach(r -> keep[r] = true, results_of(nodes, n.op.instance))
+    end
     values = Value[]
     access = Vector{Access}(undef, length(nodes))
     gathers = IdDict{Any, Int}()
@@ -120,6 +140,10 @@ function lower(p::Program)
     function value!(definition, n)
         push!(values, Value(definition, n.dims, n.eltype, n.scalar))
         ValueAccess(length(values), identity_index(n.dims))
+    end
+    function value!(definition, dims, T)
+        push!(values, Value(definition, dims, T, false))
+        ValueAccess(length(values), identity_index(dims))
     end
     arguments = Int[]
     for (id, n) in enumerate(nodes)
@@ -136,7 +160,7 @@ function lower(p::Program)
         access[id] = if op isa Constant
             op.value isa AbstractArray ? value!(ConstantArray(op.value), n) : LiteralAccess(op.value)
         elseif op isa Positions
-            IndexAccess(add(linear_index(n.dims, d), 1, d), Int32)
+            IndexAccess(add(op.axis == 0 ? linear_index(n.dims, d) : identity_index(n.dims)[op.axis], 1, d), Int32)
         elseif op isa Map && all(a -> a isa LiteralAccess, inputs)
             # Constants fold: a map of constants is a constant.
             LiteralAccess(convert(n.eltype, op.f(map(a -> a.value, inputs)...)))
@@ -147,7 +171,21 @@ function lower(p::Program)
             value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
         elseif op isa Contract
             all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
-            value!(contraction(op, inputs, input_dims, n, values), n)
+            contraction!(value!, op, inputs, input_dims, n)
+        elseif op isa Call
+            # A claimed call reads its operands densely, in their program
+            # shapes; anything else (a layout, a constant) is materialized.
+            reads = map(inputs, n.inputs) do a, i
+                dims = nodes[i].dims
+                if a isa ValueAccess && a.index == identity_index(dims) && values[a.value].dims == dims &&
+                   values[a.value].scalar == nodes[i].scalar
+                    return Read(a.value, identity_index(dims))
+                end
+                push!(values, Value(Pointwise(identity, (operand(a, dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
+                Read(length(values), identity_index(dims))
+            end
+            shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
+            value!(Opaque(n, reads, shapes, epilogue(n, nodes)), n)
         elseif op isa Union{Reshape, Permute, Select}
             compose(only(inputs), layout_index(op, n.dims, only(input_dims), d, gather), d)
         else

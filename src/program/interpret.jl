@@ -2,7 +2,13 @@
 # Julia arrays. It allocates freely and ignores every plan.
 
 evaluate(op::Constant, n, xs) = op.value isa AbstractArray ? op.value : n.scalar ? op.value : fill(op.value, n.dims)
-evaluate(::Positions, n, xs) = reshape(Int32.(1:prod(n.dims)), n.dims)
+function evaluate(op::Positions, n, xs)
+    op.axis == 0 && return reshape(Int32.(1:prod(n.dims)), n.dims)
+    shape = ntuple(k -> k == op.axis ? n.dims[k] : 1, length(n.dims))
+    out = Array{Int32}(undef, n.dims)
+    out .= reshape(Int32.(1:n.dims[op.axis]), shape)
+    out
+end
 evaluate(op::Permute, n, xs) = permutedims(only(xs), op.perm)
 
 function evaluate(op::Map, n, xs)
@@ -79,7 +85,11 @@ function interpret(p::Program, args...)
     keep = live(p.nodes, p.results)
     for (id, n) in enumerate(p.nodes)
         (keep[id] && !(n.op isa Argument)) || continue
+        if n.op isa Call
+            isassigned(values, id) || evaluate_call!(values, p.nodes, id)
+            continue
+        end
         values[id] = evaluate(n.op, n, map(i -> values[i], n.inputs))
     end
-    rebuild(k -> values[p.results[k]], p.output_structure)
+    rebuild(k -> k === nothing ? nothing : values[p.results[k]], p.output_structure)
 end
