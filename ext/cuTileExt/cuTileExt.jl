@@ -110,13 +110,21 @@ function collapse_axes(graph, g::Group)
     nothing
 end
 
-"A load or store: a value's buffer as a strided view over collapsed groups of axes."
+"""
+A load or store: a value's buffer as a strided view over collapsed groups of
+axes. A load may add an offset computed per block (`dynamic`): any formula of
+the axes the grid binds, below `reach`.
+"""
 struct View
     value::Int
     offset::Int
     strides::Tuple{Vararg{Int}}
     spans::Tuple{Vararg{Bool}} # whether the view extends along each group
+    dynamic::Union{Nothing, Affine}
+    reach::Int
 end
+
+View(value, offset, strides, spans) = View(value, offset, strides, spans, nothing, 0)
 
 # The stride along one collapsed group of axes, or nothing when the address's
 # coefficients do not chain over the group.
@@ -138,17 +146,39 @@ function group_stride(e::Affine, axes, domain)
 end
 
 # The view of value `v` read at `index` over the groups of axes; nothing when the
-# address is not affine, does not chain within a group, or depends on an axis
-# outside the groups.
-function view_of(graph, v, index, g, groups...)
-    e = Tempest.address(graph, v, index, Tempest.Domain(g.domain))
-    Tempest.is_affine(e) || return nothing
+# address does not chain within a group, depends on an axis outside the
+# groups, or is not affine. The groups numbered in `scalar` are bound by the
+# grid, one index per block: the address may depend on them through any
+# formula, which becomes the view's offset per block, as does the part of the
+# address over such a group that does not chain.
+function view_of(graph, v, index, g, groups...; scalar = ())
+    domain = Tempest.Domain(g.domain)
+    e = Tempest.address(graph, v, index, domain)
+    rest = [t for t in e.terms if !(t.first isa Tempest.Var)]
+    e = Affine(e.constant, Tuple(t for t in e.terms if t.first isa Tempest.Var))
+    for i in scalar
+        s = group_stride(e, groups[i], g.domain)
+        s !== nothing && s >= 0 && continue
+        append!(rest, [t for t in e.terms if t.first.n in groups[i]])
+        e = Affine(e.constant, Tuple(t for t in e.terms if !(t.first.n in groups[i])))
+    end
+    dynamic = nothing
+    reach = 0
+    if !isempty(rest)
+        dynamic = Affine(0, Tuple(rest))
+        bound = reduce(vcat, (groups[i] for i in scalar); init = Int[])
+        isempty(Tempest.indirect_values(dynamic)) || return nothing
+        all(k -> k in bound || g.domain[k] == 1 || !Tempest.mentions(dynamic, k), eachindex(g.domain)) || return nothing
+        lo, hi = Tempest.affine_range(dynamic, domain)
+        lo >= 0 || return nothing
+        reach = hi + 1
+    end
     for k in 1:length(g.domain)
         g.domain[k] > 1 && Tempest.coefficient(e, k) != 0 && !any(grp -> k in grp, groups) && return nothing
     end
     strides = map(grp -> group_stride(e, grp, g.domain), groups)
     any(s -> s === nothing || s < 0, strides) && return nothing
-    View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)))
+    View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach)
 end
 
 const FOLDS = Union{Tempest.SumFold, Tempest.MaxFold, Tempest.MinFold, Tempest.ProdFold, Tempest.LogSumExpFold}

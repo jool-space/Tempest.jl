@@ -107,19 +107,30 @@ if CUDACore.functional()
     end
 end
 
-# Positions on tiles: a causal mask after a product, positions in pointwise
-# work and in a fold.
+# Positions on tiles, and formulas of the axes the grid binds computed per
+# block: a causal mask after a product, positions in pointwise work and in a
+# fold, and key heads shared among query heads, spelled as a broadcast that
+# reads key head h ÷ G.
 causal_scores(a, b) = (s = a' * b; ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 2), s, -Inf32))
+function grouped_scores(q, k)
+    D, H, S, B = size(q)
+    G = H ÷ size(k, 2)
+    shared = reshape(reshape(k, D, 1, size(k, 2), S, B) .* ones(Float32, 1, G, 1, 1, 1), D, H, S, B)
+    T.contract(shared, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 5, 2, 4))
+end
 
 const POSITIONAL = [
     ("causal mask after a product", (a, b) -> exp.(causal_scores(a, b) .- T.logsumexp(causal_scores(a, b); dims = 1)),
      (data(24, 70; scale = 0.1), data(24, 70; scale = 0.2))),
     ("positions in pointwise work", x -> x .* T.axis_positions(x, 2) .+ T.positions(x), (data(50, 30, 3),)),
     ("positions in a fold", x -> sum(ifelse.(T.axis_positions(x, 1) .<= T.axis_positions(x, 2), x, 0.0f0); dims = 1), (data(300, 200),)),
+    ("grouped heads by division", grouped_scores, (data(16, 6, 40, 2; scale = 0.1), data(16, 2, 40, 2; scale = 0.2))),
+    ("shared columns by division in a fold",
+     x -> sum(reshape(reshape(x, 64, 1, 3, 10) .* ones(Float32, 1, 2, 1, 1), 64, 6, 10); dims = 1), (data(64, 3, 10),)),
 ]
 
 if CUDACore.functional()
-    @testset "positions on cuTile" begin
+    @testset "positions and per-block formulas on cuTile" begin
         @testset "$name" for (name, f, args) in POSITIONAL
             args = map(single, args)
             p = trace(f, args...)

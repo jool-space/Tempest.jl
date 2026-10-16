@@ -16,18 +16,25 @@ end
 compact(spans, xs) = Tuple(x for (s, x) in zip(spans, xs) if s)
 storage_order(v) = sortperm(collect(compact(v.spans, v.strides)))
 
+# A view's offset per block, if it has one, is one more axis of unit stride
+# after the others, loaded at that offset with extent one.
 function spec(v, extents)
-    any(v.spans) || return ArgSpec(v.value, v.offset, (1,), (1,))
+    sizes, strides = v.dynamic === nothing ? ((), ()) : ((v.reach,), (1,))
+    any(v.spans) || return ArgSpec(v.value, v.offset, (1, sizes...), (1, strides...))
     order = storage_order(v)
-    ArgSpec(v.value, v.offset, compact(v.spans, extents)[order], compact(v.spans, v.strides)[order])
+    ArgSpec(v.value, v.offset, (compact(v.spans, extents)[order]..., sizes...), (compact(v.spans, v.strides)[order]..., strides...))
 end
 
-function load_nd(sym, v, tiles, indices)
+# `at` is the one-based offset per block of a view that has one.
+function load_nd(sym, v, tiles, indices, at = nothing)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
-    any(v.spans) || return :(reshape($(ct.load)($sym; index = (Int32(1),), shape = (1,)), $full))
+    extra, one = v.dynamic === nothing ? ((), ()) : ((at,), (1,))
+    any(v.spans) || return :(reshape($(ct.load)($sym; index = (Int32(1), $(extra...)), shape = (1, $(one...))), $full))
     order = storage_order(v)
     shape, index = compact(v.spans, tiles), compact(v.spans, indices)
-    loaded = :($(ct.load)($sym; index = ($(index[order]...),), shape = $(shape[order]), padding_mode = $(ct.PaddingMode.Zero)))
+    loaded = :($(ct.load)($sym; index = ($(index[order]...), $(extra...)), shape = $((shape[order]..., one...)),
+        padding_mode = $(ct.PaddingMode.Zero)))
+    isempty(one) || (loaded = :(reshape($loaded, $(shape[order]))))
     order == 1:length(order) || (loaded = :(permutedims($loaded, $(Tuple(invperm(order))))))
     shape == full ? loaded : :(reshape($loaded, $full))
 end
@@ -88,7 +95,10 @@ reduced_dims(c::Context) = code(c.s) == 3 ? (1, 2) : only(swept(c.s))
 
 value_spec(c::Context, v::View) = spec(v, extent(c.s))
 
-load_view(c::Context, v, index) = view_of(c.graph, v, index, c.g, groups(c)...)
+# Tile axes of extent one per tile are bound by the grid (or a loop): one index
+# per block, so a load may depend on them through any formula.
+scalar_groups(c::Context) = Tuple(i for (i, ax) in enumerate(c.s.tiling) if ax.tile == 1)
+load_view(c::Context, v, index) = view_of(c.graph, v, index, c.g, groups(c)...; scalar = scalar_groups(c))
 
 # Positions. Domain variable `n` at the tile of block indices `indices`: the
 # lanes of its tile axis, their collapsed index decoded into the axes of the
@@ -123,6 +133,21 @@ index_tile(c::Context, a::Tempest.Var, indices) = variable_tile(c, a.n, indices)
 index_tile(c::Context, a::Tempest.Div, indices) = :(fld.($(index_tile(c, a.e, indices)), Int32($(a.d))))
 index_tile(c::Context, a::Tempest.Mod, indices) = :(mod.($(index_tile(c, a.e, indices)), Int32($(a.d))))
 
+# A formula of axes bound by the grid, as a scalar per block.
+block_scalar(c::Context, e::Affine, indices) =
+    foldl(e.terms; init = :(Int32($(e.constant)))) do x, (atom, k)
+        :($x + Int32($k) * $(block_scalar(c, atom, indices)))
+    end
+function block_scalar(c::Context, a::Tempest.Var, indices)
+    i = findfirst(ax -> a.n in ax.axes, c.s.tiling)
+    i === nothing && return :(Int32(0))
+    decode(c, c.s.tiling[i], a.n, :($(indices[i]) - Int32(1)); tile = false)
+end
+block_scalar(c::Context, a::Tempest.Div, indices) = :(fld($(block_scalar(c, a.e, indices)), Int32($(a.d))))
+block_scalar(c::Context, a::Tempest.Mod, indices) = :(mod($(block_scalar(c, a.e, indices)), Int32($(a.d))))
+
+offset_at(c::Context, v::View, indices) = v.dynamic === nothing ? nothing : :(Int32(1) + $(block_scalar(c, v.dynamic, indices)))
+
 # The workspace views of split schedules (partials, statistics) stay two-axis.
 function load_expr(sym, spans, ta, tb, ia, ib)
     shape = (spans[1] ? ta : 1, spans[2] ? tb : 1)
@@ -149,7 +174,7 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         name = gensym(:t)
         expr = if t isa Load
             v = load_view(c, t.value, t.index)
-            load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices)
+            load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
         elseif t isa Ix
             x = index_tile(c, t.expr, indices)
             T = Tempest.term_eltype(t, c.graph)
