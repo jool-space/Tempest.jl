@@ -8,23 +8,30 @@ struct ArgSpec
     strides::Tuple{Vararg{Int}}
 end
 
-spec(v, extents) = ArgSpec(
-    v.value,
-    v.offset,
-    map((s, e) -> s ? e : 1, v.spans, extents),
-    map((s, st) -> s ? st : 1, v.spans, v.strides),
-)
+# A view keeps only the tile axes it spans, so loads and stores have the shape
+# a hand-written kernel would give them; tiles are reshaped to the kernel's
+# tile axes in registers.
+compact(spans, xs) = Tuple(x for (s, x) in zip(spans, xs) if s)
+
+function spec(v, extents)
+    any(v.spans) || return ArgSpec(v.value, v.offset, (1,), (1,))
+    ArgSpec(v.value, v.offset, compact(v.spans, extents), compact(v.spans, v.strides))
+end
 
 function load_nd(sym, spans, tiles, indices)
-    shape = map((s, t) -> s ? t : 1, spans, tiles)
-    index = map((s, i) -> s ? i : :(Int32(1)), spans, indices)
-    :($(ct.load)($sym; index = ($(index...),), shape = $shape, padding_mode = $(ct.PaddingMode.Zero)))
+    full = map((s, t) -> s ? t : 1, spans, tiles)
+    any(spans) || return :(reshape($(ct.load)($sym; index = (Int32(1),), shape = (1,)), $full))
+    shape, index = compact(spans, tiles), compact(spans, indices)
+    loaded = :($(ct.load)($sym; index = ($(index...),), shape = $shape, padding_mode = $(ct.PaddingMode.Zero)))
+    shape == full ? loaded : :(reshape($loaded, $full))
 end
 
 function store_nd(sym, spans, tiles, indices, value)
-    shape = map((s, t) -> s ? t : 1, spans, tiles)
-    index = map((s, i) -> s ? i : :(Int32(1)), spans, indices)
-    :($(ct.store)($sym; index = ($(index...),), tile = $(ct.broadcast_to)($value, $shape)))
+    full = map((s, t) -> s ? t : 1, spans, tiles)
+    shape, index = any(spans) ? (compact(spans, tiles), compact(spans, indices)) : ((1,), (:(Int32(1)),))
+    tile = :($(ct.broadcast_to)($value, $full))
+    shape == full || (tile = :(reshape($tile, $shape)))
+    :($(ct.store)($sym; index = ($(index...),), tile = $tile))
 end
 
 struct Workspace
@@ -72,6 +79,7 @@ reduced_dims(c::Context) = code(c.s) == 3 ? (1, 2) : only(swept(c.s))
 
 value_spec(c::Context, v::View) = spec(v, extent(c.s))
 
+# The workspace views of split schedules (partials, statistics) stay two-axis.
 function load_expr(sym, spans, ta, tb, ia, ib)
     shape = (spans[1] ? ta : 1, spans[2] ? tb : 1)
     index = (spans[1] ? ia : :(Int32(1)), spans[2] ? ib : :(Int32(1)))
@@ -334,7 +342,19 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t)
         push!(st, :($xa = ifelse.(reshape($(ct.arange)($tk), (1, $tk)) .<= Int32($E) - ($t - Int32(1)) * Int32($tk), $xa,
             $(zero(Tempest.term_eltype(fa, c.graph))))))
     end
-    if c.s.precision === :tf32 && Tempest.term_eltype(fa, c.graph) === Float32
+    single = Tempest.term_eltype(fa, c.graph) === Float32
+    if c.s.precision === :tf32x3 && single
+        # Each factor as a TF32 high part and a TF32 remainder; the product of
+        # the remainders is below Float32 rounding and is dropped.
+        TF = :($(ct.Tile){$(ct.TFloat32)})
+        F = :($(ct.Tile){Float32})
+        ah, al, bh, bl = gensym(:ah), gensym(:al), gensym(:bh), gensym(:bl)
+        push!(st, :($ah = convert($TF, $xa)), :($al = convert($TF, $xa .- convert($F, $ah))))
+        push!(st, :($bh = convert($TF, $xb)), :($bl = convert($TF, $xb .- convert($F, $bh))))
+        push!(st, :($acc = muladd($al, $bh, $acc)), :($acc = muladd($ah, $bl, $acc)), :($acc = muladd($ah, $bh, $acc)))
+        return
+    end
+    if c.s.precision === :tf32 && single
         push!(st, :($xa = convert($(ct.Tile){$(ct.TFloat32)}, $xa)))
         push!(st, :($xb = convert($(ct.Tile){$(ct.TFloat32)}, $xb)))
     end

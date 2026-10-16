@@ -70,7 +70,8 @@ function Base.show(io::IO, s::TileSchedule)
         m, k, n = s.tiling[1:3]
         print(io, "product ", m.extent, "×", n.extent, " summing ", k.extent)
         length(s.tiling) > 3 && print(io, ", batch ", s.tiling[4].extent)
-        print(io, ", tile ", m.tile, "×", n.tile, "×", k.tile, ", ", s.precision === :tf32 ? "TF32" : "full precision")
+        print(io, ", tile ", m.tile, "×", n.tile, "×", k.tile, ", ",
+            s.precision === :tf32 ? "TF32" : s.precision === :tf32x3 ? "3×TF32" : "full precision")
         return
     end
     e, t = extent(s), tiles(s)

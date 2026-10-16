@@ -103,6 +103,9 @@ function main(path = nothing)
         got = map(host, T.leaves(execute!(ex)))
         ref = T.leaves(interpret(p, args...))
         ok = all(map((g, r) -> isapprox(g, r; rtol = TARGET.precision === :tf32 ? 2.0e-2 : 2.0e-3, atol = 1.0e-3), got, ref))
+        if TARGET.precision === :tf32x3
+            println("    max relative error ", maximum(map((g, r) -> maximum(abs.(g .- r)) / maximum(abs.(r)), got, ref)))
+        end
         t = device_microseconds(ex)
         kinds = join((d isa T.ScalarKernel ? "floor" : hasproperty(d.schedule, :sketch) ? string(d.schedule.sketch) : "product" for d in ex.kernels), "+")
         line = @sprintf("%-44s %9.1f  %-5s %s", name, t, ok ? "ok" : "WRONG", kinds)
@@ -112,9 +115,9 @@ function main(path = nothing)
     path === nothing || write(path, join(rows, '\n') * '\n')
 end
 
-# `--tf32` anywhere in the arguments allows TF32 products.
-const TARGET = T.CUDATarget(; precision = "--tf32" in ARGS ? :tf32 : :full)
-filter!(!=("--tf32"), ARGS)
+# `--tf32` or `--tf32x3` anywhere in the arguments sets the products' precision.
+const TARGET = T.CUDATarget(; precision = "--tf32" in ARGS ? :tf32 : "--tf32x3" in ARGS ? :tf32x3 : :full)
+filter!(a -> !(a in ("--tf32", "--tf32x3")), ARGS)
 
 if isempty(ARGS) || ARGS[1] != "--case"
     main(get(ARGS, 1, nothing))

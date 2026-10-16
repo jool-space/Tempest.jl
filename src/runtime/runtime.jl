@@ -10,14 +10,16 @@ struct CPUTarget <: Target end
 
 Run on an NVIDIA GPU; needs CUDACore loaded. `precision` is the numerics policy
 for products: `:full` keeps Float32 products in Float32, `:tf32` allows TF32
-tensor cores for them. Half-precision products always accumulate in Float32.
+tensor cores for them, and `:tf32x3` splits each Float32 factor into two TF32
+parts and sums three tensor-core products (close to Float32 accuracy). Half-
+precision products always accumulate in Float32.
 """
 struct CUDATarget <: Target
     precision::Symbol
 end
 
 function CUDATarget(; precision::Symbol = :full)
-    precision in (:full, :tf32) || throw(ArgumentError("precision must be :full or :tf32, got $precision"))
+    precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
     CUDATarget(precision)
 end
 
@@ -114,7 +116,8 @@ end
 
 function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
-    ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" : "full precision",
+    ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
+        ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
         "; half-precision products accumulate in Float32")
     println(io, "implementations:")
     for (k, d) in enumerate(ex.kernels)

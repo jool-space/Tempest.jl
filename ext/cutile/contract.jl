@@ -45,7 +45,7 @@ end
 # otherwise. Full-precision Float32 products are much slower on cuTile and
 # fastest in small tiles (64×64×16 measured best, 2.6 TFLOPS).
 function product_tiles(target, T, m, n, k)
-    if T === Float32 && target.precision !== :tf32
+    if T === Float32 && target.precision === :full
         tm, tn, tk = 64, 64, 16
     else
         tm, tn = 128, 128
