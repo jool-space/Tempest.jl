@@ -118,25 +118,6 @@ struct View
     spans::Tuple{Vararg{Bool}} # whether the view extends along each group
 end
 
-# The stride along one collapsed group of axes, or nothing when the address's
-# coefficients do not chain over the group.
-function group_stride(e::Affine, axes, domain)
-    stride = nothing
-    p = 1
-    for k in axes
-        n = domain[k]
-        c = Tempest.coefficient(e, k)
-        c === nothing && return nothing
-        if n > 1
-            c % p == 0 || return nothing
-            s = c ÷ p
-            stride === nothing ? (stride = s) : (stride == s || return nothing)
-        end
-        p *= n
-    end
-    something(stride, 0)
-end
-
 # The view of value `v` read at `index` over the groups of axes; nothing when the
 # address is not affine, does not chain within a group, or depends on an axis
 # outside the groups.
@@ -146,7 +127,7 @@ function view_of(graph, v, index, g, groups...)
     for k in 1:length(g.domain)
         g.domain[k] > 1 && Tempest.coefficient(e, k) != 0 && !any(grp -> k in grp, groups) && return nothing
     end
-    strides = map(grp -> group_stride(e, grp, g.domain), groups)
+    strides = map(grp -> Tempest.group_stride(e, grp, g.domain), groups)
     any(s -> s === nothing || s < 0, strides) && return nothing
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)))
 end
