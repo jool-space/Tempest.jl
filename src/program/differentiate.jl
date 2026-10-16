@@ -86,8 +86,13 @@ end
 reduce_handle(tape, x, axes; scalar) =
     h(tape, record!(tape, Reduce(SumFold(), axes), (x.id,), scalar ? () : ntuple(d -> d in axes ? 1 : node(x).dims[d], length(node(x).dims)), node(x).eltype; scalar))
 
-expand(tape, g, dims; scalar = false) =
-    node(g).dims == dims && node(g).scalar == scalar ? g : h(tape, record!(tape, Map(identity), (g.id,), dims, node(g).eltype; scalar))
+function expand(tape, g, dims; scalar = false)
+    n = node(g)
+    n.dims == dims && n.scalar == scalar && return g
+    # A constant expands to a constant, which later rules can see through.
+    n.op isa Constant && n.op.value isa Number && return h(tape, record!(tape, Constant(n.op.value), (), dims, n.eltype; scalar))
+    h(tape, record!(tape, Map(identity), (g.id,), dims, n.eltype; scalar))
+end
 
 function pullback(op::Reduce, n, id, g, tape)
     x = h(tape, only(n.inputs))

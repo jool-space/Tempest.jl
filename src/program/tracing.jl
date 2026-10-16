@@ -58,8 +58,35 @@ function tape_of(args...)
     error("no traced operand")
 end
 
+# Exact identities: multiplying or dividing by one, adding or subtracting zero.
+# They return an operand unchanged, so equal values stay one node.
+# A plain number, or a handle to a scalar constant: its value; else nothing.
+constant_value(x::Traced) = (op = node(x).op; op isa Constant && op.value isa Number ? op.value : nothing)
+constant_value(x::Number) = x
+constant_value(x) = nothing
+plain(x) = constant_value(x) !== nothing
+one_(x) = plain(x) && isone(constant_value(x))
+zero_(x) = plain(x) && iszero(constant_value(x))
+neutral(::typeof(*), a, b) = one_(b) ? a : one_(a) ? b : nothing
+neutral(::typeof(/), a, b) = one_(b) ? a : nothing
+neutral(::typeof(+), a, b) = zero_(b) ? a : zero_(a) ? b : nothing
+neutral(::typeof(-), a, b) = zero_(b) ? a : nothing
+neutral(f, args...) = nothing
+
+function simplify(f, args...)
+    length(args) == 2 && any(plain, args) || return nothing
+    a = neutral(f, args...)
+    a isa Traced || return nothing
+    n = node(a)
+    dims = broadcast_dims(map(x -> x isa Traced ? node(x).dims : (), args)...)
+    T = Base.promote_op(f, map(x -> x isa Traced ? node(x).eltype : typeof(x), args)...)
+    n.dims == dims && n.eltype === T && n.scalar == all(x -> !(x isa Traced) || node(x).scalar, args) ? a : nothing
+end
+
 "Record `f` applied elementwise to the operands, broadcast together."
 function record_map(f, args...)
+    simplified = simplify(f, args...)
+    simplified === nothing || return simplified
     tape = tape_of(args...)
     ids = map(a -> operand_id(tape, a), args)
     nodes = tape.nodes

@@ -76,12 +76,17 @@ const CASES = [
     ("layer norm, 1024×256×16", layernorm, (guard_data(1024, 256, 16), guard_weight(1024))),
 ]
 
+const TRAINING = [
+    ("RMSNorm training, 1024×4096", (x, w) -> sum(abs2, rmsnorm(x, w)), (x, guard_weight(1024))),
+    ("softmax training, 1024×4096", (x, t) -> sum(softmax_columns(x) .* t), (x, guard_data(1024, 4096; scale = 0.7f0))),
+]
+
 host(x) = x isa AbstractArray ? (a = Array(x); ndims(a) == 0 ? a[] : a) : x
 
 function main(path = nothing)
     rows = String[]
-    for (name, f, args) in CASES
-        p = trace(f, args...)
+    for (name, f, args, training) in [map(c -> (c..., false), CASES); map(c -> (c..., true), TRAINING)]
+        p = training ? differentiate(trace(f, args...)) : trace(f, args...)
         ex = prepare(p, map(a -> CuArray(a), args)...)
         got = map(host, T.leaves(execute!(ex)))
         ref = T.leaves(interpret(p, args...))
@@ -99,7 +104,8 @@ if isempty(ARGS) || ARGS[1] != "--case"
     main(get(ARGS, 1, nothing))
 else
     name = ARGS[2]
-    (_, f, args) = only(filter(c -> c[1] == name, CASES))
-    ex = prepare(trace(f, args...), map(a -> CuArray(a), args)...)
+    (_, f, args) = only(filter(c -> c[1] == name, [CASES; TRAINING]))
+    p = name in map(first, TRAINING) ? differentiate(trace(f, args...)) : trace(f, args...)
+    ex = prepare(p, map(a -> CuArray(a), args)...)
     println(name, ": ", join((round(device_microseconds(ex); digits = 1) for _ in 1:parse(Int, get(ARGS, 3, "5"))), ", "), " μs")
 end
