@@ -135,6 +135,9 @@ function lower(p::Program)
             op.value isa AbstractArray ? value!(ConstantArray(op.value), n) : LiteralAccess(op.value)
         elseif op isa Positions
             IndexAccess(add(linear_index(n.dims, d), 1, d), Int32)
+        elseif op isa Map && all(a -> a isa LiteralAccess, inputs)
+            # Constants fold: a map of constants is a constant.
+            LiteralAccess(convert(n.eltype, op.f(map(a -> a.value, inputs)...)))
         elseif op isa Map
             value!(Pointwise(op.f, map((a, dims) -> operand(a, dims, d), inputs, input_dims)), n)
         elseif op isa Reduce

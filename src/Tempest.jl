@@ -6,7 +6,7 @@ module Tempest
 
 using LinearAlgebra
 
-export trace, differentiate, interpret
+export trace, differentiate, interpret, explain
 
 # The program level.
 include("program/program.jl")
@@ -20,5 +20,11 @@ include("index/expressions.jl")
 include("index/graph.jl")
 include("index/lower.jl")
 include("index/interpret.jl")
+
+# Plans: what is stored, and the kernels.
+include("plan/terms.jl")
+include("plan/planner.jl")
+include("plan/cpu.jl")
+include("plan/explain.jl")
 
 end
