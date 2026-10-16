@@ -50,6 +50,8 @@ results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(exec
         @test length(calls(d)) == 5 # o, lse; dq, dk, dv
         ex = prepare(d, q, k, v, x)
         @test length(opaque_groups(ex)) == 2
+        # The zero cotangent of the log-sum-exp is one buffer for all three results.
+        @test count(v -> v.definition isa T.Pointwise && all(o -> o isa T.Literal, v.definition.operands), ex.plan.graph.values) == 1
         @test agree(results(ex), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))))
     finally
         filter!(i -> !(i isa HostAttention), T.EXTRA_IMPLEMENTATIONS)

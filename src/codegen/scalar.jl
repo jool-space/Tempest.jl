@@ -43,8 +43,12 @@ end
 
 buffer(c::EmitContext, v) = :(buffers[$(findfirst(==(v), c.slots))])
 
-affine_expr(e::Affine, c) = foldl((acc, (a, k)) -> :($acc + $(k == 1 ? atom_expr(a, c) : :($k * $(atom_expr(a, c))))),
-    e.terms; init = e.constant)
+function affine_expr(e::Affine, c)
+    terms = [k == 1 ? atom_expr(a, c) : :($k * $(atom_expr(a, c))) for (a, k) in e.terms]
+    isempty(terms) && return e.constant
+    sum = foldl((acc, t) -> :($acc + $t), terms)
+    e.constant == 0 ? sum : :($sum + $(e.constant))
+end
 atom_expr(a::Var, c) = c.vars[a.n]
 atom_expr(a::Div, c) = :(fld($(affine_expr(a.e, c)), $(a.d)))
 atom_expr(a::Mod, c) = :(mod($(affine_expr(a.e, c)), $(a.d)))
