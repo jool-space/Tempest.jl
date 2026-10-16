@@ -23,8 +23,32 @@ evaluate_term(t::Apply, x, k, buffers, stats, graph) =
 function run_group!(g::Group, buffers, graph)
     g.kind === :reduction && return run_reduction!(g, buffers, graph)
     g.kind === :pointwise && return run_pointwise!(g, buffers, graph)
+    g.kind === :opaque && return run_opaque!(g, buffers, graph)
     v = only(g.outputs)
     buffers[v] = evaluate_value(graph.values[v].definition, graph.values[v], buffers, graph, ())
+end
+
+# An opaque group's results through their reference, then its epilogues: terms
+# over a result's domain that read the result's tile as `Stat`.
+function run_opaque!(g::Group, buffers, graph)
+    results = Dict{Int, Any}()
+    for v in g.outputs
+        d = graph.values[v].definition
+        d isa Opaque || continue
+        results[v] = buffers[v] = evaluate_value(d, graph.values[v], buffers, graph, ())
+    end
+    for (o, e) in g.epilogues
+        val = graph.values[e]
+        if val.scalar
+            buffers[e] = evaluate_term(g.terms[e], (), nothing, buffers, results, graph)
+            continue
+        end
+        out = Array{val.eltype}(undef, val.dims)
+        for I in CartesianIndices(val.dims)
+            out[I] = evaluate_term(g.terms[e], Tuple(I) .- 1, I, buffers, results, graph)
+        end
+        buffers[e] = out
+    end
 end
 
 function run_pointwise!(g::Group, buffers, graph)

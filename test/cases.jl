@@ -54,5 +54,10 @@ const PROGRAMS = [
     ("gather by a constant list", x -> sum(abs2, x[:, [3, 1, 3, 6]]), (data(8, 6),)),
     ("vec and dropdims", x -> sum(abs2, vec(dropdims(sum(x; dims = 1); dims = 1))), (data(8, 6),)),
     ("scalar input", (x, s) -> sum(abs2, x .* s .+ s^2), (data(8, 6), 0.7)),
+    ("attention, grouped heads", (q, k, v) -> sum(abs2, T.attention(q, k, v)),
+     (data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1))),
+    ("causal attention with a residual", (q, k, v, x) -> sum(abs2, T.attention(q, k, v; causal = true) .+ x),
+     (data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1), data(4, 4, 6, 2; scale = 0.5))),
+    ("dropout", (x, s) -> sum(abs2, T.dropout(x, s; rate = 0.25) .* 2), (data(8, 6), Int32[7])),
 ]
 

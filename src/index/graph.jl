@@ -54,14 +54,19 @@ struct Reduction{F} <: Definition
 end
 
 """
-A program-level operation the index level does not model yet, realized on its
-operands materialized in their program shapes. Only the floor realizes it.
+A program-level operation realized on its operands materialized in their
+program shapes: one the index level does not model (a scatter), or a call an
+implementation claimed. Its boundary is storage. `epilogue` says whether the
+claiming kernel applies an epilogue over this result's output tile.
 """
 struct Opaque <: Definition
     node::Node
     operands::Tuple{Vararg{Read}}
     shapes::Tuple{Vararg{Tuple{Tuple{Vararg{Int}}, Bool}}} # each operand's dims and scalar flag
+    epilogue::Bool
 end
+
+Opaque(node, operands, shapes) = Opaque(node, operands, shapes, false)
 
 struct Value
     definition::Definition
@@ -110,7 +115,7 @@ describe(d::Input) = "input $(d.argument)"
 describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
-describe(d::Opaque) = "opaque $(op_name(d.node.op))"
+describe(d::Opaque) = "opaque $(op_name(d.node.op))$(op_detail(d.node.op))"
 
 show_operand(io, o::Read) = print(io, "%", o.value, "[", join(map(string, o.index), ", "), "]")
 show_operand(io, o::Literal) = print(io, repr(o.value))

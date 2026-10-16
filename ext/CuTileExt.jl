@@ -278,9 +278,11 @@ end
 include("cutile/emit.jl")
 include("cutile/build.jl")
 include("cutile/contract.jl")
+include("cutile/attention.jl")
 
 function __init__()
     push!(Tempest.EXTRA_IMPLEMENTATIONS, Tempest.CuTileGenerator())
+    push!(Tempest.EXTRA_IMPLEMENTATIONS, CuTileAttention())
 end
 
 end

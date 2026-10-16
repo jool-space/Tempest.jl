@@ -10,7 +10,7 @@ agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), 
     @testset "$name" for (name, f, args) in PROGRAMS
         for p in (trace(f, args...), differentiate(trace(f, args...)))
             planned = T.plan(T.lower(p))
-            @test agree(T.execute(planned, args...), T.leaves(interpret(p, args...)))
+            @test agree(T.execute(planned, args...), filter(!isnothing, T.leaves(interpret(p, args...))))
         end
     end
 end

@@ -29,6 +29,7 @@ end
         loss, gradients... = interpret(d, args...)
         @test loss ≈ f(args...)
         for k in eachindex(args)
+            args[k] isa Union{AbstractFloat, AbstractArray{<:AbstractFloat}} || continue
             @test isapprox(gradients[k], finite_difference(f, args, k); rtol = 1.0e-5, atol = 1.0e-7)
         end
     end

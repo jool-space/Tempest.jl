@@ -120,9 +120,14 @@ end
 
 The program at the index level.
 """
-function lower(p::Program)
+function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes) -> false)
+    p = expand_calls(p, n -> keep_call(n, p.nodes))
     nodes = p.nodes
     keep = live(nodes, p.results)
+    # A claimed call computes all its results, used or not.
+    for (id, n) in enumerate(nodes)
+        n.op isa Call && keep[id] && foreach(r -> keep[r] = true, results_of(nodes, n.op.instance))
+    end
     values = Value[]
     access = Vector{Access}(undef, length(nodes))
     gathers = IdDict{Any, Int}()
@@ -155,7 +160,7 @@ function lower(p::Program)
         access[id] = if op isa Constant
             op.value isa AbstractArray ? value!(ConstantArray(op.value), n) : LiteralAccess(op.value)
         elseif op isa Positions
-            IndexAccess(add(linear_index(n.dims, d), 1, d), Int32)
+            IndexAccess(add(op.axis == 0 ? linear_index(n.dims, d) : identity_index(n.dims)[op.axis], 1, d), Int32)
         elseif op isa Map && all(a -> a isa LiteralAccess, inputs)
             # Constants fold: a map of constants is a constant.
             LiteralAccess(convert(n.eltype, op.f(map(a -> a.value, inputs)...)))
@@ -167,6 +172,20 @@ function lower(p::Program)
         elseif op isa Contract
             all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
             contraction!(value!, op, inputs, input_dims, n)
+        elseif op isa Call
+            # A claimed call reads its operands densely, in their program
+            # shapes; anything else (a layout, a constant) is materialized.
+            reads = map(inputs, n.inputs) do a, i
+                dims = nodes[i].dims
+                if a isa ValueAccess && a.index == identity_index(dims) && values[a.value].dims == dims &&
+                   values[a.value].scalar == nodes[i].scalar
+                    return Read(a.value, identity_index(dims))
+                end
+                push!(values, Value(Pointwise(identity, (operand(a, dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
+                Read(length(values), identity_index(dims))
+            end
+            shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
+            value!(Opaque(n, reads, shapes, epilogue(n, nodes)), n)
         elseif op isa Union{Reshape, Permute, Select}
             compose(only(inputs), layout_index(op, n.dims, only(input_dims), d, gather), d)
         else

@@ -183,15 +183,24 @@ other inputs).
 function differentiate(p::Program)
     length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
         throw(ArgumentError("differentiate needs a program with one scalar result"))
+    # Calls without a derivative rule are differentiated through their reference.
+    p = expand_calls(p, n -> has_pullback(n.op.f))
     tape = Tape(copy(p.nodes))
     loss = only(p.results)
     cotangents = Dict{Int, Traced}()
     cotangents[loss] = h(tape, constant!(tape, one(p.nodes[loss].eltype)))
     keep = live(p.nodes, p.results)
     for id in reverse(eachindex(p.nodes))
-        (keep[id] && haskey(cotangents, id)) || continue
         n = p.nodes[id]
-        contributions = pullback(n.op, n, id, cotangents[id], tape)
+        if n.op isa Call
+            # A call is differentiated once, at its first result, for all.
+            n.op.instance == id || continue
+            any(r -> keep[r] && haskey(cotangents, r), results_of(p.nodes, id)) || continue
+            contributions = call_pullback(n, id, cotangents, tape)
+        else
+            (keep[id] && haskey(cotangents, id)) || continue
+            contributions = pullback(n.op, n, id, cotangents[id], tape)
+        end
         for (input, c) in zip(n.inputs, contributions)
             c === nothing && continue
             tape.nodes[input].eltype <: AbstractFloat || continue
