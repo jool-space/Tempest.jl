@@ -126,6 +126,7 @@ end
 Decide what is stored and form the kernels.
 """
 function plan(graph::IndexGraph)
+    graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
     readers = zeros(Int, n)
@@ -229,6 +230,23 @@ function plan(graph::IndexGraph)
     order = order_groups(graph, groups, owner)
     position = invperm(order)
     Plan(graph, stored, groups[order], map(o -> o == 0 ? 0 : position[o], owner))
+end
+
+# Every result becomes a value read whole, so results are buffers: a result
+# that is a layout of a value, or a constant, gets a value of its own.
+function with_stored_results(graph::IndexGraph)
+    values = copy(graph.values)
+    results = copy(graph.results)
+    for (k, r) in enumerate(results)
+        dims = graph.result_dims[k]
+        if r isa Read && r.index == identity_index(dims) && values[r.value].dims == dims &&
+           values[r.value].scalar == graph.result_scalar[k]
+            continue
+        end
+        push!(values, Value(Pointwise(identity, (r,)), dims, graph.result_eltype[k], graph.result_scalar[k]))
+        results[k] = Read(length(values), identity_index(dims))
+    end
+    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype)
 end
 
 # The values a group reads from storage.
