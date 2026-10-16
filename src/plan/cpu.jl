@@ -25,6 +25,7 @@ function run_group!(g::Group, buffers, graph)
     g.kind === :reduction && return run_reduction!(g, buffers, graph)
     g.kind === :pointwise && return run_pointwise!(g, buffers, graph)
     g.kind === :opaque && return run_opaque!(g, buffers, graph)
+    g.kind === :region && return run_region!(g, buffers, graph)
     v = only(g.outputs)
     buffers[v] = evaluate_value(graph.values[v].definition, graph.values[v], buffers, graph, ())
 end
@@ -52,19 +53,28 @@ function run_opaque!(g::Group, buffers, graph)
     end
 end
 
+# A region's values in order, through their definitions.
+function run_region!(g::Group, buffers, graph)
+    for v in g.outputs
+        val = graph.values[v]
+        buffers[v] = evaluate_value(val.definition, val, buffers, graph, ())
+    end
+end
+
 function run_pointwise!(g::Group, buffers, graph)
-    v = only(g.outputs)
-    val = graph.values[v]
-    t = g.terms[v]
-    if val.scalar
-        buffers[v] = evaluate_term(t, (), nothing, buffers, nothing, graph)
-        return
+    for v in g.outputs
+        val = graph.values[v]
+        t = g.terms[v]
+        if val.scalar
+            buffers[v] = evaluate_term(t, (), nothing, buffers, nothing, graph)
+            continue
+        end
+        out = Array{val.eltype}(undef, val.dims)
+        for I in CartesianIndices(val.dims)
+            out[I] = evaluate_term(t, Tuple(I) .- 1, I, buffers, nothing, graph)
+        end
+        buffers[v] = out
     end
-    out = Array{val.eltype}(undef, val.dims)
-    for I in CartesianIndices(val.dims)
-        out[I] = evaluate_term(t, Tuple(I) .- 1, I, buffers, nothing, graph)
-    end
-    buffers[v] = out
 end
 
 # Every fold over its own axes, in phase order; then the outputs.

@@ -7,10 +7,12 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 
 [weakdeps]
 CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
 cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
 
 [extensions]
 CUDAExt = "CUDACore"
+cuBLASExt = ["CUDACore", "cuBLAS"]
 cuTileExt = ["CUDACore", "cuTile"]
 
 [compat]

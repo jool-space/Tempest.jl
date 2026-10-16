@@ -3,7 +3,7 @@
 # by a separate add. Device time is the minimum over samples of a captured
 # graph of a few milliseconds of executions.
 #   julia --project=dev bench/attention.jl
-using Tempest, CUDACore, cuTile, Printf
+using Tempest, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 
 function replay_graph(ex; repetitions)

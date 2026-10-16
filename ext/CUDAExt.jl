@@ -12,21 +12,46 @@ Tempest.upload(::CUDATarget, x) = CuArray(x)
 
 const THREADS = 256
 
-function Tempest.build(target::CUDATarget, p::Plan, g::Group, buffers)
-    g.kind === :opaque && return Tempest.build_opaque(target, p, g, buffers)
-    for implementation in Tempest.EXTRA_IMPLEMENTATIONS
-        for claim in Tempest.claims(implementation, target, p, g)
-            built = try
-                Tempest.build_claim(implementation, claim, target, p, g, buffers)
-            catch err
-                @debug "claim failed to build; trying the next" implementation exception = err
-                nothing
-            end
-            built === nothing || return built
+# Rates for estimates, measured on known devices: copy bandwidth, and the
+# launch gap in a captured graph. Other devices derive bandwidth from their
+# attributes.
+const DEVICE_BANDWIDTH = Dict("NVIDIA GB10" => 220.0e9)
+const LAUNCH_SECONDS = 1.0e-6
+const NOISE = 0.05
+
+Tempest.device_name(::CUDATarget) = CUDACore.name(CUDACore.device())
+
+function Tempest.rates(target::CUDATarget)
+    device = CUDACore.device()
+    attribute(a) = CUDACore.attribute(device, a)
+    sms = attribute(CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+    bandwidth = get(DEVICE_BANDWIDTH, CUDACore.name(device)) do
+        0.85 * 2.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE) *
+            attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8
+    end
+    Tempest.Rates(bandwidth, LAUNCH_SECONDS, sms, NOISE)
+end
+
+Tempest.measurable(::CUDATarget) = true
+
+# Device seconds of one launch: the minimum over samples of a captured graph
+# of about a millisecond of launches.
+function Tempest.time_launch(::CUDATarget, launch; samples = 5, milliseconds = 1.0)
+    launch()
+    CUDACore.synchronize()
+    once = CUDACore.@elapsed launch()
+    repetitions = clamp(round(Int, 1.0e-3 * milliseconds / max(once, 1.0e-6)), 1, 100)
+    graph = CUDACore.capture() do
+        for _ in 1:repetitions
+            launch()
         end
     end
-    floor(p, g, buffers)
+    exec = CUDACore.instantiate(graph)
+    CUDACore.launch(exec)
+    minimum(_ -> CUDACore.@elapsed(CUDACore.launch(exec)), 1:samples) / repetitions
 end
+
+Tempest.build_floor(::CUDATarget, p::Plan, g::Group, buffers) = floor(p, g, buffers)
 
 function floor(p::Plan, g::Group, buffers)
     ks = Tempest.scalar_kernels(p.graph, p.stored, g, Tempest.kernel_slots(p, g))

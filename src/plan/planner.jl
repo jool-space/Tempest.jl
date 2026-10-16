@@ -12,7 +12,7 @@
 # a block and which by merging partial states, is the schedule's choice.
 
 struct Group
-    kind::Symbol # :reduction, :pointwise or :opaque
+    kind::Symbol # :reduction, :pointwise, :opaque or :region
     domain::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
@@ -150,11 +150,13 @@ function try_add!(graph, stored, up, g::Group, v; fold)
 end
 
 """
-    plan(graph::IndexGraph) -> Plan
+    plan(graph::IndexGraph; fixed = []) -> Plan
 
-Decide what is stored and form the kernels.
+Decide what is stored and form the kernels. Each set of values in `fixed`, a
+candidate an implementation proposed, forms a group of its own, its folds
+stored; the planner groups the rest around them.
 """
-function plan(graph::IndexGraph)
+function plan(graph::IndexGraph; fixed = Vector{Int}[])
     graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
@@ -169,8 +171,10 @@ function plan(graph::IndexGraph)
             live[r] = true
         end
     end
+    # Reads of a value, one per running reader and formula: a reader that
+    # reads it several times at one index computes it once.
     counts = zeros(Int, n)
-    for (id, v) in enumerate(values), o in operands(v.definition)
+    for (id, v) in enumerate(values), o in unique(operands(v.definition))
         live[id] && o isa Read && (counts[o.value] += 1)
     end
     results = Set(o.value for o in graph.results if o isa Read)
@@ -220,6 +224,10 @@ function plan(graph::IndexGraph)
     for (k, g) in enumerate(groups), o in copy(g.outputs)
         values[o].definition.epilogue && absorb_epilogue!(graph, stored, users, results, owner, g, k, o)
     end
+    for set in fixed
+        push!(groups, fixed_group(graph, stored, up, owner, users, results, set))
+        foreach(m -> owner[m] = length(groups), set)
+    end
     for id in 1:n
         live[id] && owner[id] == 0 || continue
         d = values[id].definition
@@ -242,21 +250,22 @@ function plan(graph::IndexGraph)
         push!(groups, g)
         foreach(m -> owner[m] = length(groups), members(g))
     end
+    # Stored pointwise values left: a group from each, joined by the later
+    # ones over its domain that read it.
     for id in 1:n
         live[id] && owner[id] == 0 && stored[id] || continue
         d = values[id].definition
         d isa Union{Input, ConstantArray} && continue
-        g = if d isa Pointwise
-            g = Group(:pointwise, values[id].dims)
-            push!(g.outputs, id)
-            g.terms[id] = value_term(graph, stored, g, id, identity_index(values[id].dims))
-            g.phase[id] = 0
-            g
-        else
-            error("value %$id has no kernel")
+        d isa Pointwise || error("value %$id has no kernel")
+        g = Group(:pointwise, values[id].dims)
+        try_add!(graph, stored, up, g, id; fold = false)
+        for other in (id + 1):n
+            live[other] && owner[other] == 0 && stored[other] || continue
+            values[other].definition isa Pointwise && values[other].dims == g.domain || continue
+            any(m -> m in up[other], members(g)) && try_add!(graph, stored, up, g, other; fold = false)
         end
         push!(groups, g)
-        owner[id] = length(groups)
+        foreach(m -> owner[m] = length(groups), members(g))
     end
     # A value only its own kernel reads need not be written.
     external = falses(n)
@@ -272,7 +281,7 @@ function plan(graph::IndexGraph)
         primary(graph, g, r) || (external[s] = true)
     end
     for g in groups
-        g.kind === :reduction || continue
+        g.kind in (:reduction, :pointwise) || continue
         for m in members(g)
             external[m] && continue
             stored[m] = false
@@ -282,6 +291,40 @@ function plan(graph::IndexGraph)
     order = order_groups(graph, groups, owner)
     position = invperm(order)
     Plan(graph, stored, groups[order], map(o -> o == 0 ? 0 : position[o], owner))
+end
+
+"A candidate that overlaps a group already formed."
+struct NotAGroup <: Exception
+    values::Vector{Int}
+end
+
+Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%$v", e.values), " "), " overlap a group")
+
+# The group of exactly the values in `set`: its folds over one domain, then
+# stored pointwise values over it. Otherwise a region, which only the
+# implementation that proposed it realizes, whole: it computes its values in
+# order, reads what lies outside it from storage, and stores what is read
+# outside it.
+function fixed_group(graph, stored, up, owner, users, results, set)
+    values = graph.values
+    all(v -> owner[v] == 0, set) || throw(NotAGroup(set))
+    d = values[first(set)].definition
+    g = d isa Reduction ? Group(:reduction, d.iteration) : Group(:pointwise, values[first(set)].dims)
+    one_group = all(set) do v
+        dv = values[v].definition
+        dv isa Reduction ? dv.iteration == g.domain && try_add!(graph, stored, up, g, v; fold = true) :
+            dv isa Pointwise && stored[v] && try_add!(graph, stored, up, g, v; fold = false)
+    end
+    one_group && return g
+    region = Group(:region, values[last(set)].dims)
+    for v in set
+        push!(region.outputs, v)
+        stored[v] = v in results || any(u -> !(u in set), users[v])
+        for o in operands(values[v].definition), r in read_values(o)
+            r in set || (stored[r] = true)
+        end
+    end
+    region
 end
 
 # An epilogue: the chain of pointwise values after an opaque result, each read
@@ -369,7 +412,7 @@ function dense_address(dims, index, d::Domain)
     total
 end
 
-# The values a group reads from storage.
+# The values a group reads from storage, its own excepted.
 function group_reads(graph, g::Group)
     reads = Set{Int}()
     for v in members(g)
@@ -387,6 +430,7 @@ function group_reads(graph, g::Group)
             end
         end
     end
+    setdiff!(reads, members(g))
     reads
 end
 

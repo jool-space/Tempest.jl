@@ -118,25 +118,6 @@ struct View
     spans::Tuple{Vararg{Bool}} # whether the view extends along each group
 end
 
-# The stride along one collapsed group of axes, or nothing when the address's
-# coefficients do not chain over the group.
-function group_stride(e::Affine, axes, domain)
-    stride = nothing
-    p = 1
-    for k in axes
-        n = domain[k]
-        c = Tempest.coefficient(e, k)
-        c === nothing && return nothing
-        if n > 1
-            c % p == 0 || return nothing
-            s = c ÷ p
-            stride === nothing ? (stride = s) : (stride == s || return nothing)
-        end
-        p *= n
-    end
-    something(stride, 0)
-end
-
 # The view of value `v` read at `index` over the groups of axes; nothing when the
 # address is not affine, does not chain within a group, or depends on an axis
 # outside the groups.
@@ -146,7 +127,7 @@ function view_of(graph, v, index, g, groups...)
     for k in 1:length(g.domain)
         g.domain[k] > 1 && Tempest.coefficient(e, k) != 0 && !any(grp -> k in grp, groups) && return nothing
     end
-    strides = map(grp -> group_stride(e, grp, g.domain), groups)
+    strides = map(grp -> Tempest.group_stride(e, grp, g.domain), groups)
     any(s -> s === nothing || s < 0, strides) && return nothing
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)))
 end
@@ -246,7 +227,7 @@ end
 # small.
 const PARTIAL_BLOCKS = 256
 
-function Tempest.claims(::Tempest.cuTileGenerator, target, p::Plan, g::Group)
+function Tempest.claims(::Tempest.cuTileGenerator, target::CUDATarget, p::Plan, g::Group)
     g.kind in (:pointwise, :reduction) || return Claim[]
     product = product_claim(target, p, g)
     product === nothing || return [product]
@@ -275,14 +256,55 @@ function Tempest.claims(::Tempest.cuTileGenerator, target, p::Plan, g::Group)
     [Claim(s)]
 end
 
+# Product rates the generator's schedules reach, measured on known devices
+# against cuBLAS (the scratchpad's rates.jl): full Float32 on CUDA cores, TF32
+# and half precision on tensor cores. Other devices scale GB10's by SM count.
+const PRODUCT_RATES = Dict("NVIDIA GB10" => (full = 2.6e12, tf32 = 25.0e12, half = 70.0e12))
+
+function product_rate(target::CUDATarget, T)
+    device = CUDACore.device()
+    r = get(PRODUCT_RATES, CUDACore.name(device)) do
+        scale = CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT) / 48
+        map(x -> scale * x, PRODUCT_RATES["NVIDIA GB10"])
+    end
+    T <: Tempest.HalfFloat ? r.half : target.precision === :full ? r.full : target.precision === :tf32 ? r.tf32 : r.tf32 / 3
+end
+
+# The blocks of a schedule's first launch: one per kept tile (or chunk of
+# them) and split, and one per tile of a fully reduced domain.
+first_blocks(s::TileSchedule) = s.splits * prod(s.tiling; init = 1) do ax
+    tiles = cld(ax.extent, ax.tile)
+    ax.reduced ? (s.sketch === :full ? tiles : 1) : cld(tiles, ax.chunk)
+end
+
+# A schedule's launches: the main kernel over its blocks, products at the
+# generator's rate, and a merge of partial states when blocks share a tile.
+function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Plan, g::Group)
+    s = claim.schedule
+    blocks = first_blocks(s)
+    bytes = Tempest.group_bytes(p, g)
+    work = if s.sketch === :product
+        m, k, n = (ax.extent for ax in s.tiling[1:3])
+        b = length(s.tiling) > 3 ? s.tiling[4].extent : 1
+        t = first(g.terms[first(g.reductions)].args)
+        factor = t isa Apply && t.f isa Tempest.Cast{Float32} ? only(t.args) : t
+        rate = product_rate(target, Tempest.term_eltype(factor, p.graph))
+        [Tempest.Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions), rate, blocks)]
+    else
+        [Tempest.Work(bytes; blocks)]
+    end
+    if s.splits > 1 || s.sketch === :full
+        kept = prod((ax.extent for ax in s.tiling if !ax.reduced); init = 1)
+        push!(work, Tempest.Work(2.0 * 4 * kept * blocks * length(g.reductions); blocks = max(1, kept / 256)))
+    end
+    work
+end
+
 include("emit.jl")
 include("build.jl")
 include("contract.jl")
 include("attention.jl")
 
-function __init__()
-    push!(Tempest.EXTRA_IMPLEMENTATIONS, Tempest.cuTileGenerator())
-    push!(Tempest.EXTRA_IMPLEMENTATIONS, cuTileAttention())
-end
+__init__() = Tempest.register!(ct, Tempest.cuTileGenerator(), cuTileAttention())
 
 end
