@@ -271,7 +271,8 @@ function build_opaque(target, p::Plan, g::Group, buffers)
     build_call(implementations(target)[k], p, g, buffers, target)
 end
 
-# Opaque work runs its reference, and its epilogues, on dense host copies.
+# Opaque work and regions run their references, and epilogues, on dense host
+# copies.
 function opaque_launch(p, g, buffers)
     graph = p.graph
     function launch()
@@ -281,7 +282,7 @@ function opaque_launch(p, g, buffers)
             val = graph.values[id]
             arrays[id] = val.scalar ? Array(b)[1] : reshape(Array(b), val.dims)
         end
-        run_opaque!(g, arrays, graph)
+        run_group!(g, arrays, graph)
         for v in g.outputs
             p.stored[v] || continue
             y = arrays[v]

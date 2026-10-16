@@ -48,7 +48,7 @@ numerics(target::CUDATarget) = target.precision
 
 The launches of a claim. By default one launch moving the group's bytes.
 """
-estimate(::Implementation, claim, target, p::Plan, g::Group) = [Work(group_bytes(p, g))]
+estimate(::Implementation, claim, target, p, g) = [Work(group_bytes(p, g))]
 
 """
     candidates(implementation, target, plan) -> Vector{Vector{Int}}
@@ -57,7 +57,24 @@ Sets of values the implementation proposes to realize as one group each, in
 place of the generator's groups: grown from anchors in `plan` (a product, a
 call) and accepted by the implementation. None by default.
 """
-candidates(::Implementation, target, p::Plan) = Vector{Int}[]
+candidates(::Implementation, target, p) = Vector{Int}[]
+
+"""
+    grow(graph, anchor, accept) -> Vector{Int}
+
+A candidate grown from `anchor` along its readers: each step adds the first
+reader of the set, in value order, with which `accept(set)` holds.
+"""
+function grow(graph, anchor, accept)
+    users = readers(graph)
+    set = [anchor]
+    while true
+        next = sort!(unique(u for v in set for u in users[v] if !(u in set)))
+        k = findfirst(u -> accept([set; u]), next)
+        k === nothing && return set
+        push!(set, next[k])
+    end
+end
 
 "A claim's name in the tuning record, without value numbers."
 record_name(implementation::Implementation, claim) = string(nameof(typeof(implementation)), " ", claim)
@@ -77,7 +94,7 @@ end
 
 # The floor reads every load at every point of the domain, one item a thread.
 function floor_estimate(p::Plan, g::Group)
-    g.kind === :opaque && return [Work(group_bytes(p, g))]
+    g.kind in (:opaque, :region) && return [Work(group_bytes(p, g))]
     points = prod(g.domain; init = 1)
     per_point = sum(m -> sum(l -> sizeof(p.graph.values[l.value].eltype), loads(g.terms[m]); init = 0), members(g); init = 0)
     items = g.kind === :reduction ? prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1) : points
@@ -291,7 +308,8 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers)
         end
         built === nothing || return built
     end
-    build_floor(d.target, p, g, buffers)
+    # A region no claim builds runs its reference on the host.
+    g.kind === :region ? opaque_launch(p, g, buffers) : build_floor(d.target, p, g, buffers)
 end
 
 function measure!(d::Decider, p::Plan, g::Group, o::Choice)

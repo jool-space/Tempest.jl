@@ -26,6 +26,30 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
+# An implementation whose candidates span several domains: a product, the
+# work after it and a sum over the result, realized whole on the host.
+struct HostRegions <: T.Implementation end
+T.candidates(::HostRegions, ::T.CPUTarget, p) = [T.grow(p.graph, r, set -> length(set) <= 3)
+    for g in p.groups if g.kind === :reduction && T.product_axes(p.graph, g) !== nothing for r in g.reductions]
+T.claims(::HostRegions, ::T.CPUTarget, p, g) = g.kind === :region ? [:host] : []
+T.estimate(::HostRegions, claim, target, p, g) = [T.Work(0.0)]
+T.build_claim(::HostRegions, claim, target, p, g, buffers) = T.opaque_launch(p, g, buffers)
+
+@testset "candidates over several domains" begin
+    a, b = data(6, 5; scale = 0.3), data(5, 4)
+    p = trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b)
+    T.register!(@__MODULE__, HostRegions())
+    try
+        ex = prepare(p, a, b)
+        region = only(filter(g -> g.kind === :region, ex.plan.groups))
+        @test length(region.outputs) == 3 && length(ex.accepted) == 1
+        @test isapprox(only(T.leaves(execute!(ex))), interpret(p, a, b); rtol = 1.0e-12)
+        @test occursin("from HostRegions replaces", sprint(explain, ex))
+    finally
+        T.register!(@__MODULE__)
+    end
+end
+
 using CUDACore
 if CUDACore.functional()
     @testset "prepared on CUDA" begin
