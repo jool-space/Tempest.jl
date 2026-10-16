@@ -138,11 +138,30 @@ function split_divisible(e::Affine, k::Int)
     (fld(e.constant, k), q, mod(e.constant, k), r)
 end
 
+# `e = g·b + s` with `s` in `0:g-1`, for the largest `g` that divides `k` and
+# leaves such a remainder, or nothing. Then `fld(e, k) = fld(b, k ÷ g)` and
+# `mod(e, k) = g·mod(b, k ÷ g) + s`: a small term below a common factor of
+# the others and the divisor drops out of the division.
+function split_common(e::Affine, k::Int, d::Domain)
+    for g in sort!(filter(g -> k % g == 0, collect(2:k-1)); rev = true)
+        big = Pair{Atom, Int}[]
+        small = Pair{Atom, Int}[]
+        for (atom, c) in e.terms
+            c % g == 0 ? push!(big, atom => c ÷ g) : push!(small, atom => c)
+        end
+        s = normalize(mod(e.constant, g), small, d)
+        lo, hi = affine_range(s, d)
+        lo >= 0 && hi < g && return (g, normalize(fld(e.constant, g), big, d), s)
+    end
+    nothing
+end
+
 """
     fdiv(e, k, domain)
 
 `fld(e, k)` for a positive constant `k`, simplified: terms divisible by `k`
-come out of the division, and a remainder known to lie in `0:k-1` vanishes.
+come out of the division, a remainder known to lie in `0:k-1` vanishes, and a
+factor common to the other terms and `k` divides out.
 """
 function fdiv(e::Affine, k::Int, d::Domain)
     k > 0 || throw(ArgumentError("division by a nonpositive constant $k"))
@@ -161,6 +180,8 @@ function fdiv(e::Affine, k::Int, d::Domain)
         inner = rest.terms[1].first
         return add(quotient, fdiv(inner.e, inner.d * k, d), d)
     end
+    common = split_common(rest, k, d)
+    common === nothing || return add(quotient, fdiv(common[2], k ÷ common[1], d), d)
     normalize(quotient.constant, (quotient.terms..., Div(rest, k) => 1), d)
 end
 
@@ -168,7 +189,8 @@ end
     fmod(e, k, domain)
 
 `mod(e, k)` for a positive constant `k`, simplified: terms divisible by `k`
-vanish, and a remainder known to lie in `0:k-1` is returned as it is.
+vanish, a remainder known to lie in `0:k-1` is returned as it is, and a factor
+common to the other terms and `k` comes out.
 """
 function fmod(e::Affine, k::Int, d::Domain)
     k > 0 || throw(ArgumentError("modulo by a nonpositive constant $k"))
@@ -181,6 +203,11 @@ function fmod(e::Affine, k::Int, d::Domain)
     if length(rest.terms) == 1 && rest.constant == 0 && rest.terms[1].second == 1 &&
        rest.terms[1].first isa Mod && rest.terms[1].first.d % k == 0
         return fmod(rest.terms[1].first.e, k, d)
+    end
+    common = split_common(rest, k, d)
+    if common !== nothing
+        g, b, small = common
+        return add(mul(fmod(b, k ÷ g, d), g, d), small, d)
     end
     normalize(0, (Mod(rest, k) => 1,), d)
 end
