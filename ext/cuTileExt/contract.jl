@@ -2,8 +2,11 @@
 # bilinear products. The kept axes split into those only one factor reads (M),
 # those only the other reads (N), and those both read (a batch, on the grid);
 # the reduced axes (K) are swept. Tile order (M, K, N, batch) puts each factor's
-# tile in matrix order, so the fold algebra's product rule applies. Everything
-# else is the ordinary resident or streamed reduction kernel.
+# tile in matrix order, so the fold algebra's product rule applies. M, N and
+# the batch each collapse into one tile axis where every view chains over
+# them; otherwise the longest axis of M and of N is tiled and every other kept
+# axis is a grid axis of its own. Everything else is the ordinary resident or
+# streamed reduction kernel.
 
 # The domain's axes a term reads, or nothing when it reads reductions.
 function axes_read(t::Term, n)
@@ -21,7 +24,8 @@ end
 function product_groups(graph, g::Group)
     n = length(g.domain)
     K = sort!(collect(Tempest.primary_axes(graph, g)))
-    kept = [k for k in 1:n if !(k in K)]
+    # Axes of extent one are read by neither factor and need no tile axis.
+    kept = [k for k in 1:n if !(k in K) && g.domain[k] > 1]
     found = nothing
     for r in g.reductions
         t = g.terms[r]
@@ -67,18 +71,23 @@ function product_claim(target, p::Plan, g::Group)
     max(m, n, k, b) < typemax(Int32) ÷ 2 || return nothing
     factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
         first(g.terms[first(g.reductions)].args))
-    tm, tn, tk = product_tiles(target, Tempest.term_eltype(factor, p.graph), m, n, k)
-    tiling = [TileAxis(M, m, tm, false), TileAxis(K, k, tk, true), TileAxis(N, n, tn, false)]
-    isempty(B) || push!(tiling, TileAxis(B, b, 1, false))
-    # A grid of few output tiles leaves the device idle: split the summed axis
-    # among blocks (split-K), merging the partial sums in a second launch.
-    blocks = cld(m, tm) * cld(n, tn) * b
-    splits = blocks < SPLIT_KEPT_BLOCKS[1] ? split_count(k, tk, blocks) : 1
-    s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
-    c = Context(p.graph, p.stored, g, s)
-    all(r -> bilinear(c, r) !== nothing, g.reductions) || return nothing
-    expressible_over(c) || return nothing
-    Claim(s)
+    longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
+    for collapsed in (true, false)
+        Mt, Nt = collapsed ? (M, N) : ([longest(M)], [longest(N)])
+        grid = collapsed ? (isempty(B) ? Vector{Int}[] : [B]) : [[a] for a in sort!([setdiff(M, Mt); setdiff(N, Nt); B])]
+        mt, nt = extent(Mt), extent(Nt)
+        tm, tn, tk = product_tiles(target, Tempest.term_eltype(factor, p.graph), mt, nt, k)
+        tiling = [TileAxis(Mt, mt, tm, false), TileAxis(K, k, tk, true), TileAxis(Nt, nt, tn, false)]
+        append!(tiling, [TileAxis(a, extent(a), 1, false) for a in grid])
+        # A grid of few output tiles leaves the device idle: split the summed
+        # axis among blocks (split-K), merging the partial sums in a second launch.
+        blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
+        splits = blocks < SPLIT_KEPT_BLOCKS[1] ? split_count(k, tk, blocks) : 1
+        s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
+        c = Context(p.graph, p.stored, g, s)
+        all(r -> bilinear(c, r) !== nothing, g.reductions) && expressible_over(c) && return Claim(s)
+    end
+    nothing
 end
 
 # Every load a view over the tiling, every stored value too, and nothing the
@@ -91,10 +100,10 @@ function expressible_over(c::Context)
         m in g.reductions && !(val.definition.fold isa FOLDS) && return false
         m in g.outputs && val.dims == g.domain && return false
         for s in Tempest.subterms((g.terms[m],))
-            s isa Ix && return false
+            s isa Ix && !positional(s) && return false
             s isa Apply && !(s.eltype <: TILE_TYPES) && return false
             s isa Lit && s.value isa Float64 && return false
-            s isa Load && view_of(graph, s.value, s.index, g, groups(c)...) === nothing && return false
+            s isa Load && load_view(c, s.value, s.index) === nothing && return false
         end
         (c.stored[m] || m in g.outputs) && output_view(c, m) === nothing && return false
     end

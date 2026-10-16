@@ -106,3 +106,26 @@ if CUDACore.functional()
         end
     end
 end
+
+# Positions on tiles: a causal mask after a product, positions in pointwise
+# work and in a fold.
+causal_scores(a, b) = (s = a' * b; ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 2), s, -Inf32))
+
+const POSITIONAL = [
+    ("causal mask after a product", (a, b) -> exp.(causal_scores(a, b) .- T.logsumexp(causal_scores(a, b); dims = 1)),
+     (data(24, 70; scale = 0.1), data(24, 70; scale = 0.2))),
+    ("positions in pointwise work", x -> x .* T.axis_positions(x, 2) .+ T.positions(x), (data(50, 30, 3),)),
+    ("positions in a fold", x -> sum(ifelse.(T.axis_positions(x, 1) .<= T.axis_positions(x, 2), x, 0.0f0); dims = 1), (data(300, 200),)),
+]
+
+if CUDACore.functional()
+    @testset "positions on cuTile" begin
+        @testset "$name" for (name, f, args) in POSITIONAL
+            args = map(single, args)
+            p = trace(f, args...)
+            ex = prepare(p, map(CuArray, args)...)
+            @test all(d -> !(d isa T.FloorKernels), ex.kernels)
+            @test agree(T.leaves(execute!(ex)), T.leaves(interpret(p, args...)); rtol = 2.0e-4)
+        end
+    end
+end

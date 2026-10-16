@@ -23,10 +23,11 @@ end
 
 # The block index of each kept tile axis, from the grid: the first two kept
 # axes through the swizzle when the schedule asks for one, the rest one grid
-# dimension each. A kept axis whose blocks cover several tiles (its `chunk`)
-# indexes them in a loop: `chunks` lists (axis, loop variable, chunk), and
-# `bases` the block index of each kept axis before chunking.
-function block_indices!(st, c::Context)
+# dimension each, those beyond the grid's `limit` of dimensions sharing its
+# last. A kept axis whose blocks cover several tiles (its `chunk`) indexes them
+# in a loop: `chunks` lists (axis, loop variable, chunk), and `bases` the block
+# index of each kept axis before chunking.
+function block_indices!(st, c::Context; limit = 3)
     s = c.s
     kept = [i for i in eachindex(s.tiling) if !s.tiling[i].reduced]
     blocks(i) = cld(cld(s.tiling[i].extent, s.tiling[i].tile), s.tiling[i].chunk)
@@ -43,11 +44,22 @@ function block_indices!(st, c::Context)
         push!(grid, blocks(i) * blocks(j))
         rest = kept[3:end]
     end
-    for i in rest
+    own = length(grid) + length(rest) <= limit ? length(rest) : max(0, limit - length(grid) - 1)
+    for i in rest[1:own]
         name = Symbol(:block_, i)
         push!(st, :($name = $(ct.bid)($(length(grid) + 1))))
         indices[i] = name
         push!(grid, blocks(i))
+    end
+    shared = rest[(own + 1):end]
+    if !isempty(shared)
+        push!(st, :(remaining = $(ct.bid)($(length(grid) + 1)) - Int32(1)))
+        for i in shared
+            name = Symbol(:block_, i)
+            push!(st, :($name = rem(remaining, Int32($(blocks(i)))) + Int32(1)), :(remaining = div(remaining, Int32($(blocks(i))))))
+            indices[i] = name
+        end
+        push!(grid, prod(blocks, shared))
     end
     bases = copy(indices)
     for i in kept
@@ -258,8 +270,7 @@ end
 function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     k = TileKernel("partial states", (), c.s.occupancy)
     st = k.body
-    indices, grid, _, _ = block_indices!(st, c)
-    length(grid) < 3 || error("a split schedule has at most two grid dimensions of kept tiles")
+    indices, grid, _, _ = block_indices!(st, c; limit = 2)
     push!(st, :(part = $(ct.bid)($(length(grid) + 1))))
     k.grid = (grid..., c.s.splits)
     p = only(swept(c.s))

@@ -77,7 +77,7 @@ function Base.show(io::IO, s::TileSchedule)
     if s.sketch === :product
         m, k, n = s.tiling[1:3]
         print(io, "product ", m.extent, "×", n.extent, " summing ", k.extent)
-        length(s.tiling) > 3 && print(io, ", batch ", s.tiling[4].extent)
+        length(s.tiling) > 3 && print(io, ", batch ", join((ax.extent for ax in s.tiling[4:end]), "×"))
         print(io, ", tile ", m.tile, "×", n.tile, "×", k.tile, ", ",
             s.precision === :tf32 ? "TF32" : s.precision === :tf32x3 ? "3×TF32" : "full precision")
         s.splits > 1 && print(io, ", summing split ", s.splits, " ways")
@@ -154,8 +154,11 @@ end
 const FOLDS = Union{Tempest.SumFold, Tempest.MaxFold, Tempest.MinFold, Tempest.ProdFold, Tempest.LogSumExpFold}
 const TILE_TYPES = Union{Float32, Float16, Core.BFloat16, Bool, Int32}
 
+# Positions computed from a formula without gathers.
+positional(t::Ix) = isempty(Tempest.indirect_values(t.expr)) && Tempest.term_eltype(t, nothing) <: TILE_TYPES
+
 # Whether the generator can express a group: tile-typed values, supported
-# folds, no positions or gathers, and every load and store a strided view.
+# folds, no gathers, and every load and store a strided view.
 function expressible(graph, stored, g::Group)
     collapse_axes(graph, g) === nothing && return false
     for m in Tempest.members(g)
@@ -163,7 +166,7 @@ function expressible(graph, stored, g::Group)
         val.eltype <: TILE_TYPES || return false
         m in g.reductions && !(val.definition.fold isa FOLDS) && return false
         for t in Tempest.subterms((g.terms[m],))
-            t isa Ix && return false
+            t isa Ix && !positional(t) && return false
             t isa Apply && !(t.eltype <: TILE_TYPES) && return false
             t isa Lit && t.value isa Float64 && return false
             t isa Load && !(graph.values[t.value].eltype <: TILE_TYPES) && return false
@@ -254,11 +257,11 @@ function Tempest.claims(::Tempest.cuTileGenerator, target, p::Plan, g::Group)
     A, B, reduced = collapse_axes(p.graph, g)
     extent = (prod(k -> g.domain[k], A; init = 1), prod(k -> g.domain[k], B; init = 1))
     max(extent...) < typemax(Int32) ÷ 2 || return Claim[]
-    for m in Tempest.members(g), l in Tempest.loads(g.terms[m])
-        view_of(p.graph, l.value, l.index, g, A, B) === nothing && return Claim[]
-    end
     s = default_schedule(g, A, B, extent, reduced)
     c = Context(p.graph, p.stored, g, s)
+    for m in Tempest.members(g), l in Tempest.loads(g.terms[m])
+        load_view(c, l.value, l.index) === nothing && return Claim[]
+    end
     partial = partial_folds(c)
     any(r -> fold_tiles(c, r) === nothing, partial) && return Claim[]
     # A resident kernel with folds that keep the swept axis covers several kept

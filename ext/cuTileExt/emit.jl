@@ -88,6 +88,41 @@ reduced_dims(c::Context) = code(c.s) == 3 ? (1, 2) : only(swept(c.s))
 
 value_spec(c::Context, v::View) = spec(v, extent(c.s))
 
+load_view(c::Context, v, index) = view_of(c.graph, v, index, c.g, groups(c)...)
+
+# Positions. Domain variable `n` at the tile of block indices `indices`: the
+# lanes of its tile axis, their collapsed index decoded into the axes of the
+# axis's group; an Int32 tile over the tile axes, zero outside the tiling.
+function variable_tile(c::Context, n, indices)
+    ones = ntuple(_ -> 1, length(c.s.tiling))
+    i = findfirst(ax -> n in ax.axes, c.s.tiling)
+    i === nothing && return :($(ct.broadcast_to)($(ct.Tile)(Int32(0)), $ones))
+    ax = c.s.tiling[i]
+    lanes = :(reshape($(ct.arange)($(ax.tile)), $(Base.setindex(ones, ax.tile, i))))
+    decode(c, ax, n, :($lanes .+ (($(indices[i]) - Int32(1)) * Int32($(ax.tile)) - Int32(1))); tile = true)
+end
+
+# Variable `n` of a tile axis's group from the axis's collapsed index `x`.
+function decode(c::Context, ax::TileAxis, n, x; tile)
+    q = findfirst(==(n), ax.axes)
+    below = prod(k -> c.g.domain[k], ax.axes[1:(q - 1)]; init = 1)
+    if below > 1
+        x = tile ? :(div.($x, Int32($below))) : :(div($x, Int32($below)))
+    end
+    if q < length(ax.axes)
+        x = tile ? :(rem.($x, Int32($(c.g.domain[n])))) : :(rem($x, Int32($(c.g.domain[n]))))
+    end
+    x
+end
+
+index_tile(c::Context, e::Affine, indices) =
+    foldl(e.terms; init = :($(ct.broadcast_to)($(ct.Tile)(Int32($(e.constant))), $(ntuple(_ -> 1, length(c.s.tiling)))))) do x, (atom, k)
+        :($x .+ Int32($k) .* $(index_tile(c, atom, indices)))
+    end
+index_tile(c::Context, a::Tempest.Var, indices) = variable_tile(c, a.n, indices)
+index_tile(c::Context, a::Tempest.Div, indices) = :(fld.($(index_tile(c, a.e, indices)), Int32($(a.d))))
+index_tile(c::Context, a::Tempest.Mod, indices) = :(mod.($(index_tile(c, a.e, indices)), Int32($(a.d))))
+
 # The workspace views of split schedules (partials, statistics) stay two-axis.
 function load_expr(sym, spans, ta, tb, ia, ib)
     shape = (spans[1] ? ta : 1, spans[2] ? tb : 1)
@@ -113,8 +148,12 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         end
         name = gensym(:t)
         expr = if t isa Load
-            v = view_of(c.graph, t.value, t.index, c.g, groups(c)...)
+            v = load_view(c, t.value, t.index)
             load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices)
+        elseif t isa Ix
+            x = index_tile(c, t.expr, indices)
+            T = Tempest.term_eltype(t, c.graph)
+            T === Int32 ? x : :(convert($(ct.Tile){$T}, $x))
         elseif t isa Apply
             args = map(a -> names[a], t.args)
             t.f isa Tempest.Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
@@ -411,14 +450,19 @@ function bilinear(c::Context, r)
     nothing
 end
 
-# The tile axes a term's loads span, or nothing if it reads positions or
+# The tile axes a term's loads and positions span, or nothing if it reads
 # reductions.
 function term_spans(c::Context, t::Term)
     spans = fill(false, length(c.s.tiling))
     for s in Tempest.subterms((t,))
-        s isa Union{Ix, Stat} && return nothing
+        s isa Stat && return nothing
+        if s isa Ix
+            for (i, ax) in enumerate(c.s.tiling)
+                any(k -> Tempest.mentions(s.expr, k), ax.axes) && (spans[i] = true)
+            end
+        end
         s isa Load || continue
-        v = view_of(c.graph, s.value, s.index, c.g, groups(c)...)
+        v = load_view(c, s.value, s.index)
         v === nothing && return nothing
         spans .|= collect(v.spans)
     end
