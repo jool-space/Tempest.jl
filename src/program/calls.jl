@@ -60,6 +60,8 @@ end
 
 function record_call(f, args...; kwargs...)
     tape = tape_of(args...)
+    # Julia arrays among the arguments are constants of the program.
+    args = map(a -> a isa AbstractArray{<:Number} && !(a isa TracedArray) ? TracedArray(tape, constant!(tape, a)) : a, args)
     all(a -> a isa TracedArray && a.tape === tape, args) ||
         throw(ArgumentError("the arguments of a call of $f must be traced arrays of one program"))
     # The reference, traced on stand-ins, gives the results' shapes and types.

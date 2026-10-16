@@ -43,6 +43,14 @@ if CUDACore.functional()
             @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
             @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, w, x, b); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
+        # A conversion to BFloat16 is part of the epilogue: one kernel, and
+        # only the BFloat16 result is stored.
+        p = trace((w, x, b) -> Core.BFloat16.(gelu.(w * x .+ b)), w, x, b)
+        ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(precision = :tf32))
+        @test length(ex.kernels) == 1 && only(ex.kernels).schedule.sketch === :product
+        y = only(T.leaves(execute!(ex)))
+        @test eltype(y) === Core.BFloat16
+        @test isapprox(Float32.(Array(y)), Float32.(interpret(p, w, x, b)); rtol = 1.0e-2)
         # Half operands accumulate in Float32 and round once.
         h, y = Float16.(data(64, 48; scale = 0.1)), Float16.(data(48, 32))
         p = trace((h, y) -> h * y, h, y)

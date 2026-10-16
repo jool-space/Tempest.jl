@@ -39,4 +39,4 @@ function dropout(x, seed; rate::Real, stream::Integer = 0)
 end
 
 reference(::typeof(dropout), x, seed; rate, stream) =
-    x .* DropoutScale{eltype(x)}(rate, stream).(seed[1], positions(x))
+    x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), positions(x))

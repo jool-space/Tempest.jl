@@ -395,16 +395,13 @@ Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
 
 "The one-based linear index of each element of `x`, as `Int32`."
 positions(x::TracedArray) = TracedArray(x.tape, record!(x.tape, Positions(), (), size(x), Int32))
-positions(x::AbstractArray) = reshape(Int32.(1:length(x)), size(x))
+positions(x::AbstractArray) = similar(x, Int32) .= reshape(Int32(1):Int32(length(x)), size(x))
 
 "The one-based index of each element of `x` along `axis`, as `Int32`, in the shape of `x`."
 axis_positions(x::TracedArray, axis::Integer) =
     TracedArray(x.tape, record!(x.tape, Positions(Int(axis)), (), size(x), Int32))
-function axis_positions(x::AbstractArray, axis::Integer)
-    out = Array{Int32}(undef, size(x))
-    out .= reshape(Int32.(1:size(x, axis)), ntuple(k -> k == axis ? size(x, k) : 1, ndims(x)))
-    out
-end
+axis_positions(x::AbstractArray, axis::Integer) =
+    similar(x, Int32) .= reshape(Int32(1):Int32(size(x, axis)), ntuple(k -> k == axis ? size(x, k) : 1, ndims(x)))
 
 # Tracing a function.
 

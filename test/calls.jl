@@ -58,6 +58,10 @@ if CUDACore.functional()
         q, k, v = single(16, 4, 64, 2; scale = 0.1), single(16, 2, 64, 2; scale = 0.2), single(16, 2, 64, 2; scale = 0.3)
         x = single(16, 4, 64, 2; scale = 0.5)
         device(xs) = map(CuArray, xs)
+        # Untraced, the verbs run their references on device arrays.
+        @test Array(T.attention(device((q, k, v))...; causal = true)) ≈ T.attention(q, k, v; causal = true)
+        seed = Int32[7]
+        @test Array(T.dropout(CuArray(x), CuArray(seed); rate = 0.25)) == T.dropout(x, seed; rate = 0.25)
         close(a, b; rtol) = all(map((x, y) -> isapprox(ndims(x) == 0 ? Array(x)[] : Array(x), y; rtol), a, b))
         # Full precision keeps the reference; TF32 takes the kernels.
         p = trace(residual, q, k, v, x)
