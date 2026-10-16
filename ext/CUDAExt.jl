@@ -64,17 +64,17 @@ function floor_function(@nospecialize(f), @nospecialize(args), n)
         fun = CUDACore.link_kernel(image, entry, CUDACore.GPUCompiler.Relocations())
         return fun, CUDACore.create_exceptions!(fun.mod)
     end
-    Base.invokelatest(f, args, n) do f, args, n
-        kernel = CUDACore.@cuda(launch = false, f(args, n))
+    compiled = Tempest.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
         job = CUDACore.CompilerJob(CUDACore.methodinstance(typeof(f), tt), CUDACore.compiler_config(device))
-        compiled = CUDACore.compile_or_lookup(job)
-        if isempty(compiled.relocations.records)
-            Tempest.store_kernel(key, compiled.entry, compiled.image)
-        else
-            Threads.atomic_add!(Tempest.CACHE_COUNTS.compiled, 1)
-        end
-        kernel.fun, kernel.state.exception_info
+        Base.@lock CUDACore.cufunction_lock CUDACore.compile_or_lookup(job)
+    end)
+    if isempty(compiled.relocations.records)
+        Tempest.store_kernel(key, compiled.entry, compiled.image)
+    else
+        Threads.atomic_add!(Tempest.CACHE_COUNTS.compiled, 1)
     end
+    fun = CUDACore.link_kernel(compiled.image, compiled.entry, compiled.relocations)
+    fun, CUDACore.create_exceptions!(fun.mod)
 end
 
 """

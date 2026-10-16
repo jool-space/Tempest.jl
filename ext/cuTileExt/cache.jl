@@ -21,7 +21,7 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     key = Tempest.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
         ct.tileiras_version(), ct.bytecode_version(), ENTRY)
     found = Tempest.load_kernel(key)
-    entry, cubin = found !== nothing ? found : Base.invokelatest(f, tt) do f, tt
+    entry, cubin = found !== nothing ? found : Tempest.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
         argtypes, constants = ct.unwrap_argtypes(f, tt)
         job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
             name = ENTRY, alias_groups = groups)
@@ -33,7 +33,7 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
             rethrow()
         end
         Tempest.store_kernel(key, ENTRY, cubin)
-    end
+    end)
     CuFunction(CuModule(cubin), entry)
 end
 

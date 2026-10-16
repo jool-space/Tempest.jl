@@ -151,18 +151,31 @@ task_state(target) = () -> nothing
 """
     concurrently(f, xs, target) -> results
 
-`f` of each of `xs`, in tasks that run at once, each in the calling task's
-state on `target`. Kernels compile this way, a group or a kernel per task.
+`f` of each of `xs`, in tasks that take turns on the calling thread, each in
+the calling task's state on `target`. Groups and kernels are built this way:
+while one task waits for a compilation running `elsewhere`, the others start
+theirs. Device objects are made on the calling thread, so at exit they are
+finalized after what the caller made from them later (a module unloaded before
+a captured graph that launches it crashes the driver).
 """
 function concurrently(f, xs, target)
     enter = task_state(target)
-    tasks = [Threads.@spawn((enter(); f(x))) for x in xs]
-    map(tasks) do t
-        try
-            fetch(t)
-        catch err
-            err isa TaskFailedException ? throw(err.task.exception) : rethrow()
-        end
+    map(fetch_result, [@async((enter(); f(x))) for x in xs])
+end
+
+"""
+    elsewhere(f) -> f()
+
+Run `f` on another thread, if there is one, and wait for it while the calling
+thread's other tasks run. For compilation, which makes no device objects.
+"""
+elsewhere(f) = fetch_result(Threads.@spawn f())
+
+function fetch_result(t::Task)
+    try
+        fetch(t)
+    catch err
+        err isa TaskFailedException ? throw(err.task.exception) : rethrow()
     end
 end
 
