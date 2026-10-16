@@ -155,7 +155,12 @@ function attention_dq_kernel(dq, q, k, v, lse, delta, dout, scale::Float32, D::I
     return
 end
 
-function Tempest.claims_call(::CuTileAttention, ::CUDATarget, f, kwargs, inputs)
+# Claimed only under TF32: with full Float32 tile products the forward kernel
+# took 8.65 ms on GB10 at d=64, 12 heads, T=256, B=16, causal, against 2.13 ms
+# for today's composed form on cuBLAS. The kernels keep the full-precision
+# variant behind their `tf32` flag for when a cost model can choose it.
+function Tempest.claims_call(::CuTileAttention, target::CUDATarget, f, kwargs, inputs)
+    target.matmul_precision === :tf32 || return false
     f in (Tempest.attention_forward, Tempest.attention_backward) || return false
     (qd, qt), (kd, kt), (vd, vt) = inputs[1], inputs[2], inputs[3]
     qt === kt === vt === Float32 || return false
