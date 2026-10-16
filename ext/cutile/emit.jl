@@ -183,6 +183,27 @@ function direct_state!(st, f, A, x, valid, dims)
     names
 end
 
+# Merge partial state `parts` into accumulators of the same shape.
+function combine_states!(st, f, A, acc, parts)
+    if f isa Tempest.SumFold
+        push!(st, :($(acc[1]) = $(acc[1]) .+ $(parts[1])))
+    elseif f isa Tempest.MaxFold
+        push!(st, :($(acc[1]) = max.($(acc[1]), $(parts[1]))))
+    elseif f isa Tempest.MinFold
+        push!(st, :($(acc[1]) = min.($(acc[1]), $(parts[1]))))
+    elseif f isa Tempest.ProdFold
+        push!(st, :($(acc[1]) = $(acc[1]) .* $(parts[1])))
+    else
+        m, s = acc
+        pm, ps = parts
+        top, sh = gensym(:top), gensym(:shift)
+        push!(st, :($top = max.($m, $pm)))
+        push!(st, :($sh = $SHIFT.($top)))
+        push!(st, :($s = $s .* exp.($m .- $sh) .+ $ps .* exp.($pm .- $sh)))
+        push!(st, :($m = $top))
+    end
+end
+
 function observe!(st, f, A, T, state)
     name = gensym(:stat)
     value = f isa Tempest.LogSumExpFold ? :($SHIFT.($(state[1])) .+ log.($(state[2]))) : state[1]
@@ -239,9 +260,25 @@ function statistic_buffer(c::Context, r, workspaces)
     key
 end
 
-function reduction_phases(g::Group)
-    phases = sort!(unique(g.phase[r] for r in g.reductions))
-    [[r for r in g.reductions if g.phase[r] == p] for p in phases]
+# Folds over the swept axes, completed by the schedule before what reads them,
+# in phases; and folds over other axes, completed by merging partial states.
+primary_folds(c::Context) = [r for r in c.g.reductions if Tempest.primary(c.graph, c.g, r)]
+partial_folds(c::Context) = [r for r in c.g.reductions if !Tempest.primary(c.graph, c.g, r)]
+
+function reduction_phases(c::Context)
+    folds = primary_folds(c)
+    phases = sort!(unique(c.g.phase[r] for r in folds))
+    [[r for r in folds if c.g.phase[r] == p] for p in phases]
+end
+
+"The collapsed axes fold `r` reduces: 1, 2 or (1, 2)."
+fold_dims(c::Context, r) = collapsed_reduce(c.axes[1], c.axes[2], Tempest.fold_axes(c.graph, r))
+
+"The collapsed axis fold `r` keeps (0 for none), and its extent."
+function fold_kept(c::Context, r)
+    d = fold_dims(c, r)
+    q = d == (1, 2) ? 0 : 3 - d
+    (q, q == 0 ? 1 : c.s.extent[q])
 end
 
 statistic_outputs(c::Context) = [m for m in c.g.outputs if c.graph.values[m].dims != c.g.domain]

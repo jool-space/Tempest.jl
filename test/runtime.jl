@@ -36,3 +36,37 @@ if CUDACore.functional()
         check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget(); rtol = 2.0e-4, precision = single)
     end
 end
+
+# Sizes that take several blocks: full reductions merge partial states, and
+# folds over other than the swept axes (the loss, a weight gradient) merge
+# theirs, under every sketch.
+rmsnorm32(x, w) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0f-5) .* w
+function layernorm32(x, w)
+    m = sum(x; dims = 1) ./ size(x, 1)
+    (x .- m) ./ sqrt.(sum(abs2, x .- m; dims = 1) ./ size(x, 1) .+ 1.0f-5) .* w
+end
+
+const LARGE = [
+    ("vector sum", x -> sum(abs2, x), (data(1 << 16),)),
+    ("dot product", (a, b) -> sum(a .* b), (data(1 << 16), data(1 << 16; scale = 0.3))),
+    ("matrix sum and shift", x -> sum(exp.(x .- maximum(x))), (data(512, 300),)),
+    ("RMSNorm training, resident", (x, w) -> sum(abs2, rmsnorm32(x, w)), (data(256, 700), data(256; scale = 0.1))),
+    ("softmax training, resident", (x, t) -> sum(softmax_columns(x) .* t), (data(256, 700), data(256, 700; scale = 0.7))),
+    ("softmax training, streamed", (x, t) -> sum(softmax_columns(x) .* t), (data(9000, 40), data(9000, 40; scale = 0.7))),
+    ("row softmax training, split", (x, t) -> sum(softmax_rows(x) .* t), (data(100, 3000), data(100, 3000; scale = 0.7))),
+    ("layer norm training", (x, w) -> sum(abs2, layernorm32(x, w)), (data(256, 700), data(256; scale = 0.1))),
+]
+
+if CUDACore.functional()
+    @testset "several blocks with cuTile, Float32" begin
+        @testset "$name" for (name, f, args) in LARGE
+            args = map(single, args)
+            for p in (trace(f, args...), differentiate(trace(f, args...)))
+                reference = T.leaves(interpret(p, args...))
+                ex = prepare(p, map(x -> x isa AbstractArray ? CuArray(x) : x, args)...)
+                @test all(d -> !(d isa T.FloorKernels), ex.kernels)
+                @test agree(T.leaves(execute!(ex)), reference; rtol = 2.0e-3)
+            end
+        end
+    end
+end

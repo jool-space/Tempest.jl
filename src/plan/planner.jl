@@ -1,45 +1,39 @@
 # The decision procedure: which values are stored, which are recomputed inside
 # their readers, and how the work groups into kernels.
 #
-# A kernel computes a group over one domain. A reduction group's domain is the
-# iteration domain of its reductions: it holds reductions over the same axes,
-# later ones reading earlier ones at the group's position along the kept axes
-# (phases), and pointwise outputs that read those reductions there.
-#
-# A group may also hold cross reductions: reductions over the same domain but
-# other axes (all of them, or exactly the axes the group keeps). They run with
-# the outputs, after every phase, and no other member reads them: each block of
-# a kernel reduces what it covers into partial states, and a second launch
-# merges them. Their operands, often values the group already computes, are
-# never written.
+# A kernel computes a group: maps and folds over one shared index domain. Each
+# fold reduces its own set of the domain's axes; a fold's value sits at the
+# domain's index with its reduced axes at zero. Folds over the group's first
+# set of axes (its primary axes) can be read by later members at that
+# position: a schedule completes them before what follows (phases). A fold
+# over other axes is completed by merging partial states, so within the group
+# nothing reads it; its operand, often a value the group already computes, is
+# never written. Which axes a schedule sweeps, and which folds it completes in
+# a block and which by merging partial states, is the schedule's choice.
 
 struct Group
     kind::Symbol # :reduction, :pointwise, :contraction or :opaque
     domain::Tuple{Vararg{Int}}
-    reduced::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
-    cross::Vector{Int}
     terms::Dict{Int, Term}
     phase::Dict{Int, Int}
 end
 
-Group(kind, domain, reduced = ()) =
-    Group(kind, domain, reduced, Int[], Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}())
+Group(kind, domain) = Group(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}())
 
-members(g::Group) = [g.reductions; g.outputs; g.cross]
+members(g::Group) = [g.reductions; g.outputs]
 
-# The axes a cross reduction of group `g` may reduce: all of the domain, or
-# exactly the axes the group keeps. The group's own reduced axes must be a
-# leading or trailing run, and must not be all of them.
-function cross_axes(g::Group, reduced)
-    r = length(g.domain)
-    R = collect(g.reduced)
-    (isempty(R) || length(R) == r) && return false
-    (R == collect(1:length(R)) || R == collect((r - length(R) + 1):r)) || return false
-    S = collect(reduced)
-    S == collect(1:r) || S == setdiff(1:r, R)
-end
+"The axes a fold reduces."
+fold_axes(graph, r) = graph.values[r].definition.reduced
+
+"The axes of the group's first fold: folds over them can be read within the group."
+primary_axes(graph, g::Group) = isempty(g.reductions) ? () : fold_axes(graph, first(g.reductions))
+
+kept_dims(domain, axes) = ntuple(k -> k in axes ? 1 : domain[k], length(domain))
+
+"Whether fold `r` reduces the group's primary axes."
+primary(graph, g::Group, r) = fold_axes(graph, r) == primary_axes(graph, g)
 
 struct Plan
     graph::IndexGraph
@@ -48,15 +42,14 @@ struct Plan
     owner::Vector{Int}
 end
 
-# Where a group keeps a value it computes: a full-domain value at every index,
-# a reduction (or a value shaped like one) at the position along the kept axes.
+# Where a group keeps a value it computes: at the domain's index with each axis
+# the value lacks (extent one) at zero. A fold lacks its reduced axes.
 function placement(graph, g::Group, v)
     val = graph.values[v]
     (val.scalar || isempty(val.dims)) && return ()
-    val.dims == g.domain && return identity_index(g.domain)
-    kept = ntuple(k -> k in g.reduced ? 1 : g.domain[k], length(g.domain))
-    val.dims == kept && return identity_index(kept)
-    nothing
+    length(val.dims) == length(g.domain) || return nothing
+    all(k -> val.dims[k] == g.domain[k] || val.dims[k] == 1, eachindex(val.dims)) || return nothing
+    identity_index(val.dims)
 end
 
 struct OutsideGroup <: Exception end
@@ -66,7 +59,7 @@ function value_term(graph, stored, g::Group, v, index)
     val = graph.values[v]
     d = val.definition
     if v in g.reductions
-        index == placement(graph, g, v) || throw(OutsideGroup())
+        primary(graph, g, v) && index == placement(graph, g, v) || throw(OutsideGroup())
         return Stat(v)
     end
     if v in g.outputs
@@ -111,19 +104,21 @@ function ancestors(graph)
     up
 end
 
-# Try to add a member to a group: a reduction over the group's axes, an output,
-# or a cross reduction. Its term must stay inside the group's domain, nothing it
-# loads may depend on the group, and no member may already load it.
-function try_add!(graph, stored, up, g::Group, v; kind)
+# Try to add a fold or an output to a group. Its term must stay inside the
+# group's domain, nothing it loads may depend on the group, and no member may
+# already load it.
+function try_add!(graph, stored, up, g::Group, v; fold)
     val = graph.values[v]
-    reduces = kind in (:reduction, :cross)
-    index = reduces ? identity_index(g.domain) : placement(graph, g, v)
+    index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
+    # An output covers the domain, or the positions of the primary folds.
+    fold || val.dims == g.domain || val.dims == kept_dims(g.domain, primary_axes(graph, g)) ||
+        (val.scalar && length(primary_axes(graph, g)) == length(g.domain)) || return false
     any(m -> any(l -> l.value == v, loads(g.terms[m])), members(g)) && return false
-    candidate = Group(g.kind, g.domain, g.reduced, copy(g.reductions), copy(g.outputs), copy(g.cross), copy(g.terms), copy(g.phase))
-    kind === :output && push!(candidate.outputs, v)
+    candidate = Group(g.kind, g.domain, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase))
+    fold || push!(candidate.outputs, v)
     t = try
-        reduces ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
+        fold ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
         value_term(graph, stored, candidate, v, index)
     catch e
         e isa OutsideGroup || rethrow()
@@ -133,13 +128,13 @@ function try_add!(graph, stored, up, g::Group, v; kind)
     for l in loads(t)
         (l.value in group || !isempty(intersect(up[l.value], group))) && return false
     end
-    # A member reads the group's reductions, or something the group reads.
+    # A member reads the group's folds, or something the group reads.
     shared = Set(l.value for m in members(g) for l in loads(g.terms[m]))
     connected = isempty(g.reductions) || !isempty(stats(t)) || any(l -> l.value in shared, loads(t))
     connected || return false
-    push!(kind === :reduction ? g.reductions : kind === :output ? g.outputs : g.cross, v)
+    push!(fold ? g.reductions : g.outputs, v)
     g.terms[v] = t
-    g.phase[v] = maximum(s -> g.phase[s], stats(t); init = 0) + (kind === :reduction ? 1 : 0)
+    g.phase[v] = maximum(s -> g.phase[s], stats(t); init = 0) + (fold ? 1 : 0)
     true
 end
 
@@ -194,29 +189,20 @@ function plan(graph::IndexGraph)
         live[id] && owner[id] == 0 || continue
         d = values[id].definition
         d isa Reduction || continue
-        g = Group(:reduction, d.iteration, d.reduced)
-        try_add!(graph, stored, up, g, id; kind = :reduction)
+        g = Group(:reduction, d.iteration)
+        try_add!(graph, stored, up, g, id; fold = true)
         changed = true
         while changed
             changed = false
             for other in (id + 1):n
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
-                if od isa Reduction && od.iteration == g.domain && od.reduced == g.reduced
-                    changed |= try_add!(graph, stored, up, g, other; kind = :reduction)
+                if od isa Reduction && od.iteration == g.domain
+                    changed |= try_add!(graph, stored, up, g, other; fold = true)
                 elseif od isa Pointwise && stored[other]
-                    changed |= try_add!(graph, stored, up, g, other; kind = :output)
+                    changed |= try_add!(graph, stored, up, g, other; fold = false)
                 end
             end
-        end
-        # Cross reductions come last: no other member reads them, and nothing
-        # they add lets more members in.
-        for other in (id + 1):n
-            live[other] && owner[other] == 0 && !(other in members(g)) || continue
-            od = values[other].definition
-            od isa Reduction && od.iteration == g.domain && od.reduced != g.reduced &&
-                cross_axes(g, od.reduced) || continue
-            try_add!(graph, stored, up, g, other; kind = :cross)
         end
         push!(groups, g)
         foreach(m -> owner[m] = length(groups), members(g))
@@ -251,10 +237,10 @@ function plan(graph::IndexGraph)
     for (k, g) in enumerate(groups), r in group_reads(graph, g)
         owner[r] != k && (external[r] = true)
     end
-    # The reductions a cross reduction reads stay stored: a realization that
-    # computes it in a launch of its own loads them.
-    for g in groups, c in g.cross, s in stats(g.terms[c])
-        external[s] = true
+    # The folds a fold over other than the primary axes reads stay stored: a
+    # realization that completes it in a launch of its own loads them.
+    for g in groups, r in g.reductions, s in stats(g.terms[r])
+        primary(graph, g, r) || (external[s] = true)
     end
     for g in groups
         g.kind === :reduction || continue

@@ -100,7 +100,18 @@ function main(path = nothing)
     path === nothing || write(path, join(rows, '\n') * '\n')
 end
 
-if isempty(ARGS) || ARGS[1] != "--case"
+if !isempty(ARGS) && ARGS[1] == "--cases"
+    # Several cases in one process, each timed `repeats` times: for comparing
+    # builds case by case.
+    repeats = parse(Int, get(ARGS, 3, "5"))
+    for name in split(ARGS[2], '|')
+        (_, f, args) = only(filter(c -> c[1] == name, [CASES; TRAINING]))
+        p = name in map(first, TRAINING) ? differentiate(trace(f, args...)) : trace(f, args...)
+        ex = prepare(p, map(a -> CuArray(a), args)...)
+        times = [device_microseconds(ex) for _ in 1:repeats]
+        println(rpad(name, 44), " min ", round(minimum(times); digits = 1), "  all ", join(round.(times; digits = 1), ", "))
+    end
+elseif isempty(ARGS) || ARGS[1] != "--case"
     main(get(ARGS, 1, nothing))
 else
     name = ARGS[2]

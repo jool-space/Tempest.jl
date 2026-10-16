@@ -100,12 +100,15 @@ function scalar_kernel(graph, stored, g::Group, slots)
         return ScalarKernel(slots, prod(D; init = 1), body)
     end
     g.kind === :contraction && return contraction_kernel(graph, g, slots, c)
-    kept = [k for k in 1:length(D) if !(k in g.reduced)]
-    reduced = collect(g.reduced)
+    # Items are the positions of the primary folds; other folds get launches of
+    # their own (`fold_kernel`).
+    reduced = collect(primary_axes(graph, g))
+    kept = [k for k in 1:length(D) if !(k in reduced)]
+    folds = [r for r in g.reductions if primary(graph, g, r)]
     delinearize_expr(s, :lin, kept, D, vars)
     count = prod(k -> D[k], reduced; init = 1)
-    for phase in sort!(unique(g.phase[r] for r in g.reductions))
-        phase_reductions = [r for r in g.reductions if g.phase[r] == phase]
+    for phase in sort!(unique(g.phase[r] for r in folds))
+        phase_reductions = [r for r in folds if g.phase[r] == phase]
         loop = Expr(:block)
         states = Dict{Int, Symbol}()
         for r in phase_reductions
@@ -131,7 +134,7 @@ function scalar_kernel(graph, stored, g::Group, slots)
     end
     # Reductions other kernels read, and outputs shaped like a reduction, once.
     foreach(k -> push!(s, :($(vars[k]) = 0)), reduced)
-    for r in g.reductions
+    for r in folds
         stored[r] && push!(s, store_expr(c, r, placement(graph, g, r), Symbol(:stat_, r)))
     end
     statistic_outputs = [m for m in g.outputs if graph.values[m].dims != D && !(m in g.reductions)]
@@ -160,9 +163,9 @@ stored_statistics(t::Stat, graph, g) = Load(t.value, placement(graph, g, t.value
 stored_statistics(t::Apply, graph, g) = Apply(t.f, map(a -> stored_statistics(a, graph, g), t.args), t.eltype)
 stored_statistics(t::Term, graph, g) = t
 
-# A cross reduction on the floor: one item per position of its kept axes,
-# sweeping its reduced axes and recomputing its operand.
-function cross_kernel(graph, g::Group, slots, r)
+# A fold the group's items do not cover, on the floor: one item per position of
+# its kept axes, sweeping its reduced axes and recomputing its operand.
+function fold_kernel(graph, g::Group, slots, r)
     D = g.domain
     vars = index_vars(length(D))
     c = EmitContext(graph, slots, vars, Domain(D))
@@ -190,9 +193,9 @@ function cross_kernel(graph, g::Group, slots, r)
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 
-"The floor's launches for a group: its kernel, then one per cross reduction."
+"The floor's launches for a group: its kernel, then one per fold over other axes."
 scalar_kernels(graph, stored, g::Group, slots) =
-    [scalar_kernel(graph, stored, g, slots); [cross_kernel(graph, g, slots, r) for r in g.cross]]
+    [scalar_kernel(graph, stored, g, slots); [fold_kernel(graph, g, slots, r) for r in g.reductions if !primary(graph, g, r)]]
 
 # A product, one output element per item, summing sequentially.
 function contraction_kernel(graph, g, slots, c)

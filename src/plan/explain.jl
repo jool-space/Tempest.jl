@@ -13,19 +13,13 @@ function explain(io::IO, p::Plan)
     for (k, g) in enumerate(p.groups)
         reads = sort!(collect(group_reads(graph, g)))
         print(io, "kernel ", k, ": ", g.kind, " over ", g.domain)
-        isempty(g.reduced) || print(io, ", reducing axes ", g.reduced)
         println(io, isempty(reads) ? "" : string(", reads ", join(map(r -> "%$r", reads), " ")))
         for r in sort(g.reductions; by = r -> (g.phase[r], r))
             println(io, "  phase ", g.phase[r], ": ", describe_value(graph, r), " = ",
-                fold_name(graph.values[r].definition.fold), " of ", g.terms[r])
+                fold_name(graph.values[r].definition.fold), " over axes ", fold_axes(graph, r), " of ", g.terms[r])
         end
         for m in g.outputs
             println(io, "  writes ", describe_value(graph, m), haskey(g.terms, m) ? string(" = ", g.terms[m]) : "")
-        end
-        for r in g.cross
-            d = graph.values[r].definition
-            println(io, "  across axes ", d.reduced, ": ", describe_value(graph, r), " = ",
-                fold_name(d.fold), " of ", g.terms[r])
         end
     end
 end

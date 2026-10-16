@@ -33,23 +33,30 @@ struct TileSchedule
     reduced::Int              # 0 none, 1 or 2 one axis, 3 both
     tile::Tuple{Int, Int}
     splits::Int               # blocks sharing one kept tile
+    chunk::Int                # kept tiles one block sweeps, one after another
     occupancy::Union{Nothing, Int}
 end
+
+TileSchedule(sketch, extent, reduced, tile, splits, occupancy) =
+    TileSchedule(sketch, extent, reduced, tile, splits, 1, occupancy)
+with_chunk(s::TileSchedule, chunk) = TileSchedule(s.sketch, s.extent, s.reduced, s.tile, s.splits, chunk, s.occupancy)
 
 function Base.show(io::IO, s::TileSchedule)
     print(io, s.sketch, " ", s.extent[1], "×", s.extent[2], ", tile ", s.tile[1], "×", s.tile[2])
     s.reduced in (1, 2) && print(io, ", reducing axis ", s.reduced)
     s.splits > 1 && print(io, ", split ", s.splits, " ways")
+    s.chunk > 1 && print(io, ", ", s.chunk, " kept tiles per block")
     s.occupancy === nothing || print(io, ", occupancy ", s.occupancy)
 end
 
 sweeps(s::TileSchedule) = s.reduced in (1, 2) ? cld(s.extent[s.reduced], s.tile[s.reduced]) : 1
 kept_tiles(s::TileSchedule) = s.reduced in (1, 2) ? cld(s.extent[3 - s.reduced], s.tile[3 - s.reduced]) : 1
 
-# Which axes of the group's domain collapse into A and B, and which is reduced.
-function collapse_axes(g::Group)
+# Which axes of the group's domain collapse into A and B, and which one the
+# schedule sweeps: the group's primary axes.
+function collapse_axes(graph, g::Group)
     r = length(g.domain)
-    R = collect(g.reduced)
+    R = collect(Tempest.primary_axes(graph, g))
     if g.kind === :pointwise
         return (1:min(r, 1), 2:r, 0)
     elseif R == collect(1:r)
@@ -104,11 +111,15 @@ const TILE_TYPES = Union{Float32, Float16, Core.BFloat16, Bool, Int32}
 # Whether the generator can express a group: tile-typed values, supported
 # folds, no positions or gathers, and every load and store a strided view.
 function expressible(graph, stored, g::Group)
-    collapse_axes(g) === nothing && return false
+    axes = collapse_axes(graph, g)
+    axes === nothing && return false
     for m in Tempest.members(g)
         val = graph.values[m]
         val.eltype <: TILE_TYPES || return false
-        m in g.reductions && !(val.definition.fold isa FOLDS) && return false
+        if m in g.reductions
+            val.definition.fold isa FOLDS || return false
+            collapsed_reduce(axes[1], axes[2], val.definition.reduced) === nothing && return false
+        end
         for t in Tempest.subterms((g.terms[m],))
             t isa Ix && return false
             t isa Apply && !(t.eltype <: TILE_TYPES) && return false
@@ -186,17 +197,35 @@ struct Claim
     axes::Tuple
 end
 
+# The collapsed axes a fold reduces (1, 2 or both), or nothing when its axes
+# are not whole collapsed groups.
+function collapsed_reduce(A, B, axes)
+    S = Set(axes)
+    # An empty group of axes (B of a vector) is reduced by any fold.
+    a = issubset(A, S)
+    b = issubset(B, S)
+    S == union(Set(a ? A : Int[]), Set(b ? B : Int[])) || return nothing
+    a && b ? (1, 2) : a ? 1 : b ? 2 : nothing
+end
+
+# Blocks aim for this many when a fold over other than the swept axis keeps an
+# axis: each block sweeps several kept tiles, so its partial states stay small.
+const PARTIAL_BLOCKS = 256
+
 function Tempest.claims(::Tempest.CuTileGenerator, p::Plan, g::Group)
     g.kind in (:pointwise, :reduction) || return Claim[]
-    isempty(g.cross) || return Claim[]
     expressible(p.graph, p.stored, g) || return Claim[]
-    A, B, reduced = collapse_axes(g)
+    A, B, reduced = collapse_axes(p.graph, g)
     extent = (prod(k -> g.domain[k], A; init = 1), prod(k -> g.domain[k], B; init = 1))
     max(extent...) < typemax(Int32) ÷ 2 || return Claim[]
     for m in Tempest.members(g), l in Tempest.loads(g.terms[m])
         view_of(p.graph, l.value, l.index, g, A, B) === nothing && return Claim[]
     end
-    [Claim(default_schedule(g, extent, reduced), (A, B))]
+    s = default_schedule(g, extent, reduced)
+    keeping = any(r -> !Tempest.primary(p.graph, g, r) &&
+        collapsed_reduce(A, B, Tempest.fold_axes(p.graph, r)) != (1, 2), g.reductions)
+    s.sketch === :resident && keeping && (s = with_chunk(s, max(1, cld(kept_tiles(s), PARTIAL_BLOCKS))))
+    [Claim(s, (A, B))]
 end
 
 include("cutile/emit.jl")
