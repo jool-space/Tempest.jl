@@ -84,8 +84,9 @@ const CASES = [
 
 mlp(x, w1, b1, w2, b2) = w2 * tanh.(w1 * x .+ b1) .+ b2
 gelu(x) = 0.5f0 * x * (1.0f0 + tanh(0.7978846f0 * (x + 0.044715f0 * x * x * x)))
-mlp_arguments = (guard_data(512, 1024), guard_data(2048, 512; scale = 0.01f0), guard_weight(2048),
-                 guard_data(512, 2048; scale = 0.02f0), guard_weight(512))
+# As in the earlier guard rails.
+mlp_arguments = (guard_data(512, 1024; scale = 0.5f0), 0.05f0 .* guard_data(2048, 512), guard_data(2048; scale = 0.1f0),
+                 0.05f0 .* guard_data(512, 2048; scale = 0.3f0), guard_data(512; scale = 0.2f0))
 
 const TRAINING = [
     ("MLP block training, 512→2048→512 × 1024", (x, w1, b1, w2, b2) -> sum(abs2, mlp(x, w1, b1, w2, b2)), mlp_arguments),

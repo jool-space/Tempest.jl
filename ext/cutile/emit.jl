@@ -8,30 +8,39 @@ struct ArgSpec
     strides::Tuple{Vararg{Int}}
 end
 
-# A view keeps only the tile axes it spans, so loads and stores have the shape
-# a hand-written kernel would give them; tiles are reshaped to the kernel's
-# tile axes in registers.
+# A view keeps only the tile axes it spans, in the order of their strides, so
+# loads and stores have the shape and order a hand-written kernel would give
+# them: the unit-stride axis first. Tiles are permuted and reshaped to the
+# kernel's tile axes in registers (a transposed operand is loaded in storage
+# order, then permuted).
 compact(spans, xs) = Tuple(x for (s, x) in zip(spans, xs) if s)
+storage_order(v) = sortperm(collect(compact(v.spans, v.strides)))
 
 function spec(v, extents)
     any(v.spans) || return ArgSpec(v.value, v.offset, (1,), (1,))
-    ArgSpec(v.value, v.offset, compact(v.spans, extents), compact(v.spans, v.strides))
+    order = storage_order(v)
+    ArgSpec(v.value, v.offset, compact(v.spans, extents)[order], compact(v.spans, v.strides)[order])
 end
 
-function load_nd(sym, spans, tiles, indices)
-    full = map((s, t) -> s ? t : 1, spans, tiles)
-    any(spans) || return :(reshape($(ct.load)($sym; index = (Int32(1),), shape = (1,)), $full))
-    shape, index = compact(spans, tiles), compact(spans, indices)
-    loaded = :($(ct.load)($sym; index = ($(index...),), shape = $shape, padding_mode = $(ct.PaddingMode.Zero)))
+function load_nd(sym, v, tiles, indices)
+    full = map((s, t) -> s ? t : 1, v.spans, tiles)
+    any(v.spans) || return :(reshape($(ct.load)($sym; index = (Int32(1),), shape = (1,)), $full))
+    order = storage_order(v)
+    shape, index = compact(v.spans, tiles), compact(v.spans, indices)
+    loaded = :($(ct.load)($sym; index = ($(index[order]...),), shape = $(shape[order]), padding_mode = $(ct.PaddingMode.Zero)))
+    order == 1:length(order) || (loaded = :(permutedims($loaded, $(Tuple(invperm(order))))))
     shape == full ? loaded : :(reshape($loaded, $full))
 end
 
-function store_nd(sym, spans, tiles, indices, value)
-    full = map((s, t) -> s ? t : 1, spans, tiles)
-    shape, index = any(spans) ? (compact(spans, tiles), compact(spans, indices)) : ((1,), (:(Int32(1)),))
+function store_nd(sym, v, tiles, indices, value)
+    full = map((s, t) -> s ? t : 1, v.spans, tiles)
     tile = :($(ct.broadcast_to)($value, $full))
+    any(v.spans) || return :($(ct.store)($sym; index = (Int32(1),), tile = reshape($tile, (1,))))
+    order = storage_order(v)
+    shape, index = compact(v.spans, tiles), compact(v.spans, indices)
     shape == full || (tile = :(reshape($tile, $shape)))
-    :($(ct.store)($sym; index = ($(index...),), tile = $tile))
+    order == 1:length(order) || (tile = :(permutedims($tile, $(Tuple(order)))))
+    :($(ct.store)($sym; index = ($(index[order]...),), tile = $tile))
 end
 
 struct Workspace
@@ -105,7 +114,7 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         name = gensym(:t)
         expr = if t isa Load
             v = view_of(c.graph, t.value, t.index, c.g, groups(c)...)
-            load_nd(argument!(k, value_spec(c, v)), v.spans, tile(c), indices)
+            load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices)
         elseif t isa Apply
             args = map(a -> names[a], t.args)
             t.f isa Tempest.Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
@@ -273,7 +282,7 @@ function store_values!(k, st, c, vs, names, indices...)
     for m in vs
         v = output_view(c, m)
         value = m in c.g.reductions ? names[Stat(m)] : names[c.g.terms[m]]
-        push!(st, store_nd(argument!(k, value_spec(c, v)), v.spans, tile(c), indices, value))
+        push!(st, store_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, value))
     end
 end
 
