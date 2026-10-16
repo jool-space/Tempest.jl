@@ -1,0 +1,12 @@
+name = "TempestSeed"
+uuid = "764c75ae-da20-4b0a-b983-46742decac95"
+version = "0.0.1"
+
+[deps]
+Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
+
+[sources]
+Tempest = {path = "../Tempest"}
+
+[compat]
+julia = "1.11"
