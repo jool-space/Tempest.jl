@@ -114,6 +114,41 @@ function Tempest.claims(::cuBLASProducts, target::CUDATarget, p::Plan, g::Group)
     [GemmClaim((oa[1], ob[1]), m, n, k, batch, operand(left, oa), operand(right, ob), operand(out, oc), T, R)]
 end
 
+# Product rates cuBLAS reaches, measured on known devices (the scratchpad's
+# rates.jl): Float32 in full, TF32, and half factors. Other devices scale
+# GB10's by SM count.
+const RATES = Dict("NVIDIA GB10" => (full = 17.0e12, tf32 = 38.0e12, half = 88.0e12))
+
+function product_rate(target::CUDATarget, T)
+    device = CUDACore.device()
+    r = get(RATES, CUDACore.name(device)) do
+        scale = CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT) / 48
+        map(x -> scale * x, RATES["NVIDIA GB10"])
+    end
+    T === Float32 ? (compute_type(target, T) == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? r.tf32 : r.full) : r.half
+end
+
+Tempest.estimate(::cuBLASProducts, c::GemmClaim, target, p::Plan, g::Group) =
+    [Tempest.Work(Tempest.group_bytes(p, g); flops = 2.0 * c.m * c.n * c.k * c.batch, rate = product_rate(target, c.factor))]
+
+Tempest.record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transposes..., " ", c.m, "×", c.n, "×", c.k,
+    c.batch > 1 ? " batch $(c.batch)" : "", " leading ", (c.a.leading, c.b.leading, c.c.leading), " ", c.factor, " to ", c.result)
+
+# Candidates: each product fold the generator groups with other work, alone,
+# so that its group is this claim's and the work after it a kernel of its own.
+function Tempest.candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
+    found = Vector{Int}[]
+    for g in p.groups
+        g.kind === :reduction && length(Tempest.members(g)) > 1 || continue
+        r = first(g.reductions)
+        t = g.terms[r]
+        p.graph.values[r].definition.fold isa Tempest.SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 || continue
+        all(f -> factor_load(f, p.graph) !== nothing, t.args) && Tempest.product_axes(p.graph, g) !== nothing || continue
+        push!(found, [r])
+    end
+    found
+end
+
 # One handle per context, its workspace and the device constants one and
 # zero, set up once: pointers to device constants, Float32 accumulation that
 # never reduces precision, and the precision of each call in its compute type.

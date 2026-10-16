@@ -91,12 +91,41 @@ if CUDACore.functional()
             rtol = eltype(args[1]) === Float32 ? (target.precision === :tf32 ? 1.0e-2 : 1.0e-5) : 2 * eps(eltype(args[1]))
             @test isapprox(Float32.(Array(only(T.leaves(execute!(ex))))), Float32.(interpret(p, args...)); rtol)
         end
-        # Work around the product stays with the generator.
+        # With work after the product, cuBLAS's candidate is the product
+        # alone, and the work after it a kernel of its own.
         w = Float32.(data(96; scale = 0.3))
-        ex = prepare(trace((a, b, w) -> tanh.(a * b .+ w), a, b, w), CuArray(a), CuArray(b), CuArray(w); target = T.CUDATarget(cuBLAS))
-        @test isempty(built(ex))
+        p = trace((a, b, w) -> tanh.(a * b .+ w), a, b, w)
+        ex = prepare(p, CuArray(a), CuArray(b), CuArray(w); target = T.CUDATarget(cuBLAS))
+        @test length(built(ex)) == 1 && length(ex.accepted) == 1 && length(ex.kernels) == 2
+        @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, a, b, w); rtol = 1.0e-5)
         ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
         @test isempty(built(ex))
+    end
+    @testset "choosing between claims" begin
+        # Half-precision products cuBLAS and cuTile both claim, close by
+        # estimate: measured at preparation and kept in the tuning record.
+        a, b = Float16.(data(1024, 256; scale = 0.1)), Float16.(data(256, 1024))
+        p = trace((a, b) -> a * b, a, b)
+        target = T.CUDATarget()
+        prepared() = prepare(p, CuArray(a), CuArray(b); target)
+        ex = prepared()
+        x = only(ex.decisions)
+        @test x.how === :measured && length(x.options) == 2
+        @test occursin("chosen by measurement", sprint(explain, ex))
+        path = T.record_path(target)
+        lines = readlines(path)
+        @test length(lines) >= 2
+        # Given the record, preparing again measures nothing and chooses alike.
+        again = prepared()
+        @test readlines(path) == lines && only(again.decisions).choice.key == x.choice.key
+        # A measurement overrides the estimate only beyond the noise margin.
+        rewrite(f) = write(path, join((string(k, '\t', f(k, parse(Float64, t))) for (k, t) in split.(lines, '\t')), '\n') * '\n')
+        other = only(o for o in x.options if o.key != x.choice.key)
+        rewrite((k, t) -> k == other.key ? 1.0e-7 : 1.0e-5)
+        @test only(prepared().decisions).choice.key == other.key
+        rewrite((k, t) -> 1.0e-5)
+        @test only(prepared().decisions).choice.key == first(x.options).key
+        @test isapprox(Array(only(T.leaves(execute!(prepared())))), interpret(p, a, b); rtol = 2 * eps(Float16))
     end
     @testset "implementation sets" begin
         w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))

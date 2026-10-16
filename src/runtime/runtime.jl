@@ -143,32 +143,43 @@ struct Executable{T <: Target}
     buffers::Vector{Any}
     launches::Vector{Any}
     kernels::Vector{Any}
+    decisions::Vector{Any}
+    accepted::Vector{Pair{Vector{Int}, Implementation}}
 end
 
 storage_length(v::Value) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
 
 """
-    prepare(program, inputs...; target) -> Executable
+    prepare(program, inputs...; target, measure = true) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
-`target`, chosen from the inputs' array types by default.
+`target`, chosen from the inputs' array types by default. Close calls between
+claims are timed when `measure` allows and the target can, and kept in the
+tuning record.
 """
-function prepare(program::Program, inputs...; target = default_target(inputs))
-    p = plan(lower(program;
+function prepare(program::Program, inputs...; target = default_target(inputs), measure::Bool = true)
+    graph = lower(program;
         keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
-        epilogue = (n, nodes) -> takes_epilogue(target, nodes, n)))
-    graph = p.graph
-    buffers = Vector{Any}(nothing, length(graph.values))
-    for (id, v) in enumerate(graph.values)
-        d = v.definition
-        if d isa ConstantArray
-            buffers[id] = upload(target, vec(collect(d.data)))
+        epilogue = (n, nodes) -> takes_epilogue(target, nodes, n))
+    d = Decider(target, graph; measure)
+    p, accepted = cover(d)
+    ds = decisions(d, p)
+    buffers = d.buffers
+    n = length(p.graph.values)
+    length(buffers) < n && append!(buffers, fill(nothing, n - length(buffers)))
+    for (id, v) in enumerate(p.graph.values)
+        def = v.definition
+        if def isa ConstantArray
+            buffers[id] === nothing && (buffers[id] = upload(target, vec(collect(def.data))))
         elseif p.stored[id]
-            buffers[id] = allocate(target, v.eltype, storage_length(v))
+            buffers[id] === nothing && (buffers[id] = allocate(target, v.eltype, storage_length(v)))
+        else
+            buffers[id] = nothing # stored only in a plan not taken
         end
     end
-    built = map(g -> build(target, p, g, buffers), p.groups)
-    ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built], Any[last(b) for b in built])
+    built = map((g, x) -> build_group(d, p, g, x, buffers), p.groups, ds)
+    ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built],
+        Any[last(b) for b in built], Any[ds...], accepted)
     bind!(ex, inputs...)
     ex
 end
@@ -196,10 +207,14 @@ function explain(io::IO, ex::Executable)
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
         "; half-precision products accumulate in Float32")
+    for (set, i) in ex.accepted
+        println(io, "candidate ", join(map(v -> "%$v", set), " "), " from ", nameof(typeof(i)), " replaces the generator's grouping")
+    end
     println(io, "implementations from ", isempty(ex.packages) ? "no package" : join(map(string ∘ nameof, ex.packages), ", "),
         ", and the floor:")
     for (k, d) in enumerate(ex.kernels)
-        println(io, "  kernel ", k, ": ", d)
+        x = ex.decisions[k]
+        println(io, "  kernel ", k, ": ", d, x === nothing ? "" : string(" (", x, ")"))
     end
 end
 
@@ -228,8 +243,7 @@ end
 
 Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, " items") for k in f.kernels), " then "))
 
-function build(target::CPUTarget, p::Plan, g::Group, buffers)
-    g.kind === :opaque && return build_opaque(target, p, g, buffers)
+function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
     ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
     launches = map(ks) do k
         f = Core.eval(Generated, :(function (buffers, n)
