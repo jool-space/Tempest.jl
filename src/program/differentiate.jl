@@ -221,5 +221,6 @@ function differentiate(p::Program)
         length(results)
     end
     gradients = rebuild(gradient, p.input_structure)
-    Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...))
+    # Rules may build what nothing reads, such as a constant operand's share.
+    prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...)))
 end

@@ -75,7 +75,8 @@ epilogue_results(::Implementation, f, kwargs) = ()
 
 Build the kernels of a claimed call: the group's opaque results, each written
 to its buffer or, where `group.epilogues` names a value, that value computed
-from the result's tile by the group's terms.
+from the result's tile by the group's terms. A result whose buffer is `nothing`
+is read by nobody and may be left unwritten.
 """
 function build_call end
 

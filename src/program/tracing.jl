@@ -443,5 +443,5 @@ function trace(f, args...)
         push!(results, id)
         length(results)
     end
-    Program(tape.nodes, arguments, results, input_structure, output_structure)
+    prune(Program(tape.nodes, arguments, results, input_structure, output_structure))
 end

@@ -27,6 +27,8 @@ const ATTENTION_TILE = 64
     reshape(ct.load(x; index = (Int32(1), head, block, batch), shape = (1, 1, M, 1)), (1, M))
 @inline store_head!(x, tile, head, block, batch, D, M) =
     ct.store(x; index = (Int32(1), head, block, batch), tile = reshape(tile, (D, 1, M, 1)))
+# A result nobody reads is passed as `nothing` and not stored.
+@inline store_head!(::Nothing, tile, head, block, batch, D, M) = nothing
 
 "An epilogue: a generated function of the output tile, its index, and the arrays it reads."
 struct Epilogue{F, A}
@@ -258,13 +260,15 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     if op.f === Tempest.attention_forward
         o, lse = outs
         epilogue, target_o = epilogue_for(p, g, o, buffers, (D, 1, ATTENTION_TILE, 1))
-        args = (tile_array(buffers[target_o], (D, H, T, B)), tile_array(buffers[lse], (1, H, T, B)),
-            arrays..., epilogue, s, constants...)
+        lse_array = buffers[lse] === nothing ? nothing : tile_array(buffers[lse], (1, H, T, B))
+        args = (tile_array(buffers[target_o], (D, H, T, B)), lse_array, arrays..., epilogue, s, constants...)
         kernel = compile(attention_forward_kernel, args)
         return (() -> kernel(args...; blocks = grid), BuiltAttention(op.f, !(epilogue isa NoEpilogue), tf32))
     end
     qa, ka, va, oa, lsea, douta, dlsea = arrays
-    dq, dk, dv = map(r -> tile_array(buffers[r], p.graph.values[r].dims), outs)
+    # The kernels write all three gradients; one nobody reads goes to scratch.
+    places = map(r -> something(buffers[r], CuArray{Float32}(undef, prod(p.graph.values[r].dims))), outs)
+    dq, dk, dv = map((r, b) -> tile_array(b, p.graph.values[r].dims), outs, places)
     workspace = CuArray{Float32}(undef, H * T * B)
     delta = tile_array(workspace, (1, H, T, B))
     delta_args = (delta, oa, douta, dlsea, ct.Constant(D), tile, ct.Constant(H))
@@ -276,7 +280,7 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
         kernels[1](delta_args...; blocks = grid)
         kernels[2](dkdv_args...; blocks = kv_grid)
         kernels[3](dq_args...; blocks = grid)
-        workspace
+        workspace, places
         nothing
     end
     (launch, BuiltAttention(op.f, false, tf32))

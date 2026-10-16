@@ -30,7 +30,10 @@ end
     @test issubset(full_domain_stored(softmax, g), results(softmax))
 
     norm = T.plan(T.lower(differentiate(trace((x, w) -> sum(abs2, rmsnorm(x, w)), data(8, 6), data(8; scale = 0.1)))))
-    g = only(filter(g -> g.kind === :reduction, norm.groups))
+    # The weight gradient, reshaped from (8, 1) to (8,), is the fold's own
+    # buffer: no copy.
+    @test length(norm.groups) == 1
+    g = only(norm.groups)
     @test Set(T.fold_axes(norm.graph, r) for r in g.reductions) == Set([(1,), (2,), (1, 2)])
     @test issubset(full_domain_stored(norm, g), results(norm))
     # Within the group nothing reads a fold over other than the primary axes.

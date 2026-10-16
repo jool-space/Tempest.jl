@@ -116,7 +116,7 @@ function expand_calls(p::Program, keep)
         end
         new[id] = record!(tape, op, map(i -> new[i], n.inputs), n.dims, n.eltype; scalar = n.scalar)
     end
-    Program(tape.nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure)
+    prune(Program(tape.nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure))
 end
 
 # One result of a call, through the reference.
