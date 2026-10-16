@@ -120,7 +120,7 @@ storage_length(v::Value) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default.
 """
-function prepare(program::Program, inputs...; target = default_target(inputs))
+function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs))
     p = plan(lower(program;
         keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
         epilogue = (n, nodes) -> takes_epilogue(target, nodes, n)))
@@ -141,7 +141,7 @@ function prepare(program::Program, inputs...; target = default_target(inputs))
 end
 
 "Copy `inputs` into the executable's input buffers."
-function bind!(ex::Executable, inputs...)
+function bind!(ex::Executable, @nospecialize(inputs...))
     arguments = leaves(inputs)
     for (id, v) in enumerate(ex.plan.graph.values)
         d = v.definition

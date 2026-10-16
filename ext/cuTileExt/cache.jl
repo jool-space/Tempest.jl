@@ -14,9 +14,9 @@ const ENTRY = "tempest_tile"
 The compiled kernel of `f` for the converted arguments `args`, from the cache
 or compiled through cuTile and kept.
 """
-function tile_function(f, args; occupancy = nothing)
+function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothing)
     tt = Tuple{map(Core.Typeof, args)...}
-    groups = ct.alias_groups(args...)
+    groups = alias_groups(args)
     arch = ct.device_sm_arch()
     key = Tempest.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
         ct.tileiras_version(), ct.bytecode_version(), ENTRY)
@@ -25,15 +25,54 @@ function tile_function(f, args; occupancy = nothing)
         argtypes, constants = ct.unwrap_argtypes(f, tt)
         job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
             name = ENTRY, alias_groups = groups)
-        Tempest.store_kernel(key, ENTRY, ct.invoke_frozen(ct.compile_or_lookup, job).cubin)
+        cubin = try
+            ct.invoke_frozen(ct.compile_or_lookup, job).cubin
+        catch err
+            # A kernel cuTile cannot express fails the same way next time.
+            err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.store_failure(key, sprint(showerror, err))
+            rethrow()
+        end
+        Tempest.store_kernel(key, ENTRY, cubin)
     end
     CuFunction(CuModule(cubin), entry)
+end
+
+# The groups of arrays among `args` whose memory overlaps, as cuTile's
+# `alias_groups` finds them, without compiling a generated function for each
+# kernel's argument types.
+function alias_groups(args)
+    leaves = ct.array_leaves(map(Core.Typeof, args))
+    ranges = map(((n, path),) -> memory_range(foldl(getfield, path; init = args[n - 1])), leaves)
+    labels = collect(eachindex(ranges))
+    changed = true
+    while changed
+        changed = false
+        for i in eachindex(ranges), j in (i + 1):lastindex(ranges)
+            if labels[i] != labels[j] && ct.overlaps(ranges[i], ranges[j])
+                labels[i] = labels[j] = min(labels[i], labels[j])
+                changed = true
+            end
+        end
+    end
+    ct.labels_to_groups(Tuple(map(l -> count(==(l), labels) > 1 ? l : 0, labels)), leaves)
+end
+
+# The bytes an array can reach, `[lo, hi)`; empty for an empty array.
+function memory_range(@nospecialize(a))
+    lo = hi = reinterpret(Int, a.ptr)
+    for d in eachindex(a.sizes)
+        n = Int(a.sizes[d])
+        n == 0 && return (0, 0)
+        extent = (n - 1) * Int(a.strides[d]) * sizeof(eltype(typeof(a.ptr)))
+        extent < 0 ? (lo += extent) : (hi += extent)
+    end
+    (lo, hi + sizeof(eltype(typeof(a.ptr))))
 end
 
 # The parameters of a value, in the order of cuTile's code generation: an
 # array's pointer, sizes and strides; nothing for a ghost; a primitive as is;
 # any other struct field by field.
-function flatten!(out, x)
+function flatten!(out, @nospecialize(x))
     T = typeof(x)
     if x isa ct.TileArray
         push!(out, x.ptr, x.sizes..., x.strides...)
@@ -55,7 +94,7 @@ struct TileLaunch
     grid::NTuple{3, Int}
 end
 
-function TileLaunch(fun::CuFunction, f, args, grid)
+function TileLaunch(fun::CuFunction, @nospecialize(f), @nospecialize(args), grid)
     any(>(ct.MAX_GRID_DIM), grid) && error("grid $grid exceeds Tile IR's 24-bit limit")
     # The kernel function's captured values come first, the seed of cuTile's
     # kernel state last.
@@ -78,4 +117,4 @@ function (l::TileLaunch)()
 end
 
 "Compile (or load) `f` for `args` and return its launch on `grid`."
-tile_launch(f, args, grid; occupancy = nothing) = TileLaunch(tile_function(f, args; occupancy), f, args, grid)
+tile_launch(@nospecialize(f), @nospecialize(args), grid; occupancy = nothing) = TileLaunch(tile_function(f, args; occupancy), f, args, grid)

@@ -24,7 +24,7 @@ function kernel_cache()
     dir in ("", "0") ? nothing : dir
 end
 
-"Kernels loaded from the cache and kernels compiled, in this session."
+"Kernels loaded from the cache and kernels compiled (or failed to), in this session."
 const CACHE_COUNTS = (loaded = Threads.Atomic{Int}(0), compiled = Threads.Atomic{Int}(0))
 
 cache_counts() = (loaded = CACHE_COUNTS.loaded[], compiled = CACHE_COUNTS.compiled[])
@@ -34,7 +34,8 @@ entry_path(dir, key) = joinpath(dir, key[1:2], key)
 """
     load_kernel(key) -> (entry, binary) or nothing
 
-The cached kernel under `key`, if there is one.
+The cached kernel under `key`, if there is one. A kernel that failed to compile
+fails again, with the compiler's message.
 """
 function load_kernel(key)
     dir = kernel_cache()
@@ -49,6 +50,7 @@ function load_kernel(key)
     end
     n = Int(only(reinterpret(UInt32, bytes[1:4])))
     Threads.atomic_add!(CACHE_COUNTS.loaded, 1)
+    n == 0 && error("this kernel failed to compile before:\n", String(bytes[5:end]))
     (String(bytes[5:(4 + n)]), bytes[(5 + n):end])
 end
 
@@ -61,8 +63,19 @@ entry.
 """
 function store_kernel(key, entry::String, binary::Vector{UInt8})
     Threads.atomic_add!(CACHE_COUNTS.compiled, 1)
+    write_entry(key, entry, binary)
+    (entry, binary)
+end
+
+"Count a kernel that failed to compile and keep the compiler's message."
+function store_failure(key, message::String)
+    Threads.atomic_add!(CACHE_COUNTS.compiled, 1)
+    write_entry(key, "", Vector{UInt8}(message))
+end
+
+function write_entry(key, entry, binary)
     dir = kernel_cache()
-    dir === nothing && return (entry, binary)
+    dir === nothing && return
     path = entry_path(dir, key)
     try
         mkpath(dirname(path))
@@ -72,7 +85,6 @@ function store_kernel(key, entry::String, binary::Vector{UInt8})
     catch err
         @debug "could not write a kernel cache entry" path exception = err
     end
-    (entry, binary)
 end
 
 # Generated functions, by type, with the source that defined them: in a key a
@@ -144,7 +156,7 @@ end
 
 canonical(c::Canonical, ::LineNumberNode) = nothing
 canonical(c::Canonical, q::QuoteNode) = (print(c.io, "(quote "); canonical(c, q.value); print(c.io, ")"))
-canonical(c::Canonical, x::Union{Number, Char, AbstractString, Nothing, Missing}) = print(c.io, typeof(x), "(", repr(x), ")")
+canonical(c::Canonical, @nospecialize(x::Union{Number, Char, AbstractString, Nothing, Missing})) = print(c.io, typeof(x), "(", repr(x), ")")
 canonical(c::Canonical, m::Module) = (push!(c.roots, Base.moduleroot(m)); print(c.io, "module ", join(fullname(m), ".")))
 
 function canonical(c::Canonical, g::GlobalRef)
@@ -158,7 +170,7 @@ function canonical(c::Canonical, g::GlobalRef)
     end
 end
 
-function canonical(c::Canonical, x::Array)
+function canonical(c::Canonical, @nospecialize(x::Array))
     print(c.io, "array ")
     canonical(c, typeof(x))
     print(c.io, size(x))
@@ -169,13 +181,13 @@ function canonical(c::Canonical, x::Array)
     end
 end
 
-function canonical(c::Canonical, T::Type)
+function canonical(c::Canonical, @nospecialize(T::Type))
     print(c.io, "type ")
     canonical_type(c, T)
 end
 
 # Any other value: its type, then its fields.
-function canonical(c::Canonical, x)
+function canonical(c::Canonical, @nospecialize(x))
     T = typeof(x)
     canonical_type(c, T)
     Base.issingletontype(T) && return
@@ -191,7 +203,7 @@ function canonical(c::Canonical, x)
     print(c.io, ")")
 end
 
-function canonical_type(c::Canonical, T::DataType)
+function canonical_type(c::Canonical, @nospecialize(T::DataType))
     source = generated_source(T)
     if source !== nothing
         print(c.io, "generated ")
@@ -214,13 +226,13 @@ function canonical_type(c::Canonical, T::DataType)
     identified(m) || T in c.seen || canonical_definition(c, T)
 end
 
-function canonical_type(c::Canonical, T::Union)
+function canonical_type(c::Canonical, @nospecialize(T::Union))
     print(c.io, "Union{")
     foreach(S -> (canonical_type(c, S); print(c.io, ", ")), Base.uniontypes(T))
     print(c.io, "}")
 end
 
-function canonical_type(c::Canonical, T::UnionAll)
+function canonical_type(c::Canonical, @nospecialize(T::UnionAll))
     print(c.io, "where ", T.var.name, " <: ")
     canonical_type(c, T.var.ub)
     print(c.io, " ")
@@ -230,7 +242,7 @@ end
 canonical_type(c::Canonical, v::TypeVar) = print(c.io, "var ", v.name)
 canonical_type(c::Canonical, ::Core.TypeofBottom) = print(c.io, "Union{}")
 
-function canonical_definition(c::Canonical, T::DataType)
+function canonical_definition(c::Canonical, @nospecialize(T::DataType))
     push!(c.seen, T)
     print(c.io, " defined as [")
     if isstructtype(T)

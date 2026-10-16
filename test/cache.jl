@@ -42,6 +42,11 @@ if CUDACore.functional()
             cuTile.flatten_params!(expressions, types, typeof(argument), :argument)
             @test map(typeof, ext.flatten!(Any[], argument)) == types
         end
+        # So are the groups of arrays that overlap.
+        whole, part, other = ext.tile_array(y, (16, 8)), cuTile.TileArray(view(y, :, 3:4)), ext.tile_array(CuArray{Float32}(undef, 4), (4,))
+        for arguments in ((whole, other), (whole, other, part), (other, epilogue, whole), ())
+            @test ext.alias_groups(arguments) == cuTile.alias_groups(arguments...)
+        end
 
         previous = get(ENV, "TEMPEST_KERNEL_CACHE", nothing)
         ENV["TEMPEST_KERNEL_CACHE"] = mktempdir()
