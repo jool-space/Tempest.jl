@@ -151,3 +151,30 @@ function live(nodes, results)
     end
     keep
 end
+
+"""
+    prune(program) -> Program
+
+The program without the nodes its results do not read. Arguments stay, and a
+call keeps all its results when any of them is read.
+"""
+function prune(p::Program)
+    keep = live(p.nodes, p.results)
+    foreach(a -> keep[a] = true, p.arguments)
+    for (id, n) in enumerate(p.nodes)
+        n.op isa Call && keep[id] && foreach(r -> keep[r] = true, results_of(p.nodes, n.op.instance))
+    end
+    all(keep) && return p
+    new = zeros(Int, length(p.nodes))
+    nodes = Node[]
+    for (id, n) in enumerate(p.nodes)
+        keep[id] || continue
+        op = n.op
+        if op isa Call
+            op = Call(op.f, op.kwargs, op.output, op.instance == id ? length(nodes) + 1 : new[op.instance], op.structure)
+        end
+        push!(nodes, Node(op, map(i -> new[i], n.inputs), n.dims, n.eltype, n.scalar))
+        new[id] = length(nodes)
+    end
+    Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure)
+end
