@@ -115,9 +115,10 @@ function try_add!(graph, stored, up, g::Group, v; fold)
     val = graph.values[v]
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    # An output covers the domain, or the positions of the primary folds.
-    fold || val.dims == g.domain || val.dims == kept_dims(g.domain, primary_axes(graph, g)) ||
-        (val.scalar && length(primary_axes(graph, g)) == length(g.domain)) || return false
+    # An output covers the domain, or the positions of the primary folds
+    # (missing trailing axes read as extent one).
+    padded = ntuple(k -> get(val.dims, k, 1), length(g.domain))
+    fold || padded == g.domain || padded == kept_dims(g.domain, primary_axes(graph, g)) || return false
     any(m -> any(l -> l.value == v, loads(g.terms[m])), members(g)) && return false
     candidate = Group(g.kind, g.domain, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase))
     fold || push!(candidate.outputs, v)
