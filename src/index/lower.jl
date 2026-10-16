@@ -19,7 +19,9 @@ struct IndexAccess <: Access
     eltype::DataType
 end
 
-identity_index(dims) = ntuple(var, length(dims))
+# Each variable of a domain, read as itself; an axis of extent one reads zero,
+# the canonical form of its only index.
+identity_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
 
 # Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
 # broadcasts: axes of extent one, and missing trailing axes, read index zero.

@@ -35,7 +35,7 @@ function placement(graph, g::Group, v)
     (val.scalar || isempty(val.dims)) && return ()
     val.dims == g.domain && return identity_index(g.domain)
     kept = ntuple(k -> k in g.reduced ? 1 : g.domain[k], length(g.domain))
-    val.dims == kept && return ntuple(k -> k in g.reduced ? constant(0) : var(k), length(g.domain))
+    val.dims == kept && return identity_index(kept)
     nothing
 end
 

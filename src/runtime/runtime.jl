@@ -5,6 +5,9 @@ abstract type Target end
 "Run on the CPU, through the same generated floor code CUDA runs."
 struct CPUTarget <: Target end
 
+"Run on an NVIDIA GPU; needs CUDACore loaded."
+struct CUDATarget <: Target end
+
 target_for(x::AbstractArray) = CPUTarget()
 target_for(x) = nothing
 
@@ -18,6 +21,23 @@ end
 
 # Generated kernels live here.
 module Generated end
+
+"""
+An implementation realizes kernels. `claims(implementation, plan, group)`
+returns the ways it can realize a group (empty when it cannot), and
+`build_claim(implementation, claim, plan, group, buffers)` returns a launch and
+a description. A target's floor realizes any group.
+"""
+abstract type Implementation end
+
+"cuTile's generator; active when cuTile is loaded."
+struct CuTileGenerator <: Implementation end
+
+claims(::Implementation, plan, group) = ()
+function build_claim end
+
+"Implementations offered before the floor, in order."
+const EXTRA_IMPLEMENTATIONS = Implementation[]
 
 """
     Executable
@@ -78,6 +98,16 @@ function execute!(ex::Executable)
     foreach(launch -> launch(), ex.launches)
     outputs(ex)
 end
+
+function explain(io::IO, ex::Executable)
+    explain(io, ex.plan)
+    println(io, "implementations:")
+    for (k, d) in enumerate(ex.kernels)
+        println(io, "  kernel ", k, ": ", d isa ScalarKernel ? "floor, $(d.items) items" : d)
+    end
+end
+
+explain(ex::Executable) = explain(stdout, ex)
 
 "The results, in the program's output structure, as arrays over the buffers."
 function outputs(ex::Executable)
