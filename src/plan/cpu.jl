@@ -14,7 +14,8 @@ evaluate_term(t::Ix{T}, x, k, buffers, stats, graph) where {T} =
 function evaluate_term(t::Stat, x, k, buffers, stats, graph)
     s = stats[t.value]
     s isa Number && return s
-    axes = graph.values[t.value].definition.reduced
+    d = graph.values[t.value].definition
+    axes = d isa Reduction ? d.reduced : ()
     s[ntuple(i -> i in axes ? 1 : x[i] + 1, length(x))...]
 end
 evaluate_term(t::Apply, x, k, buffers, stats, graph) =
