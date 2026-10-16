@@ -1,0 +1,166 @@
+# From the program level to the index level. Layout operations become
+# formulas; every other node becomes a value over its own domain.
+
+# How a program node is read: a value through a formula over the node's own
+# domain, a constant, or an integer computed from the index (positions).
+abstract type Access end
+
+struct ValueAccess <: Access
+    value::Int
+    index::Tuple{Vararg{Affine}}
+end
+
+struct LiteralAccess{T} <: Access
+    value::T
+end
+
+struct IndexAccess <: Access
+    expr::Affine
+    eltype::DataType
+end
+
+identity_index(dims) = ntuple(var, length(dims))
+
+# Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
+# broadcasts: axes of extent one, and missing trailing axes, read index zero.
+broadcast_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
+
+operand(a::ValueAccess, dims, reader::Domain) =
+    Read(a.value, map(e -> substitute(e, broadcast_index(dims), reader), a.index))
+operand(a::LiteralAccess, dims, ::Domain) = Literal(a.value)
+operand(a::IndexAccess, dims, reader::Domain) =
+    IndexOperand(substitute(a.expr, broadcast_index(dims), reader), a.eltype)
+
+function linear_index(dims, d::Domain)
+    linear = constant(0)
+    stride = 1
+    for (k, n) in enumerate(dims)
+        linear = add(linear, scale(var(k), stride), d)
+        stride *= n
+    end
+    linear
+end
+
+function delinearize(linear, dims, d::Domain)
+    stride = 1
+    map(dims) do n
+        e = fmod(fdiv(linear, stride, d), n, d)
+        stride *= n
+        e
+    end
+end
+
+# The index of a layout node's input, for each index of the node, as
+# expressions over the node's domain.
+layout_index(::Reshape, dims, parentdims, d, gather) = delinearize(linear_index(dims, d), parentdims, d)
+
+function layout_index(op::Permute, dims, parentdims, d, gather)
+    index = Vector{Affine}(undef, length(parentdims))
+    for (k, p) in enumerate(op.perm)
+        index[p] = var(k)
+    end
+    Tuple(index)
+end
+
+function layout_index(op::Select, dims, parentdims, d, gather)
+    axis = 0
+    map(op.indices) do i
+        if i isa Integer
+            constant(i - 1)
+        elseif i isa AbstractRange
+            axis += 1
+            add(scale(var(axis), step(i)), first(i) - 1, d)
+        else
+            axis += 1
+            lo, hi = extrema(i)
+            add(normalize(0, (Indirect(gather(i), (var(axis),), lo, hi) => 1,), d), -1, d)
+        end
+    end
+end
+
+compose(a::ValueAccess, index, d) = ValueAccess(a.value, map(e -> substitute(e, index, d), a.index))
+compose(a::LiteralAccess, index, d) = a
+compose(a::IndexAccess, index, d) = IndexAccess(substitute(a.expr, index, d), a.eltype)
+
+# A contraction's domain: the result's axes, then the summed ones. Each operand
+# is read with its labels' variables.
+function contraction(op::Contract, inputs, input_dims, n, values)
+    summed = [l for l in op.a if l in op.b && !(l in op.out)]
+    labels = [collect(op.out); summed]
+    extent = Dict{Int, Int}()
+    foreach((l, e) -> extent[l] = e, (op.a..., op.b...), (input_dims[1]..., input_dims[2]...))
+    iteration = Tuple(extent[l] for l in labels)
+    d = Domain(iteration)
+    read(access, ls) = Read(
+        access.value,
+        map(e -> substitute(e, Tuple(var(findfirst(==(l), labels)) for l in ls), d), access.index),
+    )
+    Contraction(read(inputs[1], op.a), read(inputs[2], op.b), iteration, length(summed))
+end
+
+"""
+    lower(program) -> IndexGraph
+
+The program at the index level.
+"""
+function lower(p::Program)
+    nodes = p.nodes
+    keep = live(nodes, p.results)
+    values = Value[]
+    access = Vector{Access}(undef, length(nodes))
+    gathers = IdDict{Any, Int}()
+    function gather(list)
+        get!(gathers, list) do
+            push!(values, Value(ConstantArray(collect(Int, list)), (length(list),), Int, false))
+            length(values)
+        end
+    end
+    function value!(definition, n)
+        push!(values, Value(definition, n.dims, n.eltype, n.scalar))
+        ValueAccess(length(values), identity_index(n.dims))
+    end
+    arguments = Int[]
+    for (id, n) in enumerate(nodes)
+        if n.op isa Argument
+            access[id] = value!(Input(findfirst(==(id), p.arguments)), n)
+            push!(arguments, access[id].value)
+            continue
+        end
+        keep[id] || continue
+        d = Domain(n.dims)
+        op = n.op
+        inputs = map(i -> access[i], n.inputs)
+        input_dims = map(i -> nodes[i].dims, n.inputs)
+        access[id] = if op isa Constant
+            op.value isa AbstractArray ? value!(ConstantArray(op.value), n) : LiteralAccess(op.value)
+        elseif op isa Positions
+            IndexAccess(add(linear_index(n.dims, d), 1, d), Int32)
+        elseif op isa Map
+            value!(Pointwise(op.f, map((a, dims) -> operand(a, dims, d), inputs, input_dims)), n)
+        elseif op isa Reduce
+            parent = only(input_dims)
+            value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
+        elseif op isa Contract
+            all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
+            value!(contraction(op, inputs, input_dims, n, values), n)
+        elseif op isa Union{Reshape, Permute, Select}
+            compose(only(inputs), layout_index(op, n.dims, only(input_dims), d, gather), d)
+        else
+            reads = map(inputs, input_dims) do a, dims
+                a isa ValueAccess || error("$(op_name(op)) of a constant or positions is not supported yet")
+                operand(a, dims, Domain(dims))
+            end
+            shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
+            value!(Opaque(n, reads, shapes), n)
+        end
+    end
+    results = Operand[operand(access[r], nodes[r].dims, Domain(nodes[r].dims)) for r in p.results]
+    IndexGraph(
+        values,
+        arguments,
+        results,
+        [nodes[r].dims for r in p.results],
+        [nodes[r].scalar for r in p.results],
+        [nodes[r].eltype for r in p.results],
+    )
+end

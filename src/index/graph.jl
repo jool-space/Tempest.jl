@@ -53,6 +53,18 @@ struct Reduction{F} <: Definition
 end
 
 """
+A product summed over the trailing axes of `iteration`: the value at an index
+of its own domain (the leading axes of `iteration`) is the sum, over the summed
+axes, of the product of the two operands, each read over `iteration`.
+"""
+struct Contraction <: Definition
+    a::Read
+    b::Read
+    iteration::Tuple{Vararg{Int}}
+    summed::Int
+end
+
+"""
 A program-level operation the index level does not model yet, realized on its
 operands materialized in their program shapes. Only the floor realizes it.
 """
@@ -70,7 +82,8 @@ struct Value
 end
 
 domain(v::Value) = Domain(v.dims)
-iteration_domain(v::Value) = v.definition isa Reduction ? Domain(v.definition.iteration) : domain(v)
+iteration_domain(v::Value) =
+    v.definition isa Union{Reduction, Contraction} ? Domain(v.definition.iteration) : domain(v)
 
 """
     IndexGraph
@@ -91,6 +104,7 @@ end
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
 operands(d::Reduction) = (d.operand,)
+operands(d::Contraction) = (d.a, d.b)
 operands(d::Opaque) = d.operands
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
@@ -109,6 +123,7 @@ describe(d::Input) = "input $(d.argument)"
 describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
+describe(d::Contraction) = "contract(sum the last $(d.summed) of $(d.iteration))"
 describe(d::Opaque) = "opaque $(op_name(d.node.op))"
 
 show_operand(io, o::Read) = print(io, "%", o.value, "[", join(map(string, o.index), ", "), "]")

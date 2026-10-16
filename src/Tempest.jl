@@ -18,5 +18,7 @@ include("program/differentiate.jl")
 # The index level.
 include("index/expressions.jl")
 include("index/graph.jl")
+include("index/lower.jl")
+include("index/interpret.jl")
 
 end
