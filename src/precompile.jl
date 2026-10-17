@@ -1,10 +1,12 @@
 # Work Tempest does while it precompiles, so that its own code is compiled once
 # rather than in every session: small programs of each kind traced,
 # differentiated, lowered, planned, explained and prepared for the CPU.
+# Development sessions skip it, so a test runs `workload` too.
 
-using PrecompileTools: @setup_workload, @compile_workload
+using PrecompileTools: @compile_workload
 
-@setup_workload begin
+"Trace, differentiate, interpret, prepare, run and explain small programs of each kind on the CPU."
+function workload()
     sample(dims...) = Float32.(reshape(sin.(1:prod(dims)), dims))
     gelu(x) = x / (1 + exp(-1.702f0 * x))
     rmsnorm(x, w) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0f-5) .* w
@@ -24,15 +26,16 @@ using PrecompileTools: @setup_workload, @compile_workload
         ((x, s) -> sum(abs2, dropout(permutedims(x), s; rate = 0.1)), (x, Int32[1])),
         (x -> sum(abs2, Float16.(reshape(x, 6, 8))), (x,)),
     ]
-    @compile_workload begin
-        for (f, args) in losses
-            p = trace(f, args...)
-            for program in (p, differentiate(p))
-                interpret(program, args...)
-                ex = prepare(program, args...)
-                execute!(ex)
-                explain(devnull, ex)
-            end
+    for (f, args) in losses
+        p = trace(f, args...)
+        for program in (p, differentiate(p))
+            interpret(program, args...)
+            ex = prepare(program, args...)
+            execute!(ex)
+            explain(devnull, ex)
         end
     end
+    nothing
 end
+
+@compile_workload workload()

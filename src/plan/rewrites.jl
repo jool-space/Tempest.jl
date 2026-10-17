@@ -1,22 +1,22 @@
 # Algorithms as rewrites of folds, applied to the index-level graph before
 # planning where the target's numerics permit them, since they change
-# rounding. A factor constant along a sum leaves the sum. A sum weighted by
-# `exp(y - m)`, where `m` is the maximum or the logsumexp of `y` over the summed
-# axes, becomes an online softmax: one fold that keeps the running maximum and
-# rescales its sums as the maximum grows, so that `m` is never computed in a
-# pass of its own. A quotient of two online softmaxes with the same maximum
-# becomes one. So the two spellings of a softmax, `exp(s - logsumexp(s))` and
+# rounding. A sum weighted by `exp(y - m)`, where `m` is the maximum or the
+# logsumexp of `y` over the summed axes, becomes an online softmax: one fold
+# that keeps the running maximum and rescales its sums as the maximum grows,
+# so that `m` is never computed in a pass of its own. Its factors constant
+# along the sum leave it, as the softmax's denominator does: Σ v·e/l is
+# (Σ v·e)/l. A quotient of two online softmaxes with the same maximum becomes
+# one. So the two spellings of a softmax, `exp(s - logsumexp(s))` and
 # `exp(s - maximum(s)) / sum(exp(s - maximum(s)))`, weighted and summed, reach
 # the same fold.
 
 """
     rewrite(graph) -> IndexGraph
 
-The graph with its sums rewritten: factors constant along a sum taken out of
-it, and sums weighted by a softmax made online softmax folds. The graph's
-`rewrites` notes each, and `explain` prints them.
+The graph with its sums weighted by a softmax made online softmax folds. The
+graph's `rewrites` notes each, and `explain` prints them.
 """
-rewrite(graph::IndexGraph) = compact(merge_softmaxes(online_softmaxes(compact(factor_sums(graph)))))
+rewrite(graph::IndexGraph) = compact(merge_softmaxes(online_softmaxes(graph)))
 
 ## Building a graph from another, in order.
 
@@ -131,45 +131,6 @@ new_factors(b::Builder, fs) = [(remap(o, b.ids), power) for (o, power) in fs]
 
 ## The rewrites.
 
-# Σ f·c = (Σ f)·c when `c` is constant along the summed axes: those factors
-# leave the sum, which keeps the others.
-function factor_sums(graph::IndexGraph)
-    first(rebuild(graph) do b, id
-        v = graph.values[id]
-        d = v.definition
-        d isa Reduction{SumFold} && v.eltype <: AbstractFloat && !(v.eltype <: HalfFloat) || return nothing
-        operand, constant = without_constants!(b, graph, d.operand, Domain(d.iteration), v.eltype, d.reduced)
-        (operand === nothing || isempty(constant)) && return nothing
-        sum = add!(b, Reduction(SumFold(), operand, d.iteration, d.reduced), v.dims, v.eltype, v.scalar)
-        # Factors with a numerator first, so that a quotient divides.
-        constant = sort(new_factors(b, constant); by = f -> -f[2])
-        x = product!(b, [(Read(sum, identity_index(v.dims)), 1); constant], v.dims, v.eltype, v.scalar)
-        push!(b.rewrites, x.value => "factors constant along a sum taken out of it")
-        x.value
-    end)
-end
-
-# The product `o` reads, as read from domain `d`, without its factors constant
-# along `axes`, its other products grouped as they were (nothing when every
-# factor is constant); and those factors, each with its power, 1 or -1.
-function without_constants!(b::Builder, graph, o, d::Domain, T, axes, power = 1)
-    if (pointwise(graph, o, *) || pointwise(graph, o, /)) && eltype_of(graph, o) === T
-        xs = inner(graph, o, d)
-        if length(xs) == 2 && all(x -> x isa Literal || eltype_of(graph, x) === T, xs)
-            f = graph.values[o.value].definition.f
-            x, cx = without_constants!(b, graph, xs[1], d, T, axes, power)
-            y, cy = without_constants!(b, graph, xs[2], d, T, axes, f === (/) ? -power : power)
-            constant = [cx; cy]
-            isempty(constant) && return remap(o, b.ids), constant
-            y === nothing && return x, constant
-            x === nothing && f === (*) && return y, constant
-            id = add!(b, Pointwise(f, (something(x, Literal(one(T))), y)), d.extents, T)
-            return Read(id, identity_index(d.extents)), constant
-        end
-    end
-    any(k -> mentions(o, k), axes) ? (remap(o, b.ids), Tuple{Any, Int}[]) : (nothing, Tuple{Any, Int}[(o, power)])
-end
-
 # The index at which fold `F`, read at `index` from a domain whose axes `axes`
 # it reduces, in order, reads its operand: its kept axes at `index`, its
 # reduced axes the reader's. Nothing when the axes differ in number or
@@ -179,11 +140,7 @@ function aligned(graph, F, index, axes, d::Domain)
     def isa Reduction && length(def.reduced) == length(axes) || return nothing
     all(j -> def.iteration[def.reduced[j]] == d.extents[axes[j]], eachindex(axes)) || return nothing
     any(e -> any(k -> mentions(e, k), axes), index) && return nothing
-    whole = identity_index(d.extents)
-    ntuple(length(def.iteration)) do q
-        j = findfirst(==(q), def.reduced)
-        j === nothing ? index[q] : whole[axes[j]]
-    end
+    iteration_index(def, index, map(k -> identity_index(d.extents)[k], axes))
 end
 
 # A sum whose factors include `exp(y - F)`, where `F` folds `y` over the summed
@@ -206,11 +163,12 @@ function weighted(graph, r, F)
     nothing
 end
 
-# Σ g·exp(y - m) over the axes `m` reduces, for `m` the maximum of `y`, is an
-# online softmax of `(y, g)`; for `m` the logsumexp of `y`, `exp(y - m)` is
-# `exp(y - max) / Σ exp(y - max)`, so the sum is one of `(y, g, 1)` that
-# divides. Done for a maximum or a logsumexp when every sum it weighs can be,
-# so that nothing else reads it and its pass disappears.
+# Σ c·g·exp(y - m) over the axes `m` reduces, `c` constant along them, is `c`
+# times an online softmax of `(y, g)` for `m` the maximum of `y`; for `m` the
+# logsumexp of `y`, `exp(y - m)` is `exp(y - max) / Σ exp(y - max)`, so the
+# online softmax is one of `(y, g, 1)` that divides. Done for a maximum or a
+# logsumexp when every sum it weighs can be, so that nothing else reads it and
+# its pass disappears.
 function online_softmaxes(graph::IndexGraph)
     F = 1
     while F <= length(graph.values)
@@ -235,7 +193,8 @@ function online!(b::Builder, graph, r, F)
     v = graph.values[r]
     d = v.definition
     y, rest = weighted(graph, r, F)
-    g = product!(b, new_factors(b, rest), d.iteration, v.eltype)
+    along = [any(k -> mentions(o, k), d.reduced) for (o, _) in rest]
+    g = product!(b, new_factors(b, rest[along]), d.iteration, v.eltype)
     lse = graph.values[F].definition.fold isa LogSumExpFold
     elements = lse ? (remap(y, b.ids), g, Literal(one(v.eltype))) : (remap(y, b.ids), g)
     E = Tuple{map(_ -> v.eltype, elements)...}
@@ -243,7 +202,12 @@ function online!(b::Builder, graph, r, F)
     fold = OnlineSoftmax(lse ? (/) : identity)
     id = add!(b, Reduction(fold, Read(t, identity_index(d.iteration)), d.iteration, d.reduced), v.dims, v.eltype, v.scalar)
     push!(b.rewrites, id => string("online softmax: a sum weighted by exp(y - m), m the ", lse ? "logsumexp" : "maximum", " of y"))
-    id
+    all(along) && return id
+    # The factors constant along the sum, read from its own axes, a numerator
+    # first so that a quotient divides.
+    kept = iteration_index(d, identity_index(v.dims), map(_ -> constant(0), d.reduced))
+    scale = sort(new_factors(b, [(through(o, kept, Domain(v.dims)), power) for (o, power) in rest[.!along]]); by = f -> -f[2])
+    product!(b, [(Read(id, identity_index(v.dims)), 1); scale], v.dims, v.eltype, v.scalar).value
 end
 
 # The online softmax of `(y, g...)` that `o` reads at the identity of a domain
@@ -266,8 +230,11 @@ function merge_softmaxes(graph::IndexGraph)
         A !== nothing && l isa Read && l.value != a.value && graph.values[a.value].dims == v.dims || return nothing
         L = graph.values[l.value].definition
         L isa Reduction{OnlineSoftmax{typeof(identity)}} || return nothing
+        # `l` as read over the iteration of `A`, whose kept axes are `v`'s.
         domain = Domain(A.iteration)
-        index = aligned(graph, l.value, l.index, A.reduced, domain)
+        whole = identity_index(A.iteration)
+        kept = Tuple(whole[k] for k in eachindex(whole) if !(k in A.reduced))
+        index = aligned(graph, l.value, map(e -> substitute(e, kept, domain), l.index), A.reduced, domain)
         index === nothing && return nothing
         (ya, ga), (yl, gl) = inner(graph, A.operand, domain), inner(graph, through(L.operand, index, domain), domain)
         ya == yl || return nothing

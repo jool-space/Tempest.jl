@@ -62,5 +62,11 @@ const PROGRAMS = [
     ("causal attention with a residual", (q, k, v, x) -> sum(abs2, T.attention(q, k, v; causal = true) .+ x),
      (data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1), data(4, 4, 6, 2; scale = 0.5))),
     ("dropout", (x, s) -> sum(abs2, T.dropout(x, s; rate = 0.25) .* 2), (data(8, 6), Int32[7])),
+    ("gather by a traced vector", (x, i) -> sum(abs2, x[:, i] .* 2), (data(8, 6), [3, 1, 3, 6])),
+    ("gather by a traced Int32 matrix", (x, i) -> sum(abs2, x[:, i]), (data(8, 6), Int32[2 5; 6 1; 1 1])),
+    ("gather rows by a traced Int64 matrix", (x, i) -> sum(abs2, tanh.(x[i, :])), (data(8, 6), [8 1; 2 8])),
+    ("gather by linear and scalar indices", (x, i, t) -> sum(abs2, x[i]) + x[2, t], (data(8, 6), [40, 3, 17], 5)),
+    ("embedding lookup and layer norm", (E, P, t, w) -> sum(abs2, layernorm(E[:, t] .+ P, w)),
+     (data(8, 10; scale = 0.3), data(8, 3; scale = 0.2), Int32[3 1; 10 3; 7 7], data(8; scale = 0.1))),
 ]
 

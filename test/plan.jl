@@ -34,9 +34,8 @@ end
 end
 
 # Rewrites of sums, which change rounding: rewritten programs plan and compute
-# what they computed, a sum over a constant factor and a sum of the factor's
-# multiples plan alike, and so do the two spellings of a softmax weighting a
-# sum, one online softmax recomputing the scores in the kernel of the sum.
+# what they computed, and the two spellings of a softmax weighting a sum plan
+# alike, one online softmax recomputing the scores in the kernel of the sum.
 scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.125
 causal(s) = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, -Inf)
 weigh(v, p) = T.contract(v, p, (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
@@ -55,8 +54,6 @@ end
         end
     end
     groups(f, args...) = T.plan(T.rewrite(T.lower(trace(f, args...))); recompute_folds = true).groups
-    x = data(8, 6)
-    @test only(groups(x -> sum(x ./ 4; dims = 1), x)).terms == only(groups(x -> sum(x; dims = 1) ./ 4, x)).terms
     q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
     a, b = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v))
     @test a.terms == b.terms
@@ -105,4 +102,32 @@ end
     for m in T.members(g), s in T.stats(g.terms[m])
         @test T.primary(norm.graph, g, s)
     end
+end
+
+# Programs that differ by axes of extent one get the same plan: reshapes that
+# insert them around pointwise work, reductions, products and their gradients,
+# and attention, whose grouped heads have such an axis with one query head per
+# key head, against attention written out without it.
+@testset "axes of extent one" begin
+    explained(p) = [sprint(explain, T.plan(T.lower(p); recompute_folds)) for recompute_folds in (false, true)]
+    same(f, g, args...) = explained(trace(f, args...)) == explained(trace(g, args...))
+    same_gradient(f, g, args...) = explained(differentiate(trace(f, args...))) == explained(differentiate(trace(g, args...)))
+    x, w, c = data(8, 6), data(8; scale = 0.1), data(5)
+    a, b = data(5, 7; scale = 0.3), data(7, 6)
+    pointwise(x) = tanh.(x) .* 2
+    @test same(pointwise, x -> reshape(pointwise(reshape(x, 1, 8, 1, 6)), 8, 6), x)
+    @test same(x -> sum(x; dims = 1), x -> dropdims(sum(x; dims = 1); dims = 1), x)
+    @test same(x -> T.logsumexp(x; dims = 2), x -> reshape(T.logsumexp(reshape(x, 8, 1, 6); dims = 3), 8, 1), x)
+    unit_norm(x, w) = reshape(rmsnorm(reshape(x, 8, 1, 6), reshape(w, 8, 1)), 8, 6)
+    @test same(rmsnorm, unit_norm, x, w)
+    @test same_gradient((x, w) -> sum(abs2, rmsnorm(x, w)), (x, w) -> sum(abs2, unit_norm(x, w)), x, w)
+    unit_product(a, b) = reshape(T.batched_mul(reshape(a, 5, 7, 1), reshape(b, 7, 6, 1)), 5, 6)
+    @test same((a, b, c) -> tanh.(a * b .+ c), (a, b, c) -> tanh.(unit_product(a, b) .+ reshape(c, 5, 1, 1)), a, b, c)
+    @test same_gradient((a, b) -> sum(abs2, a * b), (a, b) -> sum(abs2, unit_product(a, b)), a, b)
+    q, k, v, r = data(8, 3, 16, 2; scale = 0.3), data(8, 3, 16, 2; scale = 0.2), data(8, 3, 16, 2; scale = 0.1), data(8, 3, 16, 2)
+    scale = Float32(1 / sqrt(8))
+    scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* scale
+    causal(s) = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, -Inf)
+    written(q, k, v) = (s = causal(scores(q, k)); T.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4)))
+    @test same((q, k, v, r) -> T.attention(q, k, v; causal = true) .+ r, (q, k, v, r) -> written(q, k, v) .+ r, q, k, v, r)
 end

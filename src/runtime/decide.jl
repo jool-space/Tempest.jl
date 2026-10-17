@@ -134,7 +134,7 @@ mutable struct Decider
     measure::Bool
     rates::Rates
     record::Dict{String, Float64}
-    record_path::String
+    record_path::Union{Nothing, String}
     buffers::Vector{Any}
     built::Dict{Tuple{Any, String}, Any}
     decided::Dict{Any, Decision}
@@ -348,18 +348,24 @@ end
 ## The tuning record: measured seconds by claim, one file per device.
 
 """
-    Tempest.cache_directory()
+    Tempest.tuning_directory() -> directory or nothing
 
-Where Tempest keeps what it measures: `ENV["TEMPEST_CACHE"]`, or `tempest` in
-the first depot.
+Where Tempest keeps what it measures: `tuning` in `ENV["TEMPEST_CACHE"]` when
+set, otherwise Tempest's `tuning` scratch space.
 """
-cache_directory() = get(ENV, "TEMPEST_CACHE", joinpath(first(DEPOT_PATH), "tempest"))
+function tuning_directory()
+    dir = get(ENV, "TEMPEST_CACHE", nothing)
+    dir === nothing ? SCRATCH.tuning[] : joinpath(dir, "tuning")
+end
 
-record_path(target) = joinpath(cache_directory(), "tuning", replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * ".tsv")
+function record_path(target)
+    dir = tuning_directory()
+    dir === nothing ? nothing : joinpath(dir, replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * ".tsv")
+end
 
 function load_record(path)
     record = Dict{String, Float64}()
-    isfile(path) || return record
+    path !== nothing && isfile(path) || return record
     for line in eachline(path)
         key, value = rsplit(line, '\t'; limit = 2)
         record[key] = parse(Float64, value)
@@ -368,6 +374,7 @@ function load_record(path)
 end
 
 function save_record(path, key, seconds)
+    path === nothing && return
     mkpath(dirname(path))
     open(io -> println(io, key, '\t', seconds), path, "a")
 end

@@ -1,0 +1,21 @@
+the verb	157.4566401541233
+written out with contract and logsumexp	157.62176364660263
+softcap 30·tanh(s/30)	168.02268025154868
+SiLU scores, no softmax (HSTU)	109.48444509671793
+SiLU scores, a training step (HSTU)	679.5626444121202
+softmax spelled exp(s - max) / sum	378.68800573050976
+the verb, then a residual	159.49866307588914
+written out, then a residual	158.75199809670448
+the verb, and a reduction of its output	159.43167731165886
+the verb, a training step	589.2022911991392
+written out, a training step	195.40800713002682
+RMSNorm, divided by the root	9.887040359899402
+RMSNorm, times the inverse root	9.776640217751265
+RMSNorm, a training step	13.877759920433164
+layer norm, two passes	10.07135957479477
+layer norm, from the mean of squares	9.98624018393457
+softmax through logsumexp	5.564320017583668
+softmax shifted by the maximum	5.694080027751625
+softmax, exp written twice	5.00096008181572
+softmax, exp computed once	7.9500803258270025
+linear, bias, GELU	13.43664014711976

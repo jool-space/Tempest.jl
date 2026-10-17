@@ -30,6 +30,65 @@ closure(s) = x -> s * x
     @test T.content_key(closure(1.0f0)) != T.content_key(closure(2.0f0))
 end
 
+@testset "where the caches live" begin
+    # In Tempest's scratch spaces, unless the environment names a directory.
+    scratch(depot, key) = joinpath(depot, "scratchspaces", string(Base.PkgId(Tempest).uuid), key)
+    withenv("TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
+        @test T.kernel_cache() == scratch(first(DEPOT_PATH), "kernels") && isdir(T.kernel_cache())
+        @test T.tuning_directory() == scratch(first(DEPOT_PATH), "tuning") && isdir(T.tuning_directory())
+    end
+    withenv("TEMPEST_KERNEL_CACHE" => "0") do
+        @test T.kernel_cache() === nothing
+    end
+    elsewhere = mktempdir()
+    withenv("TEMPEST_KERNEL_CACHE" => elsewhere, "TEMPEST_CACHE" => elsewhere) do
+        @test T.kernel_cache() == elsewhere
+        @test T.tuning_directory() == joinpath(elsewhere, "tuning")
+        @test dirname(T.record_path(T.CPUTarget())) == joinpath(elsewhere, "tuning")
+    end
+    # The paths are found when Tempest loads, not baked in when it
+    # precompiles: a process with another first depot keeps its caches there.
+    depot = mktempdir()
+    script = "using Tempest; print(Tempest.kernel_cache(), '\\n', Tempest.tuning_directory())"
+    paths = withenv("JULIA_DEPOT_PATH" => join([depot; DEPOT_PATH], Sys.iswindows() ? ';' : ':'),
+        "TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
+        readchomp(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`)
+    end
+    @test split(paths, '\n') == [scratch(depot, "kernels"), scratch(depot, "tuning")]
+end
+
+@testset "the kernel cache's size" begin
+    # Beyond its limit the cache removes the entries used least recently.
+    withenv("TEMPEST_KERNEL_CACHE" => mktempdir(), "TEMPEST_KERNEL_CACHE_LIMIT" => "3000") do
+        keys = [T.content_key(n) for n in 1:4]
+        binary = zeros(UInt8, 990) # entries of 1000 bytes, the name and its length included
+        kept() = map(key -> isfile(T.entry_path(T.kernel_cache(), key)), keys)
+        # Modification times tell entries apart only so finely.
+        for key in keys[1:3]
+            T.store_kernel(key, "kernel", binary)
+            sleep(0.05)
+        end
+        @test kept() == [true, true, true, false]
+        # A hit marks its entry used, so the second entry goes first.
+        @test T.load_kernel(keys[1]) == ("kernel", binary)
+        sleep(0.05)
+        T.store_kernel(keys[4], "kernel", binary)
+        @test kept() == [true, false, true, true]
+        @test T.load_kernel(keys[2]) === nothing
+    end
+    for (limit, bytes) in (nothing => 1 << 30, "2048" => 2048, "64K" => 64 << 10, "1g" => 1 << 30)
+        withenv(() -> @test(T.kernel_cache_limit() == bytes), "TEMPEST_KERNEL_CACHE_LIMIT" => limit)
+    end
+    withenv("TEMPEST_KERNEL_CACHE_LIMIT" => "lots") do
+        @test (@test_logs (:warn, r"TEMPEST_KERNEL_CACHE_LIMIT") T.kernel_cache_limit()) == 1 << 30
+    end
+end
+
+# What Tempest compiles while it precompiles, which development sessions skip.
+@testset "the precompile workload" begin
+    @test T.workload() === nothing
+end
+
 using CUDACore, cuTile
 if CUDACore.functional()
     @testset "kernel cache" begin
