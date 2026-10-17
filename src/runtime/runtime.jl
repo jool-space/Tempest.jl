@@ -15,9 +15,9 @@ always used. `precision` is the numerics policy for products: `:full` keeps
 Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
 `:tf32x3` splits each Float32 factor into two TF32 parts and sums three
 tensor-core products (close to Float32 accuracy). Half-precision products
-always accumulate in Float32. `online` permits the online softmax: a sum
-weighted by `exp(y - logsumexp(y))` accumulates in the same sweep as the
-log-sum-exp, rescaled as its maximum grows, which changes rounding.
+always accumulate in Float32. `online` permits the online softmax (see
+`rewrite`): a sum weighted by a softmax accumulates in one pass with the
+softmax's maximum, rescaled as it grows, which changes rounding.
 """
 struct CUDATarget <: Target
     precision::Symbol
@@ -161,7 +161,9 @@ claims are timed when `measure` allows and the target can, and kept in the
 tuning record.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true)
-    d = Decider(target, lower(program); measure)
+    graph = lower(program)
+    permits_rewrites(target) && (graph = rewrite(graph))
+    d = Decider(target, graph; measure)
     p, considered = cover(d)
     ds = decisions(d, p)
     buffers = d.buffers

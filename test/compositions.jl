@@ -27,9 +27,7 @@ Composition(name, program, args, expected; generated = expected) = Composition(n
 
 sample(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
 
-const TRACK_B = "track B: the online softmax as a fold"
 const BACKWARD = "a generated attention backward pass (DESIGN, next 4)"
-const SHARED_MAP = "a map read by a fold and by a later map in one kernel is stored (DESIGN, decision procedure, 5)"
 
 ## Attention: (features, heads, positions, batch), causal, one key head per
 ## query head. Small enough to compile quickly, long enough to stream keys.
@@ -69,9 +67,7 @@ const ATTENTION = [
     # The output, the loss's gradient at it, the loss and three gradients.
     Composition("SiLU scores, a training step (HSTU)", training((q, k, v) -> sum(abs2, hstu(q, k, v)), q, k, v), (q, k, v),
         (kernels = 3, bytes = 5O + 4, largest = O)),
-    # Three kernels today, storing the scores and their exponentials.
-    Composition("softmax spelled exp(s - max) / sum", trace(shifted, q, k, v), (q, k, v),
-        (kernels = Gap(1, TRACK_B), bytes = Gap(O, TRACK_B), largest = Gap(O, TRACK_B))),
+    Composition("softmax spelled exp(s - max) / sum", trace(shifted, q, k, v), (q, k, v), (kernels = 1, bytes = O, largest = O)),
     Composition("the verb, then a residual", trace((q, k, v, x) -> attend(q, k, v) .+ x, q, k, v, x), (q, k, v, x),
         (kernels = 1, bytes = O, largest = O)),
     Composition("written out, then a residual", trace((q, k, v, x) -> written(q, k, v) .+ x, q, k, v, x), (q, k, v, x),
@@ -123,9 +119,7 @@ const SPELLINGS = [
     Composition("softmax through logsumexp", trace(softmax_logsumexp, X), (X,), (kernels = 1, bytes = Y)),
     Composition("softmax shifted by the maximum", trace(softmax_shifted, X), (X,), (kernels = 1, bytes = Y)),
     Composition("softmax, exp written twice", trace(softmax_twice, X), (X,), (kernels = 1, bytes = Y)),
-    # Two kernels today: exp.(x) is stored for the sum and the division.
-    Composition("softmax, exp computed once", trace(softmax_reused, X), (X,),
-        (kernels = Gap(1, SHARED_MAP), bytes = Gap(Y, SHARED_MAP))),
+    Composition("softmax, exp computed once", trace(softmax_reused, X), (X,), (kernels = 1, bytes = Y)),
     # cuBLAS wins the product by estimate, and the epilogue is a kernel of its own.
     Composition("linear, bias, GELU", trace((W, Z, b) -> gelu.(W * Z .+ b), W, Z, b), (W, Z, b),
         (kernels = 2, bytes = 2P); generated = (kernels = 1, bytes = P)),

@@ -120,7 +120,8 @@ if CUDACore.functional()
                     T.CUDATarget(precision = :tf32)),
                 ("attention claims", differentiate(trace((q, k, v) -> sum(abs2, T.attention(q, k, v; causal = true)), q, k, v)),
                     (q, k, v), T.CUDATarget(precision = :tf32)),
-                ("the floor", trace(x -> T.fold(sums, x; dims = 1), x), (x,), T.CUDATarget()),
+                # Float64 elements, which tiles do not take.
+                ("the floor", trace(x -> T.fold(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),
             ]
             host(r) = (a = Array(r); ndims(a) == 0 ? a[] : a)
             @testset "$name" for (name, p, args, target) in programs

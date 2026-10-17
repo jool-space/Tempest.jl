@@ -209,6 +209,10 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         if t isa Lit
             names[t] = t.value
             continue
+        elseif t isa Apply && t.f === tuple
+            # A tuple is a fold's element, a tile for each component.
+            names[t] = Any[names[a] for a in t.args]
+            continue
         elseif t isa Apply && all(a -> names[a] isa Number, t.args)
             names[t] = convert(t.eltype, t.f(map(a -> names[a], t.args)...))
             continue
@@ -236,119 +240,109 @@ end
 
 fold_of(c::Context, r) = c.graph.values[r].definition.fold
 accumulator(c::Context, r) = Tempest.fold_types(fold_of(c, r), Tempest.term_eltype(c.g.terms[r], c.graph)).accumulator
-state_width(f) = f isa Tempest.LogSumExpFold ? 2 : 1
 
-state_symbols(r, f) = [Symbol(:acc_, r, :_, i) for i in 1:state_width(f)]
-
-function init_state(f, A, shape)
-    f isa Tempest.SumFold && return [:(fill($(zero(A)), $shape))]
-    f isa Tempest.MaxFold && return [:(fill($(typemin(A)), $shape))]
-    f isa Tempest.MinFold && return [:(fill($(typemax(A)), $shape))]
-    f isa Tempest.ProdFold && return [:(fill($(one(A)), $shape))]
-    [:(fill($(A(-Inf)), $shape)), :(fill($(zero(A)), $shape))]
+# Whether a fold's state and result are tiles.
+function tile_fold(f, T)
+    types = try
+        Tempest.fold_types(f, T)
+    catch err
+        err isa ArgumentError || rethrow()
+        return false
+    end
+    all(S -> S <: TILE_TYPES, fieldtypes(types.state)) && types.result <: TILE_TYPES
 end
 
-const SHIFT = Tempest.lse_shift
+# A fold's functions as cuTile maps them over tiles, which takes functions of
+# numbers to numbers: lifting and combining one component of the state at a
+# time. A tuple element is one tile per component. `Pairwise` combines as
+# cuTile's reductions take it, one state or a tuple of them at a time.
+struct Lift{I, F}
+    f::F
+end
+Lift{I}(f::F) where {I, F} = Lift{I, F}(f)
+(l::Lift{I})(x...) where {I} = Tempest.fold_lift(l.f, length(x) == 1 ? only(x) : x)[I]
 
-# Accumulate the elements of tile `x` where `valid`, elementwise.
-function accumulate_elements!(st, f, A, acc, x, valid)
-    if f isa Tempest.SumFold
-        push!(st, :($(acc[1]) = $(acc[1]) .+ ifelse.($valid, $x, $(zero(A)))))
-    elseif f isa Tempest.MaxFold
-        push!(st, :($(acc[1]) = max.($(acc[1]), ifelse.($valid, $x, $(typemin(A))))))
-    elseif f isa Tempest.MinFold
-        push!(st, :($(acc[1]) = min.($(acc[1]), ifelse.($valid, $x, $(typemax(A))))))
-    elseif f isa Tempest.ProdFold
-        push!(st, :($(acc[1]) = $(acc[1]) .* ifelse.($valid, $x, $(one(A)))))
-    else
-        m, s = acc
-        top, sh = gensym(:top), gensym(:shift)
-        push!(st, :($top = max.($m, ifelse.($valid, $x, $(A(-Inf))))))
-        push!(st, :($sh = $SHIFT.($top)))
-        push!(st, :($s = $s .* exp.($m .- $sh) .+ ifelse.($valid, exp.($x .- $sh), $(zero(A)))))
-        push!(st, :($m = $top))
+struct Combine{I, N, F}
+    f::F
+end
+Combine{I, N}(f::F) where {I, N, F} = Combine{I, N, F}(f)
+(c::Combine{I, N})(x...) where {I, N} = Tempest.fold_combine(c.f, ntuple(i -> x[i], Val(N)), ntuple(i -> x[N + i], Val(N)))[I]
+
+struct Pairwise{F}
+    f::F
+end
+(p::Pairwise)(a::Tuple, b::Tuple) = Tempest.fold_combine(p.f, a, b)
+(p::Pairwise)(a, b) = only(Tempest.fold_combine(p.f, (a,), (b,)))
+
+struct Observe{F}
+    f::F
+end
+(o::Observe)(s...) = Tempest.fold_observe(o.f, s)
+
+state_symbols(r, f, A) = [Symbol(:acc_, r, :_, i) for i in eachindex(Tempest.fold_init(f, A))]
+
+# Accumulators `names` at the fold's identity, over tiles of `shape`.
+init_state!(st, names, f, A, shape) = foreach((x, init) -> push!(st, :($x = fill($init, $shape))), names, Tempest.fold_init(f, A))
+
+# Elements `x` (a tile, or one per component of a tuple element) lifted into
+# states, lanes outside `valid` at the fold's identity.
+function lift!(st, f, A, x, valid)
+    xs = x isa Vector ? x : [x]
+    map(enumerate(Tempest.fold_init(f, A))) do (i, init)
+        name = gensym(:lift)
+        lifted = :($(Lift{i}(f)).($(xs...)))
+        push!(st, :($name = $(valid === nothing ? lifted : :(ifelse.($valid, $lifted, $init)))))
+        name
     end
 end
 
-# Merge partial states (unobserved) where `valid`, elementwise.
-function accumulate_states!(st, f, A, acc, parts, valid)
-    f isa Tempest.LogSumExpFold || return accumulate_elements!(st, f, A, acc, only(parts), valid)
-    m, s = acc
-    pm, ps = parts
-    top, sh = gensym(:top), gensym(:shift)
-    push!(st, :($top = max.($m, ifelse.($valid, $pm, $(A(-Inf))))))
-    push!(st, :($sh = $SHIFT.($top)))
-    push!(st, :($s = $s .* exp.($m .- $sh) .+ ifelse.($valid, $ps .* exp.($pm .- $sh), $(zero(A)))))
-    push!(st, :($m = $top))
+# Merge states `parts` into accumulators `acc` of the same shape, lanes outside
+# `valid` excepted.
+function combine!(st, f, A, acc, parts, valid = nothing)
+    if valid !== nothing
+        parts = map(parts, Tempest.fold_init(f, A)) do x, init
+            name = gensym(:part)
+            push!(st, :($name = ifelse.($valid, $x, $init)))
+            name
+        end
+    end
+    n = length(acc)
+    merged = [gensym(:acc) for _ in acc]
+    foreach(i -> push!(st, :($(merged[i]) = $(Combine{i, n}(f)).($(acc...), $(parts...)))), 1:n)
+    foreach((a, m) -> push!(st, :($a = $m)), acc, merged)
 end
 
-# The accumulators reduced along `dims`: a state, still unobserved.
+accumulate_elements!(st, f, A, acc, x, valid) = combine!(st, f, A, acc, lift!(st, f, A, x, valid))
+
+# The accumulators folded along `dims`: a state, still unobserved. A fold
+# with a faster way to fold many states at once (`Tempest.fold_reduce`) takes
+# it.
 function reduce_state!(st, f, A, acc, dims)
     names = [gensym(:state) for _ in acc]
-    if f isa Tempest.SumFold
-        push!(st, :($(names[1]) = sum($(acc[1]); dims = $dims)))
-    elseif f isa Tempest.MaxFold
-        push!(st, :($(names[1]) = maximum($(acc[1]); dims = $dims)))
-    elseif f isa Tempest.MinFold
-        push!(st, :($(names[1]) = minimum($(acc[1]); dims = $dims)))
-    elseif f isa Tempest.ProdFold
-        push!(st, :($(names[1]) = prod($(acc[1]); dims = $dims)))
-    else
-        m, s = acc
-        push!(st, :($(names[1]) = maximum($m; dims = $dims)))
-        push!(st, :($(names[2]) = sum($s .* exp.($m .- $SHIFT.($(names[1]))); dims = $dims)))
-    end
+    folder = Tempest.fold_reduce(f)
+    init = Tempest.fold_init(f, A)
+    expr = folder !== nothing ? :($folder(($(acc...),), $dims)) : length(acc) == 1 ?
+        :((reduce($(Pairwise(f)), $(only(acc)); dims = $dims, init = $(only(init))),)) :
+        :(mapreduce(identity, $(Pairwise(f)), $(acc...); dims = $dims, init = $init))
+    push!(st, :(($(names...),) = $expr))
     names
 end
 
-# A whole tile reduced directly where `valid`: no accumulators, and for a
-# logsumexp one exponential per element (maximum, then a shifted sum).
-function direct_state!(st, f, A, x, valid, dims)
-    names = [gensym(:state) for _ in 1:state_width(f)]
-    if f isa Tempest.SumFold
-        push!(st, :($(names[1]) = sum(ifelse.($valid, $x, $(zero(A))); dims = $dims)))
-    elseif f isa Tempest.MaxFold
-        push!(st, :($(names[1]) = maximum(ifelse.($valid, $x, $(typemin(A))); dims = $dims)))
-    elseif f isa Tempest.MinFold
-        push!(st, :($(names[1]) = minimum(ifelse.($valid, $x, $(typemax(A))); dims = $dims)))
-    elseif f isa Tempest.ProdFold
-        push!(st, :($(names[1]) = prod(ifelse.($valid, $x, $(one(A))); dims = $dims)))
-    else
-        push!(st, :($(names[1]) = maximum(ifelse.($valid, $x, $(A(-Inf))); dims = $dims)))
-        push!(st, :($(names[2]) = sum(ifelse.($valid, exp.($x .- $SHIFT.($(names[1]))), $(zero(A))); dims = $dims)))
-    end
-    names
-end
-
-# Merge partial state `parts` into accumulators of the same shape.
-function combine_states!(st, f, A, acc, parts)
-    if f isa Tempest.SumFold
-        push!(st, :($(acc[1]) = $(acc[1]) .+ $(parts[1])))
-    elseif f isa Tempest.MaxFold
-        push!(st, :($(acc[1]) = max.($(acc[1]), $(parts[1]))))
-    elseif f isa Tempest.MinFold
-        push!(st, :($(acc[1]) = min.($(acc[1]), $(parts[1]))))
-    elseif f isa Tempest.ProdFold
-        push!(st, :($(acc[1]) = $(acc[1]) .* $(parts[1])))
-    else
-        m, s = acc
-        pm, ps = parts
-        top, sh = gensym(:top), gensym(:shift)
-        push!(st, :($top = max.($m, $pm)))
-        push!(st, :($sh = $SHIFT.($top)))
-        push!(st, :($s = $s .* exp.($m .- $sh) .+ $ps .* exp.($pm .- $sh)))
-        push!(st, :($m = $top))
-    end
-end
+# A whole tile of elements folded along `dims`, lanes outside `valid` excepted.
+direct_state!(st, f, A, x, valid, dims) = reduce_state!(st, f, A, lift!(st, f, A, x, valid), dims)
 
 function observe!(st, f, A, T, state)
     name = gensym(:stat)
-    value = f isa Tempest.LogSumExpFold ? :($SHIFT.($(state[1])) .+ log.($(state[2]))) : state[1]
-    push!(st, :($name = $(A === T ? value : :(convert($(ct.Tile){$T}, $value)))))
+    value = :($(Observe(f)).($(state...)))
+    R = Tempest.fold_types(f, A).observed
+    push!(st, :($name = $(R === T ? value : :(convert($(ct.Tile){$T}, $value)))))
     name
 end
 
+# Elements converted to the accumulator's type and broadcast to `shape`; a
+# tuple element component by component.
 function as_accumulator(st, x, A, T, shape)
+    x isa Vector && return map((x, A, T) -> as_accumulator(st, x, A, T, shape), x, fieldtypes(A), fieldtypes(T))
     name = gensym(:x)
     converted = A === T ? tile_of(x) : :(convert($(ct.Tile){$A}, $(tile_of(x))))
     push!(st, :($name = $(ct.broadcast_to)($converted, $shape)))
@@ -438,7 +432,7 @@ function partial_spec!(c::Context, r, i, slots, workspaces)
     sizes = (Tuple(c.s.tiling[q].extent for q in kept_tiles_of(c, r))..., slots)
     strides = Tuple(prod(sizes[1:(d - 1)]; init = 1) for d in eachindex(sizes))
     key = partial_key(r, i)
-    workspaces[key] = Workspace(key, accumulator(c, r), prod(sizes))
+    workspaces[key] = Workspace(key, typeof(Tempest.fold_init(fold_of(c, r), accumulator(c, r))[i]), prod(sizes))
     ArgSpec(key, 0, sizes, strides)
 end
 
@@ -596,9 +590,6 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = on
     push!(st, :($acc = muladd($xa, $xb, $acc)))
 end
 
-# The accumulator of a product, as a state over the tile axes.
-product_state(c::Context, (a, b, i, j), acc) = [from_matrix(c, acc, i, j)]
-
 # Recomputed folds. A fold the kernel recomputes where it reads it extends the
 # tiling by its reduced axis, swept in steps: a product's steps when its body
 # is bilinear in that axis, the kernel's own steps when its body recomputes
@@ -612,7 +603,7 @@ function fold_context(c::Context, t::Tempest.Fold; lanes = INNER_TILE)
     inner = [TileAxis([base + j], e, min(nextpow(2, e), lanes), true) for (j, e) in enumerate(t.extents)]
     s = c.s
     e = Context(c.graph, c.stored, Group(c.g.kind, (c.g.domain..., t.extents...)),
-        TileSchedule(s.sketch, [s.tiling; inner], s.splits, s.occupancy, s.swizzle, s.precision, s.online))
+        TileSchedule(s.sketch, [s.tiling; inner], s.splits, s.occupancy, s.swizzle, s.precision))
     lanes == INNER_TILE || return e
     f = c.graph.values[t.value].definition.fold
     if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
@@ -629,7 +620,7 @@ spanned_shape(c::Context, t::Term) =
 
 function fold_expressible(c::Context, t::Tempest.Fold)
     val = c.graph.values[t.value]
-    val.definition.fold isa FOLDS && val.eltype <: TILE_TYPES && length(t.extents) == 1 || return false
+    tile_fold(val.definition.fold, Tempest.term_eltype(t.body, c.graph)) && length(t.extents) == 1 || return false
     terms_expressible(fold_context(c, t), (t.body,))
 end
 
@@ -639,7 +630,7 @@ function terms_expressible(c::Context, roots; stats = false)
         s isa Stat && !stats && return false
         s isa Tempest.Fold && !fold_expressible(c, s) && return false
         s isa Ix && !positional(s) && return false
-        s isa Apply && !(s.eltype <: TILE_TYPES) && return false
+        s isa Apply && !tile_type(s.eltype) && return false
         s isa Lit && s.value isa Float64 && return false
         s isa Load && !loadable(c, s) && return false
     end
@@ -659,37 +650,28 @@ function emit_fold!(k, st, c::Context, t::Tempest.Fold, indices)
     j = gensym(:j)
     at = steps == 1 ? :(Int32(1)) : j
     loop = steps == 1 ? st : Any[]
-    product = bilinear_over(e, f, t.body, p)
-    if product !== nothing
-        x, y, u, w = product
-        acc = gensym(:acc)
-        push!(st, :($acc = fill(0.0f0, ($(tile(e)[u]), $(tile(e)[w])))))
-        names = emit_tiles!(k, loop, e, unique([product_factor(e, x), product_factor(e, y)]), Dict{Term, Any}(), indices..., at)
-        accumulate_product!(loop, e, names, product, acc, at, p)
-        steps == 1 || push!(st, :(for $j in Int32(1):Int32($steps)
-            $(loop...)
-        end))
-        stat = gensym(:stat)
-        push!(st, :($stat = $(from_matrix(c, T === Float32 ? acc : :(convert($(ct.Tile){$T}, $acc)), u, w))))
-        return stat
-    end
+    sums = sweep_sums(e, f, t.body, p)
     shape = Base.setindex(spanned_shape(e, t.body), tp, p)
-    lanes = ntuple(q -> q == p ? tp : 1, p)
-    names = emit_tiles!(k, loop, e, [t.body], Dict{Term, Any}(), indices..., at)
+    # A fold that does not sum, in one step, folds the tile directly.
+    direct = sums === nothing && steps == 1
+    acc = sums !== nothing ? sum_accumulators!(st, e, f, t.body, sums, p, gensym(:acc)) : [gensym(:acc) for _ in Tempest.fold_init(f, A)]
+    sums !== nothing || direct || init_state!(st, acc, f, A, shape)
+    names = emit_tiles!(k, loop, e, unique(step_roots(e, f, t.body, sums)), Dict{Term, Any}(), indices..., at)
     valid = gensym(:valid)
-    push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
-    x = as_accumulator(loop, names[t.body], A, Tempest.term_eltype(t.body, c.graph), shape)
-    if steps == 1
-        state = direct_state!(st, f, A, x, valid, p)
-    else
-        acc = [gensym(:acc) for _ in 1:state_width(f)]
-        foreach((a, init) -> push!(st, :($a = $init)), acc, init_state(f, A, shape))
-        accumulate_elements!(loop, f, A, acc, x, valid)
-        push!(st, :(for $j in Int32(1):Int32($steps)
-            $(loop...)
-        end))
-        state = reduce_state!(st, f, A, acc, p)
+    if sums === nothing || f isa Tempest.OnlineSoftmax
+        lanes = ntuple(q -> q == p ? tp : 1, p)
+        push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
     end
+    if sums !== nothing
+        sum_step!(k, loop, e, f, t.body, sums, acc, names, valid, (indices..., at), p)
+    else
+        x = as_accumulator(loop, names[t.body], A, Tempest.term_eltype(t.body, c.graph), shape)
+        direct ? (acc = direct_state!(st, f, A, x, valid, p)) : accumulate_elements!(loop, f, A, acc, x, valid)
+    end
+    steps == 1 || push!(st, :(for $j in Int32(1):Int32($steps)
+        $(loop...)
+    end))
+    state = sums !== nothing ? sum_state(e, sums, acc) : direct ? acc : reduce_state!(st, f, A, acc, p)
     stat = observe!(st, f, A, T, state)
     result = gensym(:stat)
     push!(st, :($result = reshape($stat, $(shape[1:n]))))

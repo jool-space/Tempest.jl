@@ -34,7 +34,7 @@ function fold_types(f::Fold, T)
     R = Base.promote_op(s -> fold_observe(f, s), S)
     isconcretetype(R) || throw(ArgumentError("fold $f: observe must infer a concrete type, got $R"))
     # A half-precision fold rounds its result back to the element type.
-    (; state = S, accumulator = A, result = A === T ? R : T)
+    (; state = S, accumulator = A, observed = R, result = A === T ? R : T)
 end
 
 fold_eltype(f::Fold, T) = fold_types(f, T).result
@@ -75,12 +75,58 @@ fold_name(::LogSumExpFold) = :logsumexp
 fold_init(::LogSumExpFold, T) = (T(-Inf), zero(T))
 fold_lift(::LogSumExpFold, x) = (x, one(x))
 lse_shift(m) = ifelse(isfinite(m), m, zero(m))
-function fold_combine(::LogSumExpFold, a, b)
+fold_combine(::LogSumExpFold, a, b) = shifted_combine(a, b)
+fold_observe(::LogSumExpFold, s) = lse_shift(s[1]) + log(s[2])
+
+# States of a running maximum and sums relative to it: combining moves both
+# sums to the larger maximum.
+function shifted_combine(a, b)
     m = max(a[1], b[1])
     s = lse_shift(m)
-    (m, a[2] * exp(a[1] - s) + b[2] * exp(b[1] - s))
+    ea, eb = exp(a[1] - s), exp(b[1] - s)
+    (m, map((x, y) -> x * ea + y * eb, Base.tail(a), Base.tail(b))...)
 end
-fold_observe(::LogSumExpFold, s) = lse_shift(s[1]) + log(s[2])
+
+"""
+    fold_reduce(f) -> function or nothing
+
+How to fold arrays of states along some of their axes at once, when `f` has a
+faster way than combining them in pairs: a function of the state's components,
+one array each, and the axes, that returns the folded components.
+Implementations call it on their own arrays, such as tiles. Logsumexp takes the
+maximum first, so that each element needs one exponential.
+"""
+fold_reduce(::Fold) = nothing
+fold_reduce(::LogSumExpFold) = shifted_sums
+
+function shifted_sums(states, dims)
+    m = first(states)
+    top = maximum(m; dims)
+    shift = lse_shift.(top)
+    (top, map(s -> sum(s .* exp.(m .- shift); dims), Base.tail(states))...)
+end
+
+"""
+    OnlineSoftmax(f)
+
+Sums of `g · exp(y - m)` over the reduced axes, one for each `g` of an element
+`(y, g...)`, where `m` is the maximum of `y` over the same axes: the online
+softmax, as one fold. The state is the running maximum and the sums relative to
+it; combining moves the sums to the larger maximum, scaling each by
+`exp(m_old - m_new)`. The result is `f` of the sums. Logsumexp is this fold of
+`(y, 1)`, observed as `m + log(sum)`. Plans rewrite sums weighted by `exp(y - m)`
+into it (see `rewrite`).
+"""
+struct OnlineSoftmax{F} <: Fold
+    f::F
+end
+fold_name(::OnlineSoftmax) = Symbol("online softmax")
+fold_init(::OnlineSoftmax, ::Type{E}) where {E <: Tuple} =
+    ntuple(i -> i == 1 ? fieldtype(E, 1)(-Inf) : zero(fieldtype(E, i)), Val(fieldcount(E)))
+fold_lift(::OnlineSoftmax, e) = e
+fold_combine(::OnlineSoftmax, a, b) = shifted_combine(a, b)
+fold_observe(f::OnlineSoftmax, s) = f.f(Base.tail(s)...)
+fold_reduce(::OnlineSoftmax) = shifted_sums
 
 """
     GenericFold(; init, combine, lift = tuple, observe = only, pullback = nothing)

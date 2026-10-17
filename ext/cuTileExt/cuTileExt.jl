@@ -53,11 +53,7 @@ struct TileSchedule
     occupancy::Union{Nothing, Int}
     swizzle::Int              # grouping of the first two kept axes on the grid; 0 for a plain grid
     precision::Symbol         # of products: :full or :tf32
-    online::Bool              # whether a softmax-weighted sum may accumulate online
 end
-
-TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision) =
-    TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision, false)
 
 # The two-axis sketches over groups A and B, `reduced` naming the reduced one
 # (1 or 2), both (3) or neither (0).
@@ -168,8 +164,10 @@ function view_of(graph, v, index, g, groups...; scalar = ())
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach)
 end
 
-const FOLDS = Union{Tempest.SumFold, Tempest.MaxFold, Tempest.MinFold, Tempest.ProdFold, Tempest.LogSumExpFold}
 const TILE_TYPES = Union{Float32, Float16, Core.BFloat16, Bool, Int32}
+
+# Tile types, and tuples of them: a fold's element of several components.
+tile_type(T) = T <: TILE_TYPES || T <: Tuple && all(tile_type, fieldtypes(T))
 
 # Positions computed from a formula without gathers.
 positional(t::Ix) = isempty(Tempest.indirect_values(t.expr)) && Tempest.term_eltype(t, nothing) <: TILE_TYPES
@@ -181,11 +179,11 @@ function expressible(graph, stored, g::Group)
     for m in Tempest.members(g)
         val = graph.values[m]
         val.eltype <: TILE_TYPES || return false
-        m in g.reductions && !(val.definition.fold isa FOLDS) && return false
+        m in g.reductions && !tile_fold(val.definition.fold, Tempest.term_eltype(g.terms[m], graph)) && return false
         for t in Tempest.subterms((g.terms[m],))
             t isa Tempest.Fold && return false
             t isa Ix && !positional(t) && return false
-            t isa Apply && !(t.eltype <: TILE_TYPES) && return false
+            t isa Apply && !tile_type(t.eltype) && return false
             t isa Lit && t.value isa Float64 && return false
             t isa Load && !(graph.values[t.value].eltype <: TILE_TYPES) && return false
         end
@@ -292,7 +290,7 @@ function Tempest.claims(::Tempest.cuTileGenerator, target::CUDATarget, p::Plan, 
             chunk = max(1, cld(cld(s.tiling[kept].extent, s.tiling[kept].tile), PARTIAL_BLOCKS))
             tiling = copy(s.tiling)
             tiling[kept] = with_chunk(tiling[kept], chunk)
-            s = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision, s.online)
+            s = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
         end
     end
     [Claim(s)]
@@ -328,7 +326,8 @@ function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Pl
     work = if s.sketch === :product
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
-        t = first(g.terms[first(g.reductions)].args)
+        r = first(g.reductions)
+        t = first(Tempest.product_factors(p.graph.values[r].definition.fold, g.terms[r]))
         factor = t isa Apply && t.f isa Tempest.Cast{Float32} ? only(t.args) : t
         rate = product_rate(target, Tempest.term_eltype(factor, p.graph))
         [Tempest.Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions), rate, blocks)]

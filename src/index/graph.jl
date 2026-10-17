@@ -124,7 +124,8 @@ end
 
 A program at the index level: values in topological order, the values that are
 arguments, each result as a read over the result's own shape (results may be
-layouts of values, or constants), and the calls.
+layouts of values, or constants), and the calls. `rewrites` notes the values
+that rewrites of the graph made, and what each rewrote.
 """
 struct IndexGraph
     values::Vector{Value}
@@ -134,9 +135,11 @@ struct IndexGraph
     result_scalar::Vector{Bool}
     result_eltype::Vector{DataType}
     calls::Vector{CallSite}
+    rewrites::Vector{Pair{Int, String}}
 end
 
-IndexGraph(values, arguments, results, dims, scalar, eltype) = IndexGraph(values, arguments, results, dims, scalar, eltype, CallSite[])
+IndexGraph(values, arguments, results, dims, scalar, eltype, calls = CallSite[]) =
+    IndexGraph(values, arguments, results, dims, scalar, eltype, calls, Pair{Int, String}[])
 
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands

@@ -44,6 +44,10 @@ device_name(::CPUTarget) = "cpu"
 numerics(::Target) = :default
 numerics(target::CUDATarget) = target.online ? target.precision : Symbol(target.precision, "-two-pass")
 
+"Whether a target permits the rewrites of sums that change rounding (see `rewrite`)."
+permits_rewrites(::Target) = true
+permits_rewrites(target::CUDATarget) = target.online
+
 """
     estimate(implementation, claim, target, plan, group) -> Vector{Work}
 
@@ -333,7 +337,7 @@ function claimed(graph::IndexGraph, calls)
             values[r.value] = Value(Opaque(n, site.operands, site.shapes, k in c.epilogues, index), v.dims, v.eltype, v.scalar)
         end
     end
-    IndexGraph(values, graph.arguments, graph.results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls)
+    IndexGraph(values, graph.arguments, graph.results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls, graph.rewrites)
 end
 
 # The calls an implementation claims, with the epilogues it applies. An opaque

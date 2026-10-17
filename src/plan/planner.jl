@@ -206,15 +206,14 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
     # An opaque operation runs when any of its results is read (a call's
     # results run together), and reads its operands from storage, as a gather
     # reads its indices.
-    instance(id) = (op = values[id].definition.node.op; op isa Call ? op.instance : -id)
-    running = Set(instance(id) for id in 1:n if live[id] && values[id].definition isa Opaque)
+    running = Set(instance(graph, id) for id in 1:n if live[id] && values[id].definition isa Opaque)
     materialized = falses(n)
     for id in 1:n
         live[id] || continue
         for o in operands(values[id].definition)
             foreach(r -> materialized[r] = true, gathered_values(o))
         end
-        values[id].definition isa Opaque && instance(id) in running || continue
+        values[id].definition isa Opaque && instance(graph, id) in running || continue
         foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
     recomputed = recompute_folds ? setdiff(recomputed_folds(graph, results, materialized), keep, fixed...) : Set{Int}()
@@ -227,10 +226,13 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
     end
     # A result of an opaque operation that nobody reads is not stored: its
     # kernel leaves it unwritten.
+    # Work nothing reads, such as a call's result whose reference a rewrite
+    # replaced, is not stored.
     stored = map(eachindex(values)) do id
         d = values[id].definition
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
-        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : d isa Opaque ? live[id] : true
+        d isa Union{Pointwise, Reduction, Opaque} && !live[id] && return false
+        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : true
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
     for id in eachindex(values)
@@ -239,6 +241,38 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
         all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
         all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
     end
+    # A pointwise value read only by one group over its domain, at the same
+    # index, is recomputed by that group: grouped again without it.
+    p = group_values(graph, copy(stored), live, results, running, fixed)
+    users = readers(graph)
+    shared = filter(id -> !any(s -> id in s, fixed) && recomputable(p, users, id, live, results, materialized), 1:n)
+    isempty(shared) && return p
+    stored[shared] .= false
+    group_values(graph, stored, live, results, running, fixed)
+end
+
+# An opaque operation's instance: a call's results run together.
+instance(graph, id) = (op = graph.values[id].definition.node.op; op isa Call ? op.instance : -id)
+
+# Whether stored pointwise value `id` is read only by the members of one group
+# over its domain, each reading it at the domain's index.
+function recomputable(p::Plan, users, id, live, results, materialized)
+    v = p.graph.values[id]
+    v.definition isa Pointwise && p.stored[id] && live[id] && !(id in results) && !materialized[id] || return false
+    readers = filter(u -> live[u], users[id])
+    k = isempty(readers) ? 0 : p.owner[first(readers)]
+    k != 0 && k != p.owner[id] && p.groups[k].kind in (:reduction, :pointwise) && p.groups[k].domain == v.dims || return false
+    all(readers) do u
+        p.owner[u] == k && all(operands(p.graph.values[u].definition)) do o
+            !(id in read_values(o)) || o isa Read && o.value == id && o.index == identity_index(v.dims)
+        end
+    end
+end
+
+# The kernels, given what is stored.
+function group_values(graph, stored, live, results, running, fixed)
+    values = graph.values
+    n = length(values)
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
@@ -248,8 +282,8 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
     # applies over the result's output tile.
     output(id) = (op = values[id].definition.node.op; op isa Call ? op.output : 1)
     instances = Dict{Int, Int}()
-    for id in sort([id for id in 1:n if values[id].definition isa Opaque && instance(id) in running]; by = output)
-        k = get!(instances, instance(id)) do
+    for id in sort([id for id in 1:n if values[id].definition isa Opaque && instance(graph, id) in running]; by = output)
+        k = get!(instances, instance(graph, id)) do
             push!(groups, Group(:opaque, opaque_dims(values[id].definition)))
             length(groups)
         end
@@ -480,7 +514,7 @@ function with_stored_results(graph::IndexGraph)
             graph.result_eltype[k], graph.result_scalar[k]))
         results[k] = Read(length(values), wide_index(dims))
     end
-    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls)
+    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls, graph.rewrites)
 end
 
 # The values a group reads from storage, its own excepted.

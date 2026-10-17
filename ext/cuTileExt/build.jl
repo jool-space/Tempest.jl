@@ -120,8 +120,8 @@ function unsplit_kernel(c::Context, workspaces, slots)
     for r in partial
         held(r) || continue
         f, A = fold_of(c, r), accumulator(c, r)
-        held_states[r] = [Symbol(:partial_, r, :_, i) for i in 1:state_width(f)]
-        foreach((x, init) -> push!(st, :($x = $init)), held_states[r], init_state(f, A, fold_tile_shape(c, r)))
+        held_states[r] = [Symbol(:partial_, r, :_, i) for i in eachindex(Tempest.fold_init(f, A))]
+        init_state!(st, held_states[r], f, A, fold_tile_shape(c, r))
     end
     body = isempty(chunks) ? st : Any[]
     names = Dict{Term, Any}()
@@ -131,62 +131,33 @@ function unsplit_kernel(c::Context, workspaces, slots)
     elementwise(phase) = any(r -> bilinear(c, r) === nothing, phase)
     valid1 = resident && any(elementwise, reduction_phases(c)) ? valid_mask!(body, c, one32) : nothing
     for phase in reduction_phases(c)
-        products = Dict(r => bilinear(c, r) for r in phase)
-        accumulators = Dict{Int, Vector{Symbol}}()
-        for r in phase
-            f, A = fold_of(c, r), accumulator(c, r)
-            if products[r] !== nothing
-                (a, b, i, j) = products[r]
-                accumulators[r] = [Symbol(:acc_, r)]
-                push!(body, :($(only(accumulators[r])) = fill(0.0f0, ($(tile(c)[i]), $(tile(c)[j])))))
-            elseif !resident
-                accumulators[r] = state_symbols(r, f)
-                foreach((x, init) -> push!(body, :($x = $init)), accumulators[r], init_state(f, A, tile(c)))
-            end
-        end
+        sums = Dict(r => fold_sums(c, r) for r in phase)
+        # Folds of a resident tile that do not sum fold it directly.
+        accumulators = Dict(r => fold_accumulators!(body, c, r, sums[r]) for r in phase if !resident || sums[r] !== nothing)
         loop = resident ? body : Any[]
         t = resident ? one32 : gensym(:t)
-        online = Dict{Int, Any}()
-        for r in phase
-            o = resident ? nothing : online_softmax(c, r)
-            o === nothing || (online[r] = o)
-        end
-        # The online softmax's running maximum and sum mask lanes too.
-        valid = resident ? valid1 : elementwise(phase) || !isempty(online) ? valid_mask!(loop, c, t) : nothing
+        valid = resident ? valid1 : elementwise(phase) ? valid_mask!(loop, c, t) : nothing
         scope = resident ? names : merge(Dict{Term, Any}(), statistics)
-        roots = [products[r] === nothing ? c.g.terms[r] : product_factor(c, products[r][q]) for r in phase for q in (1, 2)]
-        if !resident
-            hoist_folds!(k, body, c, unique(roots), scope, at(one32), Set(o[3] for o in values(online)))
-            for (r, o) in online
-                online[r] = online_step!(k, body, loop, c, o, scope, valid, at(t), products[r], only(accumulators[r]))
-            end
-        end
-        emit_tiles!(k, loop, c, unique(roots), scope, at(t)...)
+        roots = phase_roots(c, phase, sums)
+        resident || hoist_folds!(k, body, c, roots, scope, at(one32))
+        emit_tiles!(k, loop, c, roots, scope, at(t)...)
         states = Dict{Int, Vector{Any}}()
         for r in phase
-            f, A = fold_of(c, r), accumulator(c, r)
-            if products[r] !== nothing
-                accumulate_product!(loop, c, scope, products[r], only(accumulators[r]), t)
-            elseif resident
+            if haskey(accumulators, r)
+                fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t))
+            else
+                f, A = fold_of(c, r), accumulator(c, r)
                 x = as_accumulator(loop, scope[c.g.terms[r]], A, Tempest.term_eltype(c.g.terms[r], c.graph), tile(c))
                 states[r] = direct_state!(loop, f, A, x, valid1, p)
-            else
-                x = as_accumulator(loop, scope[c.g.terms[r]], A, Tempest.term_eltype(c.g.terms[r], c.graph), tile(c))
-                accumulate_elements!(loop, f, A, accumulators[r], x, valid)
             end
         end
         resident || push!(body, :(for $t in Int32(1):Int32($n)
             $(loop...)
         end))
-        for (r, total) in online
-            acc = only(accumulators[r])
-            push!(body, :($acc = $acc ./ $(products[r] === nothing ? total : matrix_tile(c, total, products[r][3], products[r][4]))))
-        end
-        isempty(online) || (k.name *= ", online softmax")
+        any(r -> fold_of(c, r) isa Tempest.OnlineSoftmax, phase) && (k.name *= ", online softmax")
         for r in phase
             f, A = fold_of(c, r), accumulator(c, r)
-            state = products[r] !== nothing ? product_state(c, products[r], only(accumulators[r])) :
-                resident ? states[r] : reduce_state!(body, f, A, accumulators[r], p)
+            state = haskey(states, r) ? states[r] : fold_state!(body, c, r, sums[r], accumulators[r])
             stat = observe!(body, f, A, c.graph.values[r].eltype, state)
             names[Stat(r)] = stat
             statistics[Stat(r)] = stat
@@ -203,7 +174,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         emit_tiles!(k, body, c, [c.g.terms[m] for m in outputs], names, at(one32)...)
         store_values!(k, body, c, outputs, names, at(one32)...)
         for (r, state) in tile_states!(k, body, c, partial, names, at(one32))
-            combine_states!(body, fold_of(c, r), accumulator(c, r), held_states[r], state)
+            combine!(body, fold_of(c, r), accumulator(c, r), held_states[r], state)
         end
     elseif !isempty(outputs) || !isempty(partial)
         t = gensym(:t)
@@ -213,7 +184,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         store_values!(k, loop, c, outputs, scope, at(t)...)
         for (r, state) in tile_states!(k, loop, c, partial, scope, at(t))
             if held(r)
-                combine_states!(loop, fold_of(c, r), accumulator(c, r), held_states[r], state)
+                combine!(loop, fold_of(c, r), accumulator(c, r), held_states[r], state)
             else
                 slot, slots[r] = slot_of(r)
                 store_partial!(k, loop, c, r, state, at(t), slot, slots[r], workspaces)
@@ -239,66 +210,120 @@ end
 
 # Recomputed folds that do not move along the swept axis are computed once,
 # before the sweep.
-function hoist_folds!(k, st, c::Context, roots, scope, indices, exclude)
+function hoist_folds!(k, st, c::Context, roots, scope, indices)
     axes = c.s.tiling[only(swept(c.s))].axes
     for t in Tempest.subterms(roots; known = t -> haskey(scope, t))
-        t isa Tempest.Fold && !(t in exclude) || continue
+        t isa Tempest.Fold || continue
         any(q -> Tempest.mentions(t, q), axes) && continue
         emit_tiles!(k, st, c, [t], scope, indices...)
     end
 end
 
-# The online softmax: a sum whose term weighs by `exp(y - lse)`, where `lse` is
-# a recomputed logsumexp of `y` over the swept axis, accumulates in the sweep
-# that computes `lse`: each step raises the running maximum, rescales the sum
-# and the running sum of exponentials by how much it rose, and weighs by
-# `exp(y - maximum)`; the sum is divided by the sum of exponentials at the
-# end. Returns the weight, `y` and `lse`, or nothing.
-function online_softmax(c::Context, r)
-    c.s.online && fold_of(c, r) isa Tempest.SumFold || return nothing
-    axes = c.s.tiling[only(swept(c.s))].axes
-    length(axes) == 1 || return nothing
-    K = only(axes)
-    roots = (c.g.terms[r],)
-    for w in Tempest.subterms(roots)
-        w isa Apply && w.f === exp && length(w.args) == 1 || continue
-        d = only(w.args)
-        d isa Apply && d.f === (-) && length(d.args) == 2 && d.args[2] isa Tempest.Fold || continue
-        y, F = d.args
-        def = c.graph.values[F.value].definition
-        def.fold isa Tempest.LogSumExpFold && F.extents == (c.g.domain[K],) || continue
-        Tempest.mentions(F, K) && continue
-        index = Tempest.iteration_index(def, F.index, (Tempest.var(K),))
-        Tempest.operand_term(c.graph, c.stored, c.g, def.operand, index, Tempest.Domain(c.g.domain)) == y || continue
-        # Nothing else reads the logsumexp, whose value is only known at the end.
-        all(s -> !(s isa Apply) || s == d || !(F in s.args), Tempest.subterms(roots)) || continue
-        return (w, y, F)
+# Folds that accumulate as sums of terms along tile axis `p`: a sum of a
+# bilinear product, and an online softmax of `(y, g...)`, whose sums are of
+# each `g` times the weight `exp(y - m)` against the running maximum `m` of `y`
+# (`Weight` stands for it). Each sum is a term and its product, or nothing
+# when the term adds elementwise. Nothing for other folds, which accumulate
+# elementwise in their state.
+struct Weight end
+
+weight(c::Context, y) = Apply(Weight(), (y,), Tempest.term_eltype(y, c.graph))
+
+function sweep_sums(c::Context, f, body, p)
+    if f isa Tempest.OnlineSoftmax
+        w = weight(c, first(body.args))
+        return map(Base.tail(body.args)) do g
+            term = g isa Lit && isone(g.value) ? w : Apply(*, (g, w), w.eltype)
+            (term, bilinear_over(c, Tempest.SumFold(), term, p))
+        end
     end
-    nothing
+    product = bilinear_over(c, f, body, p)
+    product === nothing ? nothing : [(body, product)]
 end
 
-# One step of the online softmax for weight `w`: the running maximum and sum
-# start before the sweep, `w` becomes `exp(y - maximum)`, and the accumulator
-# of the sum it weighs is rescaled. Returns the running sum.
-function online_step!(k, before, loop, c::Context, (w, y, F), scope, valid, indices, product, acc)
-    p = only(swept(c.s))
-    A = Tempest.fold_types(Tempest.LogSumExpFold(), Tempest.term_eltype(y, c.graph)).accumulator
-    shape = Base.setindex(spanned_shape(c, y), 1, p)
-    m, l = gensym(:max), gensym(:sum)
-    push!(before, :($m = fill($(A(-Inf)), $shape)), :($l = fill($(zero(A)), $shape)))
-    emit_tiles!(k, loop, c, [y], scope, indices...)
-    x = as_accumulator(loop, scope[y], A, Tempest.term_eltype(y, c.graph), spanned_shape(c, y))
-    top, sh, rise, weight = gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
-    push!(loop, :($top = max.($m, maximum(ifelse.($valid, $x, $(A(-Inf))); dims = $p))))
-    push!(loop, :($sh = $SHIFT.($top)))
-    push!(loop, :($rise = exp.($m .- $sh)))
-    push!(loop, :($weight = exp.($x .- $sh)))
-    push!(loop, :($l = $l .* $rise .+ sum(ifelse.($valid, $weight, $(zero(A))); dims = $p)))
-    push!(loop, :($m = $top))
-    push!(loop, :($acc = $acc .* $(product === nothing ? rise : matrix_tile(c, rise, product[3], product[4]))))
-    scope[w] = weight
-    l
+# The terms a step computes before its sums add: the products' factors but
+# the weights, which the step computes, and an online softmax's `y`; or the
+# term of a fold that accumulates elementwise.
+function step_roots(c::Context, f, body, sums)
+    sums === nothing && return Term[body]
+    factors = Term[product_factor(c, x) for (_, product) in sums if product !== nothing for x in product[1:2] if !(x isa Apply && x.f isa Weight)]
+    f isa Tempest.OnlineSoftmax ? [first(body.args); factors] : factors
 end
+
+# Accumulators of sums, named from `prefix`: an online softmax's running
+# maximum, over the lanes `y` spans but the swept ones, then each sum's, a
+# product's matrix or the lanes its term spans.
+function sum_accumulators!(st, c::Context, f, body, sums, p, prefix)
+    starts = Any[product === nothing ? :(fill($(zero(term.eltype)), $(Base.setindex(spanned_shape(c, term), 1, p)))) :
+        :(fill(0.0f0, ($(tile(c)[product[3]]), $(tile(c)[product[4]])))) for (term, product) in sums]
+    if f isa Tempest.OnlineSoftmax
+        y = first(body.args)
+        pushfirst!(starts, :(fill($(Tempest.term_eltype(y, c.graph)(-Inf)), $(Base.setindex(spanned_shape(c, y), 1, p)))))
+    end
+    acc = [Symbol(prefix, :_, i) for i in eachindex(starts)]
+    foreach((a, x) -> push!(st, :($a = $x)), acc, starts)
+    acc
+end
+
+# One step of the sums. An online softmax's running maximum rises to the
+# step's first, and its sums scale by how much it rose; lanes past the swept
+# extent weigh nothing. Then each sum adds its terms.
+function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices, p)
+    rise = nothing
+    if f isa Tempest.OnlineSoftmax
+        y = first(body.args)
+        T = Tempest.term_eltype(y, c.graph)
+        x = as_accumulator(st, scope[y], T, T, spanned_shape(c, y))
+        m = first(acc)
+        masked, top, shift, rise, w = gensym(:y), gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
+        push!(st, :($masked = ifelse.($valid, $x, $(T(-Inf)))))
+        push!(st, :($top = max.($m, maximum($masked; dims = $p))))
+        push!(st, :($shift = $(Tempest.lse_shift).($top)))
+        push!(st, :($rise = exp.($m .- $shift)))
+        push!(st, :($w = exp.($masked .- $shift)))
+        push!(st, :($m = $top))
+        scope[weight(c, y)] = w
+    end
+    for ((term, product), a) in zip(sums, acc[(end - length(sums) + 1):end])
+        if product === nothing
+            emit_tiles!(k, st, c, [term], scope, indices...)
+            push!(st, :($a = $a .* $rise .+ sum(ifelse.($valid, $(scope[term]), $(zero(term.eltype))); dims = $p)))
+        else
+            rise === nothing || push!(st, :($a = $a .* $(matrix_tile(c, rise, product[3], product[4]))))
+            accumulate_product!(st, c, scope, product, a, indices[p], p)
+        end
+    end
+end
+
+# The state at the end of the sweep: an online softmax's running maximum, and
+# the sums.
+sum_state(c::Context, sums, acc) = Any[acc[1:(end - length(sums))];
+    [product === nothing ? a : from_matrix(c, a, product[3], product[4]) for ((_, product), a) in zip(sums, acc[(end - length(sums) + 1):end])]]
+
+# A group's fold in a sweep along the schedule's swept axis: its sums, its
+# accumulators, a step, and its state at the end; for folds that do not sum,
+# their state's.
+fold_sums(c::Context, r) = sweep_sums(c, fold_of(c, r), c.g.terms[r], only(swept(c.s)))
+
+function fold_accumulators!(st, c::Context, r, sums)
+    f, A = fold_of(c, r), accumulator(c, r)
+    sums === nothing || return sum_accumulators!(st, c, f, c.g.terms[r], sums, only(swept(c.s)), Symbol(:acc_, r))
+    acc = state_symbols(r, f, A)
+    init_state!(st, acc, f, A, tile(c))
+    acc
+end
+
+function fold_step!(k, st, c::Context, r, sums, acc, scope, valid, indices)
+    f, A, term = fold_of(c, r), accumulator(c, r), c.g.terms[r]
+    sums === nothing || return sum_step!(k, st, c, f, term, sums, acc, scope, valid, indices, only(swept(c.s)))
+    x = as_accumulator(st, scope[term], A, Tempest.term_eltype(term, c.graph), tile(c))
+    accumulate_elements!(st, f, A, acc, x, valid)
+end
+
+fold_state!(st, c::Context, r, sums, acc) =
+    sums === nothing ? reduce_state!(st, fold_of(c, r), accumulator(c, r), acc, only(swept(c.s))) : sum_state(c, sums, acc)
+
+phase_roots(c::Context, phase, sums) = unique(Term[x for r in phase for x in step_roots(c, fold_of(c, r), c.g.terms[r], sums[r])])
 
 # Folds whose swept axis is shared among blocks: per phase, a launch of
 # partial states (each block summing a chunk of the swept axis; a product's
@@ -367,42 +392,20 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     at(t) = (ix = copy(indices); ix[p] = t; Tuple(ix))
     names = Dict{Term, Any}()
     load_folds!(k, st, c, earlier, names, at(:(Int32(1))), workspaces)
-    products = Dict(r => bilinear(c, r) for r in phase)
-    accumulators = Dict{Int, Vector{Symbol}}()
-    for r in phase
-        f, A = fold_of(c, r), accumulator(c, r)
-        if products[r] !== nothing
-            (a, b, i, j) = products[r]
-            accumulators[r] = [Symbol(:acc_, r)]
-            push!(st, :($(only(accumulators[r])) = fill(0.0f0, ($(tile(c)[i]), $(tile(c)[j])))))
-        else
-            accumulators[r] = state_symbols(r, f)
-            foreach((x, init) -> push!(st, :($x = $init)), accumulators[r], init_state(f, A, tile(c)))
-        end
-    end
+    sums = Dict(r => fold_sums(c, r) for r in phase)
+    accumulators = Dict(r => fold_accumulators!(st, c, r, sums[r]) for r in phase)
     chunk = cld(sweeps(c.s), c.s.splits)
     t = gensym(:t)
     loop = Any[]
-    valid = any(r -> products[r] === nothing, phase) ? valid_mask!(loop, c, t) : nothing
+    valid = any(r -> bilinear(c, r) === nothing, phase) ? valid_mask!(loop, c, t) : nothing
     scope = copy(names)
-    roots = [products[r] === nothing ? c.g.terms[r] : product_factor(c, products[r][q]) for r in phase for q in (1, 2)]
-    emit_tiles!(k, loop, c, unique(roots), scope, at(t)...)
-    for r in phase
-        f, A = fold_of(c, r), accumulator(c, r)
-        if products[r] !== nothing
-            accumulate_product!(loop, c, scope, products[r], only(accumulators[r]), t)
-        else
-            x = as_accumulator(loop, scope[c.g.terms[r]], A, Tempest.term_eltype(c.g.terms[r], c.graph), tile(c))
-            accumulate_elements!(loop, f, A, accumulators[r], x, valid)
-        end
-    end
+    emit_tiles!(k, loop, c, phase_roots(c, phase, sums), scope, at(t)...)
+    foreach(r -> fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t)), phase)
     push!(st, :(for $t in ((part - Int32(1)) * Int32($chunk) + Int32(1)):min(part * Int32($chunk), Int32($(sweeps(c.s))))
         $(loop...)
     end))
     for r in phase
-        f, A = fold_of(c, r), accumulator(c, r)
-        state = products[r] !== nothing ? product_state(c, products[r], only(accumulators[r])) :
-            reduce_state!(st, f, A, accumulators[r], p)
+        state = fold_state!(st, c, r, sums[r], accumulators[r])
         slots[r] = c.s.splits
         store_partial!(k, st, c, r, state, at(:(Int32(1))), :part, c.s.splits, workspaces)
     end
@@ -429,19 +432,19 @@ function merge_kernel(c::Context, rs, slots, workspaces)
     lanes = (map(_ -> 1, tiles_m)..., width)
     for r in rs
         f, A = fold_of(c, r), accumulator(c, r)
-        acc = state_symbols(r, f)
-        foreach((x, init) -> push!(st, :($x = $init)), acc, init_state(f, A, shape))
+        acc = state_symbols(r, f, A)
+        init_state!(st, acc, f, A, shape)
         t = gensym(:t)
         loop = Any[]
         valid = gensym(:valid)
         push!(loop, :($valid = reshape($(ct.arange)($width), $lanes) .<= Int32($slots) - ($t - Int32(1)) * Int32($width)))
-        loaded = map(1:state_width(f)) do j
+        loaded = map(eachindex(acc)) do j
             name = gensym(:part)
             sym = argument!(k, partial_spec!(c, r, j, slots, workspaces))
             push!(loop, :($name = $(ct.load)($sym; index = ($(idx...), $t), shape = $shape, padding_mode = $(ct.PaddingMode.Zero))))
             name
         end
-        accumulate_states!(loop, f, A, acc, loaded, valid)
+        combine!(loop, f, A, acc, loaded, valid)
         push!(st, :(for $t in Int32(1):Int32($(cld(slots, width)))
             $(loop...)
         end))

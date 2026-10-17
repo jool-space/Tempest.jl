@@ -33,6 +33,50 @@ end
     @test agree(T.execute(planned, q, k, v), [interpret(p, q, k, v)])
 end
 
+# Rewrites of sums, which change rounding: rewritten programs plan and compute
+# what they computed, and the two spellings of a softmax weighting a sum plan
+# alike, one online softmax recomputing the scores in the kernel of the sum.
+scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.125
+causal(s) = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, -Inf)
+weigh(v, p) = T.contract(v, p, (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
+by_logsumexp(q, k, v) = (s = causal(scores(q, k)); weigh(v, exp.(s .- T.logsumexp(s; dims = 1))))
+function by_maximum(q, k, v)
+    s = causal(scores(q, k))
+    e = exp.(s .- maximum(s; dims = 1))
+    weigh(v, e ./ sum(e; dims = 1))
+end
+
+@testset "rewritten sums" begin
+    @testset "$name" for (name, f, args) in PROGRAMS
+        for p in (trace(f, args...), differentiate(trace(f, args...)))
+            planned = T.plan(T.rewrite(T.lower(p)); recompute_folds = true)
+            @test agree(T.execute(planned, args...), filter(!isnothing, T.leaves(interpret(p, args...))))
+        end
+    end
+    groups(f, args...) = T.plan(T.rewrite(T.lower(trace(f, args...))); recompute_folds = true).groups
+    q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
+    a, b = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v))
+    @test a.terms == b.terms
+    graph = T.rewrite(T.lower(trace(by_maximum, q, k, v)))
+    @test graph.values[only(b.reductions)].definition.fold == T.OnlineSoftmax(/)
+    @test length(T.recomputed_in(b)) == 1
+    planned = T.plan(graph; recompute_folds = true)
+    @test agree(T.execute(planned, q, k, v), [interpret(trace(by_maximum, q, k, v), q, k, v)])
+    @test occursin("online softmax", sprint(explain, planned))
+end
+
+# A map read by a fold and by a later map over its domain is recomputed in
+# their kernel, as when it is written twice.
+@testset "a map one kernel reads" begin
+    x = data(8, 6)
+    for f in (x -> (e = exp.(x); e ./ sum(e; dims = 1)), x -> exp.(x) ./ sum(exp.(x); dims = 1))
+        p = trace(f, x)
+        planned = T.plan(T.lower(p))
+        @test length(planned.groups) == 1
+        @test agree(T.execute(planned, x), [interpret(p, x)])
+    end
+end
+
 # A kernel is maps and folds over one domain, each fold over its own axes: the
 # loss and a weight gradient join the normalization's kernel, and the values
 # only they read are never stored.

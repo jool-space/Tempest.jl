@@ -23,6 +23,9 @@ function explain(io::IO, p::Plan)
     recomputed = count(id -> !p.stored[id], eachindex(graph.values))
     println(io, s.kernels, " kernels; ", length(s.stored), " values stored (", Base.format_bytes(s.bytes), "), ",
         recomputed, " recomputed where read")
+    for (v, note) in graph.rewrites
+        println(io, "rewritten: ", describe_value(graph, v), ", ", note)
+    end
     for (k, g) in enumerate(p.groups)
         reads = sort!(collect(group_reads(graph, g)))
         print(io, "kernel ", k, ": ", g.kind, " over ", g.domain)
