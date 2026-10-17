@@ -325,7 +325,7 @@ function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Pl
     bytes = Tempest.group_bytes(p, g)
     work = if s.sketch === :product
         m, k, n = (ax.extent for ax in s.tiling[1:3])
-        b = length(s.tiling) > 3 ? s.tiling[4].extent : 1
+        b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
         t = first(g.terms[first(g.reductions)].args)
         factor = t isa Apply && t.f isa Tempest.Cast{Float32} ? only(t.args) : t
         rate = product_rate(target, Tempest.term_eltype(factor, p.graph))
