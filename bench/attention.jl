@@ -47,7 +47,7 @@ function measure(name, p, args; target, check = true)
         err = NaN
     end
     t = device_microseconds(ex)
-    kinds = join(unique(d isa T.ScalarKernel ? "floor" : first(split(string(d), ":")) for d in ex.kernels), " + ")
+    kinds = join(unique(d isa T.FloorKernels ? "floor" : first(split(string(d), ":")) for d in ex.kernels), " + ")
     @printf("%-58s %10.1f us  err %.1e  %s\n", name, t, err, kinds)
     t
 end
@@ -58,6 +58,7 @@ ext = Base.get_extension(Tempest, :cuTileExt)
 println("== full")
 measure("generated, forward", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget())
 measure("generated, forward, two passes", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(online = false))
+measure("training step (loss of attention + residual)", differentiate(trace(loss, q, k, v, x)), (q, k, v, x); target = T.CUDATarget())
 for precision in (:tf32,)
     target = T.CUDATarget(precision = precision)
     println("== ", precision)

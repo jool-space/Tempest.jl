@@ -29,7 +29,8 @@ is not such a product, or the folds split the axes differently.
 function product_axes(graph, g::Group)
     n = length(g.domain)
     K = sort!(collect(primary_axes(graph, g)))
-    # Axes of extent one are read by neither factor and need no tile axis.
+    # Axes of extent one, kept or summed, are read by neither factor and need
+    # no tile axis.
     kept = [k for k in 1:n if !(k in K) && g.domain[k] > 1]
     found = nothing
     for r in g.reductions
@@ -37,7 +38,7 @@ function product_axes(graph, g::Group)
         t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
         ax, ay = axes_read(t.args[1], n), axes_read(t.args[2], n)
         (ax === nothing || ay === nothing) && return nothing
-        all(k -> k in ax && k in ay, K) || return nothing
+        all(k -> g.domain[k] == 1 || k in ax && k in ay, K) || return nothing
         M = [k for k in kept if k in ax && !(k in ay)]
         N = [k for k in kept if k in ay && !(k in ax)]
         B = [k for k in kept if k in ax && k in ay]

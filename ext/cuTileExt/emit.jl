@@ -39,9 +39,12 @@ function load_nd(sym, v, tiles, indices, at = nothing)
     shape == full ? loaded : :(reshape($loaded, $full))
 end
 
+# A value as a tile: a constant term is a number when the kernel is generated.
+tile_of(x) = x isa Number ? :($(ct.Tile)($x)) : x
+
 function store_nd(sym, v, tiles, indices, value)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
-    tile = :($(ct.broadcast_to)($value, $full))
+    tile = :($(ct.broadcast_to)($(tile_of(value)), $full))
     any(v.spans) || return :($(ct.store)($sym; index = (Int32(1),), tile = reshape($tile, (1,))))
     order = storage_order(v)
     shape, index = compact(v.spans, tiles), compact(v.spans, indices)
@@ -158,7 +161,7 @@ end
 store_expr(sym, spans, ta, tb, ia, ib, value) = :($(ct.store)(
     $sym;
     index = ($(spans[1] ? ia : :(Int32(1))), $(spans[2] ? ib : :(Int32(1)))),
-    tile = $(ct.broadcast_to)($value, $((spans[1] ? ta : 1, spans[2] ? tb : 1))),
+    tile = $(ct.broadcast_to)($(tile_of(value)), $((spans[1] ? ta : 1, spans[2] ? tb : 1))),
 ))
 
 # Statements for `roots`, each subterm once, at the tile of block indices
@@ -168,6 +171,9 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
     for t in Tempest.subterms(roots; known = t -> haskey(names, t))
         if t isa Lit
             names[t] = t.value
+            continue
+        elseif t isa Apply && all(a -> names[a] isa Number, t.args)
+            names[t] = convert(t.eltype, t.f(map(a -> names[a], t.args)...))
             continue
         end
         name = gensym(:t)
@@ -308,7 +314,7 @@ end
 
 function as_accumulator(st, x, A, T, shape)
     name = gensym(:x)
-    converted = A === T ? x : :(convert($(ct.Tile){$A}, $x))
+    converted = A === T ? tile_of(x) : :(convert($(ct.Tile){$A}, $(tile_of(x))))
     push!(st, :($name = $(ct.broadcast_to)($converted, $shape)))
     name
 end
@@ -506,7 +512,7 @@ end
 function matrix_tile(c::Context, x, u, w)
     tu, tw = tile(c)[u], tile(c)[w]
     full = ntuple(q -> q == u ? tu : q == w ? tw : 1, length(c.s.tiling))
-    m = :(reshape($(ct.broadcast_to)($x, $full), $(u < w ? (tu, tw) : (tw, tu))))
+    m = :(reshape($(ct.broadcast_to)($(tile_of(x)), $full), $(u < w ? (tu, tw) : (tw, tu))))
     u < w ? m : :(permutedims($m, (2, 1)))
 end
 

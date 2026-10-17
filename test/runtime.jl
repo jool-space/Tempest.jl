@@ -305,6 +305,13 @@ if CUDACore.functional()
                 @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v)]; rtol = 1.0e-4)
             end
         end
+        # The reference's gradient: every product generated, also those that
+        # sum over key heads shared by one query head each.
+        q, k, v = single(data(16, 2, 70, 2; scale = 0.1)), single(data(16, 2, 70, 2; scale = 0.2)), single(data(16, 2, 70, 2; scale = 0.3))
+        d = differentiate(trace((q, k, v) -> sum(abs2, T.attention(q, k, v; causal = true)), q, k, v))
+        ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
+        @test all(d -> !(d isa T.FloorKernels), ex.kernels)
+        @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
     end
 end
 
