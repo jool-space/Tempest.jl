@@ -30,6 +30,33 @@ closure(s) = x -> s * x
     @test T.content_key(closure(1.0f0)) != T.content_key(closure(2.0f0))
 end
 
+@testset "where the caches live" begin
+    # In Tempest's scratch spaces, unless the environment names a directory.
+    scratch(depot, key) = joinpath(depot, "scratchspaces", string(Base.PkgId(Tempest).uuid), key)
+    withenv("TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
+        @test T.kernel_cache() == scratch(first(DEPOT_PATH), "kernels") && isdir(T.kernel_cache())
+        @test T.tuning_directory() == scratch(first(DEPOT_PATH), "tuning") && isdir(T.tuning_directory())
+    end
+    withenv("TEMPEST_KERNEL_CACHE" => "0") do
+        @test T.kernel_cache() === nothing
+    end
+    elsewhere = mktempdir()
+    withenv("TEMPEST_KERNEL_CACHE" => elsewhere, "TEMPEST_CACHE" => elsewhere) do
+        @test T.kernel_cache() == elsewhere
+        @test T.tuning_directory() == joinpath(elsewhere, "tuning")
+        @test dirname(T.record_path(T.CPUTarget())) == joinpath(elsewhere, "tuning")
+    end
+    # The paths are found when Tempest loads, not baked in when it
+    # precompiles: a process with another first depot keeps its caches there.
+    depot = mktempdir()
+    script = "using Tempest; print(Tempest.kernel_cache(), '\\n', Tempest.tuning_directory())"
+    paths = withenv("JULIA_DEPOT_PATH" => join([depot; DEPOT_PATH], Sys.iswindows() ? ';' : ':'),
+        "TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
+        readchomp(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`)
+    end
+    @test split(paths, '\n') == [scratch(depot, "kernels"), scratch(depot, "tuning")]
+end
+
 using CUDACore, cuTile
 if CUDACore.functional()
     @testset "kernel cache" begin

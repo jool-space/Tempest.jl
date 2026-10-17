@@ -11,16 +11,28 @@
 # kernel is its entry name and its binary.
 
 using SHA
+using Scratch: @get_scratch!
+
+# Tempest's caches live in its scratch spaces in the depot: `kernels` and
+# `tuning`, the tuning record. Their paths are found when Tempest loads, so
+# none is part of its precompiled image; while Tempest precompiles there are
+# none, and its workload uses no cache unless an environment variable names one.
+const SCRATCH = (kernels = Ref{Union{Nothing, String}}(nothing), tuning = Ref{Union{Nothing, String}}(nothing))
+
+function __init__()
+    SCRATCH.kernels[] = @get_scratch!("kernels")
+    SCRATCH.tuning[] = @get_scratch!("tuning")
+end
 
 """
     kernel_cache() -> directory or nothing
 
 Where compiled kernels are kept: `ENV["TEMPEST_KERNEL_CACHE"]` when set, otherwise
-`tempest/kernels` in the first depot. Empty or `"0"` turns the cache off.
+Tempest's `kernels` scratch space. Empty or `"0"` turns the cache off.
 """
 function kernel_cache()
     dir = get(ENV, "TEMPEST_KERNEL_CACHE", nothing)
-    dir === nothing && return joinpath(first(DEPOT_PATH), "tempest", "kernels")
+    dir === nothing && return SCRATCH.kernels[]
     dir in ("", "0") ? nothing : dir
 end
 
