@@ -151,7 +151,7 @@ own, other values a view of their slot, and a result that replaces an argument
 the argument's. `bind!` copies inputs into the buffers the executable owns;
 `outputs` returns the result buffers, which the next execution overwrites.
 """
-struct Executable{T <: Target}
+mutable struct Executable{T <: Target}
     program::Program
     plan::Plan
     target::T
@@ -171,6 +171,8 @@ struct Executable{T <: Target}
     considered::Vector{Any}
     # Copies of staged results into the arguments they replace, after the kernels.
     copies::Vector{Any}
+    # The graph `execute!` replays, once captured (see `capture!`).
+    captured::Any
 end
 
 storage_length(v::Value) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
@@ -248,7 +250,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
     ex = Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results,
-        Any[first(b) for b in built], Any[last(b) for b in built], Any[ds...], Any[considered...], copies)
+        Any[first(b) for b in built], Any[last(b) for b in built], Any[ds...], Any[considered...], copies, nothing)
     bind!(ex, inputs...)
     ex
 end
@@ -274,7 +276,7 @@ end
 # program's results and the argument's among its arguments, leaf by leaf.
 function replacements(program, replaces)
     pairs = Pair{Int, Int}[]
-    for (k, j) in replaces
+    for (k, j) in (replaces isa Pair ? (replaces,) : replaces)
         out, in = program.output_structure[k], program.input_structure[j]
         rebuild(Returns(nothing), out) == rebuild(Returns(nothing), in) ||
             throw(ArgumentError("result $k cannot replace argument $j, whose structure differs"))
@@ -373,12 +375,58 @@ function bind_leaves!(ex, positions, xs)
     ex
 end
 
-"Run every kernel in order, then copy staged results into the arguments they replace."
+"""
+    execute!(ex) -> results
+
+Run the program: replay its captured graph, or else run every kernel in
+order, then copy staged results into the arguments they replace.
+"""
 function execute!(ex::Executable)
-    foreach(launch -> launch(), ex.launches)
-    foreach(copy -> copy(), ex.copies)
+    ex.captured === nothing ? run_once(ex) : replay(ex.target, ex.captured)
     outputs(ex)
 end
+
+function run_once(ex::Executable)
+    foreach(launch -> launch(), ex.launches)
+    foreach(copy -> copy(), ex.copies)
+end
+
+"""
+    capture!(ex; repetitions = 1) -> ex
+
+Capture the program's launches as one graph, which `execute!` replays from
+then on, each replay `repetitions` executions of the program (for timing).
+What varies between replays lives in device buffers: inputs bound by copy or
+by reference, scalars and seeds among them, are read where they are, so they
+need no new capture. Capturing again replaces the graph. A program with work
+on the host cannot be captured; on a target without graphs, replaying runs
+the kernels.
+"""
+function capture!(ex::Executable; repetitions::Integer = 1)
+    k = findfirst(isnothing, ex.decisions)
+    k === nothing || throw(ArgumentError("kernel $k runs on the host, so the program cannot be captured"))
+    ex.captured === nothing || release(ex.target, ex.captured)
+    ex.captured = nothing
+    launches, copies = ex.launches, ex.copies
+    run() = for _ in 1:repetitions
+        foreach(launch -> launch(), launches)
+        foreach(copy -> copy(), copies)
+    end
+    ex.captured = capture(ex.target, run, (launches, copies))
+    ex
+end
+
+"""
+    capture(target, run, keep) -> graph
+
+`run`, which launches work on `target`, captured as a graph for `replay(target,
+graph)` to launch again. The graph keeps `keep`, what it launches, alive until
+`release(target, graph)` or the collector destroys it. A target without graphs
+replays `run` itself.
+"""
+capture(::Target, run, keep) = run
+replay(::Target, run) = run()
+release(::Target, graph) = nothing
 
 function explain(io::IO, ex::Executable)
     explain(io, ex.plan)

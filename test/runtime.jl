@@ -69,11 +69,13 @@ adam_state = (m = map(zero, params), v = map(zero, params), t = 0.0f0)
 batches = [map(single, (x = data(8, 32; scale = 0.1k), y = data(4, 32; scale = 0.05k))) for k in 1:4]
 step_program = trace(training_step, params, adam_state, batches[1])
 
-function check_steps(device; rtol, by_reference = ())
+# Captured, each step replays one graph, the batch bound between replays.
+function check_steps(device; rtol, by_reference = (), captured = false)
     p = step_program
     on(x) = T.rebuild(a -> a isa AbstractArray ? device(a) : a, x)
     inputs = (on(params), on(adam_state), on(batches[1]))
     ex = prepare(p, inputs...; replaces = (2 => 1, 3 => 2), by_reference)
+    captured && capture!(ex)
     @test length(ex.storage.donated) == 13 && isempty(ex.storage.staged)
     # The results that replace arguments are the arguments' storage.
     @test all(T.leaves(outputs(ex)[2:3]) .=== ex.results[2:end])
@@ -125,7 +127,7 @@ end
 
 @testset "a training step as one program, on the CPU" begin
     check_steps(copy; rtol = 1.0e-5, by_reference = (1, 2))
-    check_steps(identity; rtol = 1.0e-5)
+    check_steps(identity; rtol = 1.0e-5, captured = true)
     check_replacing(identity)
 end
 
@@ -212,6 +214,9 @@ if CUDACore.functional()
     @testset "a training step as one program, on CUDA" begin
         check_steps(CuArray; rtol = 1.0e-3, by_reference = (1, 2))
         check_steps(CuArray; rtol = 1.0e-3)
+        check_steps(CuArray; rtol = 1.0e-3, by_reference = (1, 2), captured = true)
+        ex = check_steps(CuArray; rtol = 1.0e-3, captured = true)
+        @test ex.captured !== nothing
         check_replacing(CuArray)
     end
     using cuTile

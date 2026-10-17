@@ -7,26 +7,13 @@ import Tempest as T
 
 const SAMPLES = 15
 
-function replay_graph(ex; repetitions)
-    execute!(ex)
-    CUDACore.synchronize()
-    graph = CUDACore.capture() do
-        for _ = 1:repetitions
-            foreach(launch -> launch(), ex.launches)
-        end
-    end
-    CUDACore.instantiate(graph)
-end
-
 function device_microseconds(ex; samples = SAMPLES, milliseconds = 4.0)
-    once = let g = replay_graph(ex; repetitions = 1)
-        CUDACore.launch(g)
-        minimum(_ -> CUDACore.@elapsed(CUDACore.launch(g)), 1:3)
-    end
+    execute!(ex)
+    execute!(capture!(ex))
+    once = minimum(_ -> CUDACore.@elapsed(execute!(ex)), 1:3)
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 2, 200)
-    g = replay_graph(ex; repetitions)
-    CUDACore.launch(g); CUDACore.launch(g)
-    minimum(_ -> 1.0e6 * CUDACore.@elapsed(CUDACore.launch(g)) / repetitions, 1:samples)
+    execute!(capture!(ex; repetitions)); execute!(ex)
+    minimum(_ -> 1.0e6 * CUDACore.@elapsed(execute!(ex)) / repetitions, 1:samples)
 end
 
 guard_data(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))

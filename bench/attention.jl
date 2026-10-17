@@ -7,32 +7,15 @@
 using Tempest, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 
-function replay_graph(ex; repetitions)
-    execute!(ex)
-    CUDACore.synchronize()
-    graph = CUDACore.capture() do
-        for _ = 1:repetitions
-            foreach(launch -> launch(), ex.launches)
-        end
-    end
-    CUDACore.instantiate(graph)
-end
-
-# Each captured graph is destroyed once timed: the garbage collector may
-# otherwise unload the kernels' modules first, which crashes the driver.
+# Microseconds of one execution: the minimum over samples of replays of a
+# graph that captures a few milliseconds of executions.
 function device_microseconds(ex; samples = 15, milliseconds = 4.0)
-    once = let g = replay_graph(ex; repetitions = 1)
-        CUDACore.launch(g)
-        t = minimum(_ -> CUDACore.@elapsed(CUDACore.launch(g)), 1:3)
-        finalize(g)
-        t
-    end
+    execute!(ex)
+    execute!(capture!(ex))
+    once = minimum(_ -> CUDACore.@elapsed(execute!(ex)), 1:3)
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 1, 200)
-    g = replay_graph(ex; repetitions)
-    CUDACore.launch(g)
-    t = minimum(_ -> 1.0e6 * CUDACore.@elapsed(CUDACore.launch(g)) / repetitions, 1:samples)
-    finalize(g)
-    t
+    execute!(capture!(ex; repetitions))
+    minimum(_ -> 1.0e6 * CUDACore.@elapsed(execute!(ex)) / repetitions, 1:samples)
 end
 
 data(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
