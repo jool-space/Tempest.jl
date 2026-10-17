@@ -176,30 +176,19 @@ function unbroadcast(tape, c::Traced, input)
     node(c).eltype === target.eltype ? c : cast(target.eltype, c)
 end
 
-"""
-    differentiate(program) -> Program
-
-The program extended by its reverse pass. `program` must have one scalar
-result, the loss. The new program returns the loss and, in the structure of the
-inputs, the gradient with respect to every floating-point input (`nothing` for
-other inputs).
-"""
-function differentiate(p::Program)
-    length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
-        throw(ArgumentError("differentiate needs a program with one scalar result"))
-    # Calls without a derivative rule are differentiated through their reference.
-    p, _ = expand_calls(p, f -> !has_pullback(f) && !opaque(f))
-    tape = Tape(copy(p.nodes))
-    loss = only(p.results)
+# The reverse pass from the scalar node `loss` over the nodes `range` of the
+# tape, recorded into the tape: the cotangent of each node it reaches. Nodes
+# before `range` are constants to it.
+function reverse_pass!(tape, loss, range)
     cotangents = Dict{Int, Traced}()
-    cotangents[loss] = h(tape, constant!(tape, one(p.nodes[loss].eltype)))
-    keep = live(p.nodes, p.results)
-    for id in reverse(eachindex(p.nodes))
-        n = p.nodes[id]
+    cotangents[loss] = h(tape, constant!(tape, one(tape.nodes[loss].eltype)))
+    keep = live(tape.nodes, [loss])
+    for id in reverse(range)
+        n = tape.nodes[id]
         if n.op isa Call
             # A call is differentiated once, at its first result, for all.
             n.op.instance == id || continue
-            any(r -> keep[r] && haskey(cotangents, r), results_of(p.nodes, id)) || continue
+            any(r -> keep[r] && haskey(cotangents, r), results_of(tape.nodes, id)) || continue
             contributions = call_pullback(n, id, cotangents, tape)
         else
             (keep[id] && haskey(cotangents, id)) || continue
@@ -212,19 +201,101 @@ function differentiate(p::Program)
             cotangents[input] = haskey(cotangents, input) ? cotangents[input] + c : c
         end
     end
+    cotangents
+end
+
+# The cotangent of node `id`: zero where the pass did not reach it, and
+# nothing unless its elements are floating-point numbers.
+function cotangent!(tape, cotangents, id)
+    a = tape.nodes[id]
+    a.eltype <: AbstractFloat || return nothing
+    get(cotangents, id) do
+        z = h(tape, constant!(tape, zero(a.eltype)))
+        a.scalar ? z : h(tape, record!(tape, Map(identity), (z.id,), a.dims, a.eltype))
+    end
+end
+
+# Calls without a derivative rule are differentiated through their reference.
+expands_to_differentiate(f) = !has_pullback(f) && !opaque(f)
+
+"""
+    differentiate(program) -> Program
+
+The program extended by its reverse pass. `program` must have one scalar
+result, the loss. The new program returns the loss and, in the structure of the
+inputs, the gradient with respect to every floating-point input (`nothing` for
+other inputs).
+"""
+function differentiate(p::Program)
+    length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
+        throw(ArgumentError("differentiate needs a program with one scalar result"))
+    p, _ = expand_calls(p, expands_to_differentiate)
+    tape = Tape(copy(p.nodes))
+    loss = only(p.results)
+    cotangents = reverse_pass!(tape, loss, eachindex(p.nodes))
     results = [loss]
-    gradient(position) = position === nothing ? nothing : begin
-        argument = p.arguments[position]
-        a = tape.nodes[argument]
-        a.eltype <: AbstractFloat || return nothing
-        g = get(cotangents, argument) do
-            z = h(tape, constant!(tape, zero(a.eltype)))
-            a.scalar ? z : h(tape, record!(tape, Map(identity), (z.id,), a.dims, a.eltype))
-        end
+    function result(position)
+        position === nothing && return nothing
+        g = cotangent!(tape, cotangents, p.arguments[position])
+        g === nothing && return nothing
         push!(results, g.id)
         length(results)
     end
-    gradients = rebuild(gradient, p.input_structure)
+    gradients = rebuild(result, p.input_structure)
     # Rules may build what nothing reads, such as a constant operand's share.
     prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...)))
+end
+
+"""
+    Tempest.gradient(f, args...) -> (value, gradients...)
+
+The value of `f(args...)`, a number, and its gradient with respect to each
+argument, in that argument's structure: an array or a number for each
+floating-point array or number, and `nothing` for anything else. On Julia
+arrays this is `interpret(differentiate(trace(f, args...)), args...)`.
+
+In traced code it differentiates `f` where it is called, so a training step
+is a function like any other, traced and prepared as one program:
+
+    function step(params, state, batch)
+        loss, grads = Tempest.gradient(p -> loss_of(p, batch), params)
+        new_params, new_state = adam(params, state, grads)
+        (loss, new_params, new_state)
+    end
+
+What `f` closes over is a constant to the gradient.
+"""
+function gradient(f, args...)
+    k = findfirst(x -> x isa Union{Traced, TracedArray}, leaves(args))
+    k === nothing && return interpret(differentiate(trace(f, args...)), args...)
+    tape = leaves(args)[k].tape
+    # Each floating-point argument enters as a node of its own, whose
+    # cotangent the pass collects.
+    function stand_in(x)
+        x isa Union{Traced, TracedArray} && x.tape !== tape &&
+            throw(ArgumentError("the arguments of a gradient must be traced by one program"))
+        x isa Union{AbstractFloat, AbstractArray{<:AbstractFloat}} || return x
+        id = x isa Union{Traced, TracedArray} ? x.id : constant!(tape, x)
+        n = tape.nodes[id]
+        handle_of(tape, record!(tape, Map(identity), (id,), n.dims, n.eltype; scalar = n.scalar))
+    end
+    stand_ins = rebuild(stand_in, args)
+    start = length(tape.nodes) + 1
+    expands = tape.expands
+    tape.expands = g -> expands_to_differentiate(g) || expands(g)
+    value = try
+        f(stand_ins...)
+    finally
+        tape.expands = expands
+    end
+    value isa Number && !(value isa Traced) && (value = Traced(tape, constant!(tape, value)))
+    value isa Traced && value.tape === tape && node(value).scalar ||
+        throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
+    cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))
+    gradients = rebuild(stand_ins) do x
+        x isa Union{Traced, TracedArray} || return nothing
+        g = cotangent!(tape, cotangents, x.id)
+        g === nothing ? nothing : handle_of(tape, g.id)
+    end
+    (value, gradients...)
 end
