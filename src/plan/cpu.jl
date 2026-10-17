@@ -42,13 +42,14 @@ function run_group!(g::Group, buffers, graph)
 end
 
 # An opaque group's results through their reference, then its epilogues: terms
-# over a result's domain that read the result's tile as `Stat`.
+# over a result's domain (`opaque_dims`) that read the result's tile as `Stat`.
 function run_opaque!(g::Group, buffers, graph)
     results = Dict{Int, Any}()
     for v in g.outputs
         d = graph.values[v].definition
         d isa Opaque || continue
-        results[v] = buffers[v] = evaluate_value(d, graph.values[v], buffers, graph, ())
+        buffers[v] = evaluate_value(d, graph.values[v], buffers, graph, ())
+        results[v] = d.node.scalar ? buffers[v] : reshape(buffers[v], opaque_dims(d))
     end
     for (o, e) in g.epilogues
         val = graph.values[e]

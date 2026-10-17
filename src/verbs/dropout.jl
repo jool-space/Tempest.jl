@@ -1,6 +1,7 @@
-# Dropout as a verb with no realization of its own: it always expands to its
-# reference, a pointwise function of the element, the seed and the position,
-# so it fuses with the work around it and its derivative redraws the mask.
+# Dropout as an operation with no implementation of its own: it always runs
+# as its reference, a pointwise function of the element, the seed and the
+# position, so it fuses with the work around it and its derivative redraws the
+# mask.
 
 """
 The keep-scale of one element: `1 / (1 - rate)` or zero, from a counter hash of
@@ -35,8 +36,7 @@ distinct dropout sites should use distinct `stream` numbers.
 function dropout(x, seed; rate::Real, stream::Integer = 0)
     0 <= rate < 1 || throw(ArgumentError("dropout rate must lie in [0, 1)"))
     eltype(seed) <: Integer || throw(ArgumentError("dropout seeds are integer arrays"))
-    call(dropout, x, seed; rate = Float32(rate), stream = UInt32(stream))
+    x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), positions(x))
 end
 
-reference(::typeof(dropout), x, seed; rate, stream) =
-    x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), positions(x))
+@operation dropout(x, seed; rate::Real, stream::Integer = 0)

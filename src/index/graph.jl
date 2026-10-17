@@ -54,18 +54,25 @@ end
 """
 A program-level operation realized on its operands materialized in their
 program shapes: one the index level does not model (a scatter), or a call an
-implementation claimed, which reads values whole. Its boundary is storage.
+implementation claims, which reads values whole. Its boundary is storage.
 `epilogue` says whether the claiming kernel applies an epilogue over this
-result's output tile.
+result's output tile. The value holds the node's result at `index`, a formula
+over the node's axes wider than one (`opaque_dims`): a claimed call's result
+may sit in a value of another shape laid out alike.
 """
 struct Opaque <: Definition
     node::Node
     operands::Tuple{Vararg{Operand}}
     shapes::Tuple{Vararg{Tuple{Tuple{Vararg{Int}}, Bool}}} # each operand's dims and scalar flag
     epilogue::Bool
+    index::Tuple{Vararg{Affine}}
 end
 
-Opaque(node, operands, shapes) = Opaque(node, operands, shapes, false)
+Opaque(node, operands, shapes, epilogue = false) =
+    Opaque(node, operands, shapes, epilogue, ntuple(var, length(wide_axes(node.dims))))
+
+"The domain of opaque work's result: its node's axes wider than one."
+opaque_dims(d::Opaque) = map(k -> d.node.dims[k], wide_axes(d.node.dims))
 
 """
 A value: its definition, the extents of its domain (none of them one; see
@@ -76,6 +83,20 @@ struct Value
     dims::Tuple{Vararg{Int}}
     eltype::DataType
     scalar::Bool
+end
+
+"""
+A call, for implementations to claim: the values its reference expanded to (an
+opaque call's own results), its arguments read densely in their shapes, and
+each result's node and read, of a value of the call's own whose storage holds
+the result densely in the node's shape.
+"""
+struct CallSite
+    values::Vector{Int}
+    operands::Tuple{Vararg{Read}}
+    shapes::Tuple{Vararg{Tuple{Tuple{Vararg{Int}}, Bool}}}
+    results::Vector{Node}
+    reads::Vector{Read}
 end
 
 domain(v::Value) = Domain(v.dims)
@@ -102,8 +123,8 @@ end
     IndexGraph
 
 A program at the index level: values in topological order, the values that are
-arguments, and each result as a read over the result's own shape (results may be
-layouts of values, or constants).
+arguments, each result as a read over the result's own shape (results may be
+layouts of values, or constants), and the calls.
 """
 struct IndexGraph
     values::Vector{Value}
@@ -112,7 +133,10 @@ struct IndexGraph
     result_dims::Vector{Tuple{Vararg{Int}}}
     result_scalar::Vector{Bool}
     result_eltype::Vector{DataType}
+    calls::Vector{CallSite}
 end
+
+IndexGraph(values, arguments, results, dims, scalar, eltype) = IndexGraph(values, arguments, results, dims, scalar, eltype, CallSite[])
 
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands

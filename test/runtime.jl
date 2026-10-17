@@ -8,6 +8,8 @@ agree(a, b; rtol = 1.0e-10) = all(map((x, y) -> isapprox(scalar(Array(x)), y; rt
 host(x) = x isa AbstractArray ? x : x
 
 single(x) = x isa AbstractArray{<:AbstractFloat} ? Float32.(x) : x isa AbstractFloat ? Float32(x) : x
+# The proposals the cover took.
+taken(ex) = [c.proposal for c in ex.considered if c.accepted]
 
 function check_prepared(device, expected_target; rtol = 1.0e-10, precision = identity)
     @testset "$name" for (name, f, args) in PROGRAMS
@@ -45,7 +47,7 @@ T.build_claim(::HostProducts, claim, target, p, g, buffers) = T.build_floor(targ
     T.register!(@__MODULE__, HostProducts())
     try
         ex = prepare(p, a, b)
-        @test length(ex.accepted) == 1 && length(first(first(ex.accepted))) == 1
+        @test length(only(taken(ex))) == 1
         @test length(ex.plan.groups) == 2
         @test isapprox(only(T.leaves(execute!(ex))), interpret(p, a, b); rtol = 1.0e-12)
         @test occursin("from HostProducts replaces", sprint(explain, ex))
@@ -171,7 +173,7 @@ if CUDACore.functional()
         w = Float32.(data(96; scale = 0.3))
         p = trace((a, b, w) -> tanh.(a * b .+ w), a, b, w)
         ex = prepare(p, CuArray(a), CuArray(b), CuArray(w); target = T.CUDATarget(cuBLAS))
-        @test length(built(ex)) == 1 && length(ex.accepted) == 1 && length(ex.kernels) == 2
+        @test length(built(ex)) == 1 && length(taken(ex)) == 1 && length(ex.kernels) == 2
         @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, a, b, w); rtol = 1.0e-5)
         ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
         @test isempty(built(ex))
