@@ -140,7 +140,7 @@ function record_call(f, args...; kwargs...)
         declared(declared_results(f, map(a -> (size(a), eltype(a)), args); kwargs...), f)
     else
         scratch = Tape()
-        stand_ins = map(a -> TracedArray(scratch, record!(scratch, Argument(), (), size(a), eltype(a))), args)
+        stand_ins = map(a -> TracedArray(scratch, record!(scratch, Argument(), (), size(a), eltype(a)); input = true), args)
         rebuild(node, reference(f, stand_ins...; kwargs...))
     end
     position = Ref(0)
@@ -184,9 +184,13 @@ struct Expansion
     results::Vector{Int}
 end
 
+# A reference reads its arguments and never writes them, as a program its inputs.
+as_input(a::TracedArray) = TracedArray(a.tape, a.id; input = true)
+as_input(a) = a
+
 function expand!(tape, f, args, kwargs)
     start = length(tape.nodes)
-    out = reference(f, args...; kwargs...)
+    out = reference(f, map(as_input, args)...; kwargs...)
     position = Ref(0)
     structure = rebuild(_ -> (position[] += 1), out)
     push!(tape.expansions, Expansion(f, kwargs, [a.id for a in args], structure, (start + 1):length(tape.nodes), [r.id for r in leaves(out)]))

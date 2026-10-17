@@ -148,7 +148,8 @@ pullback(op::Scatter, n, id, g, tape) = adjoint_selection(Select(op.indices), n,
 
 function adjoint_selection(op, n, g, tape)
     x, indices... = n.inputs
-    (h(tape, record!(tape, op, (g.id, indices...), tape.nodes[x].dims, node(g).eltype)), map(_ -> nothing, indices)...)
+    xn = tape.nodes[x]
+    (h(tape, record!(tape, op, (g.id, indices...), xn.dims, node(g).eltype; scalar = xn.scalar)), map(_ -> nothing, indices)...)
 end
 
 pullback(::Union{Constant, Positions, Argument}, n, id, g, tape) = map(_ -> nothing, n.inputs)

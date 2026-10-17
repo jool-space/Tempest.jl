@@ -8,11 +8,36 @@
 # function enters the program as primitives, and derivative rules are written
 # as ordinary Julia on handles. A function that cannot run on handles (it
 # branches on a traced value, say) is recorded whole, as an opaque `Map`.
+#
+# A traced array is memory, as a Julia array is: an array the traced code
+# allocates can be written, and each write is a functional update (see
+# `write!`). Views, reshapes and transposes share the memory of the array they
+# are made from.
 
-struct TracedArray{T, N} <: AbstractArray{T, N}
-    tape::Tape
+"""
+How a traced array shares the memory of `parent`: it is `op`, a selection, a
+reshape or a permutation, of `parent` and of the nodes `inputs` (a
+selection's index arrays).
+"""
+struct Layout{A}
+    parent::A
+    op::Operation
+    inputs::Tuple{Vararg{Int}}
+end
+
+mutable struct TracedArray{T, N} <: AbstractArray{T, N}
+    const tape::Tape
+    # The node holding the array's contents. A write records a new node and
+    # moves the array, and every array sharing its memory, to it.
     id::Int
-    dims::NTuple{N, Int}
+    const dims::NTuple{N, Int}
+    # The array whose memory this one shares, or nothing.
+    const layout::Union{Nothing, Layout}
+    # The program's inputs, and the arguments of an operation's reference,
+    # are never written.
+    const input::Bool
+    # The layouts made from this array, which read its writes.
+    const views::Vector{WeakRef}
 end
 
 struct Traced{T} <: Real
@@ -20,7 +45,9 @@ struct Traced{T} <: Real
     id::Int
 end
 
-TracedArray(tape::Tape, id::Int) = TracedArray{tape.nodes[id].eltype, length(tape.nodes[id].dims)}(tape, id, tape.nodes[id].dims)
+TracedArray{T, N}(tape::Tape, id::Int, dims) where {T, N} = TracedArray{T, N}(tape, id, dims, nothing, false, WeakRef[])
+TracedArray(tape::Tape, id::Int; input = false) =
+    TracedArray{tape.nodes[id].eltype, length(tape.nodes[id].dims)}(tape, id, tape.nodes[id].dims, nothing, input, WeakRef[])
 Traced(tape::Tape, id::Int) = Traced{tape.nodes[id].eltype}(tape, id)
 
 node(x::Union{TracedArray, Traced}) = x.tape.nodes[x.id]
@@ -229,14 +256,14 @@ end
 
 function Base.copy(bc::Broadcast.Broadcasted{TracedStyle})
     tape = tape_in(bc)
-    dims = broadcast_dims_of(bc)
-    id = broadcast_handle(bc, tape).id
-    # A result smaller than the broadcast, or a scalar, is filled out to it.
+    TracedArray(tape, filled(tape, broadcast_handle(bc, tape).id, broadcast_dims_of(bc)))
+end
+
+# Node `id` as an array of shape `dims`: a result smaller than a broadcast, or
+# a scalar, is filled out to it.
+function filled(tape, id, dims)
     n = tape.nodes[id]
-    if n.dims != dims || n.scalar
-        id = record!(tape, Map(identity), (id,), dims, n.eltype)
-    end
-    TracedArray(tape, id)
+    n.dims != dims || n.scalar ? record!(tape, Map(identity), (id,), dims, n.eltype) : id
 end
 
 "A function with some arguments fixed; each `Slot` takes the next input."
@@ -273,7 +300,7 @@ function fold(f::Fold, x::TracedArray; dims = :)
     if dims isa Colon
         return Traced(x.tape, record!(x.tape, Reduce(f, axes), (x.id,), (), T; scalar = true))
     end
-    isempty(axes) && return x
+    isempty(axes) && return copy(x)
     out = ntuple(d -> d in axes ? 1 : size(x, d), ndims(x))
     TracedArray(x.tape, record!(x.tape, Reduce(f, axes), (x.id,), out, T))
 end
@@ -360,24 +387,50 @@ function batched_mul(a::AbstractArray{<:Real, 3}, b::AbstractArray{<:Real, 3})
     stack(k -> a[:, :, k] * b[:, :, k], axes(a, 3); dims = 3)
 end
 
-# Layout.
+# Layout. As in Julia, `reshape`, `vec`, `view` and `transpose` share the
+# memory of the array they are made from; `permutedims` and `getindex` copy.
+
+"""
+A layout of `x` that shares its memory: it reads later writes into `x`, and a
+write into it writes into `x`. `op` is applied to `x` and the nodes `inputs`.
+"""
+function layout(x::TracedArray, op, inputs, dims)
+    id = record!(x.tape, op, (x.id, inputs...), dims, eltype(x))
+    y = TracedArray{eltype(x), length(dims)}(x.tape, id, Tuple(dims), Layout(x, op, Tuple(inputs)), false, WeakRef[])
+    push!(x.views, WeakRef(y))
+    y
+end
+
+"A copy of `x`: its contents now, in an array of its own."
+Base.copy(x::TracedArray) = TracedArray(x.tape, x.id)
+
 function Base.reshape(x::TracedArray, dims::Tuple{Vararg{Int}})
     prod(dims) == length(x) || throw(DimensionMismatch("cannot reshape $(size(x)) to $dims"))
     dims == size(x) && return x
-    TracedArray(x.tape, record!(x.tape, Reshape(), (x.id,), dims, eltype(x)))
+    layout(x, Reshape(), (), dims)
+end
+
+function check_permutation(x, perm)
+    perm = Tuple(perm)
+    isperm(perm) && length(perm) == ndims(x) || throw(ArgumentError("$perm is not a permutation of $(ndims(x)) axes"))
+    perm
 end
 
 function Base.permutedims(x::TracedArray, perm)
-    perm = Tuple(perm)
-    isperm(perm) && length(perm) == ndims(x) || throw(ArgumentError("$perm is not a permutation of $(ndims(x)) axes"))
-    perm == ntuple(identity, ndims(x)) && return x
-    dims = map(p -> size(x, p), perm)
-    TracedArray(x.tape, record!(x.tape, Permute(perm), (x.id,), dims, eltype(x)))
+    perm = check_permutation(x, perm)
+    perm == ntuple(identity, ndims(x)) && return copy(x)
+    TracedArray(x.tape, record!(x.tape, Permute(perm), (x.id,), map(p -> size(x, p), perm), eltype(x)))
+end
+
+"`x` with its axes permuted, sharing its memory, as `PermutedDimsArray` does."
+function permuted(x::TracedArray, perm)
+    perm = check_permutation(x, perm)
+    perm == ntuple(identity, ndims(x)) ? x : layout(x, Permute(perm), (), map(p -> size(x, p), perm))
 end
 
 Base.permutedims(x::TracedArray{<:Any, 2}) = permutedims(x, (2, 1))
 Base.permutedims(x::TracedArray{<:Any, 1}) = reshape(x, (1, length(x)))
-Base.transpose(x::TracedArray{<:Real, 2}) = permutedims(x, (2, 1))
+Base.transpose(x::TracedArray{<:Real, 2}) = permuted(x, (2, 1))
 Base.transpose(x::TracedArray{<:Real, 1}) = reshape(x, (1, length(x)))
 Base.adjoint(x::TracedArray{<:Real}) = transpose(x)
 
@@ -403,36 +456,52 @@ function linear_range(l)
     s != 0 && all(k -> l[k] - l[k - 1] == s, 2:length(l)) ? (first(l):s:last(l)) : l
 end
 
-function select(x::TracedArray, I; scalar)
+"""
+    selection(x, I) -> (array, indices)
+
+What indexing `x` by `I` selects, and from which array: `x` or, for one
+linear index into an array of several axes, `vec(x)`; by integers, ranges and
+arrays of integers. A linear integer is its Cartesian index, and an array of
+Cartesian indices the linear indices it holds.
+"""
+function selection(x::TracedArray, I)
     I = Base.to_indices(x, map(index_array, I))
-    # One index into an array of several axes is linear; an array of
-    # Cartesian indices selects the linear indices it holds.
-    if length(I) == 1 && only(I) isa AbstractArray{<:CartesianIndex}
-        return select(vec(x), (linear_range(LinearIndices(x)[only(I)]),); scalar)
-    end
-    length(I) == 1 && ndims(x) != 1 && return select(vec(x), I; scalar)
-    indices = map(selection_index, I)
+    length(I) == 1 && ndims(x) != 1 || return x, map(selection_index, I)
+    i = only(I)
+    i isa Integer && return (checkbounds(x, i); (x, Tuple(CartesianIndices(x)[i])))
+    i isa AbstractArray{<:CartesianIndex} && (i = linear_range(LinearIndices(x)[i]))
+    vec(x), (selection_index(i),)
+end
+
+# With `scalar`, as `getindex`, a selection copies the elements, and one
+# element is a number; otherwise it is a view that shares their memory.
+function select(x::TracedArray, I; scalar)
+    x, indices = selection(x, I)
     for (k, i) in enumerate(indices)
         i isa TracedArray || all(j -> 1 <= j <= size(x, k), i) || throw(BoundsError(x, I))
     end
     dims = Tuple(n for i in indices if !(i isa Integer) for n in size(i))
     full = length(indices) == ndims(x) &&
         all(k -> indices[k] isa AbstractRange && indices[k] == 1:size(x, k), 1:ndims(x))
-    full && return x
+    full && !(scalar && isempty(dims)) && return scalar ? copy(x) : x
     # Arrays of integers are inputs of the node, constants unless traced.
-    inputs = [x.id]
+    inputs = Int[]
     indices = map(indices) do i
         i isa AbstractArray && !(i isa AbstractRange) || return i
         push!(inputs, i isa TracedArray ? i.id : constant!(x.tape, i))
-        IndexInput(length(inputs))
+        IndexInput(length(inputs) + 1)
     end
-    scalar = scalar && isempty(dims)
-    id = record!(x.tape, Select(indices), inputs, dims, eltype(x); scalar)
+    scalar || return layout(x, Select(indices), inputs, dims)
+    scalar = isempty(dims)
+    id = record!(x.tape, Select(indices), (x.id, inputs...), dims, eltype(x); scalar)
     scalar ? Traced(x.tape, id) : TracedArray(x.tape, id)
 end
 
 Base.getindex(x::TracedArray, I...) = select(x, I; scalar = true)
 Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
+
+# A reversal is a selection by reversed ranges, not a loop of swaps.
+Base.reverse(x::TracedArray; dims = :) = x[ntuple(k -> dims isa Colon || k in dims ? (size(x, k):-1:1) : (1:size(x, k)), ndims(x))...]
 
 # `map` over arrays of one shape is a broadcast, and `dot` a sum of products,
 # rather than loops over their elements.
@@ -471,7 +540,7 @@ function trace(f, args...)
         if leaf isa AbstractArray{<:Number}
             id = record!(tape, Argument(), (), size(leaf), eltype(leaf))
             push!(arguments, id)
-            return TracedArray(tape, id)
+            return TracedArray(tape, id; input = true)
         elseif leaf isa Number
             id = record!(tape, Argument(), (), (), typeof(leaf); scalar = true)
             push!(arguments, id)

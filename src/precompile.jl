@@ -25,6 +25,7 @@ function workload()
         ((q, k) -> sum(abs2, attention(q, k, k; causal = true) .+ q), (q, k)),
         ((x, s) -> sum(abs2, dropout(permutedims(x), s; rate = 0.1)), (x, Int32[1])),
         (x -> sum(abs2, Float16.(reshape(x, 6, 8))), (x,)),
+        (x -> (y = copy(x); y[2:3, :] .= 0; sum(abs2, vcat(y, x))), (x,)),
     ]
     for (f, args) in losses
         p = trace(f, args...)

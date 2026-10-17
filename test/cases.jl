@@ -24,6 +24,13 @@ spelled_product(a, b) = dropdims(sum(reshape(a, size(a, 1), size(a, 2), 1) .* re
 
 data(dims...; scale = 1.0) = 2.0 .* sin.(scale .* reshape(Float64.(1:prod(dims)), dims...))
 
+# Writes into an array the program allocates, as NNlib pads.
+function padded(x)
+    y = fill!(similar(x, size(x) .+ 2), 0)
+    y[2:(end - 1), 2:(end - 1)] = x
+    y
+end
+
 # Julia arrays a program closes over, as factors of products: constants, in
 # the precision of the program's inputs.
 const WEIGHTS, BATCH = data(5, 4; scale = 0.2), data(4, 3, 2; scale = 0.3)
@@ -77,6 +84,16 @@ const PROGRAMS = [
     ("gather by a traced Int32 matrix", (x, i) -> sum(abs2, x[:, i]), (data(8, 6), Int32[2 5; 6 1; 1 1])),
     ("gather rows by a traced Int64 matrix", (x, i) -> sum(abs2, tanh.(x[i, :])), (data(8, 6), [8 1; 2 8])),
     ("gather by linear and scalar indices", (x, i, t) -> sum(abs2, x[i]) + x[2, t], (data(8, 6), [40, 3, 17], 5)),
+    ("a write of a slice", (x, v) -> (y = copy(x); y[2:4, :] = v; sum(abs2, tanh.(y))), (data(8, 6), data(3, 6; scale = 0.3))),
+    ("padding by a write", x -> sum(abs2, padded(x) .* data(10, 8)), (data(8, 6),)),
+    ("writes through views", x -> (y = zero(x); view(y, :, 2:3) .= x[:, 1:2] .* 2; y[1, :] .= 1; sum(abs2, y .+ x)), (data(8, 6),)),
+    ("a mean divided in place", x -> (r = sum(x; dims = 1); r ./= size(x, 1); sum(abs2, x .- r)), (data(8, 6),)),
+    ("concatenations", (x, v) -> sum(abs2, vcat(x, v) .* data(11, 6)) + sum(hcat(x, x) .* 2), (data(8, 6), data(3, 6; scale = 0.3))),
+    ("strided and reversed writes", (x, v) -> (y = copy(x); y[1:2:8, end:-2:1] = v; sum(abs2, sin.(y))), (data(8, 6), data(4, 3; scale = 0.3))),
+    ("scalar writes in a loop", x -> (y = similar(x, 6); for i in 1:6; y[i] = sum(x[:, i]); end; sum(abs2, y)), (data(8, 6),)),
+    ("a scalar written into place", (x, s) -> (y = copy(x); y[3, 2] = s * 2; sum(abs2, y)), (data(8, 6), 0.7)),
+    ("permutedims! and copyto!", x -> (y = similar(x, 6, 8); permutedims!(y, x, (2, 1)); z = similar(x, 48); copyto!(z, y); sum(abs2, z .* data(48))),
+     (data(8, 6),)),
     ("embedding lookup and layer norm", (E, P, t, w) -> sum(abs2, layernorm(E[:, t] .+ P, w)),
      (data(8, 10; scale = 0.3), data(8, 3; scale = 0.2), Int32[3 1; 10 3; 7 7], data(8; scale = 0.1))),
 ]
