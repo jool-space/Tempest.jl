@@ -9,6 +9,7 @@ import Tempest: CUDATarget, Plan, Group
 Tempest.target_for(::CuArray) = CUDATarget()
 Tempest.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
 Tempest.upload(::CUDATarget, x) = CuArray(x)
+Tempest.bindable(::CUDATarget, x) = x isa CuArray
 
 function Tempest.task_state(::CUDATarget)
     context, stream = CUDACore.context(), CUDACore.stream()

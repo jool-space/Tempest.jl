@@ -45,6 +45,90 @@ end
     end
 end
 
+# A training step as one program: an MLP's gradient, then Adam's update.
+# Prepared with its parameters and Adam's state replacing themselves, it runs
+# step after step with only the batch bound, writing every parameter and
+# moment into its own storage, and matches the interpreter step by step.
+function adam(params, state, grads; rate = 1.0f-2, β1 = 0.9f0, β2 = 0.999f0, ϵ = 1.0f-8)
+    t = state.t + 1
+    m = map((m, g) -> β1 .* m .+ (1 - β1) .* g, state.m, grads)
+    v = map((v, g) -> β2 .* v .+ (1 - β2) .* g .^ 2, state.v, grads)
+    new = map((p, m, v) -> p .- rate .* (m ./ (1 - β1^t)) ./ (sqrt.(v ./ (1 - β2^t)) .+ ϵ), params, m, v)
+    new, (; m, v, t)
+end
+mlp_loss(p, batch) = sum(abs2, p.w2 * tanh.(p.w1 * batch.x .+ p.b1) .+ p.b2 .- batch.y) / size(batch.y, 2)
+function training_step(params, state, batch)
+    loss, grads, _ = T.gradient(mlp_loss, params, batch)
+    new_params, new_state = adam(params, state, grads)
+    (loss, new_params, new_state)
+end
+
+params = map(single, (w1 = data(16, 8; scale = 0.3) ./ 4, b1 = data(16; scale = 0.2) ./ 4, w2 = data(4, 16; scale = 0.5) ./ 4,
+    b2 = data(4; scale = 0.7) ./ 4))
+adam_state = (m = map(zero, params), v = map(zero, params), t = 0.0f0)
+batches = [map(single, (x = data(8, 32; scale = 0.1k), y = data(4, 32; scale = 0.05k))) for k in 1:4]
+step_program = trace(training_step, params, adam_state, batches[1])
+
+function check_steps(device; rtol, by_reference = ())
+    p = step_program
+    on(x) = T.rebuild(a -> a isa AbstractArray ? device(a) : a, x)
+    inputs = (on(params), on(adam_state), on(batches[1]))
+    ex = prepare(p, inputs...; replaces = (2 => 1, 3 => 2), by_reference)
+    @test length(ex.storage.donated) == 13 && isempty(ex.storage.staged)
+    # The results that replace arguments are the arguments' storage.
+    @test all(T.leaves(outputs(ex)[2:3]) .=== ex.results[2:end])
+    @test all(pointer.(ex.results[2:end]) .== pointer.(ex.arguments[1:13]))
+    expected = (params, adam_state)
+    for batch in batches
+        bind!(ex, 3 => on(batch))
+        got = T.leaves(execute!(ex))
+        reference = interpret(p, expected..., batch)
+        @test agree(got, T.leaves(reference); rtol)
+        expected = reference[2:3]
+    end
+    # The same step runs eagerly.
+    @test all(map((a, b) -> isapprox(a, b; rtol = 1.0e-5), T.leaves(training_step(params, adam_state, batches[1])),
+        T.leaves(interpret(p, params, adam_state, batches[1]))))
+    # Arrays bound by reference are the executable's storage, and the results
+    # that replace them write into them.
+    for j in by_reference
+        @test agree(filter(x -> x isa AbstractArray, T.leaves(inputs[j])), filter(x -> x isa AbstractArray, T.leaves(expected[j])); rtol)
+    end
+    ex
+end
+
+# A kernel that writes a result in place of an argument runs after the
+# others that read the argument, here a kernel over another domain the plan
+# put after it; a result written where the kernel reads the argument at
+# another address is staged, then copied.
+function check_replacing(device)
+    a, x = data(6), data(6, 5; scale = 0.3)
+    p = trace((a, x) -> (a .+ vec(sum(x; dims = 2)), a[2:3] .* 3), a, x)
+    ex = prepare(p, device(a), device(x); replaces = (1 => 1,))
+    @test length(ex.storage.donated) == 1
+    expected = a
+    for _ in 1:2
+        reference = interpret(p, expected, x)
+        @test agree(execute!(ex), reference; rtol = 1.0e-6)
+        expected = reference[1]
+    end
+    w = data(5, 5; scale = 0.4)
+    p = trace(w -> (permutedims(w) .* 2,), w)
+    ex = prepare(p, device(w); replaces = (1 => 1,))
+    @test isempty(ex.storage.donated) && length(ex.storage.staged) == 1
+    @test occursin("staged, then copied into input 1", sprint(explain, ex))
+    execute!(ex)
+    @test Array(only(execute!(ex))) ≈ 4 .* w
+    @test_throws ArgumentError prepare(trace(w -> (w .* 2, w), w), device(w); replaces = (1 => 1,))
+    @test_throws ArgumentError prepare(trace(w -> (sum(w),), w), device(w); replaces = (1 => 1,))
+end
+
+@testset "a training step as one program, on the CPU" begin
+    check_steps(copy; rtol = 1.0e-5, by_reference = (1, 2))
+    check_steps(identity; rtol = 1.0e-5)
+    check_replacing(identity)
+end
+
 # An implementation that proposes each product alone, grown from its fold, in
 # place of the generator's product with the work after it; it claims a lone
 # product as free, so the cover takes it. A candidate over several domains
@@ -124,6 +208,11 @@ if CUDACore.functional()
     end
     @testset "prepared on CUDA" begin
         check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget())
+    end
+    @testset "a training step as one program, on CUDA" begin
+        check_steps(CuArray; rtol = 1.0e-3, by_reference = (1, 2))
+        check_steps(CuArray; rtol = 1.0e-3)
+        check_replacing(CuArray)
     end
     using cuTile
     @testset "prepared on CUDA with cuTile, Float32" begin
