@@ -18,15 +18,21 @@ function replay_graph(ex; repetitions)
     CUDACore.instantiate(graph)
 end
 
+# Each captured graph is destroyed once timed: the garbage collector may
+# otherwise unload the kernels' modules first, which crashes the driver.
 function device_microseconds(ex; samples = 15, milliseconds = 4.0)
     once = let g = replay_graph(ex; repetitions = 1)
         CUDACore.launch(g)
-        minimum(_ -> CUDACore.@elapsed(CUDACore.launch(g)), 1:3)
+        t = minimum(_ -> CUDACore.@elapsed(CUDACore.launch(g)), 1:3)
+        finalize(g)
+        t
     end
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 1, 200)
     g = replay_graph(ex; repetitions)
     CUDACore.launch(g)
-    minimum(_ -> 1.0e6 * CUDACore.@elapsed(CUDACore.launch(g)) / repetitions, 1:samples)
+    t = minimum(_ -> 1.0e6 * CUDACore.@elapsed(CUDACore.launch(g)) / repetitions, 1:samples)
+    finalize(g)
+    t
 end
 
 data(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
