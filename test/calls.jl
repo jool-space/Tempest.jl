@@ -259,14 +259,14 @@ if CUDACore.functional()
         @test !any(d -> d isa T.FloorKernels, ex.kernels)
         @test close(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))); rtol)
         # The forward pass alone is a close call, measured: whichever the
-        # tuning record says is faster runs.
+        # tuning record, one of this test's own, says is faster runs.
         f = trace((q, k, v) -> T.attention(q, k, v; causal = true), q, k, v)
-        prepare(p, device((q, k, v, x))...; target)
-        prepare(f, device((q, k, v))...; target)
-        path = T.record_path(target)
-        lines = readlines(path)
-        rewrite(t) = write(path, join((string(key, '\t', occursin("cuTileAttention", key) ? t : 1.0e-5) for (key, _) in split.(lines, '\t')), '\n') * '\n')
-        try
+        withenv("TEMPEST_CACHE" => mktempdir()) do
+            prepare(p, device((q, k, v, x))...; target)
+            prepare(f, device((q, k, v))...; target)
+            path = T.record_path(target)
+            lines = readlines(path)
+            rewrite(t) = write(path, join((string(key, '\t', occursin("cuTileAttention", key) ? t : 1.0e-5) for (key, _) in split.(lines, '\t')), '\n') * '\n')
             for (t, claimed) in ((1.0e-7, true), (1.0e-3, false))
                 rewrite(t)
                 ex = prepare(p, device((q, k, v, x))...; target)
@@ -284,8 +284,6 @@ if CUDACore.functional()
                 claimed && @test count(v -> ex.plan.stored[v], only(opaque_groups(ex)).outputs) == 1
                 @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(f, q, k, v)]; rtol)
             end
-        finally
-            write(path, join(lines, '\n') * '\n')
         end
     end
     @testset "NNlib operations on CUDA" begin
