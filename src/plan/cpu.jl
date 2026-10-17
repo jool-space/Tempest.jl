@@ -65,18 +65,19 @@ function run_opaque!(g::Group, buffers, graph)
 end
 
 function run_pointwise!(g::Group, buffers, graph)
-    v = only(g.outputs)
-    val = graph.values[v]
-    t = g.terms[v]
-    if val.scalar
-        buffers[v] = evaluate_term(t, (), nothing, buffers, nothing, graph)
-        return
+    for v in g.outputs
+        val = graph.values[v]
+        t = g.terms[v]
+        if val.scalar
+            buffers[v] = evaluate_term(t, (), nothing, buffers, nothing, graph)
+            continue
+        end
+        out = Array{val.eltype}(undef, val.dims)
+        for I in CartesianIndices(val.dims)
+            out[I] = evaluate_term(t, Tuple(I) .- 1, I, buffers, nothing, graph)
+        end
+        buffers[v] = out
     end
-    out = Array{val.eltype}(undef, val.dims)
-    for I in CartesianIndices(val.dims)
-        out[I] = evaluate_term(t, Tuple(I) .- 1, I, buffers, nothing, graph)
-    end
-    buffers[v] = out
 end
 
 # Every fold over its own axes, in phase order; then the outputs.

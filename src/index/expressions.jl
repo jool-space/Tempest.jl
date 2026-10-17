@@ -138,12 +138,23 @@ function split_divisible(e::Affine, k::Int)
     (fld(e.constant, k), q, mod(e.constant, k), r)
 end
 
+# The divisors of `k` between 2 and `k - 1`, largest first.
+function proper_divisors(k::Int)
+    ds = Int[]
+    for g in 2:isqrt(k)
+        k % g == 0 || continue
+        push!(ds, g)
+        g != k ÷ g && push!(ds, k ÷ g)
+    end
+    sort!(ds; rev = true)
+end
+
 # `e = g·b + s` with `s` in `0:g-1`, for the largest `g` that divides `k` and
 # leaves such a remainder, or nothing. Then `fld(e, k) = fld(b, k ÷ g)` and
 # `mod(e, k) = g·mod(b, k ÷ g) + s`: a small term below a common factor of
 # the others and the divisor drops out of the division.
 function split_common(e::Affine, k::Int, d::Domain)
-    for g in sort!(filter(g -> k % g == 0, collect(2:k-1)); rev = true)
+    for g in proper_divisors(k)
         big = Pair{Atom, Int}[]
         small = Pair{Atom, Int}[]
         for (atom, c) in e.terms

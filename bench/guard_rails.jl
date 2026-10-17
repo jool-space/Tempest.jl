@@ -2,7 +2,7 @@
 # earlier Tempest measured them: the minimum over SAMPLES launches of a
 # captured CUDA graph of a few milliseconds of executions.
 #   julia --project=dev bench/guard_rails.jl [output.tsv]
-using Tempest, CUDACore, cuTile, Printf
+using Tempest, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 
 const SAMPLES = 15
@@ -124,7 +124,9 @@ end
 const TARGET = T.CUDATarget(; precision = "--tf32" in ARGS ? :tf32 : "--tf32x3" in ARGS ? :tf32x3 : :full)
 filter!(a -> !(a in ("--tf32", "--tf32x3")), ARGS)
 
-if !isempty(ARGS) && ARGS[1] == "--cases"
+if abspath(PROGRAM_FILE) != @__FILE__
+    # Included for its cases.
+elseif !isempty(ARGS) && ARGS[1] == "--cases"
     # Several cases in one process, each timed `repeats` times: for comparing
     # builds case by case.
     repeats = parse(Int, get(ARGS, 3, "5"))

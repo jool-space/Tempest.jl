@@ -84,6 +84,11 @@ compose(a::ValueAccess, index, d) = ValueAccess(a.value, map(e -> substitute(e, 
 compose(a::LiteralAccess, index, d) = a
 compose(a::IndexAccess, index, d) = IndexAccess(substitute(a.expr, index, d), a.eltype)
 
+# A node of shape `dims` filled out to a larger shape, as Julia broadcasts.
+fill_out(a::ValueAccess, dims, d) = ValueAccess(a.value, map(e -> substitute(e, broadcast_index(dims), d), a.index))
+fill_out(a::LiteralAccess, dims, d) = a
+fill_out(a::IndexAccess, dims, d) = IndexAccess(substitute(a.expr, broadcast_index(dims), d), a.eltype)
+
 # A product is a sum fold of a pointwise product: over the domain of the
 # result's axes then the summed ones, the two operands (converted to Float32
 # when they are half precision) are multiplied and summed over the summed axes.
@@ -145,6 +150,8 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
         push!(values, Value(definition, dims, T, false))
         ValueAccess(length(values), identity_index(dims))
     end
+    # Materialized call operands, one per node, shared by every call reading it.
+    copies = Dict{Int, Int}()
     arguments = Int[]
     for (id, n) in enumerate(nodes)
         if n.op isa Argument
@@ -164,6 +171,9 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
         elseif op isa Map && all(a -> a isa LiteralAccess, inputs)
             # Constants fold: a map of constants is a constant.
             LiteralAccess(convert(n.eltype, op.f(map(a -> a.value, inputs)...)))
+        elseif op isa Map && op.f === identity && nodes[only(n.inputs)].eltype === n.eltype
+            # Filling out to a larger shape is a formula, as a layout is.
+            fill_out(only(inputs), only(input_dims), d)
         elseif op isa Map
             value!(Pointwise(op.f, map((a, dims) -> operand(a, dims, d), inputs, input_dims)), n)
         elseif op isa Reduce
@@ -181,8 +191,11 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
                    values[a.value].scalar == nodes[i].scalar
                     return Read(a.value, identity_index(dims))
                 end
-                push!(values, Value(Pointwise(identity, (operand(a, dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
-                Read(length(values), identity_index(dims))
+                copy = get!(copies, i) do
+                    push!(values, Value(Pointwise(identity, (operand(a, dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
+                    length(values)
+                end
+                Read(copy, identity_index(dims))
             end
             shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
             value!(Opaque(n, reads, shapes, epilogue(n, nodes)), n)

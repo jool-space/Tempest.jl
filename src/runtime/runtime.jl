@@ -6,25 +6,28 @@ abstract type Target end
 struct CPUTarget <: Target end
 
 """
-    CUDATarget(; precision = :full, online = true)
+    CUDATarget(packages...; precision = :full, online = true)
 
-Run on an NVIDIA GPU; needs CUDACore loaded. `precision` is the numerics policy
-for products: `:full` keeps Float32 products in Float32, `:tf32` allows TF32
-tensor cores for them, and `:tf32x3` splits each Float32 factor into two TF32
-parts and sums three tensor-core products (close to Float32 accuracy). Half-
-precision products always accumulate in Float32. `online` permits the online
-softmax: a sum weighted by `exp(y - logsumexp(y))` accumulates in the same
-sweep as the log-sum-exp, rescaled as its maximum grows, which changes
-rounding.
+Run on an NVIDIA GPU; needs CUDACore loaded. `packages` names the packages whose
+implementations the target may use, as in `CUDATarget(cuTile)`; by default it
+uses every implementation available when a program is prepared. The floor is
+always used. `precision` is the numerics policy for products: `:full` keeps
+Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
+`:tf32x3` splits each Float32 factor into two TF32 parts and sums three
+tensor-core products (close to Float32 accuracy). Half-precision products
+always accumulate in Float32. `online` permits the online softmax: a sum
+weighted by `exp(y - logsumexp(y))` accumulates in the same sweep as the
+log-sum-exp, rescaled as its maximum grows, which changes rounding.
 """
 struct CUDATarget <: Target
     precision::Symbol
     online::Bool
+    packages::Union{Nothing, Tuple{Vararg{Module}}}
 end
 
-function CUDATarget(; precision::Symbol = :full, online::Bool = true)
+function CUDATarget(packages::Module...; precision::Symbol = :full, online::Bool = true)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision, online)
+    CUDATarget(precision, online, isempty(packages) ? nothing : packages)
 end
 
 target_for(x::AbstractArray) = CPUTarget()
@@ -82,11 +85,43 @@ epilogue_results(::Implementation, f, kwargs) = ()
 
 Build the kernels of a claimed call: the group's opaque results, each written
 to its buffer or, where `group.epilogues` names a value, that value computed
-from the result's tile by the group's terms.
+from the result's tile by the group's terms. A result whose buffer is `nothing`
+is read by nobody and may be left unwritten.
 """
 function build_call end
 
-implementations(target) = EXTRA_IMPLEMENTATIONS
+# Implementations by the package that provides them, ordered by its name.
+const REGISTERED = Pair{Module, Vector{Implementation}}[]
+
+"""
+    register!(package::Module, implementations...)
+
+Make `implementations` available under `package`, replacing what it registered
+before; extensions call this when their packages load.
+"""
+function register!(package::Module, implementations::Implementation...)
+    filter!(p -> p.first !== package, REGISTERED)
+    isempty(implementations) || push!(REGISTERED, package => Implementation[implementations...])
+    sort!(REGISTERED; by = p -> string(nameof(p.first)))
+    nothing
+end
+
+"The packages a target names, or nothing for every registered one."
+packages(::Target) = nothing
+packages(target::CUDATarget) = target.packages
+
+"The packages whose implementations a target uses, in order."
+function used_packages(target)
+    named = packages(target)
+    named === nothing && return Module[p.first for p in REGISTERED]
+    for m in named
+        any(p -> p.first === m, REGISTERED) || throw(ArgumentError("$m provides no implementations; is its extension loaded?"))
+    end
+    Module[p.first for p in REGISTERED if p.first in named]
+end
+
+"The implementations a target uses, in order: by package name, then as registered."
+implementations(target) = Implementation[i for (m, is) in REGISTERED if m in used_packages(target) for i in is]
 
 call_inputs(nodes, n) = map(i -> (nodes[i].dims, nodes[i].eltype), n.inputs)
 
@@ -100,9 +135,6 @@ function takes_epilogue(target, nodes, n)
     c !== nothing && n.op.output in epilogue_results(c, n.op.f, n.op.kwargs)
 end
 
-"Implementations offered before the floor, in order."
-const EXTRA_IMPLEMENTATIONS = Implementation[]
-
 """
     Executable
 
@@ -114,57 +146,92 @@ struct Executable{T <: Target}
     program::Program
     plan::Plan
     target::T
+    packages::Vector{Module}
     buffers::Vector{Any}
     launches::Vector{Any}
     kernels::Vector{Any}
+    decisions::Vector{Any}
+    accepted::Vector{Pair{Vector{Int}, Implementation}}
 end
 
 storage_length(v::Value) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
 
 """
-    prepare(program, inputs...; target) -> Executable
+    prepare(program, inputs...; target, measure = true) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
-`target`, chosen from the inputs' array types by default.
+`target`, chosen from the inputs' array types by default. Close calls between
+claims are timed when `measure` allows and the target can, and kept in the
+tuning record.
 """
-function prepare(program::Program, inputs...; target = default_target(inputs))
-    lowered = lower(program;
+function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true)
+    graph = lower(program;
         keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
         epilogue = (n, nodes) -> takes_epilogue(target, nodes, n))
-    recompute = any(i -> recomputes_folds(i, target), implementations(target))
-    p = plan(lowered; recompute_folds = recompute)
-    # The outermost folds recomputed in a group no implementation claims are
-    # stored instead; folds they recompute in turn may still be recomputed in
-    # their kernels.
-    keep = Set{Int}()
-    while recompute
-        unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) &&
-                     all(i -> isempty(claims(i, target, p, g)), implementations(target))]
-        isempty(unclaimed) && break
-        foreach(g -> union!(keep, recomputed_in(g; nested = false)), unclaimed)
-        p = plan(lowered; recompute_folds = true, keep)
-    end
-    graph = p.graph
-    buffers = Vector{Any}(nothing, length(graph.values))
-    for (id, v) in enumerate(graph.values)
-        d = v.definition
-        if d isa ConstantArray
-            buffers[id] = upload(target, vec(collect(d.data)))
+    d = Decider(target, graph; measure)
+    p, accepted = cover(d)
+    ds = decisions(d, p)
+    buffers = d.buffers
+    n = length(p.graph.values)
+    length(buffers) < n && append!(buffers, fill(nothing, n - length(buffers)))
+    for (id, v) in enumerate(p.graph.values)
+        def = v.definition
+        if def isa ConstantArray
+            buffers[id] === nothing && (buffers[id] = upload(target, vec(collect(def.data))))
         elseif p.stored[id]
-            buffers[id] = allocate(target, v.eltype, storage_length(v))
+            buffers[id] === nothing && (buffers[id] = allocate(target, v.eltype, storage_length(v)))
+        else
+            buffers[id] = nothing # stored only in a plan not taken
         end
     end
-    built = map(g -> build(target, p, g, buffers), p.groups)
-    ex = Executable(program, p, target, buffers, Any[first(b) for b in built], Any[last(b) for b in built])
+    built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
+    ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built],
+        Any[last(b) for b in built], Any[ds...], accepted)
     bind!(ex, inputs...)
     ex
 end
 
-recomputed_in(g::Group; nested = true) =
-    Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Fold)
+"""
+    task_state(target) -> function
+
+A function that, called first in a new task, gives the task the state on
+`target` of the task that asked for it (for CUDA, its context and stream).
+"""
+task_state(target) = () -> nothing
+
+"""
+    concurrently(f, xs, target) -> results
+
+`f` of each of `xs`, in tasks that take turns on the calling thread, each in
+the calling task's state on `target`. Groups and kernels are built this way:
+while one task waits for a compilation running `elsewhere`, the others start
+theirs. Device objects are made on the calling thread, so at exit they are
+finalized after what the caller made from them later (a module unloaded before
+a captured graph that launches it crashes the driver).
+"""
+function concurrently(f, xs, target)
+    enter = task_state(target)
+    map(fetch_result, [@async((enter(); f(x))) for x in xs])
+end
+
+"""
+    elsewhere(f) -> f()
+
+Run `f` on another thread, if there is one, and wait for it while the calling
+thread's other tasks run. For compilation, which makes no device objects.
+"""
+elsewhere(f) = fetch_result(Threads.@spawn f())
+
+function fetch_result(t::Task)
+    try
+        fetch(t)
+    catch err
+        err isa TaskFailedException ? throw(err.task.exception) : rethrow()
+    end
+end
 
 "Copy `inputs` into the executable's input buffers."
-function bind!(ex::Executable, inputs...)
+function bind!(ex::Executable, @nospecialize(inputs...))
     arguments = leaves(inputs)
     for (id, v) in enumerate(ex.plan.graph.values)
         d = v.definition
@@ -187,9 +254,14 @@ function explain(io::IO, ex::Executable)
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
         "; half-precision products accumulate in Float32",
         ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
-    println(io, "implementations:")
+    for (set, i) in ex.accepted
+        println(io, "candidate ", join(map(v -> "%$v", set), " "), " from ", nameof(typeof(i)), " replaces the generator's grouping")
+    end
+    println(io, "implementations from ", isempty(ex.packages) ? "no package" : join(map(string ∘ nameof, ex.packages), ", "),
+        ", and the floor:")
     for (k, d) in enumerate(ex.kernels)
-        println(io, "  kernel ", k, ": ", d)
+        x = ex.decisions[k]
+        println(io, "  kernel ", k, ": ", d, x === nothing ? "" : string(" (", x, ")"))
     end
 end
 
@@ -218,11 +290,10 @@ end
 
 Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, " items") for k in f.kernels), " then "))
 
-function build(target::CPUTarget, p::Plan, g::Group, buffers)
-    g.kind === :opaque && return build_opaque(target, p, g, buffers)
+function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
     ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
     launches = map(ks) do k
-        f = Core.eval(Generated, :(function (buffers, n)
+        f = generated(:(function (buffers, n)
             for lin in 0:(n - 1)
                 $(k.body)
             end
@@ -257,7 +328,7 @@ function opaque_launch(p, g, buffers)
             val = graph.values[id]
             arrays[id] = val.scalar ? Array(b)[1] : reshape(Array(b), val.dims)
         end
-        run_opaque!(g, arrays, graph)
+        run_group!(g, arrays, graph)
         for v in g.outputs
             p.stored[v] || continue
             y = arrays[v]

@@ -3,6 +3,9 @@
 using Tempest, LinearAlgebra
 import Tempest as T
 
+# Measurements the tests take stay out of the user's tuning record.
+ENV["TEMPEST_CACHE"] = mktempdir()
+
 swish(x) = x / (1 + exp(-x))
 leaky(x) = x > 0 ? x : oftype(x, 0.01) * x
 T.scalar_partials(::typeof(leaky), g, y, x) = (ifelse(x > 0, g, oftype(g, 0.01) * g),)

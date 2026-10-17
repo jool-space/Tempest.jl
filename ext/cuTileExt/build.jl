@@ -78,14 +78,21 @@ tile_counts(c::Context, axes) = [cld(c.s.tiling[i].extent, c.s.tiling[i].tile) f
 # Every tile on its own block, from a linear grid: one index per tile axis.
 function tile_indices!(st, c::Context)
     counts = tile_counts(c, eachindex(c.s.tiling))
-    push!(st, :(rest = $(ct.bid)(1) - Int32(1)))
-    indices = map(eachindex(counts)) do i
-        name = Symbol(:tile_, i)
+    linear_indices!(st, counts, :tile_), (prod(counts; init = 1),)
+end
+
+# Indices of `counts` tiles from the linear block id, named `prefix` and the
+# axis; an axis of one tile has index one.
+function linear_indices!(st, counts, prefix)
+    many = findall(>(1), counts)
+    isempty(many) || push!(st, :(rest = $(ct.bid)(1) - Int32(1)))
+    map(eachindex(counts)) do i
+        counts[i] == 1 && return :(Int32(1))
+        name = Symbol(prefix, i)
         push!(st, :($name = rem(rest, Int32($(counts[i]))) + Int32(1)))
-        push!(st, :(rest = div(rest, Int32($(counts[i])))))
+        i == last(many) || push!(st, :(rest = div(rest, Int32($(counts[i])))))
         name
     end
-    indices, (prod(counts; init = 1),)
 end
 
 # Folds along one swept tile axis, each tile of the kept axes in one block (or
@@ -119,7 +126,10 @@ function unsplit_kernel(c::Context, workspaces, slots)
     body = isempty(chunks) ? st : Any[]
     names = Dict{Term, Any}()
     statistics = Dict{Term, Any}()
-    valid1 = resident ? valid_mask!(body, c, one32) : nothing
+    # Lanes past the swept extent are masked for folds summed elementwise; a
+    # product's operands pad with zeros instead.
+    elementwise(phase) = any(r -> bilinear(c, r) === nothing, phase)
+    valid1 = resident && any(elementwise, reduction_phases(c)) ? valid_mask!(body, c, one32) : nothing
     for phase in reduction_phases(c)
         products = Dict(r => bilinear(c, r) for r in phase)
         accumulators = Dict{Int, Vector{Symbol}}()
@@ -136,15 +146,16 @@ function unsplit_kernel(c::Context, workspaces, slots)
         end
         loop = resident ? body : Any[]
         t = resident ? one32 : gensym(:t)
-        valid = resident ? valid1 : valid_mask!(loop, c, t)
+        online = Dict{Int, Any}()
+        for r in phase
+            o = resident ? nothing : online_softmax(c, r)
+            o === nothing || (online[r] = o)
+        end
+        # The online softmax's running maximum and sum mask lanes too.
+        valid = resident ? valid1 : elementwise(phase) || !isempty(online) ? valid_mask!(loop, c, t) : nothing
         scope = resident ? names : merge(Dict{Term, Any}(), statistics)
         roots = [products[r] === nothing ? c.g.terms[r] : product_factor(c, products[r][q]) for r in phase for q in (1, 2)]
-        online = Dict{Int, Any}()
         if !resident
-            for r in phase
-                o = online_softmax(c, r)
-                o === nothing || (online[r] = o)
-            end
             hoist_folds!(k, body, c, unique(roots), scope, at(one32), Set(o[3] for o in values(online)))
             for (r, o) in online
                 online[r] = online_step!(k, body, loop, c, o, scope, valid, at(t), products[r], only(accumulators[r]))
@@ -372,7 +383,7 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     chunk = cld(sweeps(c.s), c.s.splits)
     t = gensym(:t)
     loop = Any[]
-    valid = valid_mask!(loop, c, t)
+    valid = any(r -> products[r] === nothing, phase) ? valid_mask!(loop, c, t) : nothing
     scope = copy(names)
     roots = [products[r] === nothing ? c.g.terms[r] : product_factor(c, products[r][q]) for r in phase for q in (1, 2)]
     emit_tiles!(k, loop, c, unique(roots), scope, at(t)...)
@@ -413,12 +424,7 @@ function merge_kernel(c::Context, rs, slots, workspaces)
     counts = cld.(extents, tiles_m)
     k = TileKernel("merge", (prod(counts; init = 1),), nothing)
     st = k.body
-    push!(st, :(rest = $(ct.bid)(1) - Int32(1)))
-    idx = map(eachindex(counts)) do q
-        name = Symbol(:merge_, q)
-        push!(st, :($name = rem(rest, Int32($(counts[q]))) + Int32(1)), :(rest = div(rest, Int32($(counts[q])))))
-        name
-    end
+    idx = linear_indices!(st, counts, :merge_)
     shape = (tiles_m..., width)
     lanes = (map(_ -> 1, tiles_m)..., width)
     for r in rs
@@ -483,21 +489,15 @@ end
 function Tempest.build_claim(::Tempest.cuTileGenerator, claim::Claim, target, p::Plan, g::Group, buffers)
     c = Context(p.graph, p.stored, g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
-    launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule)
+    launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule, target)
 end
 
-function launch_kernels(kernels, workspaces, buffers, schedule)
+function launch_kernels(kernels, workspaces, buffers, schedule, target)
     scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in workspaces)
-    launches = map(kernels) do k
-        f = Core.eval(Tempest.Generated, source(k))
+    launches = Tempest.concurrently(kernels, target) do k
+        f = Tempest.generated(source(k))
         arrays = map(spec -> tile_array(spec.buffer isa Int ? buffers[spec.buffer] : scratch[spec.buffer], spec), k.args)
-        occupancy = k.occupancy
-        compiled = Base.invokelatest(f, arrays, occupancy) do f, arrays, occupancy
-            occupancy === nothing ? CUDACore.@cuda(backend = ct, launch = false, f(arrays...)) :
-            CUDACore.@cuda(backend = ct, launch = false, occupancy = occupancy, f(arrays...))
-        end
-        grid = k.grid
-        () -> compiled(arrays...; blocks = grid)
+        tile_launch(f, arrays, k.grid; k.occupancy)
     end
     keep = (scratch, buffers)
     launch = () -> (foreach(l -> l(), launches); keep; nothing)

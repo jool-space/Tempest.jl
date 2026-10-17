@@ -1,48 +1,11 @@
 # The product sketch: tile axes for reduction groups whose sums are of
-# bilinear products. The kept axes split into those only one factor reads (M),
-# those only the other reads (N), and those both read (a batch, on the grid);
-# the reduced axes (K) are swept. Tile order (M, K, N, batch) puts each factor's
-# tile in matrix order, so the fold algebra's product rule applies. M, N and
-# the batch each collapse into one tile axis where every view chains over
-# them; otherwise the longest axis of M and of N is tiled and every other kept
-# axis is a grid axis of its own. Everything else is the ordinary resident or
+# bilinear products, over the axes `Tempest.product_axes` finds. The reduced
+# axes (K) are swept. Tile order (M, K, N, batch) puts each factor's tile in
+# matrix order, so the fold algebra's product rule applies. M, N and the batch
+# each collapse into one tile axis where every view chains over them;
+# otherwise the longest axis of M and of N is tiled and every other kept axis
+# is a grid axis of its own. Everything else is the ordinary resident or
 # streamed reduction kernel.
-
-# The domain's axes a term reads, or nothing when it reads reductions.
-function axes_read(t::Term, n)
-    axes = Set{Int}()
-    for s in Tempest.subterms((t,); nested = true)
-        s isa Stat && return nothing
-        exprs = s isa Load ? s.index : s isa Ix ? (s.expr,) : ()
-        for e in exprs, k in 1:n
-            Tempest.mentions(e, k) && push!(axes, k)
-        end
-    end
-    axes
-end
-
-function product_groups(graph, g::Group)
-    n = length(g.domain)
-    K = sort!(collect(Tempest.primary_axes(graph, g)))
-    # Axes of extent one are read by neither factor and need no tile axis.
-    kept = [k for k in 1:n if !(k in K) && g.domain[k] > 1]
-    found = nothing
-    for r in g.reductions
-        t = g.terms[r]
-        t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
-        ax, ay = axes_read(t.args[1], n), axes_read(t.args[2], n)
-        (ax === nothing || ay === nothing) && return nothing
-        all(k -> k in ax && k in ay, K) || return nothing
-        M = [k for k in kept if k in ax && !(k in ay)]
-        N = [k for k in kept if k in ay && !(k in ax)]
-        B = [k for k in kept if k in ax && k in ay]
-        length(M) + length(N) + length(B) == length(kept) && !isempty(M) && !isempty(N) || return nothing
-        groups = (M, N, K, B)
-        found === nothing || found == groups || found == (N, M, K, B) || return nothing
-        found === nothing && (found = groups)
-    end
-    found
-end
 
 # Tiles measured on GB10 (the scratchpad benchmark of cuTile against cuBLAS):
 # 128×128 output tiles with 32-deep steps for TF32 up to K = 1024 and 64-deep
@@ -78,7 +41,7 @@ end
 function product_claim(target, p::Plan, g::Group)
     target isa CUDATarget && g.kind === :reduction || return nothing
     all(r -> g.phase[r] == 1 && p.graph.values[r].definition.fold isa Tempest.SumFold, g.reductions) || return nothing
-    found = product_groups(p.graph, g)
+    found = Tempest.product_axes(p.graph, g)
     found === nothing && return nothing
     M, N, K, B = found
     extent(axes) = prod(k -> g.domain[k], axes; init = 1)

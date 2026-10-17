@@ -26,6 +26,38 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
+# An implementation that proposes each product alone, grown from its fold, in
+# place of the generator's product with the work after it; it claims a lone
+# product as free, so the cover takes it. A candidate over several domains
+# (the product and a sum over its result) does not form a group.
+struct HostProducts <: T.Implementation end
+lone_product(p, g) = g.kind === :reduction && all(in(g.reductions), T.members(g)) && T.product_axes(p.graph, g) !== nothing
+T.candidates(::HostProducts, ::T.CPUTarget, p) = [T.grow(p.graph, r, set -> length(set) <= 1)
+    for g in p.groups if g.kind === :reduction && T.product_axes(p.graph, g) !== nothing for r in g.reductions]
+T.claims(::HostProducts, ::T.CPUTarget, p, g) = lone_product(p, g) ? [:host] : []
+T.estimate(::HostProducts, claim, target, p, g) = [T.Work(0.0)]
+T.build_claim(::HostProducts, claim, target, p, g, buffers) = T.build_floor(target, p, g, buffers)
+
+@testset "candidates from implementations" begin
+    a, b = data(6, 5; scale = 0.3), data(5, 4)
+    p = trace((a, b) -> tanh.(a * b), a, b)
+    @test length(T.plan(T.lower(p)).groups) == 1 # the generator fuses the tanh
+    T.register!(@__MODULE__, HostProducts())
+    try
+        ex = prepare(p, a, b)
+        @test length(ex.accepted) == 1 && length(first(first(ex.accepted))) == 1
+        @test length(ex.plan.groups) == 2
+        @test isapprox(only(T.leaves(execute!(ex))), interpret(p, a, b); rtol = 1.0e-12)
+        @test occursin("from HostProducts replaces", sprint(explain, ex))
+        # The product, the tanh and a sum over the result span two domains.
+        graph = T.lower(trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b))
+        r = only(g.reductions[1] for g in T.plan(graph).groups if T.product_axes(graph, g) !== nothing)
+        @test_throws T.NotAGroup T.plan(graph; fixed = [T.grow(graph, r, set -> length(set) <= 3)])
+    finally
+        T.register!(@__MODULE__)
+    end
+end
+
 # The floor evaluates recomputed folds too: an implementation that asks for
 # them and leaves the kernels to the floor.
 struct RecomputeOnTheFloor <: T.Implementation end
@@ -34,11 +66,11 @@ T.claims(::RecomputeOnTheFloor, target, p, g) = isempty(T.recomputed_in(g)) ? ()
 T.build_claim(::RecomputeOnTheFloor, claim, target, p, g, buffers) = error("left to the floor")
 
 function with_recomputing_floor(f)
-    pushfirst!(T.EXTRA_IMPLEMENTATIONS, RecomputeOnTheFloor())
+    T.register!(@__MODULE__, RecomputeOnTheFloor())
     try
         f()
     finally
-        filter!(i -> !(i isa RecomputeOnTheFloor), T.EXTRA_IMPLEMENTATIONS)
+        T.register!(@__MODULE__)
     end
 end
 
@@ -65,7 +97,7 @@ if CUDACore.functional()
         with_recomputing_floor() do
             @testset "$name" for (name, f, args) in attention_cases
                 p = trace(f, args...)
-                ex = prepare(p, map(CuArray, args)...)
+                ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(@__MODULE__))
                 @test all(d -> d isa T.FloorKernels, ex.kernels)
                 @test agree(T.leaves(execute!(ex)), [interpret(p, args...)]; rtol = 1.0e-8)
             end
@@ -80,7 +112,7 @@ if CUDACore.functional()
     end
     @testset "products on cuTile" begin
         w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
-        for target in (T.CUDATarget(), T.CUDATarget(precision = :tf32))
+        for target in (T.CUDATarget(cuTile), T.CUDATarget(cuTile; precision = :tf32))
             p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
             ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target)
             @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
@@ -89,7 +121,7 @@ if CUDACore.functional()
         # A conversion to BFloat16 is part of the epilogue: one kernel, and
         # only the BFloat16 result is stored.
         p = trace((w, x, b) -> Core.BFloat16.(gelu.(w * x .+ b)), w, x, b)
-        ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(precision = :tf32))
+        ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile; precision = :tf32))
         @test length(ex.kernels) == 1 && only(ex.kernels).schedule.sketch === :product
         y = only(T.leaves(execute!(ex)))
         @test eltype(y) === Core.BFloat16
@@ -97,22 +129,89 @@ if CUDACore.functional()
         # Half operands accumulate in Float32 and round once.
         h, y = Float16.(data(64, 48; scale = 0.1)), Float16.(data(48, 32))
         p = trace((h, y) -> h * y, h, y)
-        ex = prepare(p, CuArray(h), CuArray(y))
+        ex = prepare(p, CuArray(h), CuArray(y); target = T.CUDATarget(cuTile))
         @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
         @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, h, y); rtol = eps(Float16))
         # A product spelled as a broadcast and a sum is a product too.
         a, c = Float32.(data(64, 48; scale = 0.1)), Float32.(data(48, 80))
-        ex = prepare(trace(spelled_product, a, c), CuArray(a), CuArray(c))
+        ex = prepare(trace(spelled_product, a, c), CuArray(a), CuArray(c); target = T.CUDATarget(cuTile))
         @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
         @test isapprox(Array(only(T.leaves(execute!(ex)))), a * c; rtol = 1.0e-4)
         # A long sum over a small output splits among blocks (split-K) and merges.
         u, z = Float32.(data(64, 3000; scale = 0.01)), Float32.(data(3000, 48))
-        for target in (T.CUDATarget(), T.CUDATarget(precision = :tf32))
+        for target in (T.CUDATarget(cuTile), T.CUDATarget(cuTile; precision = :tf32))
             p = trace((u, z) -> u * z, u, z)
             ex = prepare(p, CuArray(u), CuArray(z); target)
             @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product && d.schedule.splits > 1, ex.kernels)
             @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, u, z); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
+    end
+    using cuBLAS
+    @testset "products on cuBLAS" begin
+        @test Base.get_extension(Tempest, :cuBLASExt) !== nothing
+        built(ex) = [d for d in ex.kernels if d isa Base.get_extension(Tempest, :cuBLASExt).BuiltProduct]
+        a, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112))
+        at, bt = permutedims(a), permutedims(b)
+        A, B = Float32.(data(32, 24, 5; scale = 0.1)), Float32.(data(24, 40, 5; scale = 0.2))
+        # Factors in either orientation, a result stored transposed, a batch,
+        # and half factors accumulating in Float32.
+        layouts = [((a, b) -> a * b, (a, b)), ((at, b) -> transpose(at) * b, (at, b)),
+            ((a, bt) -> a * transpose(bt), (a, bt)), ((at, bt) -> transpose(at) * transpose(bt), (at, bt)),
+            ((a, b) -> T.contract(a, b, (1, 2), (2, 3), (3, 1)), (a, b)), ((A, B) -> T.batched_mul(A, B), (A, B)),
+            ((a, b) -> a * b, (Float16.(a), Float16.(b))), ((a, b) -> a * b, (Core.BFloat16.(a), Core.BFloat16.(b)))]
+        for (f, args) in layouts, target in (T.CUDATarget(cuBLAS), T.CUDATarget(cuBLAS; precision = :tf32))
+            p = trace(f, args...)
+            ex = prepare(p, map(CuArray, args)...; target)
+            @test length(built(ex)) == 1
+            rtol = eltype(args[1]) === Float32 ? (target.precision === :tf32 ? 1.0e-2 : 1.0e-5) : 2 * eps(eltype(args[1]))
+            @test isapprox(Float32.(Array(only(T.leaves(execute!(ex))))), Float32.(interpret(p, args...)); rtol)
+        end
+        # With work after the product, cuBLAS's candidate is the product
+        # alone, and the work after it a kernel of its own.
+        w = Float32.(data(96; scale = 0.3))
+        p = trace((a, b, w) -> tanh.(a * b .+ w), a, b, w)
+        ex = prepare(p, CuArray(a), CuArray(b), CuArray(w); target = T.CUDATarget(cuBLAS))
+        @test length(built(ex)) == 1 && length(ex.accepted) == 1 && length(ex.kernels) == 2
+        @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, a, b, w); rtol = 1.0e-5)
+        ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
+        @test isempty(built(ex))
+    end
+    @testset "choosing between claims" begin
+        # Half-precision products cuBLAS and cuTile both claim, close by
+        # estimate: measured at preparation and kept in the tuning record.
+        a, b = Float16.(data(1024, 256; scale = 0.1)), Float16.(data(256, 1024))
+        p = trace((a, b) -> a * b, a, b)
+        target = T.CUDATarget()
+        prepared() = prepare(p, CuArray(a), CuArray(b); target)
+        ex = prepared()
+        x = only(ex.decisions)
+        @test x.how === :measured && length(x.options) == 2
+        @test occursin("chosen by measurement", sprint(explain, ex))
+        path = T.record_path(target)
+        lines = readlines(path)
+        @test length(lines) >= 2
+        # Given the record, preparing again measures nothing and chooses alike.
+        again = prepared()
+        @test readlines(path) == lines && only(again.decisions).choice.key == x.choice.key
+        # A measurement overrides the estimate only beyond the noise margin.
+        rewrite(f) = write(path, join((string(k, '\t', f(k, parse(Float64, t))) for (k, t) in split.(lines, '\t')), '\n') * '\n')
+        other = only(o for o in x.options if o.key != x.choice.key)
+        rewrite((k, t) -> k == other.key ? 1.0e-7 : 1.0e-5)
+        @test only(prepared().decisions).choice.key == other.key
+        rewrite((k, t) -> 1.0e-5)
+        @test only(prepared().decisions).choice.key == first(x.options).key
+        @test isapprox(Array(only(T.leaves(execute!(prepared())))), interpret(p, a, b); rtol = 2 * eps(Float16))
+    end
+    @testset "implementation sets" begin
+        w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
+        p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
+        # Loading a package makes its implementations available; a target
+        # names the ones it uses, and the floor is always there.
+        @test T.used_packages(T.CUDATarget()) == [cuBLAS, cuTile]
+        ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile))
+        @test ex.packages == [cuTile]
+        @test occursin("implementations from cuTile, and the floor", sprint(explain, ex))
+        @test_throws ArgumentError prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(Test))
     end
 end
 
@@ -177,7 +276,7 @@ if CUDACore.functional()
         @testset "$name" for (name, f, args) in POSITIONAL
             args = map(single, args)
             p = trace(f, args...)
-            ex = prepare(p, map(CuArray, args)...)
+            ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
             @test all(d -> !(d isa T.FloorKernels), ex.kernels)
             @test agree(T.leaves(execute!(ex)), T.leaves(interpret(p, args...)); rtol = 2.0e-4)
         end
@@ -199,7 +298,7 @@ if CUDACore.functional()
             q, k, v = single(data(D, H, S, B; scale = 0.1)), single(data(D, KV, S, B; scale = 0.2)), single(data(D, KV, S, B; scale = 0.3))
             p = trace((q, k, v) -> T.attention(q, k, v; causal), q, k, v)
             for online in (true, false)
-                ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(; online))
+                ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile; online))
                 kernel = only(ex.kernels)
                 @test !(kernel isa T.FloorKernels)
                 @test occursin("online softmax", string(kernel)) == online
@@ -208,3 +307,5 @@ if CUDACore.functional()
         end
     end
 end
+
+include("cache.jl")

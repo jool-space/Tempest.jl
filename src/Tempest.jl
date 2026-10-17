@@ -29,11 +29,16 @@ include("index/interpret.jl")
 # Plans: what is stored, and the kernels.
 include("plan/terms.jl")
 include("plan/planner.jl")
+include("plan/products.jl")
 include("plan/cpu.jl")
 include("plan/explain.jl")
 
 # Code generation and prepared programs.
 include("codegen/scalar.jl")
 include("runtime/runtime.jl")
+include("runtime/decide.jl")
+include("runtime/cache.jl")
+
+include("precompile.jl")
 
 end

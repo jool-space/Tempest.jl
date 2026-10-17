@@ -26,6 +26,9 @@ end
         p = trace(f, args...)
         @test interpret(p, args...) ≈ f(args...)
         d = differentiate(p)
+        # Every node is read by a result, or is a call's result beside one.
+        read = T.live(d.nodes, d.results)
+        @test all(id -> read[id] || id in d.arguments || d.nodes[id].op isa T.Call, eachindex(d.nodes))
         loss, gradients... = interpret(d, args...)
         @test loss ≈ f(args...)
         for k in eachindex(args)
