@@ -78,3 +78,24 @@ end
     # A copy of an input may be written.
     @test interpret(trace(x -> (y = copy(x); y[1] = 0; y), x), x) == (y = copy(x); y[1] = 0; y)
 end
+
+# A Julia array a function closes over is a constant factor of the products it
+# enters, and the gradient flows to the traced factor, through writes too.
+@testset "products with a Julia matrix closed over" begin
+    W, x = data(5, 8; scale = 0.2), data(8, 6)
+    dx = W' * ones(5, 6)
+    loss, g = interpret(differentiate(trace(p -> sum(W * p), x)), x)
+    @test loss ≈ sum(W * x) && g ≈ dx
+    written(p) = (y = copy(p); y[1, :] .= 0; sum(W * y))
+    masked = dx .* (axes(x, 1) .!= 1)
+    @test last(interpret(differentiate(trace(written, x)), x)) ≈ masked
+    # Tempest.gradient, eagerly and where it is called in traced code, once the
+    # runtime's training-step API is here.
+    if isdefined(T, :gradient)
+        loss, g = T.gradient(p -> sum(W * p), x)
+        @test loss ≈ sum(W * x) && g ≈ dx
+        loss, g = interpret(trace(x -> T.gradient(p -> sum(W * p), x), x), x)
+        @test loss ≈ sum(W * x) && g ≈ dx
+        @test last(interpret(trace(x -> T.gradient(written, x), x), x)) ≈ masked
+    end
+end
