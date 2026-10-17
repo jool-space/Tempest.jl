@@ -433,6 +433,15 @@ if CUDACore.functional()
         ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
         @test all(d -> !(d isa T.FloorKernels), ex.kernels)
         @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+        # With grouped heads, the products into the key and value gradients sum
+        # over the query heads of a group and the queries, which no strided
+        # axis spans: the queries are tiled and the heads swept in turn.
+        g = single(data(16, 4, 70, 2; scale = 0.1))
+        d = differentiate(trace((q, k, v) -> sum(abs2, T.attention(q, k, v; causal = true)), g, k, v))
+        ex = prepare(d, map(CuArray, (g, k, v))...; target = T.CUDATarget(cuTile))
+        @test all(d -> !(d isa T.FloorKernels), ex.kernels)
+        @test any(d -> occursin("in turn", string(d)), ex.kernels)
+        @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, g, k, v))); rtol = 1.0e-4)
         # A residual is part of the one kernel, also with a key head per query
         # head, where the reference groups heads along an axis of extent one.
         x = single(data(16, 2, 70, 2; scale = 0.5))

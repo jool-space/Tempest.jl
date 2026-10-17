@@ -69,17 +69,47 @@ groups(s::TileSchedule) = Tuple(ax.axes for ax in s.tiling)
 swept(s::TileSchedule) = findall(ax -> ax.reduced, s.tiling)
 function code(s::TileSchedule)
     r = swept(s)
-    isempty(r) ? 0 : length(r) == 2 ? 3 : only(r)
+    isempty(r) ? 0 : length(r) == length(s.tiling) ? 3 : sweep_axis(s)
 end
 
-sweeps(s::TileSchedule) = (r = swept(s); length(r) == 1 ? cld(s.tiling[only(r)].extent, s.tiling[only(r)].tile) : 1)
+"The swept tile axis a schedule tiles; any other it sweeps has tile one, an index per step."
+function sweep_axis(s::TileSchedule)
+    r = swept(s)
+    r[something(findfirst(q -> s.tiling[q].tile > 1, r), 1)]
+end
+
+# The steps of a sweep: every tile of the swept axes, unless the schedule
+# reduces every axis.
+sweeps(s::TileSchedule) = (r = swept(s); length(r) == length(s.tiling) ? 1 :
+    prod(q -> cld(s.tiling[q].extent, s.tiling[q].tile), r; init = 1))
+
+"""
+The block indices at step `t` of the sweep, an Int32 expression from one: the
+swept axis the schedule tiles moves fastest, then each other swept axis.
+"""
+function step_indices(s::TileSchedule, indices, t)
+    ix = Any[indices...]
+    p = sweep_axis(s)
+    others = filter(!=(p), swept(s))
+    isempty(others) && (ix[p] = t; return Tuple(ix))
+    counts = map(q -> cld(s.tiling[q].extent, s.tiling[q].tile), [p; others])
+    rest = :($t - Int32(1))
+    for (q, n) in zip([p; others], counts)
+        ix[q] = :(rem($rest, Int32($n)) + Int32(1))
+        rest = :(div($rest, Int32($n)))
+    end
+    Tuple(ix)
+end
 kept_tiles(s::TileSchedule) = prod((cld(ax.extent, ax.tile) for ax in s.tiling if !ax.reduced); init = 1)
 
 function Base.show(io::IO, s::TileSchedule)
     if s.sketch === :product
         m, k, n = s.tiling[1:3]
         print(io, "product ", m.extent, "×", n.extent, " summing ", k.extent)
-        length(s.tiling) > 3 && print(io, ", batch ", join((ax.extent for ax in s.tiling[4:end]), "×"))
+        turns = [ax.extent for ax in s.tiling[4:end] if ax.reduced]
+        isempty(turns) || print(io, " and ", join(turns, "×"), " in turn")
+        batch = [ax.extent for ax in s.tiling[4:end] if !ax.reduced]
+        isempty(batch) || print(io, ", batch ", join(batch, "×"))
         print(io, ", tile ", m.tile, "×", n.tile, "×", k.tile, ", ",
             s.precision === :tf32 ? "TF32" : s.precision === :tf32x3 ? "3×TF32" : "full precision")
         s.splits > 1 && print(io, ", summing split ", s.splits, " ways")
@@ -366,7 +396,7 @@ function Tempest.claims(::Tempest.cuTileGenerator, target::CUDATarget, p::Plan, 
     partial = partial_folds(c)
     # A resident kernel with folds that keep the swept axis covers several kept
     # tiles per block; each such fold reduces every kept axis.
-    if s.sketch === :resident && any(r -> !(only(swept(s)) in fold_tiles(c, r)), partial)
+    if s.sketch === :resident && any(r -> !(sweep_axis(s) in fold_tiles(c, r)), partial)
         kept = findfirst(ax -> !ax.reduced, s.tiling)
         if kept !== nothing && all(r -> kept in fold_tiles(c, r), partial)
             chunk = max(1, cld(cld(s.tiling[kept].extent, s.tiling[kept].tile), PARTIAL_BLOCKS))

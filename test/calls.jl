@@ -249,12 +249,14 @@ if CUDACore.functional()
         @test isempty(opaque_groups(ex))
         @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
         # Under TF32 the hand-written kernels claim attention, and compete with
-        # the attention generated from the reference. In training they win by
-        # their estimates.
+        # the attention generated from the reference. In training the forward
+        # kernel wins by its estimate; at these sizes the backward kernel and
+        # the generated products are a close call, measured.
         target, rtol = T.CUDATarget(precision = :tf32), 5.0e-3
         d = differentiate(p)
         ex = prepare(d, device((q, k, v, x))...; target)
-        @test length(opaque_groups(ex)) == 2
+        @test length(opaque_groups(ex)) in (1, 2)
+        @test occursin(r"call of attention_forward \(.*\): cuTileAttention's claim", sprint(explain, ex))
         # The log-sum-exp's cotangent, a constant, is generated too.
         @test !any(d -> d isa T.FloorKernels, ex.kernels)
         @test close(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))); rtol)

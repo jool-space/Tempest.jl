@@ -105,13 +105,13 @@ function unsplit_kernel(c::Context, workspaces, slots)
     st = k.body
     indices, grid, chunks, bases = block_indices!(st, c)
     k.grid = grid
-    p = only(swept(c.s))
-    at(t) = (ix = copy(indices); ix[p] = t; Tuple(ix))
+    p = sweep_axis(c.s)
+    at(t) = step_indices(c.s, indices, t)
     n = sweeps(c.s)
     resident = n == 1
     one32 = :(Int32(1))
     partial = partial_folds(c)
-    held(r) = resident || p in fold_tiles(c, r)
+    held(r) = resident || all(q -> q in fold_tiles(c, r), swept(c.s))
     # Slots of a fold's partial states: the blocks along the kept axes it reduces.
     kept = [i for i in eachindex(c.s.tiling) if !c.s.tiling[i].reduced]
     slot_of(r) = slot_expr(bases, [i for i in kept if i in fold_tiles(c, r)], block_counts(c, [i for i in kept if i in fold_tiles(c, r)]))
@@ -128,14 +128,14 @@ function unsplit_kernel(c::Context, workspaces, slots)
     # Lanes past the swept extent are masked for folds summed elementwise; a
     # product's operands pad with zeros instead.
     elementwise(phase) = any(r -> bilinear(c, r) === nothing, phase)
-    valid1 = resident && any(elementwise, reduction_phases(c)) ? valid_mask!(body, c, one32) : nothing
+    valid1 = resident && any(elementwise, reduction_phases(c)) ? valid_mask!(body, c, at(one32)[p]) : nothing
     for phase in reduction_phases(c)
         sums = Dict(r => fold_sums(c, r) for r in phase)
         # Folds of a resident tile that do not sum fold it directly.
         accumulators = Dict(r => fold_accumulators!(body, c, r, sums[r]) for r in phase if !resident || sums[r] !== nothing)
         loop = resident ? body : Any[]
         t = resident ? one32 : gensym(:t)
-        valid = resident ? valid1 : elementwise(phase) ? valid_mask!(loop, c, t) : nothing
+        valid = resident ? valid1 : elementwise(phase) ? valid_mask!(loop, c, at(t)[p]) : nothing
         scope = resident ? names : merge(Dict{Term, Any}(), statistics)
         roots = phase_roots(c, phase, sums)
         resident || hoist_folds!(k, body, c, roots, scope, at(one32))
@@ -210,7 +210,7 @@ end
 # Recomputed folds that do not move along the swept axis are computed once,
 # before the sweep.
 function hoist_folds!(k, st, c::Context, roots, scope, indices)
-    axes = c.s.tiling[only(swept(c.s))].axes
+    axes = reduce(vcat, (c.s.tiling[q].axes for q in swept(c.s)))
     for t in Tempest.subterms(roots; known = t -> haskey(scope, t))
         t isa Tempest.Fold || continue
         any(q -> Tempest.mentions(t, q), axes) && continue
@@ -302,11 +302,11 @@ sum_state(c::Context, sums, acc) = Any[acc[1:(end - length(sums))];
 # A group's fold in a sweep along the schedule's swept axis: its sums, its
 # accumulators, a step, and its state at the end; for folds that do not sum,
 # their state's.
-fold_sums(c::Context, r) = sweep_sums(c, fold_of(c, r), c.g.terms[r], only(swept(c.s)))
+fold_sums(c::Context, r) = sweep_sums(c, fold_of(c, r), c.g.terms[r], sweep_axis(c.s))
 
 function fold_accumulators!(st, c::Context, r, sums)
     f, A = fold_of(c, r), accumulator(c, r)
-    sums === nothing || return sum_accumulators!(st, c, f, c.g.terms[r], sums, only(swept(c.s)), Symbol(:acc_, r))
+    sums === nothing || return sum_accumulators!(st, c, f, c.g.terms[r], sums, sweep_axis(c.s), Symbol(:acc_, r))
     acc = state_symbols(r, f, A)
     init_state!(st, acc, f, A, tile(c))
     acc
@@ -314,13 +314,13 @@ end
 
 function fold_step!(k, st, c::Context, r, sums, acc, scope, valid, indices)
     f, A, term = fold_of(c, r), accumulator(c, r), c.g.terms[r]
-    sums === nothing || return sum_step!(k, st, c, f, term, sums, acc, scope, valid, indices, only(swept(c.s)))
+    sums === nothing || return sum_step!(k, st, c, f, term, sums, acc, scope, valid, indices, sweep_axis(c.s))
     x = as_accumulator(st, scope[term], A, Tempest.term_eltype(term, c.graph), tile(c))
     accumulate_elements!(st, f, A, acc, x, valid)
 end
 
 fold_state!(st, c::Context, r, sums, acc) =
-    sums === nothing ? reduce_state!(st, fold_of(c, r), accumulator(c, r), acc, only(swept(c.s))) : sum_state(c, sums, acc)
+    sums === nothing ? reduce_state!(st, fold_of(c, r), accumulator(c, r), acc, sweep_axis(c.s)) : sum_state(c, sums, acc)
 
 phase_roots(c::Context, phase, sums) = unique(Term[x for r in phase for x in step_roots(c, fold_of(c, r), c.g.terms[r], sums[r])])
 
@@ -387,8 +387,8 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     indices, grid, _, _ = block_indices!(st, c; limit = 2)
     push!(st, :(part = $(ct.bid)($(length(grid) + 1))))
     k.grid = (grid..., c.s.splits)
-    p = only(swept(c.s))
-    at(t) = (ix = copy(indices); ix[p] = t; Tuple(ix))
+    p = sweep_axis(c.s)
+    at(t) = step_indices(c.s, indices, t)
     names = Dict{Term, Any}()
     load_folds!(k, st, c, earlier, names, at(:(Int32(1))), workspaces)
     sums = Dict(r => fold_sums(c, r) for r in phase)
@@ -396,7 +396,7 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     chunk = cld(sweeps(c.s), c.s.splits)
     t = gensym(:t)
     loop = Any[]
-    valid = any(r -> bilinear(c, r) === nothing, phase) ? valid_mask!(loop, c, t) : nothing
+    valid = any(r -> bilinear(c, r) === nothing, phase) ? valid_mask!(loop, c, at(t)[p]) : nothing
     scope = copy(names)
     emit_tiles!(k, loop, c, phase_roots(c, phase, sums), scope, at(t)...)
     foreach(r -> fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t)), phase)
