@@ -28,7 +28,6 @@ Composition(name, program, args, expected; generated = expected) = Composition(n
 sample(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
 
 const TRACK_B = "track B: the online softmax as a fold"
-const TRACK_C = "track C: size-1 axes out of domains"
 const BACKWARD = "a generated attention backward pass (DESIGN, next 4)"
 const SHARED_MAP = "a map read by a fold and by a later map in one kernel is stored (DESIGN, decision procedure, 5)"
 
@@ -73,9 +72,8 @@ const ATTENTION = [
     # Three kernels today, storing the scores and their exponentials.
     Composition("softmax spelled exp(s - max) / sum", trace(shifted, q, k, v), (q, k, v),
         (kernels = Gap(1, TRACK_B), bytes = Gap(O, TRACK_B), largest = Gap(O, TRACK_B))),
-    # Two kernels today: the residual is added in a kernel of its own.
     Composition("the verb, then a residual", trace((q, k, v, x) -> attend(q, k, v) .+ x, q, k, v, x), (q, k, v, x),
-        (kernels = Gap(1, TRACK_C), bytes = Gap(O, TRACK_C), largest = O)),
+        (kernels = 1, bytes = O, largest = O)),
     Composition("written out, then a residual", trace((q, k, v, x) -> written(q, k, v) .+ x, q, k, v, x), (q, k, v, x),
         (kernels = 1, bytes = O, largest = O)),
     Composition("the verb, and a reduction of its output", trace((q, k, v) -> (o = attend(q, k, v); (o, sum(abs2, o; dims = 1))), q, k, v),
