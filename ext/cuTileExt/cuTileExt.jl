@@ -429,12 +429,32 @@ first_blocks(s::TileSchedule) = s.splits * prod(s.tiling; init = 1) do ax
     ax.reduced ? (s.sketch === :full ? tiles : 1) : cld(tiles, ax.chunk)
 end
 
-# A schedule's launches: the main kernel over its blocks, products at the
-# generator's rate, and a merge of partial states when blocks share a tile.
+# The multiply-adds of the folds a group recomputes: each fold's extents at
+# every position of the tiles it moves along, once per tile of the kept axes
+# it does not (every block computes it for its tile) and once per block along
+# the swept ones (before the sweep), and the folds inside it at every position
+# of its extents.
+function recomputed_flops(s::TileSchedule, g::Group)
+    inner(t) = prod(t.extents; init = 1.0) * (2.0 + sum(u -> u isa Tempest.Fold ? inner(u) : 0.0, Tempest.subterms((t.body,)); init = 0.0))
+    roots = [g.terms[m] for m in Tempest.members(g) if haskey(g.terms, m)]
+    sum(Tempest.subterms(roots); init = 0.0) do t
+        t isa Tempest.Fold || return 0.0
+        positions = prod(s.tiling; init = 1.0) do ax
+            tiles = cld(ax.extent, ax.tile)
+            any(a -> Tempest.mentions(t, a), ax.axes) ? tiles * ax.tile : ax.reduced && s.sketch !== :full ? 1 : tiles
+        end
+        positions * inner(t)
+    end
+end
+
+# A schedule's launches: the main kernel over its blocks, products (and the
+# folds it recomputes) at the generator's rate, and a merge of partial states
+# when blocks share a tile.
 function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Plan, g::Group)
     s = claim.schedule
     blocks = first_blocks(s)
     bytes = Tempest.group_bytes(p, g)
+    recomputed = recomputed_flops(s, g)
     work = if s.sketch === :product
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
@@ -442,9 +462,9 @@ function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Pl
         t = first(Tempest.product_factors(p.graph.values[r].definition.fold, g.terms[r]))
         factor = t isa Apply && t.f isa Tempest.Cast{Float32} ? only(t.args) : t
         rate = product_rate(target, Tempest.term_eltype(factor, p.graph))
-        [Tempest.Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions), rate, blocks)]
+        [Tempest.Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions) + recomputed, rate, blocks)]
     else
-        [Tempest.Work(bytes; blocks)]
+        [Tempest.Work(bytes; flops = recomputed, rate = product_rate(target, Float32), blocks)]
     end
     if s.splits > 1 || s.sketch === :full
         # Each of the blocks that share a kept tile writes a partial state of
