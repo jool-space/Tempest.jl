@@ -447,8 +447,11 @@ function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Pl
         [Tempest.Work(bytes; blocks)]
     end
     if s.splits > 1 || s.sketch === :full
+        # Each of the blocks that share a kept tile writes a partial state of
+        # it, and the merge reads them.
         kept = prod((ax.extent for ax in s.tiling if !ax.reduced); init = 1)
-        push!(work, Tempest.Work(2.0 * 4 * kept * blocks * length(g.reductions); blocks = max(1, kept / 256)))
+        sharing = blocks / prod((cld(cld(ax.extent, ax.tile), ax.chunk) for ax in s.tiling if !ax.reduced); init = 1)
+        push!(work, Tempest.Work(2.0 * 4 * kept * sharing * length(g.reductions); blocks = max(1, kept / 256)))
     end
     work
 end
