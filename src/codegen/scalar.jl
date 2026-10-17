@@ -226,6 +226,77 @@ function fold_kernel(graph, g::Group, slots, r)
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 
-"The floor's launches for a group: its kernel, then one per fold over other axes."
-scalar_kernels(graph, stored, g::Group, slots) =
+# An operand of the scatter at `index`, as a term.
+scatter_term(o::Read, index, d) = Load(o.value, map(e -> substitute(e, index, d), o.index))
+scatter_term(o::Literal, index, d) = Lit(o.value)
+scatter_term(o::IndexOperand{T}, index, d) where {T} = Ix{T}(substitute(o.expr, index, d))
+
+# A scatter on the floor, deterministic: an item per element of the result,
+# summing the elements selected at its position in the order of their linear
+# index, as the interpreter does. An integer or a range among the indices
+# constrains the position; each index array is scanned for it, the last
+# outermost. The work is the result's length times the index arrays'.
+function scatter_kernel(graph, g::Group, slots)
+    v = only(g.outputs)
+    d = graph.values[v].definition
+    n, op = d.node, d.node.op
+    T = n.eltype
+    # Variables: the result's axes, then each range's position along it and
+    # each index array's axes, which are the selection's axes.
+    extents = collect(n.dims)
+    vars = index_vars(length(n.dims))
+    selected = Affine[]
+    ranges = Expr[]
+    checks = Expr[]
+    scans = Tuple{UnitRange{Int}, Int, Int}[]
+    for (axis, i) in enumerate(op.indices)
+        if i isa Integer
+            push!(checks, :($(vars[axis]) == $(i - 1)))
+        elseif i isa AbstractRange
+            push!(extents, length(i))
+            push!(vars, gensym(:j))
+            offset = gensym(:offset)
+            push!(ranges, step(i) > 0 ? :($offset = $(vars[axis]) - $(first(i) - 1)) : :($offset = $(first(i) - 1) - $(vars[axis])))
+            push!(ranges, :($(last(vars)) = fld($offset, $(abs(step(i))))))
+            push!(checks, :(mod($offset, $(abs(step(i)))) == 0), :(0 <= $(last(vars)) < $(length(i))))
+            push!(selected, var(length(extents)))
+        else
+            first_axis = length(extents) + 1
+            append!(extents, d.shapes[i.input][1])
+            append!(vars, [gensym(:n) for _ in d.shapes[i.input][1]])
+            push!(scans, (first_axis:length(extents), i.input, axis))
+            append!(selected, map(var, first_axis:length(extents)))
+        end
+    end
+    domain = Domain(Tuple(extents))
+    c = EmitContext(graph, slots, vars, domain)
+    acc = gensym(:acc)
+    element = scatter_term(first(d.operands), selected, domain)
+    inner = :($acc = convert($T, $acc + $(term_expr(element, nothing, c))))
+    for (axes, input, axis) in scans
+        lin = gensym(:lin)
+        loop = Expr(:block)
+        delinearize_expr(loop.args, lin, axes, extents, vars)
+        index = term_expr(scatter_term(d.operands[input], Tuple(map(var, axes)), domain), nothing, c)
+        push!(loop.args, :(if Int($index) - 1 == $(vars[axis])
+            $inner
+        end))
+        inner = :(for $lin in 0:$(prod(extents[axes]; init = 1) - 1)
+            $loop
+        end)
+    end
+    body = Expr(:block)
+    delinearize_expr(body.args, :lin, 1:length(n.dims), extents, vars)
+    append!(body.args, ranges)
+    push!(body.args, :($acc = zero($T)))
+    push!(body.args, isempty(checks) ? inner : :(if $(foldl((a, b) -> :($a && $b), checks))
+        $inner
+    end))
+    at = map(e -> substitute(e, Tuple(map(var, wide_axes(n.dims))), domain), d.index)
+    push!(body.args, store_expr(c, v, at, acc))
+    ScalarKernel(slots, prod(n.dims; init = 1), body)
+end
+
+"The floor's launches for a group: its kernel, then one per fold over other axes; a scatter's kernel."
+scalar_kernels(graph, stored, g::Group, slots) = g.kind === :opaque ? [scatter_kernel(graph, g, slots)] :
     [scalar_kernel(graph, stored, g, slots); [fold_kernel(graph, g, slots, r) for r in g.reductions if !primary(graph, g, r)]]

@@ -336,6 +336,32 @@ if CUDACore.functional()
     end
 end
 
+# A gather's adjoint scatters on the device, deterministically: each element
+# of the result sums what was selected there in a fixed order, the
+# interpreter's, with repeated indices, two index arrays, and ranges and
+# integers beside an index array.
+const SCATTERS = [
+    ("embedding", (E, t, g) -> sum(E[:, t] .* g), (data(64, 109), Int32.(mod1.(37 .* (1:1024) .^ 2, 109)), data(64, 1024; scale = 0.37))),
+    ("repeated indices in two arrays", (x, i, j) -> sum(abs2, x[i, j]), (data(8, 6), [3, 1, 3, 8, 3], Int32[6, 6, 1])),
+    ("a strided range and an integer beside index arrays", x -> sum(abs2, x[2:2:8, [1, 4, 4]]) + sum(abs2, x[3, [2, 2]]), (data(8, 6),)),
+    ("a reversed range", x -> sum(abs2, x[8:-3:1, [2, 2, 5]]), (data(8, 6),)),
+]
+
+if CUDACore.functional()
+    @testset "scatters on the device" begin
+        @testset "$name" for (name, f, args) in SCATTERS
+            args = map(single, args)
+            p = differentiate(trace(f, args...))
+            ex = prepare(p, map(CuArray, args)...)
+            scatters = [k for (k, g) in enumerate(ex.plan.groups) if g.kind === :opaque]
+            @test !isempty(scatters) && all(k -> ex.kernels[k] isa T.FloorKernels, scatters)
+            first_run = map(Array, T.leaves(execute!(ex))[2:2])
+            @test first_run == map(Array, T.leaves(execute!(ex))[2:2])
+            @test first_run == T.leaves(interpret(p, args...))[2:2]
+        end
+    end
+end
+
 # Attention generated from its reference: one kernel, a fold over keys whose
 # scores and logsumexp are recomputed in it, online or in two passes.
 const GENERATED_ATTENTION = [

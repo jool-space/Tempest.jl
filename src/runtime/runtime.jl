@@ -298,8 +298,8 @@ function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
     (() -> foreach(l -> l(), launches), FloorKernels(ks))
 end
 
-# Opaque work other than calls (a scatter) runs on dense host copies; so may
-# an implementation's claimed call, with its epilogues.
+# An implementation's claimed call may run on dense host copies, with its
+# epilogues.
 function opaque_launch(p, g, buffers)
     graph = p.graph
     function launch()
