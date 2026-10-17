@@ -135,16 +135,21 @@ Tempest.record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transp
     c.batch > 1 ? " batch $(c.batch)" : "", " leading ", (c.a.leading, c.b.leading, c.c.leading), " ", c.factor, " to ", c.result)
 
 # Candidates: each product fold the generator groups with other work, alone,
-# so that its group is this claim's and the work after it a kernel of its own.
+# so that its group is this claim's and the work after it a kernel of its own,
+# and each product fold it recomputes inside another's, stored by this claim.
 function Tempest.candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
+    graph = p.graph
+    product(r, t) = graph.values[r].definition.fold isa Tempest.SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
+        all(f -> factor_load(f, graph) !== nothing, t.args)
     found = Vector{Int}[]
     for g in p.groups
-        g.kind === :reduction && length(Tempest.members(g)) > 1 || continue
+        g.kind === :reduction || continue
         r = first(g.reductions)
-        t = g.terms[r]
-        p.graph.values[r].definition.fold isa Tempest.SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 || continue
-        all(f -> factor_load(f, p.graph) !== nothing, t.args) && Tempest.product_axes(p.graph, g) !== nothing || continue
-        push!(found, [r])
+        length(Tempest.members(g)) > 1 && product(r, g.terms[r]) && Tempest.product_axes(graph, g) !== nothing && push!(found, [r])
+        roots = [g.terms[m] for m in Tempest.members(g) if haskey(g.terms, m)]
+        for t in Tempest.subterms(roots; nested = true)
+            t isa Tempest.Fold && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])
+        end
     end
     found
 end
