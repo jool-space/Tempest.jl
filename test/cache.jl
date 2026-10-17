@@ -57,6 +57,31 @@ end
     @test split(paths, '\n') == [scratch(depot, "kernels"), scratch(depot, "tuning")]
 end
 
+@testset "the kernel cache's size" begin
+    # Beyond its limit the cache removes the entries used least recently.
+    withenv("TEMPEST_KERNEL_CACHE" => mktempdir(), "TEMPEST_KERNEL_CACHE_LIMIT" => "3000") do
+        keys = [T.content_key(n) for n in 1:4]
+        binary = zeros(UInt8, 990) # entries of 1000 bytes, the name and its length included
+        kept() = map(key -> isfile(T.entry_path(T.kernel_cache(), key)), keys)
+        # Modification times tell entries apart only so finely.
+        for key in keys[1:3]
+            T.store_kernel(key, "kernel", binary)
+            sleep(0.05)
+        end
+        @test kept() == [true, true, true, false]
+        # A hit marks its entry used, so the second entry goes first.
+        @test T.load_kernel(keys[1]) == ("kernel", binary)
+        sleep(0.05)
+        T.store_kernel(keys[4], "kernel", binary)
+        @test kept() == [true, false, true, true]
+        @test T.load_kernel(keys[2]) === nothing
+    end
+    for (limit, bytes) in (nothing => 1 << 30, "2048" => 2048, "64K" => 64 << 10, "1g" => 1 << 30)
+        withenv(() -> @test(T.kernel_cache_limit() == bytes), "TEMPEST_KERNEL_CACHE_LIMIT" => limit)
+    end
+    withenv(() -> @test_throws(ArgumentError, T.kernel_cache_limit()), "TEMPEST_KERNEL_CACHE_LIMIT" => "lots")
+end
+
 using CUDACore, cuTile
 if CUDACore.functional()
     @testset "kernel cache" begin

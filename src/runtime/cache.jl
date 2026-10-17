@@ -9,6 +9,9 @@
 # when it is developed). Code outside any package is identified by its lowered
 # code. The binary's parameters follow from the argument types, so a cached
 # kernel is its entry name and its binary.
+#
+# The cache keeps its size under a limit by removing the entries used least
+# recently: an entry's modification time is when it was written or last loaded.
 
 using SHA
 using Scratch: @get_scratch!
@@ -55,7 +58,15 @@ function load_kernel(key)
     path = entry_path(dir, key)
     isfile(path) || return nothing
     bytes = try
-        read(path)
+        # Read and mark used, through one handle: an entry evicted meanwhile is
+        # a miss, never an empty file made again.
+        file = Base.Filesystem.open(path, Base.Filesystem.JL_O_RDONLY)
+        try
+            touch(file)
+            read(file)
+        finally
+            close(file)
+        end
     catch err
         @debug "unreadable kernel cache entry" path exception = err
         return nothing
@@ -97,6 +108,51 @@ function write_entry(key, entry, binary)
     catch err
         @debug "could not write a kernel cache entry" path exception = err
     end
+    evict!(dir, kernel_cache_limit())
+end
+
+"""
+    kernel_cache_limit() -> bytes
+
+The size of the kernel cache beyond which its least recently used entries are
+removed: `ENV["TEMPEST_KERNEL_CACHE_LIMIT"]`, in bytes or with a `K`, `M` or `G`
+suffix, by default 1 GiB, ten thousand kernels of the 80 kB they average.
+"""
+function kernel_cache_limit()
+    s = strip(get(ENV, "TEMPEST_KERNEL_CACHE_LIMIT", ""))
+    isempty(s) && return 1 << 30
+    m = match(r"^(\d+)([KMG]?)$"i, s)
+    m === nothing && throw(ArgumentError("TEMPEST_KERNEL_CACHE_LIMIT is a number of bytes, optionally with K, M or G; got \"$s\""))
+    parse(Int, m[1]) << (10 * (findfirst(==(uppercase(m[2])), ("", "K", "M", "G")) - 1))
+end
+
+const EVICTION_LOCK = ReentrantLock()
+
+"""
+    evict!(dir, limit)
+
+Remove the least recently used entries of the kernel cache in `dir` until the
+rest take at most `limit` bytes. Another process may remove the same entries.
+"""
+function evict!(dir, limit)
+    @lock EVICTION_LOCK begin
+        entries = Tuple{Float64, Int, String}[]
+        for (root, _, files) in walkdir(dir; onerror = _ -> nothing), file in files
+            s = stat(joinpath(root, file))
+            isfile(s) && push!(entries, (s.mtime, s.size, joinpath(root, file)))
+        end
+        total = sum(e -> e[2], entries; init = 0)
+        for (_, size, path) in sort!(entries)
+            total <= limit && break
+            try
+                rm(path; force = true)
+            catch err
+                @debug "could not remove a kernel cache entry" path exception = err
+            end
+            total -= size
+        end
+    end
+    nothing
 end
 
 # Generated functions, by type, with the source that defined them: in a key a
