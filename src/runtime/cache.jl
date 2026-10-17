@@ -9,18 +9,33 @@
 # when it is developed). Code outside any package is identified by its lowered
 # code. The binary's parameters follow from the argument types, so a cached
 # kernel is its entry name and its binary.
+#
+# The cache keeps its size under a limit by removing the entries used least
+# recently: an entry's modification time is when it was written or last loaded.
 
 using SHA
+using Scratch: @get_scratch!
+
+# Tempest's caches live in its scratch spaces in the depot: `kernels` and
+# `tuning`, the tuning record. Their paths are found when Tempest loads, so
+# none is part of its precompiled image; while Tempest precompiles there are
+# none, and its workload uses no cache unless an environment variable names one.
+const SCRATCH = (kernels = Ref{Union{Nothing, String}}(nothing), tuning = Ref{Union{Nothing, String}}(nothing))
+
+function __init__()
+    SCRATCH.kernels[] = @get_scratch!("kernels")
+    SCRATCH.tuning[] = @get_scratch!("tuning")
+end
 
 """
     kernel_cache() -> directory or nothing
 
 Where compiled kernels are kept: `ENV["TEMPEST_KERNEL_CACHE"]` when set, otherwise
-`tempest/kernels` in the first depot. Empty or `"0"` turns the cache off.
+Tempest's `kernels` scratch space. Empty or `"0"` turns the cache off.
 """
 function kernel_cache()
     dir = get(ENV, "TEMPEST_KERNEL_CACHE", nothing)
-    dir === nothing && return joinpath(first(DEPOT_PATH), "tempest", "kernels")
+    dir === nothing && return SCRATCH.kernels[]
     dir in ("", "0") ? nothing : dir
 end
 
@@ -43,7 +58,20 @@ function load_kernel(key)
     path = entry_path(dir, key)
     isfile(path) || return nothing
     bytes = try
-        read(path)
+        # Read and mark used, through one handle: an entry evicted meanwhile is
+        # a miss, never an empty file made again. A cache this process may not
+        # write is still read.
+        file = Base.Filesystem.open(path, Base.Filesystem.JL_O_RDONLY)
+        try
+            try
+                touch(file)
+            catch err
+                @debug "could not mark a kernel cache entry used" path exception = err
+            end
+            read(file)
+        finally
+            close(file)
+        end
     catch err
         @debug "unreadable kernel cache entry" path exception = err
         return nothing
@@ -85,6 +113,55 @@ function write_entry(key, entry, binary)
     catch err
         @debug "could not write a kernel cache entry" path exception = err
     end
+    evict!(dir, kernel_cache_limit())
+end
+
+"""
+    kernel_cache_limit() -> bytes
+
+The size of the kernel cache beyond which its least recently used entries are
+removed: `ENV["TEMPEST_KERNEL_CACHE_LIMIT"]`, in bytes or with a `K`, `M` or `G`
+suffix, by default 1 GiB, ten thousand kernels of the 80 kB they average. A
+value that is not a size warns and keeps the default, since a store that threw
+would only lose its kernel.
+"""
+function kernel_cache_limit()
+    s = strip(get(ENV, "TEMPEST_KERNEL_CACHE_LIMIT", ""))
+    m = match(r"^(\d+)([KMG]?)$"i, s)
+    if m === nothing
+        isempty(s) || @warn "TEMPEST_KERNEL_CACHE_LIMIT is a number of bytes, optionally with K, M or G, not \"$s\"; the limit is 1 GiB" maxlog = 1
+        return 1 << 30
+    end
+    parse(Int, m[1]) << (10 * (findfirst(==(uppercase(m[2])), ("", "K", "M", "G")) - 1))
+end
+
+const EVICTION_LOCK = ReentrantLock()
+
+"""
+    evict!(dir, limit)
+
+Remove the least recently used entries of the kernel cache in `dir` until the
+rest take at most `limit` bytes. Another process may remove the same entries.
+"""
+function evict!(dir, limit)
+    @lock EVICTION_LOCK begin
+        entries = Tuple{Float64, Int, String}[]
+        for (root, _, files) in walkdir(dir; onerror = _ -> nothing), file in files
+            s = stat(joinpath(root, file))
+            isfile(s) && push!(entries, (s.mtime, s.size, joinpath(root, file)))
+        end
+        total = sum(e -> e[2], entries; init = 0)
+        for (_, size, path) in sort!(entries)
+            total <= limit && break
+            try
+                rm(path; force = true)
+            catch err
+                @debug "could not remove a kernel cache entry" path exception = err
+            end
+            total -= size
+        end
+    end
+    nothing
 end
 
 # Generated functions, by type, with the source that defined them: in a key a
