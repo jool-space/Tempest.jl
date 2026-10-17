@@ -23,7 +23,10 @@ function materialize(o::Operand, dims, arrays, graph; scalar = false)
     out
 end
 
-evaluate_value(d::Input, v, arrays, graph, arguments) = arguments[d.argument]
+# An array in the shape of value `v`, whose domain has no axes of extent one.
+shaped(x, v::Value) = v.scalar ? x : reshape(x, v.dims)
+
+evaluate_value(d::Input, v, arrays, graph, arguments) = shaped(arguments[d.argument], v)
 evaluate_value(d::ConstantArray, v, arrays, graph, arguments) = d.data
 
 function evaluate_value(d::Pointwise, v, arrays, graph, arguments)
@@ -38,13 +41,12 @@ end
 
 function evaluate_value(d::Reduction, v, arrays, graph, arguments)
     y = fold_array(d.fold, materialize(d.operand, d.iteration, arrays, graph), d.reduced)
-    v.scalar ? only(y) : y
+    v.scalar ? only(y) : shaped(y, v)
 end
 
 function evaluate_value(d::Opaque, v, arrays, graph, arguments)
     xs = map((o, (dims, scalar)) -> materialize(o, dims, arrays, graph; scalar), d.operands, d.shapes)
-    y = evaluate(d.node.op, d.node, xs)
-    v.scalar ? y : reshape(y, v.dims)
+    shaped(evaluate(d.node.op, d.node, xs), v)
 end
 
 """

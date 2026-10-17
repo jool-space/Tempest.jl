@@ -45,21 +45,24 @@ struct Plan
     owner::Vector{Int}
 end
 
-# Where a group keeps a value it computes: at the domain's index with each axis
-# the value lacks (extent one) at zero. A fold lacks its reduced axes.
+# Where a group keeps a value it computes, as the value's index over the
+# domain: a fold of the group at the variables of the axes it keeps, any other
+# value over the whole domain or at the positions of the primary folds; or
+# nothing.
 function placement(graph, g::Group, v)
     val = graph.values[v]
-    (val.scalar || isempty(val.dims)) && return ()
-    # A result of the group's own opaque work, over the result's shape.
+    # A result of the group's own opaque work, at its formula.
     d = val.definition
-    g.kind === :opaque && d isa Opaque && return d.node.dims == g.domain ? d.index : nothing
-    # A value with fewer axes than the domain has the missing trailing ones at
-    # extent one, as a product's value lacks its summed axes.
-    n = length(val.dims)
-    n <= length(g.domain) || return nothing
-    padded = ntuple(k -> k <= n ? val.dims[k] : 1, length(g.domain))
-    all(k -> padded[k] == g.domain[k] || padded[k] == 1, eachindex(padded)) || return nothing
-    identity_index(padded)[1:n]
+    g.kind === :opaque && d isa Opaque && return opaque_dims(d) == g.domain ? d.index : nothing
+    axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
+    kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
+    map(k -> g.domain[k], kept) == val.dims ? map(var, kept) : nothing
+end
+
+"The iteration index of fold `d` read at `index`, its value's index, with `inner[j]` along its `j`th reduced axis."
+iteration_index(d::Reduction, index, inner) = ntuple(length(d.iteration)) do k
+    j = findfirst(==(k), d.reduced)
+    j === nothing ? index[k - count(<(k), d.reduced)] : inner[j]
 end
 
 struct OutsideGroup <: Exception end
@@ -101,10 +104,7 @@ function fold_term(graph, stored, g, v, index, domain)
     d = graph.values[v].definition
     base = length(domain)
     extents = Tuple(d.iteration[k] for k in d.reduced)
-    iteration = ntuple(length(d.iteration)) do k
-        j = findfirst(==(k), d.reduced)
-        j === nothing ? index[k] : var(base + j)
-    end
+    iteration = iteration_index(d, index, ntuple(j -> var(base + j), length(d.reduced)))
     extended = Domain((domain.extents..., extents...))
     Fold(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended))
 end
@@ -120,9 +120,11 @@ indirect_values(e::Affine) = reduce(vcat, (indirect_values(a) for (a, _) in e.te
 indirect_values(::Var) = Int[]
 indirect_values(a::Union{Div, Mod}) = indirect_values(a.e)
 indirect_values(a::Indirect) = [a.value; reduce(vcat, map(indirect_values, a.index); init = Int[])]
-read_values(o::Read) = [o.value; reduce(vcat, map(indirect_values, o.index); init = Int[])]
-read_values(o::IndexOperand) = indirect_values(o.expr)
-read_values(o::Literal) = Int[]
+gathered_values(o::Read) = reduce(vcat, map(indirect_values, o.index); init = Int[])
+gathered_values(o::IndexOperand) = indirect_values(o.expr)
+gathered_values(o::Literal) = Int[]
+read_values(o::Read) = [o.value; gathered_values(o)]
+read_values(o::Operand) = gathered_values(o)
 
 # The values each value reads, directly or through others.
 function ancestors(graph)
@@ -139,13 +141,10 @@ end
 # already load it.
 function try_add!(graph, stored, up, g::Group, v; fold)
     val = graph.values[v]
+    # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    # An output covers the domain, or the positions of the primary folds
-    # (missing trailing axes read as extent one).
-    padded = ntuple(k -> get(val.dims, k, 1), length(g.domain))
-    fold || padded == g.domain || padded == kept_dims(g.domain, primary_axes(graph, g)) || return false
-    any(m -> any(l -> l.value == v, loads(g.terms[m])), members(g)) && return false
+    any(m -> v in stored_reads(g.terms[m]), members(g)) && return false
     candidate = Group(g.kind, g.domain, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase), copy(g.epilogues))
     fold || push!(candidate.outputs, v)
     t = try
@@ -156,12 +155,13 @@ function try_add!(graph, stored, up, g::Group, v; fold)
         return false
     end
     group = Set(members(g))
-    for l in loads(t)
-        (l.value in group || !isempty(intersect(up[l.value], group))) && return false
+    reads = stored_reads(t)
+    for r in reads
+        (r in group || !isempty(intersect(up[r], group))) && return false
     end
     # A member reads the group's folds, or something the group reads.
-    shared = Set(l.value for m in members(g) for l in loads(g.terms[m]))
-    connected = isempty(g.reductions) || !isempty(stats(t)) || any(l -> l.value in shared, loads(t))
+    shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
+    connected = isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads)
     connected || return false
     push!(fold ? g.reductions : g.outputs, v)
     g.terms[v] = t
@@ -204,13 +204,18 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
         counts[r] += 1
     end
     # An opaque operation runs when any of its results is read (a call's
-    # results run together), and reads its operands from storage.
+    # results run together), and reads its operands from storage, as a gather
+    # reads its indices.
     instance(id) = (op = values[id].definition.node.op; op isa Call ? op.instance : -id)
     running = Set(instance(id) for id in 1:n if live[id] && values[id].definition isa Opaque)
     materialized = falses(n)
     for id in 1:n
+        live[id] || continue
+        for o in operands(values[id].definition)
+            foreach(r -> materialized[r] = true, gathered_values(o))
+        end
         values[id].definition isa Opaque && instance(id) in running || continue
-        foreach(o -> materialized[o.value] = true, operands(values[id].definition))
+        foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
     recomputed = recompute_folds ? setdiff(recomputed_folds(graph, results, materialized), keep, fixed...) : Set{Int}()
     # Maps of recomputed folds are recomputed with them.
@@ -237,15 +242,15 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
-    # Opaque work first, one group per operation over the shape of its first
-    # result (all results of a claimed call together, in order), which may
+    # Opaque work first, one group per operation over its first result's
+    # domain (all results of a claimed call together, in order), which may
     # absorb the pointwise work after a result as an epilogue its kernel
     # applies over the result's output tile.
     output(id) = (op = values[id].definition.node.op; op isa Call ? op.output : 1)
     instances = Dict{Int, Int}()
     for id in sort([id for id in 1:n if values[id].definition isa Opaque && instance(id) in running]; by = output)
         k = get!(instances, instance(id)) do
-            push!(groups, Group(:opaque, values[id].definition.node.dims))
+            push!(groups, Group(:opaque, opaque_dims(values[id].definition)))
             length(groups)
         end
         push!(groups[k].outputs, id)
@@ -355,23 +360,18 @@ end
 # axis of the reader wider than a tile), and either the fold is a product over
 # few elements, recomputed as one product per tile, or no reading fold reads
 # it at positions that move along its own reduced axes, so a kernel computes
-# it once per block, before or during its sweep. Results and the operands of
-# opaque work stay stored.
+# it once per block, before or during its sweep. Results, the operands of
+# opaque work and the indices of gathers stay stored.
 const RECOMPUTED_PRODUCT = 256
 const RECOMPUTED_SPAN = 128
 
 function recomputed_folds(graph, results, materialized)
     values = graph.values
     users = readers(graph)
-    gathered = Set{Int}()
-    for v in values, o in operands(v.definition)
-        o isa Read && foreach(e -> union!(gathered, indirect_values(e)), o.index)
-        o isa IndexOperand && union!(gathered, indirect_values(o.expr))
-    end
     selected = Set{Int}()
     for v in eachindex(values)
         d = values[v].definition
-        d isa Reduction && !(v in results) && !materialized[v] && !(v in gathered) || continue
+        d isa Reduction && !(v in results) && !materialized[v] || continue
         # The folds v reaches through maps, with the index at which each reads v.
         consumers = Tuple{Int, Tuple{Vararg{Affine}}}[]
         pending = [(u, v, identity_index(values[v].dims)) for u in unique(users[v])]
@@ -408,13 +408,13 @@ function recomputed_folds(graph, results, materialized)
 end
 
 # An epilogue: the chain of pointwise values after an opaque result, each read
-# only by the next, over the result's program shape, whose other reads align
-# with the result's tile (the same index, or zero along an axis of extent one).
+# only by the next, over the result's domain (`opaque_dims`), whose other reads
+# align with the result's tile (see `aligned_axes`).
 # Limits: pointwise work only, aligned reads only, no positions; the last value
 # of the chain is written in the result's place.
 function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
     values = graph.values
-    D = values[o].definition.node.dims
+    D = opaque_dims(values[o].definition)
     chain = Int[]
     current, final, final_term = o, nothing, nothing
     while !(current in results) && length(users[current]) == 1
@@ -444,19 +444,27 @@ function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
     foreach(c -> owner[c] = k, chain)
 end
 
-function aligned(graph, t, D)
-    whole = identity_index(D)
-    for s in subterms((t,))
-        s isa Union{Ix, Fold} && return false
-        s isa Load || continue
-        Dv = graph.values[s.value].dims
-        length(s.index) == length(Dv) <= length(D) || return false
-        for k in eachindex(Dv)
-            e = s.index[k]
-            (Dv[k] == D[k] && e == whole[k]) || (Dv[k] == 1 && e == constant(0)) || return false
-        end
+aligned(graph, t, D) =
+    all(s -> !(s isa Union{Ix, Fold}) && !(s isa Load && aligned_axes(graph, s, D) === nothing), subterms((t,)))
+
+"""
+    aligned_axes(graph, load, domain) -> axes or nothing
+
+The axes of `domain` along which a load reads, one per axis of the loaded
+value, when each axis of the value is read at one variable of the domain of
+the same extent, in the domain's order: the value is the domain's tile with
+the other axes broadcast.
+"""
+function aligned_axes(graph, s::Load, D)
+    dims = graph.values[s.value].dims
+    axes = Int[]
+    for (k, e) in enumerate(s.index)
+        e.constant == 0 && length(e.terms) == 1 && e.terms[1].first isa Var && e.terms[1].second == 1 || return nothing
+        n = e.terms[1].first.n
+        D[n] == dims[k] && (isempty(axes) || n > last(axes)) || return nothing
+        push!(axes, n)
     end
-    true
+    axes
 end
 
 # Every result becomes a value read whole, so results are buffers: a result
@@ -466,30 +474,13 @@ function with_stored_results(graph::IndexGraph)
     results = copy(graph.results)
     for (k, r) in enumerate(results)
         dims = graph.result_dims[k]
-        if r isa Read && r.index == identity_index(dims) && values[r.value].dims == dims &&
-           values[r.value].scalar == graph.result_scalar[k]
-            continue
-        end
-        # A reshape of a value's dense storage presents that storage as it is.
-        if r isa Read && !graph.result_scalar[k] && !values[r.value].scalar &&
-           prod(values[r.value].dims; init = 1) == prod(dims; init = 1) &&
-           dense_address(values[r.value].dims, r.index, Domain(dims)) == dense_address(dims, identity_index(dims), Domain(dims))
-            continue
-        end
-        push!(values, Value(Pointwise(identity, (r,)), dims, graph.result_eltype[k], graph.result_scalar[k]))
-        results[k] = Read(length(values), identity_index(dims))
+        # A value read whole, or a reshape of it, presents its storage as it is.
+        r isa Read && values[r.value].scalar == graph.result_scalar[k] && reads_storage(values[r.value], r.index, dims) && continue
+        push!(values, Value(narrow(Pointwise(identity, (r,)), dims), map(k -> dims[k], wide_axes(dims)),
+            graph.result_eltype[k], graph.result_scalar[k]))
+        results[k] = Read(length(values), wide_index(dims))
     end
     IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls)
-end
-
-function dense_address(dims, index, d::Domain)
-    total = constant(0)
-    stride = 1
-    for (e, n) in zip(index, dims)
-        total = add(total, scale(e, stride), d)
-        stride *= n
-    end
-    total
 end
 
 # The values a group reads from storage, its own excepted.
@@ -497,13 +488,7 @@ function group_reads(graph, g::Group)
     reads = Set{Int}()
     for v in members(g)
         if haskey(g.terms, v)
-            for l in loads(g.terms[v])
-                push!(reads, l.value)
-                foreach(e -> union!(reads, indirect_values(e)), l.index)
-            end
-            for t in subterms((g.terms[v],); nested = true)
-                t isa Ix && union!(reads, indirect_values(t.expr))
-            end
+            union!(reads, stored_reads(g.terms[v]))
         else
             for o in operands(graph.values[v].definition)
                 union!(reads, read_values(o))

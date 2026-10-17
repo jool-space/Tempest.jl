@@ -141,11 +141,15 @@ pullback(::Reshape, n, id, g, tape) =
 pullback(op::Permute, n, id, g, tape) =
     (h(tape, record!(tape, Permute(Tuple(invperm(op.perm))), (g.id,), tape.nodes[only(n.inputs)].dims, node(g).eltype)),)
 
-pullback(op::Select, n, id, g, tape) =
-    (h(tape, record!(tape, Scatter(op.indices), (g.id,), tape.nodes[only(n.inputs)].dims, node(g).eltype)),)
+# A selection and a scatter are each other's adjoints; their index arrays get
+# no cotangent.
+pullback(op::Select, n, id, g, tape) = adjoint_selection(Scatter(op.indices), n, g, tape)
+pullback(op::Scatter, n, id, g, tape) = adjoint_selection(Select(op.indices), n, g, tape)
 
-pullback(op::Scatter, n, id, g, tape) =
-    (h(tape, record!(tape, Select(op.indices), (g.id,), tape.nodes[only(n.inputs)].dims, node(g).eltype)),)
+function adjoint_selection(op, n, g, tape)
+    x, indices... = n.inputs
+    (h(tape, record!(tape, op, (g.id, indices...), tape.nodes[x].dims, node(g).eltype)), map(_ -> nothing, indices)...)
+end
 
 pullback(::Union{Constant, Positions, Argument}, n, id, g, tape) = map(_ -> nothing, n.inputs)
 

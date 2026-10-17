@@ -10,13 +10,13 @@ end
 evaluate_term(t::Lit, x, k, buffers, stats, graph) = t.value
 evaluate_term(t::Ix{T}, x, k, buffers, stats, graph) where {T} =
     T(evaluate_index(t.expr, x, (v, i) -> buffers[v][(i .+ 1)...]))
-# A fold's value at the domain index `x`, its reduced axes at zero.
+# A fold's value at the domain index `x`: at the axes it keeps.
 function evaluate_term(t::Stat, x, k, buffers, stats, graph)
     s = stats[t.value]
     s isa Number && return s
     d = graph.values[t.value].definition
     axes = d isa Reduction ? d.reduced : ()
-    s[ntuple(i -> i in axes ? 1 : x[i] + 1, length(x))...]
+    s[(x[i] + 1 for i in eachindex(x) if !(i in axes))...]
 end
 evaluate_term(t::Apply, x, k, buffers, stats, graph) =
     convert(t.eltype, t.f(map(a -> evaluate_term(a, x, k, buffers, stats, graph), t.args)...))
@@ -42,14 +42,14 @@ function run_group!(g::Group, buffers, graph)
 end
 
 # An opaque group's results through their reference, then its epilogues: terms
-# over a result's program shape that read the result's tile as `Stat`.
+# over a result's domain (`opaque_dims`) that read the result's tile as `Stat`.
 function run_opaque!(g::Group, buffers, graph)
     results = Dict{Int, Any}()
     for v in g.outputs
         d = graph.values[v].definition
         d isa Opaque || continue
         buffers[v] = evaluate_value(d, graph.values[v], buffers, graph, ())
-        results[v] = d.node.scalar ? buffers[v] : reshape(buffers[v], d.node.dims)
+        results[v] = d.node.scalar ? buffers[v] : reshape(buffers[v], opaque_dims(d))
     end
     for (o, e) in g.epilogues
         val = graph.values[e]
@@ -130,7 +130,7 @@ function execute(p::Plan, inputs...)
     buffers = Vector{Any}(undef, length(graph.values))
     for (id, v) in enumerate(graph.values)
         d = v.definition
-        d isa Input && (buffers[id] = arguments[d.argument])
+        d isa Input && (buffers[id] = shaped(arguments[d.argument], v))
         d isa ConstantArray && (buffers[id] = d.data)
     end
     foreach(g -> run_group!(g, buffers, graph), p.groups)

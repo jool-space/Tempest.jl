@@ -198,7 +198,6 @@ function call_parts(p, g)
     outs, d
 end
 
-padded(dims, n) = ntuple(k -> get(dims, k, 1), n)
 tile_array(buffer, dims) = ct.TileArray(reshape(buffer, dims))
 
 # The epilogue of result `o`: its terms as a function of the output tile `y`,
@@ -209,6 +208,14 @@ function epilogue_for(p, g, o, buffers, shape)
     t = g.terms[e]
     graph = p.graph
     rank = length(shape)
+    # The group's domain is the result's axes wider than one; a load spans
+    # those it reads along.
+    result = graph.values[o].definition.node.dims
+    wide = Tempest.wide_axes(result)
+    function spanned(s)
+        axes = Tempest.aligned_axes(graph, s, g.domain)
+        ntuple(k -> k in wide && findfirst(==(k), wide) in axes ? result[k] : 1, rank)
+    end
     arrays = Any[]
     slot = Dict{Int, Int}()
     names = Dict{Term, Any}()
@@ -222,7 +229,7 @@ function epilogue_for(p, g, o, buffers, shape)
         expr = if s isa Stat
             :y
         elseif s isa Load
-            dims = padded(graph.values[s.value].dims, rank)
+            dims = spanned(s)
             j = get!(slot, s.value) do
                 push!(arrays, tile_array(buffers[s.value], dims))
                 length(arrays)
