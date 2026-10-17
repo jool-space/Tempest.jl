@@ -26,8 +26,51 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
+# The floor evaluates recomputed folds too: an implementation that asks for
+# them and leaves the kernels to the floor.
+struct RecomputeOnTheFloor <: T.Implementation end
+T.recomputes_folds(::RecomputeOnTheFloor, target) = true
+T.claims(::RecomputeOnTheFloor, target, p, g) = isempty(T.recomputed_in(g)) ? () : (:floor,)
+T.build_claim(::RecomputeOnTheFloor, claim, target, p, g, buffers) = error("left to the floor")
+
+function with_recomputing_floor(f)
+    pushfirst!(T.EXTRA_IMPLEMENTATIONS, RecomputeOnTheFloor())
+    try
+        f()
+    finally
+        filter!(i -> !(i isa RecomputeOnTheFloor), T.EXTRA_IMPLEMENTATIONS)
+    end
+end
+
+attention_cases = [
+    ("causal attention, grouped heads", (q, k, v) -> T.attention(q, k, v; causal = true),
+     (data(4, 4, 9, 2; scale = 0.3), data(4, 2, 9, 2; scale = 0.2), data(4, 2, 9, 2; scale = 0.1))),
+    ("attention", (q, k, v) -> T.attention(q, k, v), (data(8, 2, 7, 3; scale = 0.3), data(8, 2, 7, 3; scale = 0.2), data(8, 2, 7, 3; scale = 0.1))),
+]
+
+@testset "recomputed folds on the CPU floor" begin
+    with_recomputing_floor() do
+        @testset "$name" for (name, f, args) in attention_cases
+            p = trace(f, args...)
+            ex = prepare(p, args...)
+            @test !isempty(T.recomputed_in(only(ex.plan.groups)))
+            @test agree(T.leaves(execute!(ex)), [interpret(p, args...)])
+        end
+    end
+end
+
 using CUDACore
 if CUDACore.functional()
+    @testset "recomputed folds on the CUDA floor" begin
+        with_recomputing_floor() do
+            @testset "$name" for (name, f, args) in attention_cases
+                p = trace(f, args...)
+                ex = prepare(p, map(CuArray, args)...)
+                @test all(d -> d isa T.FloorKernels, ex.kernels)
+                @test agree(T.leaves(execute!(ex)), [interpret(p, args...)]; rtol = 1.0e-8)
+            end
+        end
+    end
     @testset "prepared on CUDA" begin
         check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget())
     end
@@ -137,6 +180,31 @@ if CUDACore.functional()
             ex = prepare(p, map(CuArray, args)...)
             @test all(d -> !(d isa T.FloorKernels), ex.kernels)
             @test agree(T.leaves(execute!(ex)), T.leaves(interpret(p, args...)); rtol = 2.0e-4)
+        end
+    end
+end
+
+# Attention generated from its reference: one kernel, a fold over keys whose
+# scores and logsumexp are recomputed in it, online or in two passes.
+const GENERATED_ATTENTION = [
+    ("causal, grouped heads", (16, 4, 2, 200, 2), true),
+    ("grouped heads", (16, 4, 2, 200, 2), false),
+    ("causal, odd sizes", (32, 3, 1, 70, 3), true),
+    ("one head", (8, 1, 1, 133, 1), false),
+]
+
+if CUDACore.functional()
+    @testset "attention generated on cuTile" begin
+        @testset "$name" for (name, (D, H, KV, S, B), causal) in GENERATED_ATTENTION
+            q, k, v = single(data(D, H, S, B; scale = 0.1)), single(data(D, KV, S, B; scale = 0.2)), single(data(D, KV, S, B; scale = 0.3))
+            p = trace((q, k, v) -> T.attention(q, k, v; causal), q, k, v)
+            for online in (true, false)
+                ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(; online))
+                kernel = only(ex.kernels)
+                @test !(kernel isa T.FloorKernels)
+                @test occursin("online softmax", string(kernel)) == online
+                @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v)]; rtol = 1.0e-4)
+            end
         end
     end
 end

@@ -20,6 +20,18 @@ function evaluate_term(t::Stat, x, k, buffers, stats, graph)
 end
 evaluate_term(t::Apply, x, k, buffers, stats, graph) =
     convert(t.eltype, t.f(map(a -> evaluate_term(a, x, k, buffers, stats, graph), t.args)...))
+# A recomputed fold: its body over its reduced axes, after the domain's own.
+function evaluate_term(t::Fold, x, k, buffers, stats, graph)
+    val = graph.values[t.value]
+    fold = val.definition.fold
+    A = fold_types(fold, term_eltype(t.body, graph)).accumulator
+    state = fold_init(fold, A)
+    for J in CartesianIndices(t.extents)
+        e = evaluate_term(t.body, (x..., (Tuple(J) .- 1)...), nothing, buffers, stats, graph)
+        state = fold_combine(fold, state, fold_lift(fold, A(e)))
+    end
+    val.eltype(fold_observe(fold, state))
+end
 
 function run_group!(g::Group, buffers, graph)
     g.kind === :reduction && return run_reduction!(g, buffers, graph)

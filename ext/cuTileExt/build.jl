@@ -139,6 +139,17 @@ function unsplit_kernel(c::Context, workspaces, slots)
         valid = resident ? valid1 : valid_mask!(loop, c, t)
         scope = resident ? names : merge(Dict{Term, Any}(), statistics)
         roots = [products[r] === nothing ? c.g.terms[r] : product_factor(c, products[r][q]) for r in phase for q in (1, 2)]
+        online = Dict{Int, Any}()
+        if !resident
+            for r in phase
+                o = online_softmax(c, r)
+                o === nothing || (online[r] = o)
+            end
+            hoist_folds!(k, body, c, unique(roots), scope, at(one32), Set(o[3] for o in values(online)))
+            for (r, o) in online
+                online[r] = online_step!(k, body, loop, c, o, scope, valid, at(t), products[r], only(accumulators[r]))
+            end
+        end
         emit_tiles!(k, loop, c, unique(roots), scope, at(t)...)
         states = Dict{Int, Vector{Any}}()
         for r in phase
@@ -156,6 +167,11 @@ function unsplit_kernel(c::Context, workspaces, slots)
         resident || push!(body, :(for $t in Int32(1):Int32($n)
             $(loop...)
         end))
+        for (r, total) in online
+            acc = only(accumulators[r])
+            push!(body, :($acc = $acc ./ $(products[r] === nothing ? total : matrix_tile(c, total, products[r][3], products[r][4]))))
+        end
+        isempty(online) || (k.name *= ", online softmax")
         for r in phase
             f, A = fold_of(c, r), accumulator(c, r)
             state = products[r] !== nothing ? product_state(c, products[r], only(accumulators[r])) :
@@ -208,6 +224,69 @@ function unsplit_kernel(c::Context, workspaces, slots)
         store_partial!(k, st, c, r, held_states[r], bases, slot, slots[r], workspaces)
     end
     [k]
+end
+
+# Recomputed folds that do not move along the swept axis are computed once,
+# before the sweep.
+function hoist_folds!(k, st, c::Context, roots, scope, indices, exclude)
+    axes = c.s.tiling[only(swept(c.s))].axes
+    for t in Tempest.subterms(roots; known = t -> haskey(scope, t))
+        t isa Tempest.Fold && !(t in exclude) || continue
+        any(q -> Tempest.mentions(t, q), axes) && continue
+        emit_tiles!(k, st, c, [t], scope, indices...)
+    end
+end
+
+# The online softmax: a sum whose term weighs by `exp(y - lse)`, where `lse` is
+# a recomputed logsumexp of `y` over the swept axis, accumulates in the sweep
+# that computes `lse`: each step raises the running maximum, rescales the sum
+# and the running sum of exponentials by how much it rose, and weighs by
+# `exp(y - maximum)`; the sum is divided by the sum of exponentials at the
+# end. Returns the weight, `y` and `lse`, or nothing.
+function online_softmax(c::Context, r)
+    c.s.online && fold_of(c, r) isa Tempest.SumFold || return nothing
+    axes = c.s.tiling[only(swept(c.s))].axes
+    length(axes) == 1 || return nothing
+    K = only(axes)
+    roots = (c.g.terms[r],)
+    for w in Tempest.subterms(roots)
+        w isa Apply && w.f === exp && length(w.args) == 1 || continue
+        d = only(w.args)
+        d isa Apply && d.f === (-) && length(d.args) == 2 && d.args[2] isa Tempest.Fold || continue
+        y, F = d.args
+        def = c.graph.values[F.value].definition
+        def.fold isa Tempest.LogSumExpFold && F.extents == (c.g.domain[K],) || continue
+        Tempest.mentions(F, K) && continue
+        index = ntuple(q -> q in def.reduced ? Tempest.var(K) : F.index[q], length(def.iteration))
+        Tempest.operand_term(c.graph, c.stored, c.g, def.operand, index, Tempest.Domain(c.g.domain)) == y || continue
+        # Nothing else reads the logsumexp, whose value is only known at the end.
+        all(s -> !(s isa Apply) || s == d || !(F in s.args), Tempest.subterms(roots)) || continue
+        return (w, y, F)
+    end
+    nothing
+end
+
+# One step of the online softmax for weight `w`: the running maximum and sum
+# start before the sweep, `w` becomes `exp(y - maximum)`, and the accumulator
+# of the sum it weighs is rescaled. Returns the running sum.
+function online_step!(k, before, loop, c::Context, (w, y, F), scope, valid, indices, product, acc)
+    p = only(swept(c.s))
+    A = Tempest.fold_types(Tempest.LogSumExpFold(), Tempest.term_eltype(y, c.graph)).accumulator
+    shape = Base.setindex(spanned_shape(c, y), 1, p)
+    m, l = gensym(:max), gensym(:sum)
+    push!(before, :($m = fill($(A(-Inf)), $shape)), :($l = fill($(zero(A)), $shape)))
+    emit_tiles!(k, loop, c, [y], scope, indices...)
+    x = as_accumulator(loop, scope[y], A, Tempest.term_eltype(y, c.graph), spanned_shape(c, y))
+    top, sh, rise, weight = gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
+    push!(loop, :($top = max.($m, maximum(ifelse.($valid, $x, $(A(-Inf))); dims = $p))))
+    push!(loop, :($sh = $SHIFT.($top)))
+    push!(loop, :($rise = exp.($m .- $sh)))
+    push!(loop, :($weight = exp.($x .- $sh)))
+    push!(loop, :($l = $l .* $rise .+ sum(ifelse.($valid, $weight, $(zero(A))); dims = $p)))
+    push!(loop, :($m = $top))
+    push!(loop, :($acc = $acc .* $(product === nothing ? rise : matrix_tile(c, rise, product[3], product[4]))))
+    scope[w] = weight
+    l
 end
 
 # Folds whose swept axis is shared among blocks: per phase, a launch of

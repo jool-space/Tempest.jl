@@ -51,7 +51,11 @@ struct TileSchedule
     occupancy::Union{Nothing, Int}
     swizzle::Int              # grouping of the first two kept axes on the grid; 0 for a plain grid
     precision::Symbol         # of products: :full or :tf32
+    online::Bool              # whether a softmax-weighted sum may accumulate online
 end
+
+TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision) =
+    TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision, false)
 
 # The two-axis sketches over groups A and B, `reduced` naming the reduced one
 # (1 or 2), both (3) or neither (0).
@@ -196,6 +200,7 @@ function expressible(graph, stored, g::Group)
         val.eltype <: TILE_TYPES || return false
         m in g.reductions && !(val.definition.fold isa FOLDS) && return false
         for t in Tempest.subterms((g.terms[m],))
+            t isa Tempest.Fold && return false
             t isa Ix && !positional(t) && return false
             t isa Apply && !(t.eltype <: TILE_TYPES) && return false
             t isa Lit && t.value isa Float64 && return false
@@ -279,6 +284,8 @@ end
 # small.
 const PARTIAL_BLOCKS = 256
 
+Tempest.recomputes_folds(::Tempest.cuTileGenerator, target) = target isa CUDATarget
+
 function Tempest.claims(::Tempest.cuTileGenerator, target, p::Plan, g::Group)
     g.kind in (:pointwise, :reduction) || return Claim[]
     product = product_claim(target, p, g)
@@ -302,7 +309,7 @@ function Tempest.claims(::Tempest.cuTileGenerator, target, p::Plan, g::Group)
             chunk = max(1, cld(cld(s.tiling[kept].extent, s.tiling[kept].tile), PARTIAL_BLOCKS))
             tiling = copy(s.tiling)
             tiling[kept] = with_chunk(tiling[kept], chunk)
-            s = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
+            s = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision, s.online)
         end
     end
     [Claim(s)]

@@ -6,21 +6,25 @@ abstract type Target end
 struct CPUTarget <: Target end
 
 """
-    CUDATarget(; precision = :full)
+    CUDATarget(; precision = :full, online = true)
 
 Run on an NVIDIA GPU; needs CUDACore loaded. `precision` is the numerics policy
 for products: `:full` keeps Float32 products in Float32, `:tf32` allows TF32
 tensor cores for them, and `:tf32x3` splits each Float32 factor into two TF32
 parts and sums three tensor-core products (close to Float32 accuracy). Half-
-precision products always accumulate in Float32.
+precision products always accumulate in Float32. `online` permits the online
+softmax: a sum weighted by `exp(y - logsumexp(y))` accumulates in the same
+sweep as the log-sum-exp, rescaled as its maximum grows, which changes
+rounding.
 """
 struct CUDATarget <: Target
     precision::Symbol
+    online::Bool
 end
 
-function CUDATarget(; precision::Symbol = :full)
+function CUDATarget(; precision::Symbol = :full, online::Bool = true)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision)
+    CUDATarget(precision, online)
 end
 
 target_for(x::AbstractArray) = CPUTarget()
@@ -50,6 +54,9 @@ struct cuTileGenerator <: Implementation end
 
 claims(::Implementation, target, plan, group) = ()
 function build_claim end
+
+"Whether `implementation` realizes groups that recompute folds where they read them, on `target`."
+recomputes_folds(::Implementation, target) = false
 
 """
     claims_call(implementation, target, f, kwargs, inputs) -> Bool
@@ -121,9 +128,22 @@ Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default.
 """
 function prepare(program::Program, inputs...; target = default_target(inputs))
-    p = plan(lower(program;
+    lowered = lower(program;
         keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
-        epilogue = (n, nodes) -> takes_epilogue(target, nodes, n)))
+        epilogue = (n, nodes) -> takes_epilogue(target, nodes, n))
+    recompute = any(i -> recomputes_folds(i, target), implementations(target))
+    p = plan(lowered; recompute_folds = recompute)
+    # The outermost folds recomputed in a group no implementation claims are
+    # stored instead; folds they recompute in turn may still be recomputed in
+    # their kernels.
+    keep = Set{Int}()
+    while recompute
+        unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) &&
+                     all(i -> isempty(claims(i, target, p, g)), implementations(target))]
+        isempty(unclaimed) && break
+        foreach(g -> union!(keep, recomputed_in(g; nested = false)), unclaimed)
+        p = plan(lowered; recompute_folds = true, keep)
+    end
     graph = p.graph
     buffers = Vector{Any}(nothing, length(graph.values))
     for (id, v) in enumerate(graph.values)
@@ -139,6 +159,9 @@ function prepare(program::Program, inputs...; target = default_target(inputs))
     bind!(ex, inputs...)
     ex
 end
+
+recomputed_in(g::Group; nested = true) =
+    Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Fold)
 
 "Copy `inputs` into the executable's input buffers."
 function bind!(ex::Executable, inputs...)
@@ -162,7 +185,8 @@ function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
-        "; half-precision products accumulate in Float32")
+        "; half-precision products accumulate in Float32",
+        ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
     println(io, "implementations:")
     for (k, d) in enumerate(ex.kernels)
         println(io, "  kernel ", k, ": ", d)

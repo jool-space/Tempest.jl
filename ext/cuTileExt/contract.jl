@@ -11,7 +11,7 @@
 # The domain's axes a term reads, or nothing when it reads reductions.
 function axes_read(t::Term, n)
     axes = Set{Int}()
-    for s in Tempest.subterms((t,))
+    for s in Tempest.subterms((t,); nested = true)
         s isa Stat && return nothing
         exprs = s isa Load ? s.index : s isa Ix ? (s.expr,) : ()
         for e in exprs, k in 1:n
@@ -48,6 +48,8 @@ end
 # 128×128 output tiles with 32-deep steps for TF32 up to K = 1024 and 64-deep
 # otherwise. Full-precision Float32 products are much slower on cuTile and
 # fastest in small tiles (64×64×16 measured best, 2.6 TFLOPS).
+product_step(precision, T) = T === Float32 && precision === :full ? 16 : 32
+
 function product_tiles(target, T, m, n, k)
     if T === Float32 && target.precision === :full
         tm, tn, tk = 64, 64, 16
@@ -56,6 +58,19 @@ function product_tiles(target, T, m, n, k)
         tk = T === Float32 && k <= 1024 ? 32 : 64
     end
     override = get(ENV, "TEMPEST_PRODUCT_TILE", "")
+    isempty(override) || ((tm, tn, tk) = Tuple(parse.(Int, split(override, ","))))
+    (min(tm, nextpow(2, m)), min(tn, nextpow(2, n)), min(tk, nextpow(2, k)))
+end
+
+# A product whose factor recomputes a fold (attention's scores, inside the sum
+# over keys) does that work once per step and per block: M in one tile when it
+# fits, so no block repeats it, 128 columns, and the product's steps. Measured
+# on GB10 with GPT-2's attention (64 features, 256 positions): 128 queries per
+# block beat 32, 64 and 256, and 32 keys per step beat 16 and 64 in TF32 (243
+# µs); in full precision 16-key steps with 16-deep products inside (1281 µs).
+function recomputing_tiles(target, T, m, n, k)
+    tm, tn, tk = 128, 128, product_step(target.precision, T)
+    override = get(ENV, "TEMPEST_RECOMPUTING_TILE", "")
     isempty(override) || ((tm, tn, tk) = Tuple(parse.(Int, split(override, ","))))
     (min(tm, nextpow(2, m)), min(tn, nextpow(2, n)), min(tk, nextpow(2, k)))
 end
@@ -72,18 +87,21 @@ function product_claim(target, p::Plan, g::Group)
     factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
         first(g.terms[first(g.reductions)].args))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
+    recomputing = any(r -> any(s -> s isa Tempest.Fold, Tempest.subterms((g.terms[r],))), g.reductions)
     for collapsed in (true, false)
         Mt, Nt = collapsed ? (M, N) : ([longest(M)], [longest(N)])
         grid = collapsed ? (isempty(B) ? Vector{Int}[] : [B]) : [[a] for a in sort!([setdiff(M, Mt); setdiff(N, Nt); B])]
         mt, nt = extent(Mt), extent(Nt)
-        tm, tn, tk = product_tiles(target, Tempest.term_eltype(factor, p.graph), mt, nt, k)
+        T = Tempest.term_eltype(factor, p.graph)
+        tm, tn, tk = recomputing ? recomputing_tiles(target, T, mt, nt, k) : product_tiles(target, T, mt, nt, k)
         tiling = [TileAxis(Mt, mt, tm, false), TileAxis(K, k, tk, true), TileAxis(Nt, nt, tn, false)]
         append!(tiling, [TileAxis(a, extent(a), 1, false) for a in grid])
         # A grid of few output tiles leaves the device idle: split the summed
-        # axis among blocks (split-K), merging the partial sums in a second launch.
+        # axis among blocks (split-K), merging the partial sums in a second
+        # launch; not when the sum recomputes a fold, which a split would repeat.
         blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
-        splits = blocks < SPLIT_KEPT_BLOCKS[1] ? split_count(k, tk, blocks) : 1
-        s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
+        splits = blocks < SPLIT_KEPT_BLOCKS[1] && !recomputing ? split_count(k, tk, blocks) : 1
+        s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision, target.online)
         c = Context(p.graph, p.stored, g, s)
         all(r -> bilinear(c, r) !== nothing, g.reductions) && expressible_over(c) && return Claim(s)
     end
@@ -99,12 +117,7 @@ function expressible_over(c::Context)
         val.eltype <: TILE_TYPES || return false
         m in g.reductions && !(val.definition.fold isa FOLDS) && return false
         m in g.outputs && val.dims == g.domain && return false
-        for s in Tempest.subterms((g.terms[m],))
-            s isa Ix && !positional(s) && return false
-            s isa Apply && !(s.eltype <: TILE_TYPES) && return false
-            s isa Lit && s.value isa Float64 && return false
-            s isa Load && load_view(c, s.value, s.index) === nothing && return false
-        end
+        terms_expressible(c, (g.terms[m],); stats = true) || return false
         (c.stored[m] || m in g.outputs) && output_view(c, m) === nothing && return false
     end
     true

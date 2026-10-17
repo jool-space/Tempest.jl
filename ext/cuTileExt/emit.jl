@@ -165,8 +165,7 @@ store_expr(sym, spans, ta, tb, ia, ib, value) = :($(ct.store)(
 # `indices` (one per tile axis). `names` maps terms already in scope (loads
 # hoisted out of a loop, reductions) to their symbols.
 function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indices...)
-    for t in Tempest.subterms(roots)
-        haskey(names, t) && continue
+    for t in Tempest.subterms(roots; known = t -> haskey(names, t))
         if t isa Lit
             names[t] = t.value
             continue
@@ -175,6 +174,8 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         expr = if t isa Load
             v = load_view(c, t.value, t.index)
             load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
+        elseif t isa Tempest.Fold
+            emit_fold!(k, statements, c, t, indices)
         elseif t isa Ix
             x = index_tile(c, t.expr, indices)
             T = Tempest.term_eltype(t, c.graph)
@@ -450,40 +451,38 @@ end
 
 store_outputs!(k, st, c, ms, names, indices...) = store_values!(k, st, c, ms, names, indices...)
 
-# The one product rule of the fold algebra: a sum whose contribution is `x * y`,
-# where x and y each span the swept axis and a different one of two kept tiled
-# axes (around it in tile order), accumulates as a matrix product of their
-# tiles, `muladd` on tensor cores. Returns the factors in matrix order and the
-# kept axes, or nothing.
-function bilinear(c::Context, r)
-    fold_of(c, r) isa Tempest.SumFold || return nothing
-    t = c.g.terms[r]
-    t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
-    sw = swept(c.s)
-    length(sw) == 1 || return nothing
-    p = only(sw)
+# The one product rule of the fold algebra: a sum over tile axis `p` whose
+# contribution is `x * y`, where x and y both span `p` and each spans one
+# other tiled axis, different ones, accumulates as a matrix product of their
+# tiles, `muladd` on tensor cores. Returns the factors and their other axes,
+# or nothing.
+function bilinear_over(c::Context, f, t::Term, p)
+    f isa Tempest.SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
     x, y = t.args
     sx, sy = term_spans(c, x), term_spans(c, y)
     (sx === nothing || sy === nothing) && return nothing
     sx[p] && sy[p] || return nothing
-    kept = [i for i in eachindex(sx) if i != p && c.s.tiling[i].tile > 1]
-    length(kept) == 2 || return nothing
-    i, j = kept
-    i < p < j || return nothing
-    sx[i] && !sx[j] && sy[j] && !sy[i] && return (x, y, i, j)
-    sy[i] && !sy[j] && sx[j] && !sx[i] && return (y, x, i, j)
-    nothing
+    tiled(spans) = [q for q in eachindex(spans) if spans[q] && q != p && c.s.tiling[q].tile > 1]
+    ix, iy = tiled(sx), tiled(sy)
+    length(ix) == 1 && length(iy) == 1 && ix != iy || return nothing
+    (x, y, only(ix), only(iy))
 end
 
-# The tile axes a term's loads and positions span, or nothing if it reads
-# reductions.
+function bilinear(c::Context, r)
+    sw = swept(c.s)
+    length(sw) == 1 || return nothing
+    bilinear_over(c, fold_of(c, r), c.g.terms[r], only(sw))
+end
+
+# The tile axes a term's loads, positions and recomputed folds span, or
+# nothing if it reads reductions.
 function term_spans(c::Context, t::Term)
     spans = fill(false, length(c.s.tiling))
     for s in Tempest.subterms((t,))
         s isa Stat && return nothing
-        if s isa Ix
+        if s isa Union{Ix, Tempest.Fold}
             for (i, ax) in enumerate(c.s.tiling)
-                any(k -> Tempest.mentions(s.expr, k), ax.axes) && (spans[i] = true)
+                any(k -> Tempest.mentions(s, k), ax.axes) && (spans[i] = true)
             end
         end
         s isa Load || continue
@@ -502,15 +501,27 @@ function product_factor(c::Context, t::Term)
     Tempest.term_eltype(inner, c.graph) <: Tempest.HalfFloat ? inner : t
 end
 
-function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t)
-    shape = tile(c)
-    p = only(swept(c.s))
-    tm, tk, tn = shape[i], shape[p], shape[j]
-    n = length(shape)
+# A tile whose lanes lie along tile axes `u` and `w` only, as a `(u, w)`
+# matrix; and back.
+function matrix_tile(c::Context, x, u, w)
+    tu, tw = tile(c)[u], tile(c)[w]
+    full = ntuple(q -> q == u ? tu : q == w ? tw : 1, length(c.s.tiling))
+    m = :(reshape($(ct.broadcast_to)($x, $full), $(u < w ? (tu, tw) : (tw, tu))))
+    u < w ? m : :(permutedims($m, (2, 1)))
+end
+
+function from_matrix(c::Context, m, u, w)
+    full = ntuple(q -> q == u ? tile(c)[u] : q == w ? tile(c)[w] : 1, length(c.s.tiling))
+    :(reshape($(u < w ? m : :(permutedims($m, (2, 1)))), $full))
+end
+
+# Accumulate step `t` of a product over tile axis `p` into `acc`.
+function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = only(swept(c.s)))
+    tk = tile(c)[p]
     fa, fb = product_factor(c, a), product_factor(c, b)
     xa, xb = gensym(:a), gensym(:b)
-    push!(st, :($xa = reshape($(ct.broadcast_to)($(names[fa]), $(ntuple(k -> k == i ? tm : k == p ? tk : 1, n))), ($tm, $tk))))
-    push!(st, :($xb = reshape($(ct.broadcast_to)($(names[fb]), $(ntuple(k -> k == p ? tk : k == j ? tn : 1, n))), ($tk, $tn))))
+    push!(st, :($xa = $(matrix_tile(c, names[fa], i, p))))
+    push!(st, :($xb = $(matrix_tile(c, names[fb], p, j))))
     # Padded steps of the swept axis read zeros from loads, but a computed
     # factor need not vanish there.
     E = c.s.tiling[p].extent
@@ -538,5 +549,101 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t)
 end
 
 # The accumulator of a product, as a state over the tile axes.
-product_state(c::Context, (a, b, i, j), acc) =
-    [:(reshape($acc, $(ntuple(k -> k == only(swept(c.s)) ? 1 : tile(c)[k], length(c.s.tiling)))))]
+product_state(c::Context, (a, b, i, j), acc) = [from_matrix(c, acc, i, j)]
+
+# Recomputed folds. A fold the kernel recomputes where it reads it extends the
+# tiling by its reduced axis, swept in steps: a product's steps when its body
+# is bilinear in that axis, the kernel's own steps when its body recomputes
+# folds in turn (as much work per step as the kernel's sweep), `INNER_TILE`
+# lanes otherwise, and one step when it fits. A bilinear body accumulates as a
+# product of tiles; any other folds elementwise.
+const INNER_TILE = 128
+
+function fold_context(c::Context, t::Tempest.Fold; lanes = INNER_TILE)
+    base = length(c.g.domain)
+    inner = [TileAxis([base + j], e, min(nextpow(2, e), lanes), true) for (j, e) in enumerate(t.extents)]
+    s = c.s
+    e = Context(c.graph, c.stored, Group(c.g.kind, (c.g.domain..., t.extents...)),
+        TileSchedule(s.sketch, [s.tiling; inner], s.splits, s.occupancy, s.swizzle, s.precision, s.online))
+    lanes == INNER_TILE || return e
+    f = c.graph.values[t.value].definition.fold
+    if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
+        return fold_context(c, t; lanes = product_step(s.precision, Tempest.term_eltype(product_factor(e, t.body.args[1]), c.graph)))
+    end
+    sw = swept(s)
+    any(x -> x isa Tempest.Fold, Tempest.subterms((t.body,))) && !isempty(sw) && s.tiling[first(sw)].tile != INNER_TILE || return e
+    fold_context(c, t; lanes = s.tiling[first(sw)].tile)
+end
+
+# The shape of a term's tile: the tile along each axis it spans, one elsewhere.
+spanned_shape(c::Context, t::Term) =
+    ntuple(q -> any(k -> Tempest.mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
+
+function fold_expressible(c::Context, t::Tempest.Fold)
+    val = c.graph.values[t.value]
+    val.definition.fold isa FOLDS && val.eltype <: TILE_TYPES && length(t.extents) == 1 || return false
+    terms_expressible(fold_context(c, t), (t.body,))
+end
+
+# Whether the generator can lower every subterm of `roots`.
+function terms_expressible(c::Context, roots; stats = false)
+    for s in Tempest.subterms(roots)
+        s isa Stat && !stats && return false
+        s isa Tempest.Fold && !fold_expressible(c, s) && return false
+        s isa Ix && !positional(s) && return false
+        s isa Apply && !(s.eltype <: TILE_TYPES) && return false
+        s isa Lit && s.value isa Float64 && return false
+        s isa Load && load_view(c, s.value, s.index) === nothing && return false
+    end
+    true
+end
+
+# A recomputed fold at block indices `indices`, as a tile over the tiling.
+function emit_fold!(k, st, c::Context, t::Tempest.Fold, indices)
+    e = fold_context(c, t)
+    n = length(c.s.tiling)
+    p = n + 1
+    f = c.graph.values[t.value].definition.fold
+    A = Tempest.fold_types(f, Tempest.term_eltype(t.body, c.graph)).accumulator
+    T = c.graph.values[t.value].eltype
+    tp, E = e.s.tiling[p].tile, e.s.tiling[p].extent
+    steps = cld(E, tp)
+    j = gensym(:j)
+    at = steps == 1 ? :(Int32(1)) : j
+    loop = steps == 1 ? st : Any[]
+    product = bilinear_over(e, f, t.body, p)
+    if product !== nothing
+        x, y, u, w = product
+        acc = gensym(:acc)
+        push!(st, :($acc = fill(0.0f0, ($(tile(e)[u]), $(tile(e)[w])))))
+        names = emit_tiles!(k, loop, e, unique([product_factor(e, x), product_factor(e, y)]), Dict{Term, Any}(), indices..., at)
+        accumulate_product!(loop, e, names, product, acc, at, p)
+        steps == 1 || push!(st, :(for $j in Int32(1):Int32($steps)
+            $(loop...)
+        end))
+        stat = gensym(:stat)
+        push!(st, :($stat = $(from_matrix(c, T === Float32 ? acc : :(convert($(ct.Tile){$T}, $acc)), u, w))))
+        return stat
+    end
+    shape = Base.setindex(spanned_shape(e, t.body), tp, p)
+    lanes = ntuple(q -> q == p ? tp : 1, p)
+    names = emit_tiles!(k, loop, e, [t.body], Dict{Term, Any}(), indices..., at)
+    valid = gensym(:valid)
+    push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
+    x = as_accumulator(loop, names[t.body], A, Tempest.term_eltype(t.body, c.graph), shape)
+    if steps == 1
+        state = direct_state!(st, f, A, x, valid, p)
+    else
+        acc = [gensym(:acc) for _ in 1:state_width(f)]
+        foreach((a, init) -> push!(st, :($a = $init)), acc, init_state(f, A, shape))
+        accumulate_elements!(loop, f, A, acc, x, valid)
+        push!(st, :(for $j in Int32(1):Int32($steps)
+            $(loop...)
+        end))
+        state = reduce_state!(st, f, A, acc, p)
+    end
+    stat = observe!(st, f, A, T, state)
+    result = gensym(:stat)
+    push!(st, :($result = reshape($stat, $(shape[1:n]))))
+    result
+end
