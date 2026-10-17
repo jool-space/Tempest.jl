@@ -78,7 +78,7 @@ function expressible_over(c::Context)
     for m in Tempest.members(g)
         val = graph.values[m]
         val.eltype <: TILE_TYPES || return false
-        m in g.reductions && !(val.definition.fold isa FOLDS) && return false
+        m in g.reductions && !tile_fold(val.definition.fold, Tempest.term_eltype(g.terms[m], graph)) && return false
         m in g.outputs && val.dims == g.domain && return false
         terms_expressible(c, (g.terms[m],); stats = true) || return false
         (c.stored[m] || m in g.outputs) && output_view(c, m) === nothing && return false

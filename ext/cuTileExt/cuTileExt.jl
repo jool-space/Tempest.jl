@@ -166,7 +166,6 @@ function view_of(graph, v, index, g, groups...; scalar = ())
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach)
 end
 
-const FOLDS = Union{Tempest.SumFold, Tempest.MaxFold, Tempest.MinFold, Tempest.ProdFold, Tempest.LogSumExpFold}
 const TILE_TYPES = Union{Float32, Float16, Core.BFloat16, Bool, Int32}
 
 # Positions computed from a formula without gathers.
@@ -179,7 +178,7 @@ function expressible(graph, stored, g::Group)
     for m in Tempest.members(g)
         val = graph.values[m]
         val.eltype <: TILE_TYPES || return false
-        m in g.reductions && !(val.definition.fold isa FOLDS) && return false
+        m in g.reductions && !tile_fold(val.definition.fold, Tempest.term_eltype(g.terms[m], graph)) && return false
         for t in Tempest.subterms((g.terms[m],))
             t isa Tempest.Fold && return false
             t isa Ix && !positional(t) && return false

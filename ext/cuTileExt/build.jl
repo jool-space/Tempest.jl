@@ -120,8 +120,8 @@ function unsplit_kernel(c::Context, workspaces, slots)
     for r in partial
         held(r) || continue
         f, A = fold_of(c, r), accumulator(c, r)
-        held_states[r] = [Symbol(:partial_, r, :_, i) for i in 1:state_width(f)]
-        foreach((x, init) -> push!(st, :($x = $init)), held_states[r], init_state(f, A, fold_tile_shape(c, r)))
+        held_states[r] = [Symbol(:partial_, r, :_, i) for i in eachindex(Tempest.fold_init(f, A))]
+        init_state!(st, held_states[r], f, A, fold_tile_shape(c, r))
     end
     body = isempty(chunks) ? st : Any[]
     names = Dict{Term, Any}()
@@ -140,8 +140,8 @@ function unsplit_kernel(c::Context, workspaces, slots)
                 accumulators[r] = [Symbol(:acc_, r)]
                 push!(body, :($(only(accumulators[r])) = fill(0.0f0, ($(tile(c)[i]), $(tile(c)[j])))))
             elseif !resident
-                accumulators[r] = state_symbols(r, f)
-                foreach((x, init) -> push!(body, :($x = $init)), accumulators[r], init_state(f, A, tile(c)))
+                accumulators[r] = state_symbols(r, f, A)
+                init_state!(body, accumulators[r], f, A, tile(c))
             end
         end
         loop = resident ? body : Any[]
@@ -203,7 +203,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         emit_tiles!(k, body, c, [c.g.terms[m] for m in outputs], names, at(one32)...)
         store_values!(k, body, c, outputs, names, at(one32)...)
         for (r, state) in tile_states!(k, body, c, partial, names, at(one32))
-            combine_states!(body, fold_of(c, r), accumulator(c, r), held_states[r], state)
+            combine!(body, fold_of(c, r), accumulator(c, r), held_states[r], state)
         end
     elseif !isempty(outputs) || !isempty(partial)
         t = gensym(:t)
@@ -213,7 +213,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         store_values!(k, loop, c, outputs, scope, at(t)...)
         for (r, state) in tile_states!(k, loop, c, partial, scope, at(t))
             if held(r)
-                combine_states!(loop, fold_of(c, r), accumulator(c, r), held_states[r], state)
+                combine!(loop, fold_of(c, r), accumulator(c, r), held_states[r], state)
             else
                 slot, slots[r] = slot_of(r)
                 store_partial!(k, loop, c, r, state, at(t), slot, slots[r], workspaces)
@@ -290,7 +290,7 @@ function online_step!(k, before, loop, c::Context, (w, y, F), scope, valid, indi
     x = as_accumulator(loop, scope[y], A, Tempest.term_eltype(y, c.graph), spanned_shape(c, y))
     top, sh, rise, weight = gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
     push!(loop, :($top = max.($m, maximum(ifelse.($valid, $x, $(A(-Inf))); dims = $p))))
-    push!(loop, :($sh = $SHIFT.($top)))
+    push!(loop, :($sh = $(Tempest.lse_shift).($top)))
     push!(loop, :($rise = exp.($m .- $sh)))
     push!(loop, :($weight = exp.($x .- $sh)))
     push!(loop, :($l = $l .* $rise .+ sum(ifelse.($valid, $weight, $(zero(A))); dims = $p)))
@@ -376,8 +376,8 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
             accumulators[r] = [Symbol(:acc_, r)]
             push!(st, :($(only(accumulators[r])) = fill(0.0f0, ($(tile(c)[i]), $(tile(c)[j])))))
         else
-            accumulators[r] = state_symbols(r, f)
-            foreach((x, init) -> push!(st, :($x = $init)), accumulators[r], init_state(f, A, tile(c)))
+            accumulators[r] = state_symbols(r, f, A)
+            init_state!(st, accumulators[r], f, A, tile(c))
         end
     end
     chunk = cld(sweeps(c.s), c.s.splits)
@@ -429,19 +429,19 @@ function merge_kernel(c::Context, rs, slots, workspaces)
     lanes = (map(_ -> 1, tiles_m)..., width)
     for r in rs
         f, A = fold_of(c, r), accumulator(c, r)
-        acc = state_symbols(r, f)
-        foreach((x, init) -> push!(st, :($x = $init)), acc, init_state(f, A, shape))
+        acc = state_symbols(r, f, A)
+        init_state!(st, acc, f, A, shape)
         t = gensym(:t)
         loop = Any[]
         valid = gensym(:valid)
         push!(loop, :($valid = reshape($(ct.arange)($width), $lanes) .<= Int32($slots) - ($t - Int32(1)) * Int32($width)))
-        loaded = map(1:state_width(f)) do j
+        loaded = map(eachindex(acc)) do j
             name = gensym(:part)
             sym = argument!(k, partial_spec!(c, r, j, slots, workspaces))
             push!(loop, :($name = $(ct.load)($sym; index = ($(idx...), $t), shape = $shape, padding_mode = $(ct.PaddingMode.Zero))))
             name
         end
-        accumulate_states!(loop, f, A, acc, loaded, valid)
+        combine!(loop, f, A, acc, loaded, valid)
         push!(st, :(for $t in Int32(1):Int32($(cld(slots, width)))
             $(loop...)
         end))
