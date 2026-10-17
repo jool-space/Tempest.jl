@@ -8,9 +8,10 @@
 # - An optional derivative rule, `verb_pullback`. Without one, differentiation
 #   goes through the reference.
 #
-# A call nobody claims is replaced by its reference before planning, and then
-# fuses like any other code. A claimed call is one kernel group, which may
-# absorb pointwise work after it as an epilogue.
+# At the index level a call is its reference expanded, with the call's place
+# kept, so it fuses like any other code; an implementation's claim on it, one
+# kernel group that may absorb pointwise work after it as an epilogue,
+# competes by cost with the reference fused into its neighbours.
 
 """
 One result of a call of `f` on the node's inputs. A call with several results
@@ -64,6 +65,7 @@ function record_call(f, args...; kwargs...)
     args = map(a -> a isa AbstractArray{<:Number} && !(a isa TracedArray) ? TracedArray(tape, constant!(tape, a)) : a, args)
     all(a -> a isa TracedArray && a.tape === tape, args) ||
         throw(ArgumentError("the arguments of a call of $f must be traced arrays of one program"))
+    tape.expands(f) && return expand!(tape, f, args, values(kwargs))
     # The reference, traced on stand-ins, gives the results' shapes and types.
     scratch = Tape()
     stand_ins = map(a -> TracedArray(scratch, record!(scratch, Argument(), (), size(a), eltype(a))), args)
@@ -90,21 +92,46 @@ results_of(p_nodes, instance) = begin
 end
 
 """
-    expand_calls(program, keep) -> Program
-
-Replace every call whose first result node `n` gives `keep(n) == false` by its
-reference, traced in place.
+A call expanded where it was recorded: the operation, its keywords, inputs and
+result structure, the nodes its reference recorded, and each result's node.
 """
-function expand_calls(p::Program, keep)
-    any(n -> n.op isa Call && !keep(p.nodes[n.op.instance]), p.nodes) || return p
+struct Expansion
+    f::Any
+    kwargs::NamedTuple
+    inputs::Vector{Int}
+    structure::Any
+    nodes::UnitRange{Int}
+    results::Vector{Int}
+end
+
+function expand!(tape, f, args, kwargs)
+    start = length(tape.nodes)
+    out = reference(f, args...; kwargs...)
+    position = Ref(0)
+    structure = rebuild(_ -> (position[] += 1), out)
+    push!(tape.expansions, Expansion(f, kwargs, [a.id for a in args], structure, (start + 1):length(tape.nodes), [r.id for r in leaves(out)]))
+    out
+end
+
+"""
+    expand_calls(program, expands) -> (program, expansions)
+
+Replace every call of an operation `f` for which `expands(f)` holds by its
+reference, traced in place, together with such calls its reference makes; each
+`Expansion` keeps where a call went. Nodes that only unread results of an
+expanded call read stay, unread.
+"""
+function expand_calls(p::Program, expands)
+    any(n -> n.op isa Call && expands(n.op.f), p.nodes) || return p, Expansion[]
     tape = Tape()
+    tape.expands = expands
     new = zeros(Int, length(p.nodes))
     for (id, n) in enumerate(p.nodes)
         op = n.op
-        if op isa Call && !keep(p.nodes[op.instance])
+        if op isa Call && expands(op.f)
             op.instance == id || continue
             args = map(i -> handle_of(tape, new[i]), n.inputs)
-            out = leaves(reference(op.f, args...; op.kwargs...))
+            out = leaves(expand!(tape, op.f, args, op.kwargs))
             for (k, r) in enumerate(results_of(p.nodes, id))
                 new[r] = out[k].id
             end
@@ -116,7 +143,8 @@ function expand_calls(p::Program, keep)
         end
         new[id] = record!(tape, op, map(i -> new[i], n.inputs), n.dims, n.eltype; scalar = n.scalar)
     end
-    prune(Program(tape.nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure))
+    program = Program(tape.nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure)
+    program, Expansion[tape.expansions...]
 end
 
 # One result of a call, through the reference.

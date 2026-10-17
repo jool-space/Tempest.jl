@@ -160,7 +160,8 @@ end
 # Claimed only under TF32: with full Float32 tile products the forward kernel
 # took 8.65 ms on GB10 at d=64, 12 heads, T=256, B=16, causal, against 2.13 ms
 # for today's composed form on cuBLAS. The kernels keep the full-precision
-# variant behind their `tf32` flag for when a cost model can choose it.
+# variant behind their `tf32` flag. A claim competes by cost with the
+# attention generated from the reference.
 function Tempest.claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, inputs)
     target.precision === :tf32 || return false
     f in (Tempest.attention_forward, Tempest.attention_backward) || return false
@@ -172,6 +173,22 @@ function Tempest.claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, i
 end
 
 Tempest.epilogue_results(::cuTileAttention, ::typeof(Tempest.attention_forward), kwargs) = (1,)
+
+# The launches' work: the forward kernel computes two products per query and
+# key, the backward a row term, then four products per key block and three
+# per query block; a causal mask halves them. Products run at the generator's
+# rate.
+function Tempest.estimate(::cuTileAttention, claim, target, p::Plan, g::Group)
+    _, d = call_parts(p, g)
+    op = d.node.op
+    (D, H, T, B), (_, KV, keys, _) = first(d.shapes[1]), first(d.shapes[2])
+    product = 2.0 * D * T * keys * H * B / (op.kwargs.causal ? 2 : 1)
+    rate, bytes = product_rate(target, Float32), Tempest.group_bytes(p, g)
+    blocks = cld(T, ATTENTION_TILE) * H * B
+    op.f === Tempest.attention_forward && return [Tempest.Work(bytes; flops = 2product, rate, blocks)]
+    [Tempest.Work(0.0; blocks), Tempest.Work(bytes; flops = 4product, rate, blocks = cld(keys, ATTENTION_TILE) * KV * B),
+     Tempest.Work(0.0; flops = 3product, rate, blocks)]
+end
 
 # The opaque results of the group, by result number, and the operands.
 function call_parts(p, g)
@@ -264,7 +281,7 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     qa, ka, va, oa, lsea, douta, dlsea = arrays
     # The kernels write all three gradients; one nobody reads goes to scratch.
     places = map(r -> something(buffers[r], CuArray{Float32}(undef, prod(p.graph.values[r].dims))), outs)
-    dq, dk, dv = map((r, b) -> tile_array(b, p.graph.values[r].dims), outs, places)
+    dq, dk, dv = map((r, b) -> tile_array(b, p.graph.values[r].definition.node.dims), outs, places)
     workspace = CuArray{Float32}(undef, H * T * B)
     delta = tile_array(workspace, (1, H, T, B))
     delta_args = (delta, oa, douta, dlsea, ct.Constant(D), tile, ct.Constant(H))

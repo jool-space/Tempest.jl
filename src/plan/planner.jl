@@ -50,6 +50,9 @@ end
 function placement(graph, g::Group, v)
     val = graph.values[v]
     (val.scalar || isempty(val.dims)) && return ()
+    # A result of the group's own opaque work, over the result's shape.
+    d = val.definition
+    g.kind === :opaque && d isa Opaque && return d.node.dims == g.domain ? d.index : nothing
     # A value with fewer axes than the domain has the missing trailing ones at
     # extent one, as a product's value lacks its summed axes.
     n = length(val.dims)
@@ -234,15 +237,15 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
-    # Opaque work first, one group per operation (all results of a claimed
-    # call together), which may absorb the pointwise work after a result as an
-    # epilogue its kernel applies over the result's output tile.
+    # Opaque work first, one group per operation over the shape of its first
+    # result (all results of a claimed call together, in order), which may
+    # absorb the pointwise work after a result as an epilogue its kernel
+    # applies over the result's output tile.
+    output(id) = (op = values[id].definition.node.op; op isa Call ? op.output : 1)
     instances = Dict{Int, Int}()
-    for id in 1:n
-        d = values[id].definition
-        d isa Opaque && instance(id) in running || continue
+    for id in sort([id for id in 1:n if values[id].definition isa Opaque && instance(id) in running]; by = output)
         k = get!(instances, instance(id)) do
-            push!(groups, Group(:opaque, values[id].dims))
+            push!(groups, Group(:opaque, values[id].definition.node.dims))
             length(groups)
         end
         push!(groups[k].outputs, id)
@@ -405,13 +408,13 @@ function recomputed_folds(graph, results, materialized)
 end
 
 # An epilogue: the chain of pointwise values after an opaque result, each read
-# only by the next, over the result's domain, whose other reads align with the
-# result's tile (the same index, or zero along an axis of extent one).
+# only by the next, over the result's program shape, whose other reads align
+# with the result's tile (the same index, or zero along an axis of extent one).
 # Limits: pointwise work only, aligned reads only, no positions; the last value
 # of the chain is written in the result's place.
 function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
     values = graph.values
-    D = values[o].dims
+    D = values[o].definition.node.dims
     chain = Int[]
     current, final, final_term = o, nothing, nothing
     while !(current in results) && length(users[current]) == 1
@@ -476,7 +479,7 @@ function with_stored_results(graph::IndexGraph)
         push!(values, Value(Pointwise(identity, (r,)), dims, graph.result_eltype[k], graph.result_scalar[k]))
         results[k] = Read(length(values), identity_index(dims))
     end
-    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype)
+    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls)
 end
 
 function dense_address(dims, index, d::Domain)

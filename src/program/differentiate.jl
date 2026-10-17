@@ -184,7 +184,7 @@ function differentiate(p::Program)
     length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
         throw(ArgumentError("differentiate needs a program with one scalar result"))
     # Calls without a derivative rule are differentiated through their reference.
-    p = expand_calls(p, n -> has_pullback(n.op.f))
+    p, _ = expand_calls(p, f -> !has_pullback(f))
     tape = Tape(copy(p.nodes))
     loss = only(p.results)
     cotangents = Dict{Int, Traced}()

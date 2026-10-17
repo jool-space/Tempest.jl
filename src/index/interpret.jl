@@ -43,7 +43,8 @@ end
 
 function evaluate_value(d::Opaque, v, arrays, graph, arguments)
     xs = map((o, (dims, scalar)) -> materialize(o, dims, arrays, graph; scalar), d.operands, d.shapes)
-    evaluate(d.node.op, d.node, xs)
+    y = evaluate(d.node.op, d.node, xs)
+    v.scalar ? y : reshape(y, v.dims)
 end
 
 """

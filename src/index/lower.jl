@@ -123,16 +123,14 @@ end
 """
     lower(program) -> IndexGraph
 
-The program at the index level.
+The program at the index level. A call with a reference is expanded in place,
+and its place kept for implementations to claim.
 """
-function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes) -> false)
-    p = expand_calls(p, n -> keep_call(n, p.nodes))
+function lower(p::Program)
+    p, expansions = expand_calls(p, Returns(true))
     nodes = p.nodes
-    keep = live(nodes, p.results)
-    # A claimed call computes all its results, used or not.
-    for (id, n) in enumerate(nodes)
-        n.op isa Call && keep[id] && foreach(r -> keep[r] = true, results_of(nodes, n.op.instance))
-    end
+    # A call computes all its results, used or not, from all its arguments.
+    keep = live(nodes, [p.results; [i for e in expansions for i in [e.inputs; e.results]]])
     values = Value[]
     access = Vector{Access}(undef, length(nodes))
     gathers = IdDict{Any, Int}()
@@ -150,10 +148,36 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
         push!(values, Value(definition, dims, T, false))
         ValueAccess(length(values), identity_index(dims))
     end
-    # Materialized call operands, one per node, shared by every call reading it.
+    # A call reads its arguments densely, in their program shapes; anything
+    # else (a layout, a constant) is materialized, once per node.
     copies = Dict{Int, Int}()
+    function dense(i)
+        r = dense_read(values, access[i], nodes[i])
+        r === nothing || return r
+        dims = nodes[i].dims
+        copy = get!(copies, i) do
+            push!(values, Value(Pointwise(identity, (operand(access[i], dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
+            length(values)
+        end
+        Read(copy, identity_index(dims))
+    end
+    # Expansions by their first node, outermost first. Each one's arguments are
+    # read densely (`arguments_of`) before the values it expands to, which
+    # begin at `starts`.
+    expanding = Dict{Int, Vector{Int}}()
+    for (k, e) in enumerate(expansions)
+        isempty(e.nodes) || push!(get!(expanding, first(e.nodes), Int[]), k)
+    end
+    arguments_of = Vector{Any}(undef, length(expansions))
+    starts = zeros(Int, length(expansions))
+    first_value = zeros(Int, length(nodes) + 1)
     arguments = Int[]
     for (id, n) in enumerate(nodes)
+        first_value[id] = length(values) + 1
+        for k in sort(get(expanding, id, Int[]); by = k -> -length(expansions[k].nodes))
+            arguments_of[k] = map(dense, Tuple(expansions[k].inputs))
+            starts[k] = length(values) + 1
+        end
         if n.op isa Argument
             access[id] = value!(Input(findfirst(==(id), p.arguments)), n)
             push!(arguments, access[id].value)
@@ -182,23 +206,6 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
         elseif op isa Contract
             all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
             contraction!(value!, op, inputs, input_dims, n)
-        elseif op isa Call
-            # A claimed call reads its operands densely, in their program
-            # shapes; anything else (a layout, a constant) is materialized.
-            reads = map(inputs, n.inputs) do a, i
-                dims = nodes[i].dims
-                if a isa ValueAccess && a.index == identity_index(dims) && values[a.value].dims == dims &&
-                   values[a.value].scalar == nodes[i].scalar
-                    return Read(a.value, identity_index(dims))
-                end
-                copy = get!(copies, i) do
-                    push!(values, Value(Pointwise(identity, (operand(a, dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
-                    length(values)
-                end
-                Read(copy, identity_index(dims))
-            end
-            shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
-            value!(Opaque(n, reads, shapes, epilogue(n, nodes)), n)
         elseif op isa Union{Reshape, Permute, Select}
             compose(only(inputs), layout_index(op, n.dims, only(input_dims), d, gather), d)
         else
@@ -210,6 +217,19 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
             value!(Opaque(n, reads, shapes), n)
         end
     end
+    # Where each call went: a call's results are nodes of their own here.
+    first_value[end] = length(values) + 1
+    calls = CallSite[]
+    for (k, e) in enumerate(expansions)
+        isempty(e.nodes) && continue
+        returned = map(enumerate(e.results)) do (j, r)
+            Node(Call(e.f, e.kwargs, j, length(nodes) + k, e.structure), Tuple(e.inputs), nodes[r].dims, nodes[r].eltype, nodes[r].scalar)
+        end
+        site = expanded_site(values, collect(starts[k]:(first_value[last(e.nodes) + 1] - 1)), arguments_of[k],
+            map(i -> (nodes[i].dims, nodes[i].scalar), Tuple(e.inputs)), returned, access[e.results])
+        site === nothing || push!(calls, site)
+    end
+    sort!(calls; by = c -> (first(c.values), -length(c.values)))
     results = Operand[operand(access[r], nodes[r].dims, Domain(nodes[r].dims)) for r in p.results]
     IndexGraph(
         values,
@@ -218,5 +238,26 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
         [nodes[r].dims for r in p.results],
         [nodes[r].scalar for r in p.results],
         [nodes[r].eltype for r in p.results],
+        calls,
     )
+end
+
+# Node `n`, accessed as `a`, read as a value whose storage holds it densely in
+# the node's shape; nothing when it is not.
+function dense_read(values, a, n)
+    a isa ValueAccess || return nothing
+    v = values[a.value]
+    v.eltype === n.eltype && v.scalar == n.scalar && prod(v.dims; init = 1) == prod(n.dims; init = 1) || return nothing
+    d = Domain(n.dims)
+    r = operand(a, n.dims, d)
+    n.scalar || dense_address(v.dims, r.index, d) == dense_address(n.dims, identity_index(n.dims), d) || return nothing
+    r
+end
+
+# An expanded call's place, when implementations can take it: each result is
+# read densely from a distinct value of the call's own.
+function expanded_site(values, region, operands, shapes, nodes, accesses)
+    reads = map((a, n) -> dense_read(values, a, n), accesses, nodes)
+    all(r -> r !== nothing && r.value in region, reads) && allunique(r.value for r in reads) || return nothing
+    CallSite(region, operands, shapes, nodes, Read[reads...])
 end

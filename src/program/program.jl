@@ -78,9 +78,13 @@ end
 
 mutable struct Tape
     nodes::Vector{Node}
+    # While calls are expanded (see `expand_calls`): whether a call of an
+    # operation expands, and what each expansion recorded.
+    expands::Any
+    expansions::Vector{Any}
 end
 
-Tape() = Tape(Node[])
+Tape(nodes = Node[]) = Tape(nodes, Returns(false), [])
 
 function record!(tape::Tape, op, inputs, dims, T; scalar = false)
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))

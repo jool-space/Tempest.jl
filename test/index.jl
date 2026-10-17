@@ -13,8 +13,12 @@ agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), 
             graph = T.lower(p)
             @test agree(T.interpret(graph, args...), flat(interpret(p, args...)))
             @test all(v -> !(v.definition isa T.Opaque) || v.definition.node.op isa T.Scatter, graph.values)
-            # Filling out to a larger shape is a formula, not a value.
-            @test !any(v -> v.definition isa T.Pointwise && v.definition.f === identity, graph.values)
+            # Filling out to a larger shape is a formula, not a value. (A
+            # call's argument is materialized for an implementation that
+            # claims the call; nothing else reads it.)
+            users = T.readers(graph)
+            @test !any(k -> graph.values[k].definition isa T.Pointwise && graph.values[k].definition.f === identity &&
+                            !isempty(users[k]), eachindex(graph.values))
         end
     end
 end
