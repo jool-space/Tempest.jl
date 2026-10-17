@@ -219,9 +219,10 @@ vocabulary is small.
 Tracing, differentiation and functional updates work at this level.
 Differentiation needs one pullback per primitive; a verb may bring its own. The
 backward graph is ordinary program code and is planned together with the
-forward. A library may claim a whole named call here, as cuDNN claims
-`attention`; a call nobody claims is replaced by its reference, and an opaque
-call nobody claims fails preparation.
+forward. A library may claim a whole named call, as cuDNN claims `attention`:
+at the index level a call is its reference expanded, with its place kept, and
+a claim replaces it where the claim is cheaper. An opaque call nobody claims
+fails preparation.
 
 **Scalar functions.** A callable broadcast over traced arrays enters the
 program as primitives: during tracing it runs on tracers that record each
@@ -355,9 +356,12 @@ A Julia function meets Tempest in one of three ways.
    arrays, and Tempest plans its body. The name is not kept, and need not be:
    an implementation recognizes the computation at the index level, where
    spelling does not matter.
-2. **It keeps its name.** `@operation f` adds methods of `f` on traced arrays
-   that record a call of `f`. Eager execution is unchanged, since plain arrays
-   still reach `f`'s own methods. The reference is `f`'s generic method run on
+2. **It keeps its name.** `@operation f(x::AbstractArray, w::AbstractArray;
+   eps)` adds methods of `f` on traced arrays that record a call of `f`: one
+   for each mix of traced and plain arrays among the declared arguments, so
+   they are more specific than `f`'s own methods and ambiguous with none.
+   Eager execution is unchanged, since plain arrays still reach `f`'s own
+   methods. The reference is `f`'s method for the declared types run on
    traced arrays, unless one is given with `reference`. A name buys three
    things: a derivative rule, a claim by name, and a boundary that `explain`
    shows.
@@ -365,7 +369,8 @@ A Julia function meets Tempest in one of three ways.
    mutates, loops over scalars, draws from a global random number generator or
    has only device methods is declared the same way, with either a reference
    that traces or, for an opaque operation, a declaration of its result shapes
-   and element types from its inputs'.
+   and element types: `declared_results`, a function of its arguments' shapes
+   and element types and its keywords.
 
 An opaque operation has no decomposition. Its eager method is its meaning and
 the oracle its implementations are tested against. It differentiates only
@@ -471,7 +476,9 @@ One pass turns the index-level graph into a plan.
    each applicable sketch, grow the largest group the sketch accepts, through
    formulas, pointwise neighbours, and the contracts whose sketch has a prologue
    or epilogue. A group may have several outputs. Candidates are cached by
-   canonical numbering, so identical layers share them.
+   canonical numbering, so identical layers share them. A claim on a call is a
+   candidate too: the values the call's reference expanded to, with the
+   epilogue the claimant applies, computed by the claimant's kernel.
 2. **Forms.** Claims that demand a form constrain the layouts of the values
    they read and write. Constraints propagate through formulas, and where two
    demands conflict a copy is inserted and charged. This runs before the cover.
@@ -603,8 +610,6 @@ An explicit plan leaves room for each later.
   is.
 - Whether cuDNN reads sliced operands, which decides whether packed QKV needs
   copies.
-- How an opaque operation declares its result shapes: as a function of its
-  inputs' shapes and element types, or as a signature.
 - What NNlib's `dropout` means under tracing. NNlib draws from a global random
   number generator; Tempest takes an explicit seed.
 

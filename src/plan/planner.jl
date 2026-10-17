@@ -51,6 +51,9 @@ end
 # nothing.
 function placement(graph, g::Group, v)
     val = graph.values[v]
+    # A result of the group's own opaque work, at its formula.
+    d = val.definition
+    g.kind === :opaque && d isa Opaque && return opaque_dims(d) == g.domain ? d.index : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
     map(k -> g.domain[k], kept) == val.dims ? map(var, kept) : nothing
@@ -223,10 +226,13 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
     end
     # A result of an opaque operation that nobody reads is not stored: its
     # kernel leaves it unwritten.
+    # Work nothing reads, such as a call's result whose reference a rewrite
+    # replaced, is not stored.
     stored = map(eachindex(values)) do id
         d = values[id].definition
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
-        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : d isa Opaque ? live[id] : true
+        d isa Union{Pointwise, Reduction, Opaque} && !live[id] && return false
+        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : true
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
     for id in eachindex(values)
@@ -270,15 +276,15 @@ function group_values(graph, stored, live, results, running, fixed)
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
-    # Opaque work first, one group per operation (all results of a claimed
-    # call together), which may absorb the pointwise work after a result as an
-    # epilogue its kernel applies over the result's output tile.
+    # Opaque work first, one group per operation over its first result's
+    # domain (all results of a claimed call together, in order), which may
+    # absorb the pointwise work after a result as an epilogue its kernel
+    # applies over the result's output tile.
+    output(id) = (op = values[id].definition.node.op; op isa Call ? op.output : 1)
     instances = Dict{Int, Int}()
-    for id in 1:n
-        d = values[id].definition
-        d isa Opaque && instance(graph, id) in running || continue
+    for id in sort([id for id in 1:n if values[id].definition isa Opaque && instance(graph, id) in running]; by = output)
         k = get!(instances, instance(graph, id)) do
-            push!(groups, Group(:opaque, values[id].dims))
+            push!(groups, Group(:opaque, opaque_dims(values[id].definition)))
             length(groups)
         end
         push!(groups[k].outputs, id)
@@ -436,13 +442,13 @@ function recomputed_folds(graph, results, materialized)
 end
 
 # An epilogue: the chain of pointwise values after an opaque result, each read
-# only by the next, over the result's domain, whose other reads align with the
-# result's tile (see `aligned_axes`).
+# only by the next, over the result's domain (`opaque_dims`), whose other reads
+# align with the result's tile (see `aligned_axes`).
 # Limits: pointwise work only, aligned reads only, no positions; the last value
 # of the chain is written in the result's place.
 function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
     values = graph.values
-    D = values[o].dims
+    D = opaque_dims(values[o].definition)
     chain = Int[]
     current, final, final_term = o, nothing, nothing
     while !(current in results) && length(users[current]) == 1
@@ -508,7 +514,7 @@ function with_stored_results(graph::IndexGraph)
             graph.result_eltype[k], graph.result_scalar[k]))
         results[k] = Read(length(values), wide_index(dims))
     end
-    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.rewrites)
+    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls, graph.rewrites)
 end
 
 # The values a group reads from storage, its own excepted.

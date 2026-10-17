@@ -15,10 +15,9 @@ always used. `precision` is the numerics policy for products: `:full` keeps
 Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
 `:tf32x3` splits each Float32 factor into two TF32 parts and sums three
 tensor-core products (close to Float32 accuracy). Half-precision products
-always accumulate in Float32. `online` permits the rewrites of sums that change
-rounding (see `rewrite`): factors constant along a sum taken out of it, and
-sums weighted by a softmax accumulated in one pass with the softmax's maximum,
-rescaled as it grows.
+always accumulate in Float32. `online` permits the online softmax (see
+`rewrite`): a sum weighted by a softmax accumulates in one pass with the
+softmax's maximum, rescaled as it grows, which changes rounding.
 """
 struct CUDATarget <: Target
     precision::Symbol
@@ -30,6 +29,9 @@ function CUDATarget(packages::Module...; precision::Symbol = :full, online::Bool
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
     CUDATarget(precision, online, isempty(packages) ? nothing : packages)
 end
+
+Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", t.packages === nothing ? "" : join(map(string ∘ nameof, t.packages), ", ") * "; ",
+    "precision = :", t.precision, t.online ? "" : ", online = false", ")")
 
 target_for(x::AbstractArray) = CPUTarget()
 target_for(x) = nothing
@@ -65,10 +67,13 @@ recomputes_folds(::Implementation, target) = false
 """
     claims_call(implementation, target, f, kwargs, inputs) -> Bool
 
-Whether `implementation` realizes calls of the verb `f` with these keyword
-arguments on `target`; `inputs` holds the `(dims, eltype)` of each argument.
-A claimed call is one opaque group whose kernel computes all its results; an
-unclaimed call expands to its reference.
+Whether `implementation` realizes calls of the operation `f` with these
+keyword arguments on `target`; `inputs` holds the `(dims, eltype)` of each
+argument. A claimed call is one opaque group whose kernel computes all its
+results, estimated by `estimate` like any claim (the claim is a `CallClaim`).
+It replaces the call's reference only where it is cheaper than the reference
+expanded and fused into its neighbours; an opaque call runs only where it is
+claimed.
 """
 claims_call(::Implementation, target, f, kwargs, inputs) = false
 
@@ -85,9 +90,11 @@ epilogue_results(::Implementation, f, kwargs) = ()
     build_call(implementation, plan, group, buffers, target) -> (launch, description)
 
 Build the kernels of a claimed call: the group's opaque results, each written
-to its buffer or, where `group.epilogues` names a value, that value computed
-from the result's tile by the group's terms. A result whose buffer is `nothing`
-is read by nobody and may be left unwritten.
+densely in its program shape (its definition's `node.dims`) to its buffer or,
+where `group.epilogues` names a value, that value computed from the result's
+tile by the group's terms. Arguments are read densely in their program shapes
+(the definition's `shapes`). A result whose buffer is `nothing` is read by
+nobody and may be left unwritten.
 """
 function build_call end
 
@@ -124,18 +131,6 @@ end
 "The implementations a target uses, in order: by package name, then as registered."
 implementations(target) = Implementation[i for (m, is) in REGISTERED if m in used_packages(target) for i in is]
 
-call_inputs(nodes, n) = map(i -> (nodes[i].dims, nodes[i].eltype), n.inputs)
-
-function call_claimant(target, nodes, n)
-    k = findfirst(i -> claims_call(i, target, n.op.f, n.op.kwargs, call_inputs(nodes, n)), implementations(target))
-    k === nothing ? nothing : implementations(target)[k]
-end
-
-function takes_epilogue(target, nodes, n)
-    c = call_claimant(target, nodes, n)
-    c !== nothing && n.op.output in epilogue_results(c, n.op.f, n.op.kwargs)
-end
-
 """
     Executable
 
@@ -152,7 +147,7 @@ struct Executable{T <: Target}
     launches::Vector{Any}
     kernels::Vector{Any}
     decisions::Vector{Any}
-    accepted::Vector{Pair{Vector{Int}, Implementation}}
+    considered::Vector{Any}
 end
 
 storage_length(v::Value) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
@@ -166,12 +161,10 @@ claims are timed when `measure` allows and the target can, and kept in the
 tuning record.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true)
-    graph = lower(program;
-        keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
-        epilogue = (n, nodes) -> takes_epilogue(target, nodes, n))
+    graph = lower(program)
     permits_rewrites(target) && (graph = rewrite(graph))
     d = Decider(target, graph; measure)
-    p, accepted = cover(d)
+    p, considered = cover(d)
     ds = decisions(d, p)
     buffers = d.buffers
     n = length(p.graph.values)
@@ -188,7 +181,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     end
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built],
-        Any[last(b) for b in built], Any[ds...], accepted)
+        Any[last(b) for b in built], Any[ds...], Any[considered...])
     bind!(ex, inputs...)
     ex
 end
@@ -255,10 +248,8 @@ function explain(io::IO, ex::Executable)
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
         "; half-precision products accumulate in Float32",
-        ex.target.online ? "; sums rewritten where that changes rounding" : "; sums as written")
-    for (set, i) in ex.accepted
-        println(io, "candidate ", join(map(v -> "%$v", set), " "), " from ", nameof(typeof(i)), " replaces the generator's grouping")
-    end
+        ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
+    foreach(c -> explain(io, ex.plan, c), ex.considered)
     println(io, "implementations from ", isempty(ex.packages) ? "no package" : join(map(string ∘ nameof, ex.packages), ", "),
         ", and the floor:")
     for (k, d) in enumerate(ex.kernels)
@@ -307,20 +298,8 @@ function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
     (() -> foreach(l -> l(), launches), FloorKernels(ks))
 end
 
-# A claimed call is built by its claimant; other opaque work runs through
-# `opaque_launch`.
-function build_opaque(target, p::Plan, g::Group, buffers)
-    n = p.graph.values[first(g.outputs)].definition.node
-    n.op isa Call || return opaque_launch(p, g, buffers)
-    # The claimant is found again from the call itself.
-    d = p.graph.values[first(g.outputs)].definition
-    inputs = map((o, (dims, _)) -> (dims, p.graph.values[o.value].eltype), d.operands, d.shapes)
-    k = findfirst(i -> claims_call(i, target, n.op.f, n.op.kwargs, inputs), implementations(target))
-    k === nothing && error("no implementation builds the claimed call of $(n.op.f)")
-    build_call(implementations(target)[k], p, g, buffers, target)
-end
-
-# Opaque work runs its reference, and its epilogues, on dense host copies.
+# Opaque work other than calls (a scatter) runs on dense host copies; so may
+# an implementation's claimed call, with its epilogues.
 function opaque_launch(p, g, buffers)
     graph = p.graph
     function launch()
