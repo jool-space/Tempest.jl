@@ -181,7 +181,6 @@ function call_parts(p, g)
     outs, d
 end
 
-padded(dims, n) = ntuple(k -> get(dims, k, 1), n)
 tile_array(buffer, dims) = ct.TileArray(reshape(buffer, dims))
 
 # The epilogue of result `o`: its terms as a function of the output tile `y`,
@@ -192,6 +191,14 @@ function epilogue_for(p, g, o, buffers, shape)
     t = g.terms[e]
     graph = p.graph
     rank = length(shape)
+    # The group's domain is the result's axes wider than one; a load spans
+    # those it reads along.
+    result = graph.values[o].definition.node.dims
+    wide = Tempest.wide_axes(result)
+    function spanned(s)
+        axes = Tempest.aligned_axes(graph, s, g.domain)
+        ntuple(k -> k in wide && findfirst(==(k), wide) in axes ? result[k] : 1, rank)
+    end
     arrays = Any[]
     slot = Dict{Int, Int}()
     names = Dict{Term, Any}()
@@ -205,7 +212,7 @@ function epilogue_for(p, g, o, buffers, shape)
         expr = if s isa Stat
             :y
         elseif s isa Load
-            dims = padded(graph.values[s.value].dims, rank)
+            dims = spanned(s)
             j = get!(slot, s.value) do
                 push!(arrays, tile_array(buffers[s.value], dims))
                 length(arrays)
@@ -264,7 +271,7 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     qa, ka, va, oa, lsea, douta, dlsea = arrays
     # The kernels write all three gradients; one nobody reads goes to scratch.
     places = map(r -> something(buffers[r], CuArray{Float32}(undef, prod(p.graph.values[r].dims))), outs)
-    dq, dk, dv = map((r, b) -> tile_array(b, p.graph.values[r].dims), outs, places)
+    dq, dk, dv = map((r, b) -> tile_array(b, p.graph.values[r].definition.node.dims), outs, places)
     workspace = CuArray{Float32}(undef, H * T * B)
     delta = tile_array(workspace, (1, H, T, B))
     delta_args = (delta, oa, douta, dlsea, ct.Constant(D), tile, ct.Constant(H))

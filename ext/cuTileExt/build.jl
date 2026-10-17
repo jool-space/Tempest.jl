@@ -268,7 +268,7 @@ function online_softmax(c::Context, r)
         def = c.graph.values[F.value].definition
         def.fold isa Tempest.LogSumExpFold && F.extents == (c.g.domain[K],) || continue
         Tempest.mentions(F, K) && continue
-        index = ntuple(q -> q in def.reduced ? Tempest.var(K) : F.index[q], length(def.iteration))
+        index = Tempest.iteration_index(def, F.index, (Tempest.var(K),))
         Tempest.operand_term(c.graph, c.stored, c.g, def.operand, index, Tempest.Domain(c.g.domain)) == y || continue
         # Nothing else reads the logsumexp, whose value is only known at the end.
         all(s -> !(s isa Apply) || s == d || !(F in s.args), Tempest.subterms(roots)) || continue

@@ -36,3 +36,11 @@ end
         @test T.add(T.mul(q, k, d), r, d) == e
     end
 end
+
+# An index out of range is an error in the interpreters.
+@testset "gathers out of range" begin
+    x = data(8, 6)
+    p = trace((x, i) -> x[:, i], x, [1, 2])
+    @test_throws BoundsError interpret(p, x, [1, 7])
+    @test_throws BoundsError T.interpret(T.lower(p), x, [1, 7])
+end

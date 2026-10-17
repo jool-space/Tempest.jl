@@ -29,15 +29,18 @@ function evaluate(::Reshape, n, xs)
     x isa Number ? fill(x, n.dims) : reshape(x, n.dims)
 end
 
+# A selection's or a scatter's indices, with its index arrays.
+indices_of(op, xs) = map(i -> i isa IndexInput ? xs[i.input] : i, op.indices)
+
 function evaluate(op::Select, n, xs)
-    y = only(xs)[op.indices...]
+    y = first(xs)[indices_of(op, xs)...]
     n.scalar ? y : y isa Number ? fill(y) : y
 end
 
 function evaluate(op::Scatter, n, xs)
     out = zeros(n.eltype, n.dims)
-    targets = view(LinearIndices(out), op.indices...)
-    for (t, g) in zip(targets, only(xs))
+    targets = view(LinearIndices(out), indices_of(op, xs)...)
+    for (t, g) in zip(targets, first(xs))
         out[t] += g
     end
     out

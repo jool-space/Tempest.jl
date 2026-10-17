@@ -4,10 +4,12 @@
 # domain's axes, with an extent, a tile size, and whether it is reduced. Every
 # load and store must be a strided view of its buffer over those groups (a
 # formula affine in the group's variables, with coefficients that chain within
-# each group). A schedule also picks how the reduced axis is swept (resident in
-# one tile, streamed, or split across blocks with a merging launch), the grid
-# (plain or swizzled), hints and the precision of products. The generator turns
-# any schedule into kernels; a sketch contributes parameters, never code.
+# each group), except a load whose formula reads an index from a value (a
+# gather), which reads element by element. A schedule also picks how the
+# reduced axis is swept (resident in one tile, streamed, or split across blocks
+# with a merging launch), the grid (plain or swizzled), hints and the precision
+# of products. The generator turns any schedule into kernels; a sketch
+# contributes parameters, never code.
 module cuTileExt
 
 using Tempest
@@ -173,7 +175,7 @@ const TILE_TYPES = Union{Float32, Float16, Core.BFloat16, Bool, Int32}
 positional(t::Ix) = isempty(Tempest.indirect_values(t.expr)) && Tempest.term_eltype(t, nothing) <: TILE_TYPES
 
 # Whether the generator can express a group: tile-typed values, supported
-# folds, no gathers, and every load and store a strided view.
+# folds, and positions without gathers; its loads are checked with a schedule.
 function expressible(graph, stored, g::Group)
     collapse_axes(graph, g) === nothing && return false
     for m in Tempest.members(g)
@@ -278,7 +280,7 @@ function Tempest.claims(::Tempest.cuTileGenerator, target::CUDATarget, p::Plan, 
     s = default_schedule(g, A, B, extent, reduced)
     c = Context(p.graph, p.stored, g, s)
     for m in Tempest.members(g), l in Tempest.loads(g.terms[m])
-        load_view(c, l.value, l.index) === nothing && return Claim[]
+        loadable(c, l) || return Claim[]
     end
     partial = partial_folds(c)
     any(r -> fold_tiles(c, r) === nothing, partial) && return Claim[]

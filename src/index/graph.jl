@@ -42,9 +42,7 @@ end
 
 """
 A fold of `operand` over the `reduced` axes of `iteration`. The operand is read
-over the iteration domain; the value's own domain is the iteration domain with
-the reduced axes of extent one, without them when they are trailing (as for a
-product's summed axes), or no axes for a full reduction.
+over the iteration domain; the value's own domain is the iteration's other axes.
 """
 struct Reduction{F} <: Definition
     fold::F
@@ -56,18 +54,23 @@ end
 """
 A program-level operation realized on its operands materialized in their
 program shapes: one the index level does not model (a scatter), or a call an
-implementation claimed. Its boundary is storage. `epilogue` says whether the
-claiming kernel applies an epilogue over this result's output tile.
+implementation claimed, which reads values whole. Its boundary is storage.
+`epilogue` says whether the claiming kernel applies an epilogue over this
+result's output tile.
 """
 struct Opaque <: Definition
     node::Node
-    operands::Tuple{Vararg{Read}}
+    operands::Tuple{Vararg{Operand}}
     shapes::Tuple{Vararg{Tuple{Tuple{Vararg{Int}}, Bool}}} # each operand's dims and scalar flag
     epilogue::Bool
 end
 
 Opaque(node, operands, shapes) = Opaque(node, operands, shapes, false)
 
+"""
+A value: its definition, the extents of its domain (none of them one; see
+`wide_axes`), its element type, and whether it is a number rather than an array.
+"""
 struct Value
     definition::Definition
     dims::Tuple{Vararg{Int}}
@@ -77,6 +80,23 @@ end
 
 domain(v::Value) = Domain(v.dims)
 iteration_domain(v::Value) = v.definition isa Reduction ? Domain(v.definition.iteration) : domain(v)
+
+function dense_address(dims, index, d::Domain)
+    total = constant(0)
+    stride = 1
+    for (e, n) in zip(index, dims)
+        total = add(total, scale(e, stride), d)
+        stride *= n
+    end
+    total
+end
+
+"Whether value `v` read at `index` over a reader of shape `dims` is its storage as it is."
+function reads_storage(v::Value, index, dims)
+    prod(v.dims; init = 1) == prod(dims; init = 1) || return false
+    d = Domain(dims)
+    dense_address(v.dims, index, d) == dense_address(dims, identity_index(dims), d)
+end
 
 """
     IndexGraph

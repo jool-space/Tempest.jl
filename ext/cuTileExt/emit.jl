@@ -128,13 +128,50 @@ function decode(c::Context, ax::TileAxis, n, x; tile)
     x
 end
 
-index_tile(c::Context, e::Affine, indices) =
-    foldl(e.terms; init = :($(ct.broadcast_to)($(ct.Tile)(Int32($(e.constant))), $(ntuple(_ -> 1, length(c.s.tiling)))))) do x, (atom, k)
-        :($x .+ Int32($k) .* $(index_tile(c, atom, indices)))
+# A formula as an Int32 tile; an index it reads from a value is loaded by
+# kernel `k`.
+index_tile(k, c::Context, e::Affine, indices) =
+    foldl(e.terms; init = :($(ct.broadcast_to)($(ct.Tile)(Int32($(e.constant))), $(ntuple(_ -> 1, length(c.s.tiling)))))) do x, (atom, n)
+        :($x .+ Int32($n) .* $(index_tile(k, c, atom, indices)))
     end
-index_tile(c::Context, a::Tempest.Var, indices) = variable_tile(c, a.n, indices)
-index_tile(c::Context, a::Tempest.Div, indices) = :(fld.($(index_tile(c, a.e, indices)), Int32($(a.d))))
-index_tile(c::Context, a::Tempest.Mod, indices) = :(mod.($(index_tile(c, a.e, indices)), Int32($(a.d))))
+index_tile(k, c::Context, a::Tempest.Var, indices) = variable_tile(c, a.n, indices)
+index_tile(k, c::Context, a::Tempest.Div, indices) = :(fld.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
+index_tile(k, c::Context, a::Tempest.Mod, indices) = :(mod.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
+index_tile(k, c::Context, a::Tempest.Indirect, indices) =
+    :(convert($(ct.Tile){Int32}, $(load_tile(k, c, Load(a.value, a.index), indices))))
+
+# A load as a tile: a view of its buffer or, when its formula reads an index
+# from a value (a gather) or it is such an index and no view, the buffer's
+# elements at addresses computed lane by lane, zero outside the domain as a
+# view's padding is.
+function load_tile(k::TileKernel, c::Context, t::Load, indices)
+    v = gathers(t) ? nothing : load_view(c, t.value, t.index)
+    v === nothing || return load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
+    shape = spanned_shape(c, t)
+    address = Tempest.address(c.graph, t.value, t.index, Tempest.Domain(c.g.domain))
+    flat = argument!(k, ArgSpec(t.value, 0, (Tempest.storage_length(c.graph.values[t.value]),), (1,)))
+    lanes = :($(ct.broadcast_to)($(index_tile(k, c, address, indices)), $shape) .+ Int32(1))
+    axes = findall(>(1), shape)
+    mask = isempty(axes) ? nothing : :($(ct.broadcast_to)($(inside(c, axes, indices)), $shape))
+    :($(ct.gather)($flat, $lanes; mask = $mask))
+end
+
+gathers(t::Load) = any(e -> !isempty(Tempest.indirect_values(e)), t.index)
+
+indirect_atoms(e::Affine) = [x for (a, _) in e.terms for x in indirect_atoms(a)]
+indirect_atoms(::Tempest.Var) = Tempest.Indirect[]
+indirect_atoms(a::Union{Tempest.Div, Tempest.Mod}) = indirect_atoms(a.e)
+indirect_atoms(a::Tempest.Indirect) = [a]
+
+# Whether the generator can load `t`: as a view, or element by element when
+# its formula gathers or, as the `index` of a gather, it is no view. Int32
+# lanes address the buffer, and the indices are integers it loads in turn.
+function loadable(c::Context, t::Load; index = false)
+    !gathers(t) && load_view(c, t.value, t.index) !== nothing && return true
+    (index || gathers(t)) && Tempest.storage_length(c.graph.values[t.value]) < typemax(Int32) || return false
+    all(a -> c.graph.values[a.value].eltype in (Int32, Int64) && loadable(c, Load(a.value, a.index); index = true),
+        reduce(vcat, map(indirect_atoms, t.index)))
+end
 
 # A formula of axes bound by the grid, as a scalar per block.
 block_scalar(c::Context, e::Affine, indices) =
@@ -178,12 +215,11 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         end
         name = gensym(:t)
         expr = if t isa Load
-            v = load_view(c, t.value, t.index)
-            load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
+            load_tile(k, c, t, indices)
         elseif t isa Tempest.Fold
             emit_fold!(k, statements, c, t, indices)
         elseif t isa Ix
-            x = index_tile(c, t.expr, indices)
+            x = index_tile(k, c, t.expr, indices)
             T = Tempest.term_eltype(t, c.graph)
             T === Int32 ? x : :(convert($(ct.Tile){$T}, $x))
         elseif t isa Apply
@@ -329,16 +365,22 @@ function valid_mask!(st, c::Context, t)
     name
 end
 
-# A mask of the tile's lanes inside the domain, along every tile axis.
-function tile_mask!(st, c::Context, indices)
+# Whether each lane of the tile at block indices `indices` lies inside the
+# domain along tile axes `axes`.
+function inside(c::Context, axes, indices)
     n = length(c.s.tiling)
-    terms = map(1:n) do i
+    terms = map(axes) do i
         T, E = c.s.tiling[i].tile, c.s.tiling[i].extent
         shape = ntuple(q -> q == i ? T : 1, n)
         :(reshape($(ct.arange)($T), $shape) .<= Int32($E) - ($(indices[i]) - Int32(1)) * Int32($T))
     end
+    foldl((a, b) -> :($a .& $b), terms)
+end
+
+# A mask of the tile's lanes inside the domain, along every tile axis.
+function tile_mask!(st, c::Context, indices)
     name = gensym(:valid)
-    push!(st, :($name = $(foldl((a, b) -> :($a .& $b), terms))))
+    push!(st, :($name = $(inside(c, 1:length(c.s.tiling), indices))))
     name
 end
 
@@ -486,15 +528,15 @@ function term_spans(c::Context, t::Term)
     spans = fill(false, length(c.s.tiling))
     for s in Tempest.subterms((t,))
         s isa Stat && return nothing
-        if s isa Union{Ix, Tempest.Fold}
+        if s isa Union{Ix, Tempest.Fold} || s isa Load && gathers(s)
             for (i, ax) in enumerate(c.s.tiling)
                 any(k -> Tempest.mentions(s, k), ax.axes) && (spans[i] = true)
             end
+        elseif s isa Load
+            v = load_view(c, s.value, s.index)
+            v === nothing && return nothing
+            spans .|= collect(v.spans)
         end
-        s isa Load || continue
-        v = load_view(c, s.value, s.index)
-        v === nothing && return nothing
-        spans .|= collect(v.spans)
     end
     spans
 end
@@ -599,7 +641,7 @@ function terms_expressible(c::Context, roots; stats = false)
         s isa Ix && !positional(s) && return false
         s isa Apply && !(s.eltype <: TILE_TYPES) && return false
         s isa Lit && s.value isa Float64 && return false
-        s isa Load && load_view(c, s.value, s.index) === nothing && return false
+        s isa Load && !loadable(c, s) && return false
     end
     true
 end
