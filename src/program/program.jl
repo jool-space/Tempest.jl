@@ -52,8 +52,9 @@ struct Permute <: Operation
 end
 
 """
-Part of the input. Each entry of `indices` selects along one axis of the input:
-an integer drops the axis, a range or a vector of integers keeps it.
+Part of the input, its first input. Each entry of `indices` selects along one
+axis of the input: an integer drops the axis, a range keeps it, and an
+`IndexInput` replaces it by the axes of an array of integers (a gather).
 """
 struct Select{I <: Tuple} <: Operation
     indices::I
@@ -61,10 +62,20 @@ end
 
 """
 The adjoint of a selection: an array of the shape `dims` of zeros, with each
-input element added at the position it was selected from.
+element of the first input added at the position it was selected from.
 """
 struct Scatter{I <: Tuple} <: Operation
     indices::I
+end
+
+"""
+An entry of a selection's or a scatter's indices: the node's `input`th input,
+an array of one-based integers, whose axes take the place of the axis it
+indexes. An index out of range is an error in the interpreters, and undefined
+in a prepared program, as under `@inbounds`.
+"""
+struct IndexInput
+    input::Int
 end
 
 struct Node
@@ -114,7 +125,7 @@ op_detail(op::Union{Select, Scatter}) = " " * join(map(index_summary, op.indices
 
 index_summary(i::Integer) = string(i)
 index_summary(i::AbstractRange) = string(i)
-index_summary(i::AbstractVector) = "[" * string(length(i)) * " indices]"
+index_summary(i::IndexInput) = "by input " * string(i.input)
 
 function show_nodes(io::IO, nodes, results)
     for (id, n) in enumerate(nodes)

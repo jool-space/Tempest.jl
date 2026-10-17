@@ -117,9 +117,11 @@ indirect_values(e::Affine) = reduce(vcat, (indirect_values(a) for (a, _) in e.te
 indirect_values(::Var) = Int[]
 indirect_values(a::Union{Div, Mod}) = indirect_values(a.e)
 indirect_values(a::Indirect) = [a.value; reduce(vcat, map(indirect_values, a.index); init = Int[])]
-read_values(o::Read) = [o.value; reduce(vcat, map(indirect_values, o.index); init = Int[])]
-read_values(o::IndexOperand) = indirect_values(o.expr)
-read_values(o::Literal) = Int[]
+gathered_values(o::Read) = reduce(vcat, map(indirect_values, o.index); init = Int[])
+gathered_values(o::IndexOperand) = indirect_values(o.expr)
+gathered_values(o::Literal) = Int[]
+read_values(o::Read) = [o.value; gathered_values(o)]
+read_values(o::Operand) = gathered_values(o)
 
 # The values each value reads, directly or through others.
 function ancestors(graph)
@@ -139,7 +141,7 @@ function try_add!(graph, stored, up, g::Group, v; fold)
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    any(m -> any(l -> l.value == v, loads(g.terms[m])), members(g)) && return false
+    any(m -> v in stored_reads(g.terms[m]), members(g)) && return false
     candidate = Group(g.kind, g.domain, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase), copy(g.epilogues))
     fold || push!(candidate.outputs, v)
     t = try
@@ -150,12 +152,13 @@ function try_add!(graph, stored, up, g::Group, v; fold)
         return false
     end
     group = Set(members(g))
-    for l in loads(t)
-        (l.value in group || !isempty(intersect(up[l.value], group))) && return false
+    reads = stored_reads(t)
+    for r in reads
+        (r in group || !isempty(intersect(up[r], group))) && return false
     end
     # A member reads the group's folds, or something the group reads.
-    shared = Set(l.value for m in members(g) for l in loads(g.terms[m]))
-    connected = isempty(g.reductions) || !isempty(stats(t)) || any(l -> l.value in shared, loads(t))
+    shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
+    connected = isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads)
     connected || return false
     push!(fold ? g.reductions : g.outputs, v)
     g.terms[v] = t
@@ -198,13 +201,18 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
         counts[r] += 1
     end
     # An opaque operation runs when any of its results is read (a call's
-    # results run together), and reads its operands from storage.
+    # results run together), and reads its operands from storage, as a gather
+    # reads its indices.
     instance(id) = (op = values[id].definition.node.op; op isa Call ? op.instance : -id)
     running = Set(instance(id) for id in 1:n if live[id] && values[id].definition isa Opaque)
     materialized = falses(n)
     for id in 1:n
+        live[id] || continue
+        for o in operands(values[id].definition)
+            foreach(r -> materialized[r] = true, gathered_values(o))
+        end
         values[id].definition isa Opaque && instance(id) in running || continue
-        foreach(o -> materialized[o.value] = true, operands(values[id].definition))
+        foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
     recomputed = recompute_folds ? setdiff(recomputed_folds(graph, results, materialized), keep, fixed...) : Set{Int}()
     # Maps of recomputed folds are recomputed with them.
@@ -349,23 +357,18 @@ end
 # axis of the reader wider than a tile), and either the fold is a product over
 # few elements, recomputed as one product per tile, or no reading fold reads
 # it at positions that move along its own reduced axes, so a kernel computes
-# it once per block, before or during its sweep. Results and the operands of
-# opaque work stay stored.
+# it once per block, before or during its sweep. Results, the operands of
+# opaque work and the indices of gathers stay stored.
 const RECOMPUTED_PRODUCT = 256
 const RECOMPUTED_SPAN = 128
 
 function recomputed_folds(graph, results, materialized)
     values = graph.values
     users = readers(graph)
-    gathered = Set{Int}()
-    for v in values, o in operands(v.definition)
-        o isa Read && foreach(e -> union!(gathered, indirect_values(e)), o.index)
-        o isa IndexOperand && union!(gathered, indirect_values(o.expr))
-    end
     selected = Set{Int}()
     for v in eachindex(values)
         d = values[v].definition
-        d isa Reduction && !(v in results) && !materialized[v] && !(v in gathered) || continue
+        d isa Reduction && !(v in results) && !materialized[v] || continue
         # The folds v reaches through maps, with the index at which each reads v.
         consumers = Tuple{Int, Tuple{Vararg{Affine}}}[]
         pending = [(u, v, identity_index(values[v].dims)) for u in unique(users[v])]
@@ -482,13 +485,7 @@ function group_reads(graph, g::Group)
     reads = Set{Int}()
     for v in members(g)
         if haskey(g.terms, v)
-            for l in loads(g.terms[v])
-                push!(reads, l.value)
-                foreach(e -> union!(reads, indirect_values(e)), l.index)
-            end
-            for t in subterms((g.terms[v],); nested = true)
-                t isa Ix && union!(reads, indirect_values(t.expr))
-            end
+            union!(reads, stored_reads(g.terms[v]))
         else
             for o in operands(graph.values[v].definition)
                 union!(reads, read_values(o))

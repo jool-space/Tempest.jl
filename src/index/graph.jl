@@ -54,12 +54,13 @@ end
 """
 A program-level operation realized on its operands materialized in their
 program shapes: one the index level does not model (a scatter), or a call an
-implementation claimed. Its boundary is storage. `epilogue` says whether the
-claiming kernel applies an epilogue over this result's output tile.
+implementation claimed, which reads values whole. Its boundary is storage.
+`epilogue` says whether the claiming kernel applies an epilogue over this
+result's output tile.
 """
 struct Opaque <: Definition
     node::Node
-    operands::Tuple{Vararg{Read}}
+    operands::Tuple{Vararg{Operand}}
     shapes::Tuple{Vararg{Tuple{Tuple{Vararg{Int}}, Bool}}} # each operand's dims and scalar flag
     epilogue::Bool
 end

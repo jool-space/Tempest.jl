@@ -85,10 +85,12 @@ function delinearize(linear, dims, d::Domain)
 end
 
 # The index of a layout node's input, for each index of the node, as
-# expressions over the node's domain.
-layout_index(::Reshape, dims, parentdims, d, gather) = delinearize(linear_index(dims, d), parentdims, d)
+# expressions over the node's domain. `held(i, axis, extent)` is the index
+# that index array `i` of a selection holds where its axes are the node's from
+# `axis + 1` on, and how many axes it has.
+layout_index(::Reshape, dims, parentdims, d, held) = delinearize(linear_index(dims, d), parentdims, d)
 
-function layout_index(op::Permute, dims, parentdims, d, gather)
+function layout_index(op::Permute, dims, parentdims, d, held)
     index = Vector{Affine}(undef, length(parentdims))
     for (k, p) in enumerate(op.perm)
         index[p] = var(k)
@@ -96,21 +98,35 @@ function layout_index(op::Permute, dims, parentdims, d, gather)
     Tuple(index)
 end
 
-function layout_index(op::Select, dims, parentdims, d, gather)
+function layout_index(op::Select, dims, parentdims, d, held)
     axis = 0
-    map(op.indices) do i
+    ntuple(length(op.indices)) do p
+        i = op.indices[p]
         if i isa Integer
             constant(i - 1)
         elseif i isa AbstractRange
             axis += 1
             add(scale(var(axis), step(i)), first(i) - 1, d)
         else
-            axis += 1
-            lo, hi = extrema(i)
-            add(normalize(0, (Indirect(gather(i), (var(axis),), lo, hi) => 1,), d), -1, d)
+            e, rank = held(i, axis, parentdims[p])
+            axis += rank
+            e
         end
     end
 end
+
+# The zero-based index that an array of one-based indices into an axis of
+# `extent` holds at `at`, its index over `d`. A value is read through an
+# indirect term, a gather, whose entries lie in the axis (between a constant
+# array's extremes); an index computed from the position is a formula.
+function held_index(a::ValueAccess, at, d, values, extent)
+    data = values[a.value].definition
+    lo, hi = data isa ConstantArray && !isempty(data.data) ? extrema(data.data) : (1, extent)
+    index = map(e -> substitute(e, at, d), a.index)
+    add(normalize(0, (Indirect(a.value, index, lo, hi) => 1,), d), -1, d)
+end
+held_index(a::IndexAccess, at, d, values, extent) = add(substitute(a.expr, at, d), -1, d)
+held_index(a::LiteralAccess, at, d, values, extent) = constant(a.value - 1)
 
 compose(a::ValueAccess, index, d) = ValueAccess(a.value, map(e -> substitute(e, index, d), a.index))
 compose(a::LiteralAccess, index, d) = a
@@ -166,13 +182,6 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
     end
     values = Value[]
     access = Vector{Access}(undef, length(nodes))
-    gathers = IdDict{Any, Int}()
-    function gather(list)
-        get!(gathers, list) do
-            push!(values, Value(ConstantArray(collect(Int, list)), (length(list),), Int, false))
-            length(values)
-        end
-    end
     # A value defined over a node's shape, over the node's wide axes instead.
     function value!(definition, dims, T; scalar = false)
         push!(values, Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar))
@@ -227,12 +236,13 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
             shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
             value!(Opaque(n, reads, shapes, epilogue(n, nodes)), n)
         elseif op isa Union{Reshape, Permute, Select}
-            compose(only(inputs), layout_index(op, n.dims, only(input_dims), d, gather), d)
-        else
-            reads = map(inputs, input_dims) do a, dims
-                a isa ValueAccess || error("$(op_name(op)) of a constant or positions is not supported yet")
-                operand(a, dims, Domain(dims))
+            held = function (i, axis, extent)
+                rank = length(input_dims[i.input])
+                (held_index(inputs[i.input], ntuple(k -> var(axis + k), rank), d, values, extent), rank)
             end
+            compose(first(inputs), layout_index(op, n.dims, first(input_dims), d, held), d)
+        else
+            reads = map((a, dims) -> operand(a, dims, Domain(dims)), inputs, input_dims)
             shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
             value!(Opaque(n, reads, shapes), n)
         end

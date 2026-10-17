@@ -70,6 +70,20 @@ end
 
 loads(t::Term) = [s for s in subterms((t,); nested = true) if s isa Load]
 
+"The values a term reads from storage: those it loads, and those its formulas gather from."
+function stored_reads(t::Term)
+    reads = Int[]
+    for s in subterms((t,); nested = true)
+        if s isa Load
+            push!(reads, s.value)
+            foreach(e -> append!(reads, indirect_values(e)), s.index)
+        elseif s isa Ix
+            append!(reads, indirect_values(s.expr))
+        end
+    end
+    reads
+end
+
 "Whether term `t` depends on variable `n` of its domain."
 mentions(t::Load, n) = any(e -> mentions(e, n), t.index)
 mentions(t::Ix, n) = mentions(t.expr, n)

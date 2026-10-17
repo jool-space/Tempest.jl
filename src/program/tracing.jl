@@ -364,29 +364,42 @@ Base.transpose(x::TracedArray{<:Real, 2}) = permutedims(x, (2, 1))
 Base.transpose(x::TracedArray{<:Real, 1}) = reshape(x, (1, length(x)))
 Base.adjoint(x::TracedArray{<:Real}) = transpose(x)
 
-# Indexing: integers drop an axis; ranges and integer vectors keep one.
+# Indexing: integers drop an axis; ranges keep one; an array of integers,
+# traced or not, replaces it by its own axes (a gather). A traced integer is
+# an array without axes.
 selection_index(i::Integer) = Int(i)
 selection_index(i::Base.Slice) = 1:length(i)
 selection_index(i::AbstractRange{<:Integer}) = i
-selection_index(i::AbstractVector{<:Integer}) = collect(Int, i)
-selection_index(i::AbstractVector{Bool}) = findall(i)
+selection_index(i::AbstractArray{<:Integer}) = i
 selection_index(i) = throw(ArgumentError("unsupported index $(typeof(i)) into a traced array"))
+
+index_array(i) = i
+index_array(i::Traced{T}) where {T <: Integer} = TracedArray{T, 0}(i.tape, i.id, ())
+index_array(::Traced{Bool}) = mask_error()
+index_array(::TracedArray{Bool}) = mask_error()
+mask_error() = throw(ArgumentError("a traced mask selects a number of elements known only when the program runs"))
 
 function select(x::TracedArray, I; scalar)
     if length(I) == 1 && ndims(x) != 1
         return select(vec(x), I; scalar)
     end
-    indices = map(selection_index, Base.to_indices(x, I))
+    indices = map(selection_index, Base.to_indices(x, map(index_array, I)))
     for (k, i) in enumerate(indices)
-        all(j -> 1 <= j <= size(x, k), i) || throw(BoundsError(x, I))
+        i isa TracedArray || all(j -> 1 <= j <= size(x, k), i) || throw(BoundsError(x, I))
     end
-    kept = filter(i -> !(i isa Integer), collect(indices))
-    dims = Tuple(map(length, kept))
+    dims = Tuple(n for i in indices if !(i isa Integer) for n in size(i))
     full = length(indices) == ndims(x) &&
         all(k -> indices[k] isa AbstractRange && indices[k] == 1:size(x, k), 1:ndims(x))
     full && return x
+    # Arrays of integers are inputs of the node, constants unless traced.
+    inputs = [x.id]
+    indices = map(indices) do i
+        i isa AbstractArray && !(i isa AbstractRange) || return i
+        push!(inputs, i isa TracedArray ? i.id : constant!(x.tape, i))
+        IndexInput(length(inputs))
+    end
     scalar = scalar && isempty(dims)
-    id = record!(x.tape, Select(indices), (x.id,), dims, eltype(x); scalar)
+    id = record!(x.tape, Select(indices), inputs, dims, eltype(x); scalar)
     scalar ? Traced(x.tape, id) : TracedArray(x.tape, id)
 end
 
