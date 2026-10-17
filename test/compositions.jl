@@ -125,4 +125,28 @@ const SPELLINGS = [
         (kernels = 2, bytes = 2P); generated = (kernels = 1, bytes = P)),
 ]
 
-const COMPOSITIONS = [ATTENTION; SPELLINGS]
+## Writes into arrays the program allocates, which are functional updates:
+## each planned with its readers, storing no version of the array written.
+
+function padded(x, p)
+    y = fill!(similar(x, size(x) .+ 2p), 0)
+    y[(p + 1):(end - p), (p + 1):(end - p)] = x
+    y
+end
+overwritten(x, v) = (y = copy(x); y[1:size(v, 1), :] = v; y)
+
+const RECOMPUTE = "a map recomputed by the kernels that read it over other domains (planner)"
+Xh, V = sample(N ÷ 2, M; scale = 0.2f0), sample(64, M; scale = 0.4f0)
+
+const UPDATES = [
+    Composition("padding, then a reduction", trace(x -> sum(abs2, padded(x, 2); dims = 1), X), (X,), (kernels = 1, bytes = 4 * (M + 4))),
+    Composition("a concatenation, then a map", trace((x, h) -> tanh.(vcat(x, h)) .* 2, X, Xh), (X, Xh), (kernels = 1, bytes = 6 * N * M)),
+    Composition("a slice written, then a reduction", trace((x, v) -> sum(overwritten(x, v); dims = 1), X, V), (X, V), (kernels = 1, bytes = 4M)),
+    # The loss and the two gradients: the gradient of the values written
+    # selects, and that of the array written is masked. The map between the
+    # update and the loss is stored for the gradients' kernels.
+    Composition("a slice written, a training step", training((x, v) -> sum(abs2, tanh.(overwritten(x, v))), X, V), (X, V),
+        (kernels = Gap(2, RECOMPUTE), bytes = Gap(Y + 4 * 64 * M + 4, RECOMPUTE), largest = Y)),
+]
+
+const COMPOSITIONS = [ATTENTION; SPELLINGS; UPDATES]
