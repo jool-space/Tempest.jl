@@ -79,7 +79,9 @@ end
     for (limit, bytes) in (nothing => 1 << 30, "2048" => 2048, "64K" => 64 << 10, "1g" => 1 << 30)
         withenv(() -> @test(T.kernel_cache_limit() == bytes), "TEMPEST_KERNEL_CACHE_LIMIT" => limit)
     end
-    withenv(() -> @test_throws(ArgumentError, T.kernel_cache_limit()), "TEMPEST_KERNEL_CACHE_LIMIT" => "lots")
+    withenv("TEMPEST_KERNEL_CACHE_LIMIT" => "lots") do
+        @test (@test_logs (:warn, r"TEMPEST_KERNEL_CACHE_LIMIT") T.kernel_cache_limit()) == 1 << 30
+    end
 end
 
 # What Tempest compiles while it precompiles, which development sessions skip.

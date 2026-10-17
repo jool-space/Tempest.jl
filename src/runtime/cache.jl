@@ -59,10 +59,15 @@ function load_kernel(key)
     isfile(path) || return nothing
     bytes = try
         # Read and mark used, through one handle: an entry evicted meanwhile is
-        # a miss, never an empty file made again.
+        # a miss, never an empty file made again. A cache this process may not
+        # write is still read.
         file = Base.Filesystem.open(path, Base.Filesystem.JL_O_RDONLY)
         try
-            touch(file)
+            try
+                touch(file)
+            catch err
+                @debug "could not mark a kernel cache entry used" path exception = err
+            end
             read(file)
         finally
             close(file)
@@ -116,13 +121,17 @@ end
 
 The size of the kernel cache beyond which its least recently used entries are
 removed: `ENV["TEMPEST_KERNEL_CACHE_LIMIT"]`, in bytes or with a `K`, `M` or `G`
-suffix, by default 1 GiB, ten thousand kernels of the 80 kB they average.
+suffix, by default 1 GiB, ten thousand kernels of the 80 kB they average. A
+value that is not a size warns and keeps the default, since a store that threw
+would only lose its kernel.
 """
 function kernel_cache_limit()
     s = strip(get(ENV, "TEMPEST_KERNEL_CACHE_LIMIT", ""))
-    isempty(s) && return 1 << 30
     m = match(r"^(\d+)([KMG]?)$"i, s)
-    m === nothing && throw(ArgumentError("TEMPEST_KERNEL_CACHE_LIMIT is a number of bytes, optionally with K, M or G; got \"$s\""))
+    if m === nothing
+        isempty(s) || @warn "TEMPEST_KERNEL_CACHE_LIMIT is a number of bytes, optionally with K, M or G, not \"$s\"; the limit is 1 GiB" maxlog = 1
+        return 1 << 30
+    end
     parse(Int, m[1]) << (10 * (findfirst(==(uppercase(m[2])), ("", "K", "M", "G")) - 1))
 end
 
