@@ -12,7 +12,10 @@ agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), 
         for p in (trace(f, args...), differentiate(trace(f, args...)))
             graph = T.lower(p)
             @test agree(T.interpret(graph, args...), flat(interpret(p, args...)))
-            @test all(v -> !(v.definition isa T.Opaque) || v.definition.node.op isa T.Scatter, graph.values)
+            # Only a scatter by runtime indices is opaque; one by integers and
+            # ranges is a select of a read through a formula.
+            @test all(v -> !(v.definition isa T.Opaque) || v.definition.node.op isa T.Scatter &&
+                           any(i -> i isa T.IndexInput, v.definition.node.op.indices), graph.values)
             # Filling out to a larger shape is a formula, not a value. (A
             # call's argument is materialized for an implementation that
             # claims the call; nothing else reads it.)
