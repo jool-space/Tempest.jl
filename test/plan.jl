@@ -77,6 +77,21 @@ end
     end
 end
 
+# Writes into an allocation are functional updates that plan with their
+# readers: padding read by a reduction, a concatenation read by a map and a
+# slice written then read are one kernel each, which stores only its result.
+@testset "functional updates in one kernel" begin
+    x, v = data(8, 6), data(3, 6; scale = 0.3)
+    for (f, args) in ((x -> sum(abs2, padded(x); dims = 1), (x,)), ((x, v) -> vcat(x, v) .* 2, (x, v)),
+                      ((x, v) -> (y = copy(x); y[2:4, :] = v; tanh.(y)), (x, v)))
+        p = trace(f, args...)
+        planned = T.plan(T.lower(p))
+        @test length(planned.groups) == 1
+        @test T.structure(planned).stored == [o.value for o in planned.graph.results]
+        @test agree(T.execute(planned, args...), [interpret(p, args...)])
+    end
+end
+
 # A kernel is maps and folds over one domain, each fold over its own axes: the
 # loss and a weight gradient join the normalization's kernel, and the values
 # only they read are never stored.

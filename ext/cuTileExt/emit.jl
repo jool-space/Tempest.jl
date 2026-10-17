@@ -163,12 +163,20 @@ indirect_atoms(::Tempest.Var) = Tempest.Indirect[]
 indirect_atoms(a::Union{Tempest.Div, Tempest.Mod}) = indirect_atoms(a.e)
 indirect_atoms(a::Tempest.Indirect) = [a]
 
+# A formula with divisions or remainders, such as a read that wraps around an
+# axis, which no strided view may express.
+wraps(t::Load) = any(e -> any(a -> a.first isa Union{Tempest.Div, Tempest.Mod}, e.terms), t.index)
+
+# Whether the generator loads `t` element by element: its formula gathers, or
+# wraps and is no view.
+elementwise(c::Context, t::Load) = gathers(t) || wraps(t) && load_view(c, t.value, t.index) === nothing
+
 # Whether the generator can load `t`: as a view, or element by element when
-# its formula gathers or, as the `index` of a gather, it is no view. Int32
-# lanes address the buffer, and the indices are integers it loads in turn.
+# it gathers, wraps or, as the `index` of a gather, it is no view. Int32 lanes
+# address the buffer, and the indices are integers it loads in turn.
 function loadable(c::Context, t::Load; index = false)
     !gathers(t) && load_view(c, t.value, t.index) !== nothing && return true
-    (index || gathers(t)) && Tempest.storage_length(c.graph.values[t.value]) < typemax(Int32) || return false
+    (index || elementwise(c, t)) && Tempest.storage_length(c.graph.values[t.value]) < typemax(Int32) || return false
     all(a -> c.graph.values[a.value].eltype in (Int32, Int64) && loadable(c, Load(a.value, a.index); index = true),
         reduce(vcat, map(indirect_atoms, t.index)))
 end
@@ -522,7 +530,7 @@ function term_spans(c::Context, t::Term)
     spans = fill(false, length(c.s.tiling))
     for s in Tempest.subterms((t,))
         s isa Stat && return nothing
-        if s isa Union{Ix, Tempest.Fold} || s isa Load && gathers(s)
+        if s isa Union{Ix, Tempest.Fold} || s isa Load && elementwise(c, s)
             for (i, ax) in enumerate(c.s.tiling)
                 any(k -> Tempest.mentions(s, k), ax.axes) && (spans[i] = true)
             end

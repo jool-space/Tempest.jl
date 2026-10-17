@@ -137,6 +137,39 @@ fill_out(a::ValueAccess, dims, d) = ValueAccess(a.value, map(e -> substitute(e, 
 fill_out(a::LiteralAccess, dims, d) = a
 fill_out(a::IndexAccess, dims, d) = IndexAccess(substitute(a.expr, broadcast_index(dims), d), a.eltype)
 
+# A scatter by integers and ranges places its input: each element lands at
+# one position, and every other position is zero. At each position, a select
+# between the input, read where the position came from, and zero. The read
+# wraps around the input's axes, so that it stays inside them where it is not
+# selected; a scatter that covers its result is a formula.
+function placement!(value!, op::Scatter, input, n, d)
+    i = identity_index(n.dims)
+    conditions = ValueAccess[]
+    condition!(f, e, c) = push!(conditions, value!(Pointwise(f, (IndexOperand(e, Int32), Literal(Int32(c)))), n.dims, Bool))
+    source = Affine[]
+    for (k, s) in enumerate(op.indices)
+        if s isa Integer
+            n.dims[k] == 1 || condition!(==, i[k], s - 1)
+            continue
+        end
+        # The distance from the range's first position, along its step.
+        a = abs(step(s))
+        o = step(s) > 0 ? add(i[k], 1 - first(s), d) : add(scale(i[k], -1), first(s) - 1, d)
+        push!(source, fmod(fdiv(o, a, d), length(s), d))
+        lo, hi = affine_range(o, d)
+        lo < 0 && condition!(>=, o, 0)
+        hi > (length(s) - 1) * a && condition!(<=, o, (length(s) - 1) * a)
+        a > 1 && condition!(==, fmod(o, a, d), 0)
+    end
+    placed = compose(input, Tuple(source), d)
+    isempty(conditions) && return placed
+    read(a) = operand(a, n.dims, d)
+    mask = foldl((a, b) -> value!(Pointwise(&, (read(a), read(b))), n.dims, Bool), conditions)
+    # A placed `true` is the mask itself.
+    n.eltype === Bool && read(placed) == Literal(true) && return mask
+    value!(Pointwise(ifelse, (read(mask), read(placed), Literal(zero(n.eltype)))), n)
+end
+
 # A product is a sum fold of a pointwise product: over the domain of the
 # result's axes then the summed ones, the two operands (converted to Float32
 # when they are half precision) are multiplied and summed over the summed axes.
@@ -149,10 +182,9 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
     foreach((l, e) -> extent[l] = e, (op.a..., op.b...), (input_dims[1]..., input_dims[2]...))
     iteration = Tuple(extent[l] for l in labels)
     d = Domain(iteration)
-    read(access, ls) = Read(
-        access.value,
-        map(e -> substitute(e, Tuple(var(findfirst(==(l), labels)) for l in ls), d), access.index),
-    )
+    # A factor read at the labels `ls`: a value, or a constant or positions
+    # filling the factor's shape.
+    read(access, ls) = operand(compose(access, Tuple(var(findfirst(==(l), labels)) for l in ls), d), iteration, d)
     A = n.eltype <: HalfFloat ? Float32 : n.eltype
     function factor(access, ls)
         r = read(access, ls)
@@ -244,11 +276,12 @@ function lower(p::Program)
             parent = only(input_dims)
             value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
         elseif op isa Contract
-            all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
             contraction!(value!, op, inputs, input_dims, n)
         elseif op isa Call
             # An opaque call, which implementations alone realize.
             value!(Opaque(n, map(dense, n.inputs), map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)), n)
+        elseif op isa Scatter && !any(i -> i isa IndexInput, op.indices)
+            placement!(value!, op, only(inputs), n, d)
         elseif op isa Union{Reshape, Permute, Select}
             held = function (i, axis, extent)
                 rank = length(input_dims[i.input])

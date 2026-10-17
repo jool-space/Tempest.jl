@@ -12,6 +12,7 @@ export trace, differentiate, interpret, explain, prepare, bind!, execute!, captu
 include("program/program.jl")
 include("program/folds.jl")
 include("program/tracing.jl")
+include("program/updates.jl")
 include("program/interpret.jl")
 include("program/calls.jl")
 include("program/differentiate.jl")

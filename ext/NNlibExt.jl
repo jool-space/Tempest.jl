@@ -27,8 +27,9 @@ function Tempest.reference(::typeof(NNlib.batched_mul), a, b)
     throw(DimensionMismatch("batch sizes $(size(a, 3)) and $(size(b, 3)) differ"))
 end
 
-# A batched transpose is a layout.
-NNlib.batched_transpose(a::TracedArray{<:Real, 3}) = permutedims(a, (2, 1, 3))
-NNlib.batched_adjoint(a::TracedArray{<:Real, 3}) = permutedims(a, (2, 1, 3))
+# A batched transpose is a layout that shares its array's memory, as NNlib's
+# lazy one does.
+NNlib.batched_transpose(a::TracedArray{<:Real, 3}) = Tempest.permuted(a, (2, 1, 3))
+NNlib.batched_adjoint(a::TracedArray{<:Real, 3}) = Tempest.permuted(a, (2, 1, 3))
 
 end

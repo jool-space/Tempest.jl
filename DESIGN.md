@@ -217,6 +217,32 @@ vocabulary is small.
   and an optional derivative rule.
 
 Tracing, differentiation and functional updates work at this level.
+
+**Functional updates.** An array the traced code allocates (with `similar`,
+`copy`, `zero` or `fill`, or as the result of any operation on traced arrays)
+can be written: by `setindex!`, `.=` and the other in-place broadcasts,
+`copyto!`, `fill!`, `permutedims!` and `map!`, directly or through a view,
+reshape or transpose, which share the memory of the array they are made from
+as they do in Julia. Each write records the array's new contents; later reads
+see them, and reads before the write keep what they read. A write of part of
+an array, at integers and ranges, is a select, where a scatter of `true`
+lands, between the scatter of the values written and the old contents. At the
+index level such a scatter is a read of the values through a formula that
+wraps around their axes, which the select guards, so an update fuses with its
+readers and no version of the array is stored. The derivative masks the old
+contents and selects the values written. Three limits:
+
+- The contents of `similar` are zero until written, where Julia leaves them
+  undefined.
+- A write at positions an array of integers or a mask selects is not a
+  functional update yet.
+- A program never writes its inputs, nor anything sharing their memory, and an
+  operation's reference never writes its arguments. Such a write fails, saying
+  so: a program is a function of its inputs, and a write into one would change
+  the caller's array without the program stating it. Tracing never sees an
+  array allocated as `Array{T}(undef, dims)`, so code that writes traced values
+  into one does not trace.
+
 Differentiation needs one pullback per primitive; a verb may bring its own. The
 backward graph is ordinary program code and is planned together with the
 forward. A library may claim a whole named call, as cuDNN claims `attention`:
@@ -366,8 +392,9 @@ A Julia function meets Tempest in one of three ways.
    things: a derivative rule, a claim by name, and a boundary that `explain`
    shows.
 3. **Its body does not trace.** A function that branches on array values,
-   mutates, loops over scalars, draws from a global random number generator or
-   has only device methods is declared the same way, with either a reference
+   writes its arguments or Julia arrays it allocates, loops over scalars, draws
+   from a global random number generator or has only device methods is
+   declared the same way, with either a reference
    that traces or, for an opaque operation, a declaration of its result shapes
    and element types: `declared_results`, a function of its arguments' shapes
    and element types and its keywords.
@@ -593,7 +620,8 @@ records for known devices can ship with the package.
 
 ## Not now
 
-Control flow on traced values, mutation, ordered folds (scans and recurrences,
+Control flow on traced values, mutation of a program's inputs, writes at
+positions an array selects, ordered folds (scans and recurrences,
 whose combine is not commutative), ragged sizes, several devices, budgeted
 checkpointing, symbolic sizes beyond bounded ones, serving, and an MLIR core.
 An explicit plan leaves room for each later.
@@ -628,7 +656,8 @@ torch, run as separate processes against recorded numbers.
 
 - **Where it stands.** The program and index levels, the cuTile generator, the
   generic kernels, the cover with cuBLAS as a rival, the tuning record, the
-  kernel cache and the generated attention forward pass are built. The first
+  kernel cache, the generated attention forward pass and functional updates of
+  the arrays a program allocates are built. The first
   gates measured time against today's Tempest and held (the 29 forward
   guard-rail cases at 0.94 of today's time). From here the gates are about what
   Tempest can express; time is an alarm.
