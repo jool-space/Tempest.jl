@@ -283,6 +283,33 @@ if CUDACore.functional()
     end
 end
 
+# Gathers by runtime indices, element by element inside the kernels that read
+# them and never stored: an embedding lookup with pointwise work and a sum; a
+# lookup with a layer norm, where the embedding plus a bias, read three times,
+# is stored by the kernel that gathers; a long sum over gathered columns; and a
+# product with a gathered factor.
+tokens = Int32.(mod1.(37 .* (1:240), 1000))
+const GATHERS = [
+    ("embedding, pointwise work and a sum", (E, t) -> sum(abs2, tanh.(E[:, t]); dims = 1),
+     (data(64, 1000; scale = 0.01), reshape(tokens, 80, 3)), 1),
+    ("embedding and layer norm", (E, t, b, w) -> layernorm32(E[:, t] .+ b, w),
+     (data(64, 1000; scale = 0.01), reshape(tokens, 80, 3), data(64; scale = 0.3), data(64; scale = 0.1)), 2),
+    ("long sum over gathered columns", (E, t) -> sum(E[:, t]; dims = 2), (data(64, 1000; scale = 0.01), tokens), 1),
+    ("product with a gathered factor", (W, E, t) -> W * E[:, t], (data(96, 64; scale = 0.02), data(64, 1000; scale = 0.01), tokens), 1),
+]
+
+if CUDACore.functional()
+    @testset "gathers on cuTile" begin
+        @testset "$name" for (name, f, args, kernels) in GATHERS
+            args = map(single, args)
+            p = trace(f, args...)
+            ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+            @test length(ex.kernels) == kernels && all(d -> !(d isa T.FloorKernels), ex.kernels)
+            @test agree(T.leaves(execute!(ex)), T.leaves(interpret(p, args...)); rtol = 1.0e-3)
+        end
+    end
+end
+
 # Attention generated from its reference: one kernel, a fold over keys whose
 # scores and logsumexp are recomputed in it, online or in two passes.
 const GENERATED_ATTENTION = [
