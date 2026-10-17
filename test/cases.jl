@@ -65,6 +65,8 @@ const PROGRAMS = [
     ("strided view and index", x -> sum(abs2, view(x, 2:2:8, :) .+ x[3, 2]), (data(8, 6),)),
     ("gather by a constant list", x -> sum(abs2, x[:, [3, 1, 3, 6]]), (data(8, 6),)),
     ("vec and dropdims", x -> sum(abs2, vec(dropdims(sum(x; dims = 1); dims = 1))), (data(8, 6),)),
+    ("Cartesian indices, the diagonal and dot", x -> sum(abs2, diag(x)) + x[CartesianIndex(2, 3)] + dot(x, tanh.(x)), (data(6, 6),)),
+    ("map over two arrays", (x, y) -> sum(abs2, map((a, b) -> a * b + a, x, y)), (data(8, 6), data(8, 6; scale = 0.4))),
     ("scalar input", (x, s) -> sum(abs2, x .* s .+ s^2), (data(8, 6), 0.7)),
     ("attention, grouped heads", (q, k, v) -> sum(abs2, T.attention(q, k, v)),
      (data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1))),

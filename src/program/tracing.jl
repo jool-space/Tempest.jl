@@ -396,11 +396,22 @@ index_array(::Traced{Bool}) = mask_error()
 index_array(::TracedArray{Bool}) = mask_error()
 mask_error() = throw(ArgumentError("a traced mask selects a number of elements known only when the program runs"))
 
+# Linear indices, as a range where they step evenly.
+function linear_range(l)
+    l isa AbstractVector && !isempty(l) || return l
+    s = length(l) > 1 ? l[2] - l[1] : 1
+    s != 0 && all(k -> l[k] - l[k - 1] == s, 2:length(l)) ? (first(l):s:last(l)) : l
+end
+
 function select(x::TracedArray, I; scalar)
-    if length(I) == 1 && ndims(x) != 1
-        return select(vec(x), I; scalar)
+    I = Base.to_indices(x, map(index_array, I))
+    # One index into an array of several axes is linear; an array of
+    # Cartesian indices selects the linear indices it holds.
+    if length(I) == 1 && only(I) isa AbstractArray{<:CartesianIndex}
+        return select(vec(x), (linear_range(LinearIndices(x)[only(I)]),); scalar)
     end
-    indices = map(selection_index, Base.to_indices(x, map(index_array, I)))
+    length(I) == 1 && ndims(x) != 1 && return select(vec(x), I; scalar)
+    indices = map(selection_index, I)
     for (k, i) in enumerate(indices)
         i isa TracedArray || all(j -> 1 <= j <= size(x, k), i) || throw(BoundsError(x, I))
     end
@@ -422,6 +433,18 @@ end
 
 Base.getindex(x::TracedArray, I...) = select(x, I; scalar = true)
 Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
+
+# `map` over arrays of one shape is a broadcast, and `dot` a sum of products,
+# rather than loops over their elements.
+function Base.map(f, x::TracedArray, xs::AbstractArray...)
+    all(y -> size(y) == size(x), xs) || throw(DimensionMismatch("map over arrays of sizes $(map(size, (x, xs...)))"))
+    f.(x, xs...)
+end
+
+function LinearAlgebra.dot(x::TracedArray{<:Real}, y::TracedArray{<:Real})
+    length(x) == length(y) || throw(DimensionMismatch("dot of arrays of lengths $(length(x)) and $(length(y))"))
+    sum(vec(x) .* vec(y))
+end
 
 "The one-based linear index of each element of `x`, as `Int32`."
 positions(x::TracedArray) = TracedArray(x.tape, record!(x.tape, Positions(), (), size(x), Int32))
