@@ -55,6 +55,7 @@ const PROGRAMS = [
     ("permutation and reshape", x -> sum(abs2, reshape(permutedims(x, (2, 1, 3)), 3, 20) .* data(3, 20)), (data(4, 3, 5),)),
     ("strided view and index", x -> sum(abs2, view(x, 2:2:8, :) .+ x[3, 2]), (data(8, 6),)),
     ("gather by a constant list", x -> sum(abs2, x[:, [3, 1, 3, 6]]), (data(8, 6),)),
+    ("rotation by a constant permutation", (x, c, s) -> sum(abs2, x .* c .+ x[[3, 4, 1, 2], :] .* s), (data(4, 6), data(4, 1), data(4, 1; scale = 0.3))),
     ("vec and dropdims", x -> sum(abs2, vec(dropdims(sum(x; dims = 1); dims = 1))), (data(8, 6),)),
     ("scalar input", (x, s) -> sum(abs2, x .* s .+ s^2), (data(8, 6), 0.7)),
     ("attention, grouped heads", (q, k, v) -> sum(abs2, T.attention(q, k, v)),

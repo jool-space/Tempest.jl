@@ -38,4 +38,9 @@ end
     end
     @test any(n -> n.op isa T.Map && n.op.f === leaky, trace(x -> leaky.(x), data(3)).nodes)
     @test !any(n -> n.op isa T.Map && n.op.f === swish, trace(x -> swish.(x), data(3)).nodes)
+    # The adjoint of a selection by a constant permutation is a selection by
+    # its inverse, not a scatter.
+    d = differentiate(trace(x -> sum(abs2, x[[3, 4, 1, 2], :] .* data(4, 1)), data(4, 6)))
+    @test !any(n -> n.op isa T.Scatter, d.nodes)
+    @test any(n -> n.op isa T.Scatter, differentiate(trace(x -> sum(abs2, x[[3, 4, 1, 1], :]), data(4, 6))).nodes)
 end
