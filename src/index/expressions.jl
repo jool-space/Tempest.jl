@@ -85,7 +85,8 @@ function affine_range(a::Affine, d::Domain)
 end
 
 # Collect like atoms, drop zeros and single-valued atoms, sort, and fold
-# `c·(e mod d) + c·d·(e ÷ d)` back into `c·e`.
+# `c·(e mod d) + c·d·(e ÷ d)` back into `c·e`, the quotient in its simplified
+# form: `(i ÷ 32) mod 2` pairs with `i ÷ 64`.
 function normalize(constant::Int, terms, d::Domain)
     collected = Dict{Atom, Int}()
     for (atom, c) in terms
@@ -103,7 +104,7 @@ function normalize(constant::Int, terms, d::Domain)
         changed = false
         for (atom, c) in collected
             atom isa Mod || continue
-            partner = Div(atom.e, atom.d)
+            partner = quotient(atom, d)
             get(collected, partner, 0) == c * atom.d || continue
             delete!(collected, atom)
             delete!(collected, partner)
@@ -119,6 +120,13 @@ function normalize(constant::Int, terms, d::Domain)
     end
     sorted = sort!(collect(collected); by = p -> atom_key(p.first))
     Affine(constant, Tuple(sorted))
+end
+
+# The division a remainder pairs with, as `fdiv` writes it when that is one
+# atom.
+function quotient(m::Mod, d::Domain)
+    q = fdiv(m.e, m.d, d)
+    q.constant == 0 && length(q.terms) == 1 && q.terms[1].second == 1 ? q.terms[1].first : Div(m.e, m.d)
 end
 
 scale(a::Affine, c::Integer) =

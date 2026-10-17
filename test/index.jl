@@ -39,6 +39,13 @@ end
         # The two recombine to the expression they came from.
         @test T.add(T.mul(q, k, d), r, d) == e
     end
+    # Digits of a number recombine into it, also when nested divisions have
+    # composed: (i mod 32) + 32·((i ÷ 32) mod 2) + 64·(i ÷ 64) is i.
+    d = T.Domain((128,))
+    i = T.var(1)
+    digits = [T.fmod(i, 32, d), T.mul(T.fmod(T.fdiv(i, 32, d), 2, d), 32, d), T.mul(T.fdiv(i, 64, d), 64, d)]
+    @test foldl((a, b) -> T.add(a, b, d), digits) == i
+    @test T.is_affine(foldl((a, b) -> T.add(a, b, d), reverse(digits)))
 end
 
 # An index out of range is an error in the interpreters.
