@@ -476,15 +476,15 @@ end
 
 zeroed!(x) = (fill!(reinterpret(UInt8, x), 0x00); x)
 
-# Build a choice on the decider's buffers, once.
-function build_choice!(d::Decider, p::Plan, g::Group, o::Choice)
-    get!(d.built, (group_identity(p, g), o.key)) do
-        buffers = buffers!(d, p, g)
-        o.implementation === nothing ? build_floor(d.target, p, g, buffers) :
-        o.claim isa CallClaim ? build_call(o.implementation, p, g, buffers, d.target) :
-        build_claim(o.implementation, o.claim, d.target, p, g, buffers)
-    end
-end
+# Build a choice on `buffers`.
+build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
+    o.implementation === nothing ? build_floor(target, p, g, buffers) :
+    o.claim isa CallClaim ? build_call(o.implementation, p, g, buffers, target) :
+    build_claim(o.implementation, o.claim, target, p, g, buffers)
+
+# Build a choice on the decider's buffers, once, to measure it.
+build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =
+    get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, (group_identity(p, g), o.key))
 
 # A group's kernels: its choice, or the next claim when a build fails, and
 # the floor last; a call's group has no floor. Opaque work other than calls
@@ -495,7 +495,7 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers)
     for o in [x.choice; filter(!=(x.choice), x.options)]
         o.implementation === nothing && break
         built = try
-            build_choice!(d, p, g, o)
+            build_choice(d.target, p, g, o, buffers)
         catch err
             @debug "claim failed to build; trying the next" o.implementation exception = err
             failure = err

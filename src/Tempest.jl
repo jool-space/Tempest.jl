@@ -33,6 +33,7 @@ include("plan/rewrites.jl")
 include("plan/products.jl")
 include("plan/cpu.jl")
 include("plan/explain.jl")
+include("plan/storage.jl")
 
 # Code generation and prepared programs.
 include("codegen/scalar.jl")

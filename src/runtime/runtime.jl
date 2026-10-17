@@ -134,15 +134,19 @@ implementations(target) = Implementation[i for (m, is) in REGISTERED if m in use
 """
     Executable
 
-A program prepared for a target: its plan, one buffer per stored value, and a
-launch per kernel. Inputs are copied into owned buffers by `bind!`; `outputs`
-returns the result buffers, which the next execution overwrites.
+A program prepared for a target: its plan, its storage, and a launch per
+kernel. Each stored value has a buffer: inputs, constants and results their
+own, other values a view of their slot. Inputs are copied into owned buffers by
+`bind!`; `outputs` returns the result buffers, which the next execution
+overwrites.
 """
 struct Executable{T <: Target}
     program::Program
     plan::Plan
     target::T
     packages::Vector{Module}
+    storage::Storage
+    slots::Vector{Any}
     buffers::Vector{Any}
     launches::Vector{Any}
     kernels::Vector{Any}
@@ -166,24 +170,43 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     d = Decider(target, graph; measure)
     p, considered = cover(d)
     ds = decisions(d, p)
-    buffers = d.buffers
-    n = length(p.graph.values)
-    length(buffers) < n && append!(buffers, fill(nothing, n - length(buffers)))
+    s = storage(p)
+    slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
+    buffers = Vector{Any}(nothing, length(p.graph.values))
     for (id, v) in enumerate(p.graph.values)
         def = v.definition
         if def isa ConstantArray
+            # Uploaded already if a claim was measured.
+            buffers[id] = get(d.buffers, id, nothing)
             buffers[id] === nothing && (buffers[id] = upload(target, vec(collect(def.data))))
+        elseif s.slots[id] > 0
+            buffers[id] = slot_view(slots[s.slots[id]], v.eltype, storage_length(v))
         elseif p.stored[id]
-            buffers[id] === nothing && (buffers[id] = allocate(target, v.eltype, storage_length(v)))
-        else
-            buffers[id] = nothing # stored only in a plan not taken
+            buffers[id] = allocate(target, v.eltype, storage_length(v))
         end
     end
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
-    ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built],
+    ex = Executable(program, p, target, used_packages(target), s, slots, buffers, Any[first(b) for b in built],
         Any[last(b) for b in built], Any[ds...], Any[considered...])
     bind!(ex, inputs...)
     ex
+end
+
+"A value of `n` elements of type `T` in the first bytes of a slot."
+slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
+
+"""
+    Tempest.footprint(ex) -> (; bytes, apart)
+
+The bytes of a prepared program's buffers (inputs, constants, results and
+slots), and what they would be with each value stored apart instead of in
+slots.
+"""
+function footprint(ex::Executable)
+    graph, s = ex.plan.graph, ex.storage
+    own = sum(v -> s.slots[v] == 0 && ex.buffers[v] !== nothing ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
+    apart = sum(v -> s.slots[v] > 0 ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
+    (bytes = own + sum(s.sizes; init = 0), apart = own + apart)
 end
 
 """
@@ -250,6 +273,7 @@ function explain(io::IO, ex::Executable)
         "; half-precision products accumulate in Float32",
         ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
     foreach(c -> explain(io, ex.plan, c), ex.considered)
+    explain(io, ex.plan, ex.storage)
     println(io, "implementations from ", isempty(ex.packages) ? "no package" : join(map(string ∘ nameof, ex.packages), ", "),
         ", and the floor:")
     for (k, d) in enumerate(ex.kernels)

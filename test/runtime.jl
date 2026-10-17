@@ -28,6 +28,23 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
+# Values other than inputs and results share slots where their lifetimes do
+# not overlap, so training steps that keep values for their backward pass
+# store less.
+function slots_disjoint(s::T.Storage)
+    slotted = [v for v in eachindex(s.slots) if s.slots[v] > 0]
+    all(isempty(intersect(s.lifetimes[v], s.lifetimes[w])) for v in slotted for w in slotted if v < w && s.slots[v] == s.slots[w])
+end
+
+@testset "slots" begin
+    for (name, f, args) in PROGRAMS
+        ex = prepare(differentiate(trace(f, args...)), args...)
+        @test slots_disjoint(ex.storage)
+        bytes, apart = T.footprint(ex)
+        @test name in ("MLP", "attention, grouped heads") ? bytes < apart : bytes <= apart
+    end
+end
+
 # An implementation that proposes each product alone, grown from its fold, in
 # place of the generator's product with the work after it; it claims a lone
 # product as free, so the cover takes it. A candidate over several domains
