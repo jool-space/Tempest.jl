@@ -136,26 +136,36 @@ function ancestors(graph)
     up
 end
 
-"The kernels formed so far, and the kernel that owns each value (zero for none yet)."
+"""
+The kernels formed so far, the kernel that owns each value (zero for none
+yet), each value's ancestors, and what each kernel reads, once asked.
+"""
 struct Dependencies
     owner::Vector{Int}
     groups::Vector{Group}
+    up::Vector{Set{Int}}
+    reads::Dict{Int, Set{Int}}
 end
 
-# Whether value `r` depends on a member of `group`: through the values it
-# reads, and through the kernels that own them, each of which runs after
-# everything any of its members reads. A kernel that read `r` and joined such
-# a member would make kernels depend on each other in a cycle.
-function depends(graph, deps::Dependencies, r, group)
-    stack, seen = [r], Set{Int}()
-    while !isempty(stack)
-        u = pop!(stack)
-        u in seen && continue
-        push!(seen, u)
-        u in group && return true
-        k = deps.owner[u]
-        k == 0 ? foreach(o -> append!(stack, read_values(o)), operands(graph.values[u].definition)) :
-            union!(stack, group_reads(graph, deps.groups[k]))
+Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}())
+
+# Whether any of the values `reads` depends on a member of `group`: through
+# its ancestors, and through the kernels that own any of them, each of which
+# runs after everything its members read. A kernel that read such a value and
+# joined such a member would make kernels depend on each other in a cycle.
+function depends(graph, deps::Dependencies, reads, group)
+    pending, seen, kernels = collect(reads), Set{Int}(), Set{Int}()
+    while !isempty(pending)
+        r = pop!(pending)
+        r in seen && continue
+        push!(seen, r)
+        (r in group || !isdisjoint(deps.up[r], group)) && return true
+        for u in Iterators.flatten(((r,), deps.up[r]))
+            k = deps.owner[u]
+            (k == 0 || k in kernels) && continue
+            push!(kernels, k)
+            append!(pending, get!(() -> group_reads(graph, deps.groups[k]), deps.reads, k))
+        end
     end
     false
 end
@@ -180,7 +190,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     end
     group = Set(members(g))
     reads = stored_reads(t)
-    any(r -> depends(graph, deps, r, group), reads) && return false
+    depends(graph, deps, reads, group) && return false
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
     connected = isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads)
@@ -298,7 +308,7 @@ function group_values(graph, stored, live, results, running, fixed)
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
-    deps = Dependencies(owner, groups)
+    deps = Dependencies(owner, groups, up)
     # Opaque work first, one group per operation over its first result's
     # domain (all results of a claimed call together, in order), which may
     # absorb the pointwise work after a result as an epilogue its kernel
