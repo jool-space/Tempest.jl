@@ -10,13 +10,13 @@ end
 evaluate_term(t::Lit, x, k, buffers, stats, graph) = t.value
 evaluate_term(t::Ix{T}, x, k, buffers, stats, graph) where {T} =
     T(evaluate_index(t.expr, x, (v, i) -> buffers[v][(i .+ 1)...]))
-# A fold's value at the domain index `x`, its reduced axes at zero.
+# A fold's value at the domain index `x`: at the axes it keeps.
 function evaluate_term(t::Stat, x, k, buffers, stats, graph)
     s = stats[t.value]
     s isa Number && return s
     d = graph.values[t.value].definition
     axes = d isa Reduction ? d.reduced : ()
-    s[ntuple(i -> i in axes ? 1 : x[i] + 1, length(x))...]
+    s[(x[i] + 1 for i in eachindex(x) if !(i in axes))...]
 end
 evaluate_term(t::Apply, x, k, buffers, stats, graph) =
     convert(t.eltype, t.f(map(a -> evaluate_term(a, x, k, buffers, stats, graph), t.args)...))
@@ -129,7 +129,7 @@ function execute(p::Plan, inputs...)
     buffers = Vector{Any}(undef, length(graph.values))
     for (id, v) in enumerate(graph.values)
         d = v.definition
-        d isa Input && (buffers[id] = arguments[d.argument])
+        d isa Input && (buffers[id] = shaped(arguments[d.argument], v))
         d isa ConstantArray && (buffers[id] = d.data)
     end
     foreach(g -> run_group!(g, buffers, graph), p.groups)

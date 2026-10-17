@@ -222,8 +222,7 @@ function fold_kernel(graph, g::Group, slots, r)
         $loop
     end))
     foreach(k -> push!(s, :($(vars[k]) = 0)), reduced)
-    index = val.scalar ? () : identity_index(ntuple(k -> k in d.reduced ? 1 : D[k], length(D)))
-    push!(s, store_expr(c, r, index, :(convert($(val.eltype), $fold_observe($fold, state)))))
+    push!(s, store_expr(c, r, placement(graph, g, r), :(convert($(val.eltype), $fold_observe($fold, state)))))
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 

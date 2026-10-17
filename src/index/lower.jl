@@ -23,6 +23,38 @@ end
 # the canonical form of its only index.
 identity_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
 
+# A value ranges over the axes of its node wider than one, so programs that
+# differ by axes of extent one have the same values; the node reads its value
+# at the variables of those axes.
+wide_axes(dims) = Tuple(k for k in eachindex(dims) if dims[k] != 1)
+wide_index(dims) = map(var, wide_axes(dims))
+
+# Expressions over a shape as expressions over its axes `keep`: each kept axis
+# its variable among them, any other (of extent one) zero; and their domain.
+function narrowing(dims, keep)
+    index = ntuple(k -> (j = findfirst(==(k), keep)) === nothing ? constant(0) : var(j), length(dims))
+    (index, Domain(map(k -> dims[k], keep)))
+end
+
+narrow(o::Read, (index, d)) = Read(o.value, map(e -> substitute(e, index, d), o.index))
+narrow(o::Literal, _) = o
+narrow(o::IndexOperand{T}, (index, d)) where {T} = IndexOperand(substitute(o.expr, index, d), T)
+
+# A definition over a node of shape `dims` as one over its value's domain. An
+# opaque operation reads its operands in their own shapes.
+narrow(d::Union{Input, Opaque}, dims) = d
+narrow(d::ConstantArray, dims) = ConstantArray(reshape(d.data, map(k -> dims[k], wide_axes(dims))))
+narrow(d::Pointwise, dims) = (n = narrowing(dims, wide_axes(dims)); Pointwise(d.f, map(o -> narrow(o, n), d.operands)))
+
+# A fold ranges over the axes of its iteration wider than one, and over its
+# reduced axes even of extent one when all of them are.
+function narrow(d::Reduction, dims)
+    s = d.iteration
+    keep = all(k -> s[k] == 1, d.reduced) ? Tuple(k for k in eachindex(s) if s[k] != 1 || k in d.reduced) : wide_axes(s)
+    n = narrowing(s, keep)
+    Reduction(d.fold, narrow(d.operand, n), n[2].extents, Tuple(j for (j, k) in enumerate(keep) if k in d.reduced))
+end
+
 # Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
 # broadcasts: axes of extent one, and missing trailing axes, read index zero.
 broadcast_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
@@ -110,14 +142,13 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
         r = read(access, ls)
         A === n.eltype && return r
         cast = value!(Pointwise(Cast{A}(), (r,)), iteration, A)
-        Read(cast.value, identity_index(iteration))
+        Read(cast.value, cast.index)
     end
     product = value!(Pointwise(*, (factor(inputs[1], op.a), factor(inputs[2], op.b))), iteration, A)
     reduced = Tuple((length(op.out) + 1):length(labels))
     kept = ntuple(k -> k in reduced ? 1 : iteration[k], length(iteration))
-    sum = value!(Reduction(SumFold(), Read(product.value, identity_index(iteration)), iteration, reduced), kept, n.eltype)
-    out = identity_index(n.dims)
-    ValueAccess(sum.value, ntuple(k -> k in reduced ? constant(0) : out[k], length(iteration)))
+    # The result's axes come first, so its value is read at the same variables.
+    value!(Reduction(SumFold(), Read(product.value, product.index), iteration, reduced), kept, n.eltype)
 end
 
 """
@@ -142,16 +173,14 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
             length(values)
         end
     end
-    function value!(definition, n)
-        push!(values, Value(definition, n.dims, n.eltype, n.scalar))
-        ValueAccess(length(values), identity_index(n.dims))
+    # A value defined over a node's shape, over the node's wide axes instead.
+    function value!(definition, dims, T; scalar = false)
+        push!(values, Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar))
+        ValueAccess(length(values), wide_index(dims))
     end
-    function value!(definition, dims, T)
-        push!(values, Value(definition, dims, T, false))
-        ValueAccess(length(values), identity_index(dims))
-    end
+    value!(definition, n::Node) = value!(definition, n.dims, n.eltype; scalar = n.scalar)
     # Materialized call operands, one per node, shared by every call reading it.
-    copies = Dict{Int, Int}()
+    copies = Dict{Int, ValueAccess}()
     arguments = Int[]
     for (id, n) in enumerate(nodes)
         if n.op isa Argument
@@ -187,15 +216,13 @@ function lower(p::Program; keep_call = (n, nodes) -> false, epilogue = (n, nodes
             # shapes; anything else (a layout, a constant) is materialized.
             reads = map(inputs, n.inputs) do a, i
                 dims = nodes[i].dims
-                if a isa ValueAccess && a.index == identity_index(dims) && values[a.value].dims == dims &&
-                   values[a.value].scalar == nodes[i].scalar
-                    return Read(a.value, identity_index(dims))
+                if a isa ValueAccess && values[a.value].scalar == nodes[i].scalar && reads_storage(values[a.value], a.index, dims)
+                    return Read(a.value, a.index)
                 end
                 copy = get!(copies, i) do
-                    push!(values, Value(Pointwise(identity, (operand(a, dims, Domain(dims)),)), dims, nodes[i].eltype, nodes[i].scalar))
-                    length(values)
+                    value!(Pointwise(identity, (operand(a, dims, Domain(dims)),)), nodes[i])
                 end
-                Read(copy, identity_index(dims))
+                Read(copy.value, copy.index)
             end
             shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
             value!(Opaque(n, reads, shapes, epilogue(n, nodes)), n)

@@ -312,6 +312,13 @@ if CUDACore.functional()
         ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
         @test all(d -> !(d isa T.FloorKernels), ex.kernels)
         @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+        # A residual is part of the one kernel, also with a key head per query
+        # head, where the reference groups heads along an axis of extent one.
+        x = single(data(16, 2, 70, 2; scale = 0.5))
+        p = trace((q, k, v, x) -> T.attention(q, k, v; causal = true) .+ x, q, k, v, x)
+        ex = prepare(p, map(CuArray, (q, k, v, x))...; target = T.CUDATarget(cuTile))
+        @test length(ex.kernels) == 1 && !(only(ex.kernels) isa T.FloorKernels)
+        @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
     end
 end
 

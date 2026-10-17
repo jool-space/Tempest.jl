@@ -45,18 +45,21 @@ struct Plan
     owner::Vector{Int}
 end
 
-# Where a group keeps a value it computes: at the domain's index with each axis
-# the value lacks (extent one) at zero. A fold lacks its reduced axes.
+# Where a group keeps a value it computes, as the value's index over the
+# domain: a fold of the group at the variables of the axes it keeps, any other
+# value over the whole domain or at the positions of the primary folds; or
+# nothing.
 function placement(graph, g::Group, v)
     val = graph.values[v]
-    (val.scalar || isempty(val.dims)) && return ()
-    # A value with fewer axes than the domain has the missing trailing ones at
-    # extent one, as a product's value lacks its summed axes.
-    n = length(val.dims)
-    n <= length(g.domain) || return nothing
-    padded = ntuple(k -> k <= n ? val.dims[k] : 1, length(g.domain))
-    all(k -> padded[k] == g.domain[k] || padded[k] == 1, eachindex(padded)) || return nothing
-    identity_index(padded)[1:n]
+    axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
+    kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
+    map(k -> g.domain[k], kept) == val.dims ? map(var, kept) : nothing
+end
+
+"The iteration index of fold `d` read at `index`, its value's index, with `inner[j]` along its `j`th reduced axis."
+iteration_index(d::Reduction, index, inner) = ntuple(length(d.iteration)) do k
+    j = findfirst(==(k), d.reduced)
+    j === nothing ? index[k - count(<(k), d.reduced)] : inner[j]
 end
 
 struct OutsideGroup <: Exception end
@@ -98,10 +101,7 @@ function fold_term(graph, stored, g, v, index, domain)
     d = graph.values[v].definition
     base = length(domain)
     extents = Tuple(d.iteration[k] for k in d.reduced)
-    iteration = ntuple(length(d.iteration)) do k
-        j = findfirst(==(k), d.reduced)
-        j === nothing ? index[k] : var(base + j)
-    end
+    iteration = iteration_index(d, index, ntuple(j -> var(base + j), length(d.reduced)))
     extended = Domain((domain.extents..., extents...))
     Fold(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended))
 end
@@ -136,12 +136,9 @@ end
 # already load it.
 function try_add!(graph, stored, up, g::Group, v; fold)
     val = graph.values[v]
+    # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    # An output covers the domain, or the positions of the primary folds
-    # (missing trailing axes read as extent one).
-    padded = ntuple(k -> get(val.dims, k, 1), length(g.domain))
-    fold || padded == g.domain || padded == kept_dims(g.domain, primary_axes(graph, g)) || return false
     any(m -> any(l -> l.value == v, loads(g.terms[m])), members(g)) && return false
     candidate = Group(g.kind, g.domain, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase), copy(g.epilogues))
     fold || push!(candidate.outputs, v)
@@ -406,7 +403,7 @@ end
 
 # An epilogue: the chain of pointwise values after an opaque result, each read
 # only by the next, over the result's domain, whose other reads align with the
-# result's tile (the same index, or zero along an axis of extent one).
+# result's tile (see `aligned_axes`).
 # Limits: pointwise work only, aligned reads only, no positions; the last value
 # of the chain is written in the result's place.
 function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
@@ -441,19 +438,27 @@ function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
     foreach(c -> owner[c] = k, chain)
 end
 
-function aligned(graph, t, D)
-    whole = identity_index(D)
-    for s in subterms((t,))
-        s isa Union{Ix, Fold} && return false
-        s isa Load || continue
-        Dv = graph.values[s.value].dims
-        length(s.index) == length(Dv) <= length(D) || return false
-        for k in eachindex(Dv)
-            e = s.index[k]
-            (Dv[k] == D[k] && e == whole[k]) || (Dv[k] == 1 && e == constant(0)) || return false
-        end
+aligned(graph, t, D) =
+    all(s -> !(s isa Union{Ix, Fold}) && !(s isa Load && aligned_axes(graph, s, D) === nothing), subterms((t,)))
+
+"""
+    aligned_axes(graph, load, domain) -> axes or nothing
+
+The axes of `domain` along which a load reads, one per axis of the loaded
+value, when each axis of the value is read at one variable of the domain of
+the same extent, in the domain's order: the value is the domain's tile with
+the other axes broadcast.
+"""
+function aligned_axes(graph, s::Load, D)
+    dims = graph.values[s.value].dims
+    axes = Int[]
+    for (k, e) in enumerate(s.index)
+        e.constant == 0 && length(e.terms) == 1 && e.terms[1].first isa Var && e.terms[1].second == 1 || return nothing
+        n = e.terms[1].first.n
+        D[n] == dims[k] && (isempty(axes) || n > last(axes)) || return nothing
+        push!(axes, n)
     end
-    true
+    axes
 end
 
 # Every result becomes a value read whole, so results are buffers: a result
@@ -463,30 +468,13 @@ function with_stored_results(graph::IndexGraph)
     results = copy(graph.results)
     for (k, r) in enumerate(results)
         dims = graph.result_dims[k]
-        if r isa Read && r.index == identity_index(dims) && values[r.value].dims == dims &&
-           values[r.value].scalar == graph.result_scalar[k]
-            continue
-        end
-        # A reshape of a value's dense storage presents that storage as it is.
-        if r isa Read && !graph.result_scalar[k] && !values[r.value].scalar &&
-           prod(values[r.value].dims; init = 1) == prod(dims; init = 1) &&
-           dense_address(values[r.value].dims, r.index, Domain(dims)) == dense_address(dims, identity_index(dims), Domain(dims))
-            continue
-        end
-        push!(values, Value(Pointwise(identity, (r,)), dims, graph.result_eltype[k], graph.result_scalar[k]))
-        results[k] = Read(length(values), identity_index(dims))
+        # A value read whole, or a reshape of it, presents its storage as it is.
+        r isa Read && values[r.value].scalar == graph.result_scalar[k] && reads_storage(values[r.value], r.index, dims) && continue
+        push!(values, Value(narrow(Pointwise(identity, (r,)), dims), map(k -> dims[k], wide_axes(dims)),
+            graph.result_eltype[k], graph.result_scalar[k]))
+        results[k] = Read(length(values), wide_index(dims))
     end
     IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype)
-end
-
-function dense_address(dims, index, d::Domain)
-    total = constant(0)
-    stride = 1
-    for (e, n) in zip(index, dims)
-        total = add(total, scale(e, stride), d)
-        stride *= n
-    end
-    total
 end
 
 # The values a group reads from storage, its own excepted.
