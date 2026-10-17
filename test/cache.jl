@@ -82,6 +82,11 @@ end
     withenv(() -> @test_throws(ArgumentError, T.kernel_cache_limit()), "TEMPEST_KERNEL_CACHE_LIMIT" => "lots")
 end
 
+# What Tempest compiles while it precompiles, which development sessions skip.
+@testset "the precompile workload" begin
+    @test T.workload() === nothing
+end
+
 using CUDACore, cuTile
 if CUDACore.functional()
     @testset "kernel cache" begin
