@@ -6,7 +6,7 @@ module Tempest
 
 using LinearAlgebra
 
-export trace, differentiate, interpret, explain, prepare, bind!, execute!, outputs, @operation
+export trace, differentiate, interpret, explain, prepare, bind!, execute!, capture!, outputs, @operation
 
 # The program level.
 include("program/program.jl")
@@ -33,6 +33,7 @@ include("plan/rewrites.jl")
 include("plan/products.jl")
 include("plan/cpu.jl")
 include("plan/explain.jl")
+include("plan/storage.jl")
 
 # Code generation and prepared programs.
 include("codegen/scalar.jl")

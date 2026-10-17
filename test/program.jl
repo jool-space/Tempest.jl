@@ -39,3 +39,24 @@ end
     @test any(n -> n.op isa T.Map && n.op.f === leaky, trace(x -> leaky.(x), data(3)).nodes)
     @test !any(n -> n.op isa T.Map && n.op.f === swish, trace(x -> swish.(x), data(3)).nodes)
 end
+
+# A gradient in traced code is the differentiated program inlined where it is
+# called; what the function closes over is a constant to it, and an argument
+# passed twice gets a gradient for each place.
+@testset "gradients in traced code" begin
+    same(a, b) = a === nothing ? b === nothing : isapprox(a, b; rtol = 1.0e-12)
+    @testset "$name" for (name, f, args) in PROGRAMS
+        expected = T.leaves(interpret(differentiate(trace(f, args...)), args...))
+        @test all(map(same, expected, T.leaves(interpret(trace((xs...) -> T.gradient(f, xs...), args...), args...))))
+        @test all(map(same, expected, T.leaves(T.gradient(f, args...))))
+    end
+    x, y = data(8, 6), data(8, 6; scale = 0.3)
+    loss, dx = interpret(trace((x, y) -> T.gradient(a -> sum(a .* y .* x), x), x, y), x, y)
+    @test loss ≈ sum(x .* y .* x) && dx ≈ y .* x
+    loss, da, db = interpret(trace(x -> T.gradient((a, b) -> sum(a .* b .* b), x, x), x), x)
+    @test da ≈ x .* x && db ≈ 2 .* x .* x
+    # Structured arguments, and Julia arrays among them.
+    w, b = data(8, 8; scale = 0.2), data(8)
+    loss, g = interpret(trace((w, x) -> T.gradient(q -> sum(abs2, q.w * x .+ q.b), (; w, b)), w, x), w, x)
+    @test g.w ≈ 2 .* (w * x .+ b) * x' && g.b ≈ vec(sum(2 .* (w * x .+ b); dims = 2))
+end

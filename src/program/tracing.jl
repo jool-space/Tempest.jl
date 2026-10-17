@@ -423,6 +423,7 @@ axis_positions(x::AbstractArray, axis::Integer) =
 
 Run `f` on stand-ins for `args` and record what it computes. Arrays and numbers
 among `args`, also inside tuples and named tuples, become the program's inputs.
+Among the results, `nothing` stays `nothing`.
 """
 function trace(f, args...)
     tape = Tape()
@@ -445,6 +446,8 @@ function trace(f, args...)
     output = f(traced...)
     results = Int[]
     output_structure = rebuild(output) do leaf
+        # As a gradient has for an integer argument.
+        leaf === nothing && return nothing
         id = if leaf isa Union{Traced, TracedArray}
             leaf.tape === tape || throw(ArgumentError("a result was traced by another program"))
             leaf.id

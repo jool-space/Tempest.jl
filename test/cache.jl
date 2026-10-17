@@ -142,15 +142,21 @@ if CUDACore.functional()
             previous === nothing ? delete!(ENV, "TEMPEST_KERNEL_CACHE") : (ENV["TEMPEST_KERNEL_CACHE"] = previous)
         end
 
-        # A process that captured launches into a graph exits cleanly: modules
-        # are made on the calling thread, so the graph is destroyed first.
+        # Captured graphs are destroyed before the modules they launch are
+        # unloaded: graphs that outlive their programs and are collected
+        # after them, and a graph alive when the process exits.
         script = """
             using Tempest, CUDACore, cuTile
             x = CUDACore.CuArray(Float32.(reshape(1:4096, 64, 64)))
-            ex = prepare(trace(x -> sum(abs2, x * x; dims = 1), x), x; target = Tempest.CUDATarget(precision = :tf32))
-            execute!(ex)
-            graph = CUDACore.instantiate(CUDACore.capture(() -> foreach(l -> l(), ex.launches)))
-            CUDACore.launch(graph)
+            p = trace(x -> sum(abs2, x * x; dims = 1), x)
+            captured() = (ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32)); execute!(capture!(ex)); ex.captured)
+            graphs = [captured() for _ in 1:3]
+            CUDACore.synchronize()
+            foreach(_ -> GC.gc(true), 1:3)
+            graphs = nothing
+            foreach(_ -> GC.gc(true), 1:3)
+            ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32))
+            execute!(capture!(ex))
             CUDACore.synchronize()
             """
         @test success(pipeline(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`; stderr = devnull))

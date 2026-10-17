@@ -9,6 +9,7 @@ import Tempest: CUDATarget, Plan, Group
 Tempest.target_for(::CuArray) = CUDATarget()
 Tempest.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
 Tempest.upload(::CUDATarget, x) = CuArray(x)
+Tempest.bindable(::CUDATarget, x) = x isa CuArray
 
 function Tempest.task_state(::CUDATarget)
     context, stream = CUDACore.context(), CUDACore.stream()
@@ -39,21 +40,44 @@ end
 
 Tempest.measurable(::CUDATarget) = true
 
+# A captured graph. The driver crashes destroying a graph whose kernels'
+# modules were unloaded first, and objects that die in one collection are
+# finalized in no order we choose: so what a graph launches stays alive in
+# `GRAPHS` until the graph's own finalizer has destroyed it, and graphs alive
+# at exit are destroyed before finalizers run.
+mutable struct Graph
+    exec::CUDACore.CuGraphExec
+end
+
+const GRAPHS = WeakKeyDict{Graph, Any}()
+
+function Tempest.capture(::CUDATarget, run, keep)
+    graph = CUDACore.capture(run)
+    exec = CUDACore.instantiate(graph)
+    # The executable graph does not need the graph it was made from.
+    finalize(graph)
+    g = finalizer(g -> finalize(g.exec), Graph(exec))
+    GRAPHS[g] = keep
+    g
+end
+
+Tempest.replay(::CUDATarget, g::Graph) = CUDACore.launch(g.exec)
+Tempest.release(::CUDATarget, g::Graph) = finalize(g)
+
+__init__() = atexit(() -> foreach(finalize, collect(keys(GRAPHS))))
+
 # Device seconds of one launch: the minimum over samples of a captured graph
 # of about a millisecond of launches.
-function Tempest.time_launch(::CUDATarget, launch; samples = 5, milliseconds = 1.0)
+function Tempest.time_launch(target::CUDATarget, launch; samples = 5, milliseconds = 1.0)
     launch()
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / max(once, 1.0e-6)), 1, 100)
-    graph = CUDACore.capture() do
-        for _ in 1:repetitions
-            launch()
-        end
-    end
-    exec = CUDACore.instantiate(graph)
-    CUDACore.launch(exec)
-    minimum(_ -> CUDACore.@elapsed(CUDACore.launch(exec)), 1:samples) / repetitions
+    g = Tempest.capture(target, () -> foreach(_ -> launch(), 1:repetitions), launch)
+    Tempest.replay(target, g)
+    t = minimum(_ -> CUDACore.@elapsed(Tempest.replay(target, g)), 1:samples) / repetitions
+    Tempest.release(target, g)
+    t
 end
 
 Tempest.build_floor(::CUDATarget, p::Plan, g::Group, buffers) = floor(p, g, buffers)

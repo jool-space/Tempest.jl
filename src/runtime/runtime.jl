@@ -65,6 +65,17 @@ function build_claim end
 recomputes_folds(::Implementation, target) = false
 
 """
+    in_place(implementation, claim) -> Bool
+
+Whether the kernels of `claim` read every element that the outputs of one
+shape need before they write any of them, so that an output may be written
+into the storage of a value they read only at the address they write it (see
+`storage`). The floor's kernels do, and so do the generator's.
+"""
+in_place(::Implementation, claim) = false
+in_place(::cuTileGenerator, claim) = true
+
+"""
     claims_call(implementation, target, f, kwargs, inputs) -> Bool
 
 Whether `implementation` realizes calls of the operation `f` with these
@@ -134,56 +145,169 @@ implementations(target) = Implementation[i for (m, is) in REGISTERED if m in use
 """
     Executable
 
-A program prepared for a target: its plan, one buffer per stored value, and a
-launch per kernel. Inputs are copied into owned buffers by `bind!`; `outputs`
-returns the result buffers, which the next execution overwrites.
+A program prepared for a target: its plan, its storage, and a launch per
+kernel. Each stored value has a buffer: inputs, constants and results their
+own, other values a view of their slot, and a result that replaces an argument
+the argument's. `bind!` copies inputs into the buffers the executable owns;
+`outputs` returns the result buffers, which the next execution overwrites.
 """
-struct Executable{T <: Target}
+mutable struct Executable{T <: Target}
     program::Program
     plan::Plan
     target::T
     packages::Vector{Module}
+    storage::Storage
+    slots::Vector{Any}
     buffers::Vector{Any}
+    # Per argument of the program: its buffer, and the caller's array when it
+    # is bound by reference.
+    arguments::Vector{Any}
+    referenced::Vector{Any}
+    # Per result: an array over its buffer, or over the argument's it replaces.
+    results::Vector{Any}
     launches::Vector{Any}
     kernels::Vector{Any}
     decisions::Vector{Any}
     considered::Vector{Any}
+    # Copies of staged results into the arguments they replace, after the kernels.
+    copies::Vector{Any}
+    # The graph `execute!` replays, once captured (see `capture!`).
+    captured::Any
 end
 
 storage_length(v::Value) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
 
 """
-    prepare(program, inputs...; target, measure = true) -> Executable
+    prepare(program, inputs...; target, measure = true, replaces = (), by_reference = ()) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
 claims are timed when `measure` allows and the target can, and kept in the
 tuning record.
+
+`replaces` declares state, as pairs `result => argument` of positions among the
+program's results and its arguments, alike in structure, shapes and types:
+`(2 => 1, 3 => 2)` for a step `(params, state, batch) -> (loss, params, state)`.
+After each execution the argument holds the result, as if bound again, so the
+next execution reads it where it is. A result is written into the argument's
+storage when the kernel that writes it reads the argument only at the address
+it writes, and the kernels that read the argument otherwise can run first;
+else it is written apart and copied there after the last kernel. `explain`
+says which.
+
+Inputs are copied into storage the executable owns, except the arrays at the
+positions in `by_reference`, which must be of the target's array type: they
+are the executable's storage. The caller keeps them alive and may write them
+between executions, and a result that replaces one writes into it.
 """
-function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true)
+function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true,
+        replaces = (), by_reference = ())
     graph = lower(program)
     permits_rewrites(target) && (graph = rewrite(graph))
     d = Decider(target, graph; measure)
     p, considered = cover(d)
     ds = decisions(d, p)
-    buffers = d.buffers
-    n = length(p.graph.values)
-    length(buffers) < n && append!(buffers, fill(nothing, n - length(buffers)))
-    for (id, v) in enumerate(p.graph.values)
+    pairs = replacements(program, replaces)
+    values = p.graph.values
+    input = Dict(v.definition.argument => id for (id, v) in enumerate(values) if v.definition isa Input)
+    result_value(k) = p.graph.results[k].value
+    # A result that is an argument's storage would change as another result replaces it.
+    for k in eachindex(p.graph.results), (r, a) in pairs
+        k != r && result_value(k) == input[a] && throw(ArgumentError("result $k is argument $a, which result $r replaces"))
+    end
+    writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || in_place(o.implementation, o.claim), x.options)
+    p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
+    ds = ds[order]
+    slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
+    referenced = Vector{Any}(nothing, length(program.arguments))
+    xs = argument_leaves(program, inputs)
+    for j in by_reference, k in leaves(program.input_structure[j])
+        k === nothing || xs[k] isa Number || (referenced[k] = xs[k])
+    end
+    buffers = Vector{Any}(nothing, length(values))
+    for (id, v) in enumerate(values)
         def = v.definition
         if def isa ConstantArray
+            # Uploaded already if a claim was measured.
+            buffers[id] = get(d.buffers, id, nothing)
             buffers[id] === nothing && (buffers[id] = upload(target, vec(collect(def.data))))
+        elseif def isa Input && referenced[def.argument] !== nothing
+            x = referenced[def.argument]
+            bindable(target, x) && eltype(x) === v.eltype && length(x) == storage_length(v) ||
+                throw(ArgumentError("input $(def.argument) is bound by reference, but $(typeof(x)) is not storage on $target"))
+            buffers[id] = vec(x)
+        elseif s.slots[id] > 0
+            buffers[id] = slot_view(slots[s.slots[id]], v.eltype, storage_length(v))
         elseif p.stored[id]
-            buffers[id] === nothing && (buffers[id] = allocate(target, v.eltype, storage_length(v)))
-        else
-            buffers[id] = nothing # stored only in a plan not taken
+            buffers[id] = allocate(target, v.eltype, storage_length(v))
         end
     end
+    foreach(((r, a),) -> buffers[r] = buffers[a], s.donated)
+    arguments = Any[get(buffers, get(input, k, 0), nothing) for k in eachindex(program.arguments)]
+    replaced = Dict(pairs)
+    results = Any[reshape(haskey(replaced, k) ? arguments[replaced[k]] : buffers[result_value(k)],
+        p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
-    ex = Executable(program, p, target, used_packages(target), buffers, Any[first(b) for b in built],
-        Any[last(b) for b in built], Any[ds...], Any[considered...])
+    copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
+    ex = Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results,
+        Any[first(b) for b in built], Any[last(b) for b in built], Any[ds...], Any[considered...], copies, nothing)
     bind!(ex, inputs...)
     ex
+end
+
+"A value of `n` elements of type `T` in the first bytes of a slot."
+slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
+
+"Whether array `x` can be storage on `target`, bound by reference."
+bindable(::Target, x) = false
+bindable(::CPUTarget, x) = x isa Array
+
+# Each argument of the program among `inputs`, in the structure it was traced with.
+function argument_leaves(program, inputs)
+    positions = leaves(program.input_structure)
+    xs = leaves(inputs)
+    length(positions) == length(xs) || throw(ArgumentError("the program takes $(length(positions)) inputs, got $(length(xs))"))
+    out = Vector{Any}(nothing, length(program.arguments))
+    foreach((k, x) -> k === nothing || (out[k] = x), positions, xs)
+    out
+end
+
+# The results that replace arguments: pairs of a result's position among the
+# program's results and the argument's among its arguments, leaf by leaf.
+function replacements(program, replaces)
+    pairs = Pair{Int, Int}[]
+    for (k, j) in (replaces isa Pair ? (replaces,) : replaces)
+        out, in = program.output_structure[k], program.input_structure[j]
+        rebuild(Returns(nothing), out) == rebuild(Returns(nothing), in) ||
+            throw(ArgumentError("result $k cannot replace argument $j, whose structure differs"))
+        for (r, a) in zip(leaves(out), leaves(in))
+            (r === nothing) == (a === nothing) ||
+                throw(ArgumentError("result $k cannot replace argument $j: one has an array or a number where the other has none"))
+            r === nothing && continue
+            x, y = program.nodes[program.results[r]], program.nodes[program.arguments[a]]
+            (x.dims, x.eltype, x.scalar) == (y.dims, y.eltype, y.scalar) ||
+                throw(ArgumentError("result $k cannot replace argument $j: $(x.eltype)$(x.dims) in place of $(y.eltype)$(y.dims)"))
+            push!(pairs, r => a)
+        end
+    end
+    allunique(first.(pairs)) && allunique(last.(pairs)) ||
+        throw(ArgumentError("each result replaces one argument, and each argument is replaced once"))
+    pairs
+end
+
+"""
+    Tempest.footprint(ex) -> (; bytes, apart)
+
+The bytes of a prepared program's buffers (inputs, constants, results and
+slots), and what they would be with each value stored apart instead of in
+slots.
+"""
+function footprint(ex::Executable)
+    graph, s = ex.plan.graph, ex.storage
+    own = sum(v -> s.slots[v] == 0 && ex.buffers[v] !== nothing ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
+    own -= sum(((r, a),) -> value_bytes(graph.values[r]), s.donated; init = 0)
+    apart = sum(v -> s.slots[v] > 0 ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
+    (bytes = own + sum(s.sizes; init = 0), apart = own + apart)
 end
 
 """
@@ -225,23 +349,84 @@ function fetch_result(t::Task)
     end
 end
 
-"Copy `inputs` into the executable's input buffers."
+"""
+    bind!(ex, inputs...)
+    bind!(ex, position => input, ...)
+
+Copy inputs into the executable's input buffers: all of them, in the
+structure `prepare` took them, or those at the positions given, as a new
+batch while parameters stay where the last execution left them. An array
+bound by reference and bound again is not copied.
+"""
 function bind!(ex::Executable, @nospecialize(inputs...))
-    arguments = leaves(inputs)
-    for (id, v) in enumerate(ex.plan.graph.values)
-        d = v.definition
-        d isa Input || continue
-        x = arguments[d.argument]
-        copyto!(ex.buffers[id], x isa Number ? [x] : vec(x))
+    bind_leaves!(ex, leaves(ex.program.input_structure), leaves(inputs))
+end
+
+function bind!(ex::Executable, bindings::Pair{<:Integer}...)
+    foreach(((j, x),) -> bind_leaves!(ex, leaves(ex.program.input_structure[j]), leaves(x)), bindings)
+    ex
+end
+
+function bind_leaves!(ex, positions, xs)
+    length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
+    for (k, x) in zip(positions, xs)
+        k === nothing || x === ex.referenced[k] || copyto!(ex.arguments[k], x isa Number ? [x] : vec(x))
     end
     ex
 end
 
-"Run every kernel in order."
+"""
+    execute!(ex) -> results
+
+Run the program: replay its captured graph, or else run every kernel in
+order, then copy staged results into the arguments they replace.
+"""
 function execute!(ex::Executable)
-    foreach(launch -> launch(), ex.launches)
+    ex.captured === nothing ? run_once(ex) : replay(ex.target, ex.captured)
     outputs(ex)
 end
+
+function run_once(ex::Executable)
+    foreach(launch -> launch(), ex.launches)
+    foreach(copy -> copy(), ex.copies)
+end
+
+"""
+    capture!(ex; repetitions = 1) -> ex
+
+Capture the program's launches as one graph, which `execute!` replays from
+then on, each replay `repetitions` executions of the program (for timing).
+What varies between replays lives in device buffers: inputs bound by copy or
+by reference, scalars and seeds among them, are read where they are, so they
+need no new capture. Capturing again replaces the graph. A program with work
+on the host cannot be captured; on a target without graphs, replaying runs
+the kernels.
+"""
+function capture!(ex::Executable; repetitions::Integer = 1)
+    k = findfirst(isnothing, ex.decisions)
+    k === nothing || throw(ArgumentError("kernel $k runs on the host, so the program cannot be captured"))
+    ex.captured === nothing || release(ex.target, ex.captured)
+    ex.captured = nothing
+    launches, copies = ex.launches, ex.copies
+    run() = for _ in 1:repetitions
+        foreach(launch -> launch(), launches)
+        foreach(copy -> copy(), copies)
+    end
+    ex.captured = capture(ex.target, run, (launches, copies))
+    ex
+end
+
+"""
+    capture(target, run, keep) -> graph
+
+`run`, which launches work on `target`, captured as a graph for `replay(target,
+graph)` to launch again. The graph keeps `keep`, what it launches, alive until
+`release(target, graph)` or the collector destroys it. A target without graphs
+replays `run` itself.
+"""
+capture(::Target, run, keep) = run
+replay(::Target, run) = run()
+release(::Target, graph) = nothing
 
 function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
@@ -250,6 +435,7 @@ function explain(io::IO, ex::Executable)
         "; half-precision products accumulate in Float32",
         ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
     foreach(c -> explain(io, ex.plan, c), ex.considered)
+    explain(io, ex.plan, ex.storage)
     println(io, "implementations from ", isempty(ex.packages) ? "no package" : join(map(string ∘ nameof, ex.packages), ", "),
         ", and the floor:")
     for (k, d) in enumerate(ex.kernels)
@@ -261,14 +447,7 @@ end
 explain(ex::Executable) = explain(stdout, ex)
 
 "The results, in the program's output structure, as arrays over the buffers."
-function outputs(ex::Executable)
-    graph = ex.plan.graph
-    rebuild(ex.program.output_structure) do k
-        k === nothing && return nothing
-        r = graph.results[k]
-        reshape(ex.buffers[r.value], graph.result_scalar[k] ? () : graph.result_dims[k])
-    end
-end
+outputs(ex::Executable) = rebuild(k -> k === nothing ? nothing : ex.results[k], ex.program.output_structure)
 
 # The CPU target.
 allocate(::CPUTarget, T, n) = Vector{T}(undef, n)
