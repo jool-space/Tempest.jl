@@ -68,6 +68,18 @@ end
     @test occursin("online softmax", sprint(explain, planned))
 end
 
+# A map read by a fold and by a later map over its domain is recomputed in
+# their kernel, as when it is written twice.
+@testset "a map one kernel reads" begin
+    x = data(8, 6)
+    for f in (x -> (e = exp.(x); e ./ sum(e; dims = 1)), x -> exp.(x) ./ sum(exp.(x); dims = 1))
+        p = trace(f, x)
+        planned = T.plan(T.lower(p))
+        @test length(planned.groups) == 1
+        @test agree(T.execute(planned, x), [interpret(p, x)])
+    end
+end
+
 # A kernel is maps and folds over one domain, each fold over its own axes: the
 # loss and a weight gradient join the normalization's kernel, and the values
 # only they read are never stored.
