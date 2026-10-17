@@ -1,11 +1,10 @@
 # The launches of a schedule, and building them on device buffers.
 
 function pointwise_kernel(c::Context)
-    (ta, tb), (a, b) = tile(c), extent(c.s)
-    k = TileKernel("pointwise", (cld(a, ta), cld(b, tb)), c.s.occupancy)
-    push!(k.body, :(ia = $(ct.bid)(1)), :(ib = $(ct.bid)(2)))
-    names = emit_tiles!(k, k.body, c, [c.g.terms[m] for m in c.g.outputs], Dict{Term, Any}(), :ia, :ib)
-    store_outputs!(k, k.body, c, c.g.outputs, names, :ia, :ib)
+    k = TileKernel("pointwise", (), c.s.occupancy)
+    indices, k.grid, _, _ = block_indices!(k.body, c)
+    names = emit_tiles!(k, k.body, c, [c.g.terms[m] for m in c.g.outputs], Dict{Term, Any}(), indices...)
+    store_outputs!(k, k.body, c, c.g.outputs, names, indices...)
     [k]
 end
 

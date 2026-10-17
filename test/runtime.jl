@@ -336,6 +336,34 @@ if CUDACore.functional()
     end
 end
 
+# Folds and broadcasts over part of the axes a schedule collapses into one
+# tile axis: a sum over the middle axis of an array, spelled directly and
+# through `permutedims`, and a long one that splits; a positional embedding
+# broadcast over the batch; a table broadcast over heads and batch, as rotary
+# positions read it. The gradient of the embedding and layer norm sums over
+# the batch alone; only its scatter is on the floor.
+const PARTIAL_COLLAPSE = [
+    ("sum over the middle axis", x -> sum(x; dims = 2), (data(8, 64, 6),), false),
+    ("sum over the middle axis, permuted", x -> sum(permutedims(x, (2, 1, 3)); dims = 1), (data(64, 8, 6),), false),
+    ("long sum over the middle axis", x -> sum(abs2, x; dims = 2), (data(40, 3000, 7),), false),
+    ("positional embedding", (E, t, P) -> E[:, t] .+ P, (data(64, 1000; scale = 0.01), reshape(tokens, 80, 3), data(64, 80)), false),
+    ("a table broadcast over heads and batch", (x, c) -> x .* c, (data(32, 4, 64, 16), data(32, 1, 64)), false),
+    ("positional embedding and layer norm, training", (E, t, P, w) -> sum(abs2, layernorm32(E[:, t] .+ P, w)),
+     (data(64, 1000; scale = 0.01), reshape(tokens, 80, 3), data(64, 80; scale = 0.2), data(64; scale = 0.1)), true),
+]
+
+if CUDACore.functional()
+    @testset "folds over part of a collapsed axis on cuTile" begin
+        @testset "$name" for (name, f, args, training) in PARTIAL_COLLAPSE
+            args = map(single, args)
+            p = training ? differentiate(trace(f, args...)) : trace(f, args...)
+            ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+            @test all(k -> (ex.kernels[k] isa T.FloorKernels) == (ex.plan.groups[k].kind === :opaque), eachindex(ex.kernels))
+            @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(p, args...))); rtol = 1.0e-4)
+        end
+    end
+end
+
 # A gather's adjoint scatters on the device, deterministically: each element
 # of the result sums what was selected there in a fixed order, the
 # interpreter's, with repeated indices, two index arrays, and ranges and

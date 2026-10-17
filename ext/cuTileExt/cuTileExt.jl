@@ -85,8 +85,7 @@ function Base.show(io::IO, s::TileSchedule)
         s.splits > 1 && print(io, ", summing split ", s.splits, " ways")
         return
     end
-    e, t = extent(s), tiles(s)
-    print(io, s.sketch, " ", e[1], "×", e[2], ", tile ", t[1], "×", t[2])
+    print(io, s.sketch, " ", join(extent(s), "×"), ", tile ", join(tiles(s), "×"))
     code(s) in (1, 2) && print(io, ", reducing axis ", code(s))
     s.splits > 1 && print(io, ", split ", s.splits, " ways")
     for ax in s.tiling
@@ -96,18 +95,20 @@ function Base.show(io::IO, s::TileSchedule)
 end
 
 # Which axes of the group's domain collapse into A and B, and which one the
-# schedule sweeps: the group's primary axes (those of its first fold).
+# schedule sweeps: the group's primary axes (those of its first fold), one run
+# of axes wherever they lie. A row reduction's kept axes after the swept ones,
+# C, are bound by the grid; nothing when the primary axes are not a run.
 function collapse_axes(graph, g::Group)
     r = length(g.domain)
-    R = collect(Tempest.primary_axes(graph, g))
+    R = sort!(collect(Tempest.primary_axes(graph, g)))
     if g.kind === :pointwise
-        return (1:min(r, 1), 2:r, 0)
+        return (1:min(r, 1), 2:r, 0, 1:0)
     elseif R == collect(1:r)
-        return (1:min(r, 1), 2:r, 3)
+        return (1:min(r, 1), 2:r, 3, 1:0)
     elseif R == collect(1:length(R))
-        return (1:length(R), (length(R) + 1):r, 1)
-    elseif R == collect((r - length(R) + 1):r)
-        return (1:(r - length(R)), (r - length(R) + 1):r, 2)
+        return (1:length(R), (length(R) + 1):r, 1, 1:0)
+    elseif R == collect(first(R):last(R))
+        return (1:(first(R) - 1), R, 2, (last(R) + 1):r)
     end
     nothing
 end
@@ -210,9 +211,90 @@ function split_count(extent, tile_extent, kept)
     min(prevpow(2, reduced), nextpow(2, cld(SPLIT_TARGET_BLOCKS, kept)))
 end
 
-"The default schedule of a group over the collapsed domain `extent`."
-default_schedule(g::Group, A, B, extent, reduced) =
-    (s -> TileSchedule(s.sketch, A, B, extent, reduced, s.tile, s.splits, s.occupancy))(default_tiles(extent, reduced))
+"""
+The default schedule of a group whose domain collapses into A and B, with the
+kept axes C bound by the grid: the tiles of the collapsed domain, A's within
+its own extent.
+"""
+function default_schedule(g::Group, A, B, C, reduced)
+    n(axes) = prod(k -> g.domain[k], axes; init = 1)
+    t = default_tiles((n(A) * n(C), n(B)), reduced)
+    tiling = [TileAxis(collect(A), n(A), min(t.tile[1], nextpow(2, n(A))), reduced in (1, 3)),
+        TileAxis(collect(B), n(B), t.tile[2], reduced in (2, 3))]
+    isempty(C) || push!(tiling, TileAxis(collect(C), n(C), 1, false))
+    TileSchedule(t.sketch, tiling, t.splits, t.occupancy, 0, :full)
+end
+
+# The addresses of the group's views: every load that does not gather, also in
+# the folds it recomputes, and every value it stores.
+function view_addresses(graph, stored, g::Group)
+    found = Affine[]
+    function visit(t, extents)
+        if t isa Load
+            gathers(t) || push!(found, Tempest.address(graph, t.value, t.index, Tempest.Domain(extents)))
+        elseif t isa Apply
+            foreach(a -> visit(a, extents), t.args)
+        elseif t isa Tempest.Fold
+            visit(t.body, (extents..., t.extents...))
+        end
+    end
+    for m in Tempest.members(g)
+        visit(g.terms[m], g.domain)
+        stored[m] && push!(found, Tempest.address(graph, m, Tempest.placement(graph, g, m), Tempest.Domain(g.domain)))
+    end
+    found
+end
+
+"""
+A schedule whose kept tile axes are cut where a view does not chain from one
+axis to the next, or a fold over other axes than the swept ones begins or
+ends. Each kept tile axis keeps its tile on its longest piece, among those
+every view reads affinely; the other pieces are bound by the grid, one index
+per block, where a view's formula is an offset per block. Then a fold over
+part of a collapsed axis, or a value broadcast along part of it, is
+generated.
+"""
+function refined(c)
+    graph, g, s = c.graph, c.g, c.s
+    addresses = view_addresses(graph, c.stored, g)
+    folds = [Tempest.fold_axes(graph, r) for r in partial_folds(c)]
+    tiling = TileAxis[]
+    for ax in s.tiling
+        ax.reduced && (push!(tiling, ax); continue)
+        found, main = pieces(ax.axes, addresses, g.domain, folds)
+        for (i, piece) in enumerate(found)
+            n = prod(k -> g.domain[k], piece; init = 1)
+            push!(tiling, TileAxis(piece, n, i == main ? min(ax.tile, nextpow(2, n)) : 1, false))
+        end
+    end
+    TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
+end
+
+"""
+    pieces(axes, addresses, domain, folds = ()) -> (pieces, main)
+
+A run of axes cut where an address does not chain from one axis to the next,
+or the axes of a fold in `folds` begin or end; and the longest piece every
+address reads affinely, or zero when none does.
+"""
+function pieces(axes, addresses, domain, folds = ())
+    affine(k) = all(e -> Tempest.coefficient(e, k) !== nothing, addresses)
+    chains(k, l) = affine(k) && affine(l) &&
+        all(e -> Tempest.coefficient(e, l) == Tempest.coefficient(e, k) * domain[k], addresses)
+    joined(k, l) = chains(k, l) && all(S -> (k in S) == (l in S), folds)
+    found = Vector{Int}[]
+    for k in axes
+        !isempty(found) && joined(last(last(found)), k) ? push!(last(found), k) : push!(found, [k])
+    end
+    n(piece) = prod(k -> domain[k], piece; init = 1)
+    eligible = [i for (i, piece) in enumerate(found) if all(affine, piece)]
+    (found, isempty(eligible) ? 0 : eligible[argmax(map(i -> n(found[i]), eligible))])
+end
+
+# Whether the generator can load every load of the group under a schedule, and
+# each fold over other axes than the swept ones reduces whole tile axes.
+fits(c) = all(l -> loadable(c, l), (l for m in Tempest.members(c.g) for l in Tempest.loads(c.g.terms[m]))) &&
+    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
 
 function default_tiles(extent, reduced)
     a, b = extent
@@ -272,16 +354,16 @@ function Tempest.claims(::Tempest.cuTileGenerator, target::CUDATarget, p::Plan, 
     product = product_claim(target, p, g)
     product === nothing || return [product]
     expressible(p.graph, p.stored, g) || return Claim[]
-    A, B, reduced = collapse_axes(p.graph, g)
-    extent = (prod(k -> g.domain[k], A; init = 1), prod(k -> g.domain[k], B; init = 1))
-    max(extent...) < typemax(Int32) ÷ 2 || return Claim[]
-    s = default_schedule(g, A, B, extent, reduced)
+    A, B, reduced, C = collapse_axes(p.graph, g)
+    maximum(axes -> prod(k -> g.domain[k], axes; init = 1), (A, B, C)) < typemax(Int32) ÷ 2 || return Claim[]
+    s = default_schedule(g, A, B, C, reduced)
     c = Context(p.graph, p.stored, g, s)
-    for m in Tempest.members(g), l in Tempest.loads(g.terms[m])
-        loadable(c, l) || return Claim[]
+    if !fits(c)
+        s = refined(c)
+        c = Context(p.graph, p.stored, g, s)
+        fits(c) || return Claim[]
     end
     partial = partial_folds(c)
-    any(r -> fold_tiles(c, r) === nothing, partial) && return Claim[]
     # A resident kernel with folds that keep the swept axis covers several kept
     # tiles per block; each such fold reduces every kept axis.
     if s.sketch === :resident && any(r -> !(only(swept(s)) in fold_tiles(c, r)), partial)
