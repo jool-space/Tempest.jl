@@ -40,7 +40,8 @@ end
 
 function product_claim(target, p::Plan, g::Group)
     target isa CUDATarget && g.kind === :reduction || return nothing
-    all(r -> g.phase[r] == 1 && p.graph.values[r].definition.fold isa Tempest.SumFold, g.reductions) || return nothing
+    folds = [p.graph.values[r].definition.fold for r in g.reductions]
+    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{Tempest.SumFold, Tempest.OnlineSoftmax}, folds) || return nothing
     found = Tempest.product_axes(p.graph, g)
     found === nothing && return nothing
     M, N, K, B = found
@@ -48,7 +49,7 @@ function product_claim(target, p::Plan, g::Group)
     m, n, k, b = extent(M), extent(N), extent(K), extent(B)
     max(m, n, k, b) < typemax(Int32) ÷ 2 || return nothing
     factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
-        first(g.terms[first(g.reductions)].args))
+        first(Tempest.product_factors(first(folds), g.terms[first(g.reductions)])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
     recomputing = any(r -> any(s -> s isa Tempest.Fold, Tempest.subterms((g.terms[r],))), g.reductions)
     for collapsed in (true, false)
@@ -61,14 +62,23 @@ function product_claim(target, p::Plan, g::Group)
         append!(tiling, [TileAxis(a, extent(a), 1, false) for a in grid])
         # A grid of few output tiles leaves the device idle: split the summed
         # axis among blocks (split-K), merging the partial sums in a second
-        # launch; not when the sum recomputes a fold, which a split would repeat.
+        # launch; not when the sum recomputes a fold, which a split would
+        # repeat, nor for an online softmax.
         blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
-        splits = blocks < SPLIT_KEPT_BLOCKS[1] && !recomputing ? split_count(k, tk, blocks) : 1
-        s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision, target.online)
+        sums = all(f -> f isa Tempest.SumFold, folds)
+        splits = blocks < SPLIT_KEPT_BLOCKS[1] && !recomputing && sums ? split_count(k, tk, blocks) : 1
+        s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
         c = Context(p.graph, p.stored, g, s)
-        all(r -> bilinear(c, r) !== nothing, g.reductions) && expressible_over(c) && return Claim(s)
+        all(r -> products_of(c, r), g.reductions) && expressible_over(c) && return Claim(s)
     end
     nothing
+end
+
+# Whether a fold accumulates as products of tiles: a sum of a bilinear
+# product, or an online softmax whose sums are, but for sums of its weights.
+function products_of(c::Context, r)
+    sums = fold_sums(c, r)
+    sums !== nothing && any(s -> s[2] !== nothing, sums) && all(((term, product),) -> product !== nothing || term.f isa Weight, sums)
 end
 
 # Every load a view over the tiling, every stored value too, and nothing the

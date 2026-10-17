@@ -107,6 +107,28 @@ function shifted_sums(states, dims)
 end
 
 """
+    OnlineSoftmax(f)
+
+Sums of `g · exp(y - m)` over the reduced axes, one for each `g` of an element
+`(y, g...)`, where `m` is the maximum of `y` over the same axes: the online
+softmax, as one fold. The state is the running maximum and the sums relative to
+it; combining moves the sums to the larger maximum, scaling each by
+`exp(m_old - m_new)`. The result is `f` of the sums. Logsumexp is this fold of
+`(y, 1)`, observed as `m + log(sum)`. Plans rewrite sums weighted by `exp(y - m)`
+into it (see `rewrite`).
+"""
+struct OnlineSoftmax{F} <: Fold
+    f::F
+end
+fold_name(::OnlineSoftmax) = Symbol("online softmax")
+fold_init(::OnlineSoftmax, ::Type{E}) where {E <: Tuple} =
+    ntuple(i -> i == 1 ? fieldtype(E, 1)(-Inf) : zero(fieldtype(E, i)), Val(fieldcount(E)))
+fold_lift(::OnlineSoftmax, e) = e
+fold_combine(::OnlineSoftmax, a, b) = shifted_combine(a, b)
+fold_observe(f::OnlineSoftmax, s) = f.f(Base.tail(s)...)
+fold_reduce(::OnlineSoftmax) = shifted_sums
+
+"""
     GenericFold(; init, combine, lift = tuple, observe = only, pullback = nothing)
 
 A fold from functions. `init` is a state tuple or a function of the element type

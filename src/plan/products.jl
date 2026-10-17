@@ -34,9 +34,9 @@ function product_axes(graph, g::Group)
     kept = [k for k in 1:n if !(k in K) && g.domain[k] > 1]
     found = nothing
     for r in g.reductions
-        t = g.terms[r]
-        t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
-        ax, ay = axes_read(t.args[1], n), axes_read(t.args[2], n)
+        factors = product_factors(graph.values[r].definition.fold, g.terms[r])
+        factors === nothing && return nothing
+        ax, ay = axes_read(factors[1], n), axes_read(factors[2], n)
         (ax === nothing || ay === nothing) && return nothing
         all(k -> g.domain[k] == 1 || k in ax && k in ay, K) || return nothing
         M = [k for k in kept if k in ax && !(k in ay)]
@@ -49,6 +49,20 @@ function product_axes(graph, g::Group)
     end
     found
 end
+
+"""
+    product_factors(fold, term) -> (x, y) or nothing
+
+The two factors whose products a fold of `term` sums: those of a sum of a
+product; for an online softmax of `(y, g...)`, the first `g` that is not a
+constant, and `y`, whose `exp(y - m)` weighs it.
+"""
+product_factors(::SumFold, t) = t isa Apply && t.f === (*) && length(t.args) == 2 ? t.args : nothing
+function product_factors(::OnlineSoftmax, t)
+    i = findnext(a -> !(a isa Lit), t.args, 2)
+    i === nothing ? nothing : (t.args[i], t.args[1])
+end
+product_factors(::Fold, t) = nothing
 
 """
     group_stride(e, axes, domain) -> stride or nothing

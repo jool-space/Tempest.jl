@@ -15,9 +15,10 @@ always used. `precision` is the numerics policy for products: `:full` keeps
 Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
 `:tf32x3` splits each Float32 factor into two TF32 parts and sums three
 tensor-core products (close to Float32 accuracy). Half-precision products
-always accumulate in Float32. `online` permits the online softmax: a sum
-weighted by `exp(y - logsumexp(y))` accumulates in the same sweep as the
-log-sum-exp, rescaled as its maximum grows, which changes rounding.
+always accumulate in Float32. `online` permits the rewrites of sums that change
+rounding (see `rewrite`): factors constant along a sum taken out of it, and
+sums weighted by a softmax accumulated in one pass with the softmax's maximum,
+rescaled as it grows.
 """
 struct CUDATarget <: Target
     precision::Symbol
@@ -168,6 +169,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     graph = lower(program;
         keep_call = (n, nodes) -> call_claimant(target, nodes, n) !== nothing,
         epilogue = (n, nodes) -> takes_epilogue(target, nodes, n))
+    permits_rewrites(target) && (graph = rewrite(graph))
     d = Decider(target, graph; measure)
     p, accepted = cover(d)
     ds = decisions(d, p)
@@ -253,7 +255,7 @@ function explain(io::IO, ex::Executable)
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
         "; half-precision products accumulate in Float32",
-        ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
+        ex.target.online ? "; sums rewritten where that changes rounding" : "; sums as written")
     for (set, i) in ex.accepted
         println(io, "candidate ", join(map(v -> "%$v", set), " "), " from ", nameof(typeof(i)), " replaces the generator's grouping")
     end

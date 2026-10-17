@@ -476,7 +476,7 @@ function with_stored_results(graph::IndexGraph)
         push!(values, Value(Pointwise(identity, (r,)), dims, graph.result_eltype[k], graph.result_scalar[k]))
         results[k] = Read(length(values), identity_index(dims))
     end
-    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype)
+    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.rewrites)
 end
 
 function dense_address(dims, index, d::Domain)

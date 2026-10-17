@@ -43,6 +43,10 @@ device_name(::CPUTarget) = "cpu"
 numerics(::Target) = :default
 numerics(target::CUDATarget) = target.online ? target.precision : Symbol(target.precision, "-two-pass")
 
+"Whether a target permits the rewrites of sums that change rounding (see `rewrite`)."
+permits_rewrites(::Target) = true
+permits_rewrites(target::CUDATarget) = target.online
+
 """
     estimate(implementation, claim, target, plan, group) -> Vector{Work}
 

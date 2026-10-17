@@ -83,7 +83,8 @@ iteration_domain(v::Value) = v.definition isa Reduction ? Domain(v.definition.it
 
 A program at the index level: values in topological order, the values that are
 arguments, and each result as a read over the result's own shape (results may be
-layouts of values, or constants).
+layouts of values, or constants). `rewrites` notes the values that rewrites of
+the graph made, and what each rewrote.
 """
 struct IndexGraph
     values::Vector{Value}
@@ -92,7 +93,11 @@ struct IndexGraph
     result_dims::Vector{Tuple{Vararg{Int}}}
     result_scalar::Vector{Bool}
     result_eltype::Vector{DataType}
+    rewrites::Vector{Pair{Int, String}}
 end
+
+IndexGraph(values, arguments, results, dims, scalar, eltype) =
+    IndexGraph(values, arguments, results, dims, scalar, eltype, Pair{Int, String}[])
 
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands

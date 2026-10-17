@@ -329,6 +329,20 @@ if CUDACore.functional()
                 @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v)]; rtol = 1.0e-4)
             end
         end
+        # Softmax spelled with a maximum and a sum: rewritten into the same one
+        # kernel, at full precision and in TF32.
+        q, k, v = single(data(16, 2, 70, 2; scale = 0.1)), single(data(16, 2, 70, 2; scale = 0.2)), single(data(16, 2, 70, 2; scale = 0.3))
+        p = trace(q, k, v) do q, k, v
+            s = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.25f0
+            s = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, -Inf32)
+            e = exp.(s .- maximum(s; dims = 1))
+            T.contract(v, e ./ sum(e; dims = 1), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
+        end
+        for precision in (:full, :tf32)
+            ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile; precision))
+            @test occursin("online softmax", string(only(ex.kernels)))
+            @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v)]; rtol = precision === :tf32 ? 1.0e-2 : 1.0e-4)
+        end
         # The reference's gradient: every product generated, also those that
         # sum over key heads shared by one query head each.
         q, k, v = single(data(16, 2, 70, 2; scale = 0.1)), single(data(16, 2, 70, 2; scale = 0.2)), single(data(16, 2, 70, 2; scale = 0.3))

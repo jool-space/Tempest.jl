@@ -10,6 +10,9 @@ function explain(io::IO, p::Plan)
     stored = count(id -> p.stored[id] && !(graph.values[id].definition isa Union{Input, ConstantArray}), eachindex(graph.values))
     recomputed = count(id -> !p.stored[id], eachindex(graph.values))
     println(io, length(p.groups), " kernels; ", stored, " values stored, ", recomputed, " recomputed where read")
+    for (v, note) in graph.rewrites
+        println(io, "rewritten: ", describe_value(graph, v), ", ", note)
+    end
     for (k, g) in enumerate(p.groups)
         reads = sort!(collect(group_reads(graph, g)))
         print(io, "kernel ", k, ": ", g.kind, " over ", g.domain)
