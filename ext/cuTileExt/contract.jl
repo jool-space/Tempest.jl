@@ -53,7 +53,11 @@ function product_claim(target, p::Plan, g::Group)
     factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
         first(Tempest.product_factors(first(folds), g.terms[first(g.reductions)])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
-    recomputing = any(r -> any(s -> s isa Tempest.Fold, Tempest.subterms((g.terms[r],))), g.reductions)
+    recomputed = [s for r in g.reductions for s in Tempest.subterms((g.terms[r],)) if s isa Tempest.Fold]
+    recomputing = !isempty(recomputed)
+    # A recomputed fold that does not move along the summed axes is computed
+    # once per block, before the sweep.
+    hoisted = any(s -> !any(a -> Tempest.mentions(s, a), K), recomputed)
     # Summed axes the factors do not read as one strided axis are swept in
     # turn: the longest piece over which they do is tiled, every other piece
     # an index per step.
@@ -71,11 +75,11 @@ function product_claim(target, p::Plan, g::Group)
         append!(tiling, [TileAxis(a, extent(a), 1, true) for a in others])
         # A grid of few output tiles leaves the device idle: split the summed
         # axis among blocks (split-K), merging the partial sums in a second
-        # launch; not when the sum recomputes a fold, which a split would
-        # repeat, nor for an online softmax.
+        # launch; not when a fold is computed before the sweep, which every
+        # split would repeat, nor for an online softmax.
         blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
         sums = all(f -> f isa Tempest.SumFold, folds)
-        splits = blocks < SPLIT_KEPT_BLOCKS[1] && !recomputing && sums ? split_count(k, tk, blocks) : 1
+        splits = blocks < SPLIT_KEPT_BLOCKS[1] && !hoisted && sums ? split_count(k, tk, blocks) : 1
         s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
         c = Context(p.graph, p.stored, g, s)
         all(r -> products_of(c, r), g.reductions) && expressible_over(c) && return Claim(s)
