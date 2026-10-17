@@ -149,10 +149,9 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
     foreach((l, e) -> extent[l] = e, (op.a..., op.b...), (input_dims[1]..., input_dims[2]...))
     iteration = Tuple(extent[l] for l in labels)
     d = Domain(iteration)
-    read(access, ls) = Read(
-        access.value,
-        map(e -> substitute(e, Tuple(var(findfirst(==(l), labels)) for l in ls), d), access.index),
-    )
+    # A factor read at the labels `ls`: a value, or a constant or positions
+    # filling the factor's shape.
+    read(access, ls) = operand(compose(access, Tuple(var(findfirst(==(l), labels)) for l in ls), d), iteration, d)
     A = n.eltype <: HalfFloat ? Float32 : n.eltype
     function factor(access, ls)
         r = read(access, ls)
@@ -244,7 +243,6 @@ function lower(p::Program)
             parent = only(input_dims)
             value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
         elseif op isa Contract
-            all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
             contraction!(value!, op, inputs, input_dims, n)
         elseif op isa Call
             # An opaque call, which implementations alone realize.

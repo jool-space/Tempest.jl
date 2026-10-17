@@ -24,6 +24,10 @@ spelled_product(a, b) = dropdims(sum(reshape(a, size(a, 1), size(a, 2), 1) .* re
 
 data(dims...; scale = 1.0) = 2.0 .* sin.(scale .* reshape(Float64.(1:prod(dims)), dims...))
 
+# Julia arrays a program closes over, as factors of products: constants, in
+# the precision of the program's inputs.
+const WEIGHTS, BATCH = data(5, 4; scale = 0.2), data(4, 3, 2; scale = 0.3)
+
 const PROGRAMS = [
     ("dot product", (a, b) -> sum(a .* b), (data(32), data(32; scale = 0.3))),
     ("sum abs2 tanh", x -> sum(abs2, tanh.(x)), (data(8, 6),)),
@@ -48,6 +52,11 @@ const PROGRAMS = [
     ("products of transposes", (a, b) -> sum(abs2, a' * b' .+ 1), (data(7, 5; scale = 0.2), data(6, 7))),
     ("batched product", (a, b) -> sum(abs2, T.batched_mul(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
     ("matrix vector", (a, v) -> sum(abs2, a * v), (data(5, 4), data(4; scale = 0.5))),
+    ("a constant times x", x -> sum(abs2, eltype(x).(WEIGHTS) * x), (data(4, 3),)),
+    ("x' times a constant", x -> sum(abs2, tanh.(x' * eltype(x).(WEIGHTS))), (data(5, 3),)),
+    ("a constant times a vector", v -> sum(abs2, eltype(v).(WEIGHTS) * v), (data(4; scale = 0.5),)),
+    ("batched product with a constant", a -> sum(abs2, T.batched_mul(a, eltype(a).(BATCH))), (data(3, 4, 2),)),
+    ("constant batched product", b -> sum(abs2, T.batched_mul(eltype(b).(BATCH), b)), (data(3, 5, 2),)),
     ("swish", x -> sum(swish.(x)), (data(8, 6),)),
     ("opaque leaky with a rule", x -> sum(abs2, leaky.(x)), (data(8, 6),)),
     ("powers", x -> sum(x .^ 2 .+ x .^ 3 .+ sqrt.(abs.(x) .+ 1)), (data(8, 6),)),

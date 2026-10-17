@@ -131,6 +131,8 @@ Base.muladd(a::Real, b::Traced, c::Real) = record_map(muladd, a, b, c)
 Base.muladd(a::Real, b::Real, c::Traced) = record_map(muladd, a, b, c)
 Base.muladd(a::Traced, b::Traced, c::Real) = record_map(muladd, a, b, c)
 Base.muladd(a::Traced, b::Traced, c::Traced) = record_map(muladd, a, b, c)
+Base.muladd(a::Traced, b::Real, c::Traced) = record_map(muladd, a, b, c)
+Base.muladd(a::Real, b::Traced, c::Traced) = record_map(muladd, a, b, c)
 Base.fma(a::Traced, b::Real, c::Real) = muladd(a, b, c)
 Base.clamp(x::Traced, lo::Real, hi::Real) = min(max(x, lo), hi)
 
@@ -319,7 +321,7 @@ end
 
 Base.reduce(op, x::TracedArray{<:Real}; dims = :, init = nothing) = mapreduce(identity, op, x; dims, init)
 
-# Products.
+# Products. Julia arrays among the factors are constants of the program.
 function contract(a::TracedArray, b::TracedArray, la, lb, lo)
     T = promote_type(eltype(a), eltype(b))
     labels = Dict{Int, Int}()
@@ -330,15 +332,30 @@ function contract(a::TracedArray, b::TracedArray, la, lb, lo)
     TracedArray(a.tape, record!(a.tape, Contract(la, lb, lo), (a.id, b.id), dims, T))
 end
 
-Base.:*(a::TracedArray{<:Real, 2}, b::TracedArray{<:Real, 2}) = contract(a, b, (1, 2), (2, 3), (1, 3))
-Base.:*(a::TracedArray{<:Real, 2}, b::TracedArray{<:Real, 1}) = contract(a, b, (1, 2), (2,), (1,))
+contract(a::TracedArray, b::AbstractArray{<:Number}, la, lb, lo) = contract(a, TracedArray(a.tape, constant!(a.tape, b)), la, lb, lo)
+contract(a::AbstractArray{<:Number}, b::TracedArray, la, lb, lo) = contract(TracedArray(b.tape, constant!(b.tape, a)), b, la, lb, lo)
+
+# Each product with a traced factor, the other traced or not.
+for (A, B) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (AbstractArray, TracedArray))
+    @eval begin
+        Base.:*(a::$A{<:Real, 2}, b::$B{<:Real, 2}) = contract(a, b, (1, 2), (2, 3), (1, 3))
+        Base.:*(a::$A{<:Real, 2}, b::$B{<:Real, 1}) = contract(a, b, (1, 2), (2,), (1,))
+        batched_mul(a::$A{<:Real, 3}, b::$B{<:Real, 3}) = contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
+    end
+end
+
+# A row vector or a diagonal matrix times a traced array, as LinearAlgebra
+# multiplies them: a row times a vector is a number.
+Base.:*(a::LinearAlgebra.AdjOrTransAbsVec{<:Real}, b::TracedArray{<:Real, 2}) = contract(a, b, (1, 2), (2, 3), (1, 3))
+Base.:*(a::LinearAlgebra.AdjOrTransAbsVec{<:Real}, b::TracedArray{<:Real, 1}) = sum(vec(a) .* b)
+Base.:*(a::Transpose{T, <:AbstractVector}, b::TracedArray{T, 1}) where {T <: Real} = sum(vec(a) .* b)
+Base.:*(a::LinearAlgebra.Diagonal{<:Real}, b::TracedArray{<:Real, 1}) = a.diag .* b
 
 """
     Tempest.batched_mul(a, b)
 
 `a[:, :, k] * b[:, :, k]` for each `k` along the third axis.
 """
-batched_mul(a::TracedArray{<:Real, 3}, b::TracedArray{<:Real, 3}) = contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
 function batched_mul(a::AbstractArray{<:Real, 3}, b::AbstractArray{<:Real, 3})
     stack(k -> a[:, :, k] * b[:, :, k], axes(a, 3); dims = 3)
 end
