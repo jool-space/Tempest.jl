@@ -1,133 +1,43 @@
 # Tempest design
 
 Written 16 October 2026, and revised the same day after an adversarial review.
-This is the design Tempest is built toward, stated on its own terms rather than
-as a distance from the current code. It lives with the new code on the `next`
+Revised on 17 October to lead with the contract, to separate operations from
+their implementations, and to gate on what Tempest can express rather than on
+time. This is the design Tempest is built toward, stated on its own terms
+rather than as a distance from the current code. It lives with the new code on the `next`
 branch. Tempest's architecture page (`docs/src/architecture.md` on `main`)
 describes today's code.
 
-## The idea
+## The contract
 
-Tempest describes every computation with three things and plans it with one
-decision. Each of the three comes with rules for rewriting it without changing
-its result, and those rules are what let the planner rearrange work freely.
+Three kinds of people meet in Tempest. Model authors write Julia array code.
+Operation authors give operations names and meanings. Kernel authors offer
+faster ways to run them. Tempest connects them so that each can work without
+knowing the others' code.
 
-- **Formulas: where a value reads from.** Every read is `x[f(i)]`, where `f`
-  is index arithmetic: sums, constant multiples, and floor division and
-  remainder by constants. Transposes, reshapes, slices, broadcasts and
-  concatenations only change `f`, and formulas have one canonical form, so how
-  a layout is spelled does not matter.
-- **Folds: how a value reduces over axes.** Every reduction is three
-  functions: lift an element into a state, combine two states, observe the
-  result. Combining is associative, so every grouping is legal: resident,
-  streamed, split, partial-then-merge and online evaluation are one fold
-  grouped differently.
-- **Scalar functions: what happens to each element.** Julia functions, traced
-  into primitives with derivative rules. They are pure, so recomputing a value
-  instead of storing it is always legal.
-- **The decision.** For each value: store it, or recompute it wherever it is
-  read. A kernel is a set of maps and folds over one shared index domain, each
-  fold reducing its own subset of the axes, laid over tiles by a schedule.
-
-Nothing else is special. A matrix product is a sum fold of a product over
-`(m, n, k)`; split-K is the split schedule; an epilogue is a map over the
-fold's kept axes. Layer norm's forward and backward are folds in phases. Flash
-attention is a fold over keys whose state is the running maximum, the running
-sum and the weighted accumulator, with the rescale as the combine. Kernels
-follow from the program and a schedule; a hand-written kernel is an escape
-hatch at the edge, never a new kind in the core. The core (formulas, folds,
-scalar functions, the planner and the generator) stays small enough to read in
-an afternoon; backends are realizations of it.
-
-## Purpose
-
-Tempest turns ordinary Julia array code (a loss, a training step, a forward
-pass) into a prepared program that runs as fast as the hardware and the best
-available kernels allow, and that explains every decision it made. The user
-writes what to compute. Tempest decides how: which values are stored, which are
-fused, how each kernel is scheduled and which implementation runs it, choosing
-among generated tile programs, vendor libraries and the user's own kernels.
-
-It exists because no other system combines three things:
-
-- **Julia functions are first class.** A pointwise function or a fold's
-  operator is Julia code. Tempest reads it to plan (its derivative, its cost,
-  its canonical form), and the kernel runs the function itself. It is never
-  mapped onto a fixed operator set.
-- **Custom kernels and custom derivatives compose with fusion.** A named
-  operation carries a reference definition, so it fuses like any other code
-  when no kernel claims it, and is replaced whole when one does.
-- **The whole step is prepared once,** with fixed storage, and replayed as one
-  captured graph.
-
-## Scope
-
-Tempest is a foundation. jool-space builds new infrastructure for deep
-learning in Julia rather than extending today's frameworks, and Tempest is the
-compiler at its base: it turns array programs written in plain Julia (a forward
-pass, a loss, a training step) into fused, explained, captured programs on one
-GPU.
-
-- **What sits above it is separate.** Layers, optimizers, data loading and
-  models are packages built on Tempest, not parts of it. Libraries of
-  operations such as NNlib sit beside it. Integration with today's frameworks
-  is welcome where it comes nearly free, and does not shape the design.
-- **The same code runs eagerly.** Every function Tempest adds (folds with
-  custom operators, `logsumexp`, positions, verbs such as attention and
-  dropout) has a method on plain arrays, on the CPU or a GPU, so one source
-  runs untraced, array by array, and traced. The coverage goal is that slice:
-  Julia array code that runs eagerly should trace, except control flow on
-  array values.
-
-## Non-goals
-
-- A layer library, optimizers, data loading or a model zoo.
-- Another framework's operator list as a checklist. Coverage follows the array
-  code people write.
-- A code path per model or pattern. Every feature is formulas, folds and
-  scalar functions, or a claim at the edge.
-- Ambient numerics. There is no global or task-local math mode: the precision
-  a program computes in is written in the program, per operation, and printed
-  by `explain` (see Numerics).
-- Speed claims without their method. Every published number names the
-  hardware, the clocks, the precision, the harness and the baseline's
-  configuration, and can be reproduced from the repository.
-- Hardware in the core. Formulas, folds, scalar functions, the planner and the
-  generator's input are backend-neutral; vendor specifics live in
-  implementations and device defaults.
-
-## What makes it a leap
-
-Today a fused kernel exists only when one of several hand-written paths accepts
-a group, each path with its own gates, and a new kind of fused kernel means a
-new path. Here a kernel exists when a schedule in one language expresses it,
-reached from any spelling through one decision. That makes reachable:
-
-- products fused with their neighbours: a norm's scale or a rotary embedding
-  as prologue; an activation, a residual or a two-output backward as epilogue;
-- attention variants (masks, score modifications, grouped heads, sliding
-  windows) as bodies and formulas, not as new kernels;
-- convolutions, as contractions whose read formulas shift;
-- a user's kernel written as a schedule over index-level bodies, so it fuses
-  with its neighbours instead of being opaque;
-- derivatives, costs and canonical forms of the user's own scalar functions;
-- plans that are deterministic given a record of measurements, explained
-  decision by decision, and prepared again in seconds in a new process.
-
-Speed follows from these, and is checked, not hoped for: the speed guard rails
-run on every change. The yardstick is torch, eager and compiled, on the same
-model at the same precision. Once capture and launch overhead are gone, what
-separates two systems is which kernels they use, how they fuse and at what
-precision, and that compares like for like.
+- **Tempest owns coverage; implementations own speed.** A program in Tempest's
+  primitive language runs with no implementation beyond the generator and the
+  generic kernels. Removing an implementation may change how fast a program
+  runs, never whether it runs.
+- **A new operation changes an operation package. A new kernel changes an
+  implementation package. A better optimization changes Tempest.** None of the
+  three needs changes in the others, and a model author's code stays the same
+  through all of them.
+- **What people rely on is the promises below.** Formulas, folds, schedules and
+  the planner are how Tempest keeps them today. `explain` shows them, but they
+  are not the interface, and they may change.
+- **The core stays small.** A new kind of node or value needs a written
+  argument that formulas, folds, scalar functions and calls cannot express it.
 
 ## Promises
 
 What a user can rely on. Each one is checked by tests.
 
-1. **Layout spelling does not matter.** Programs that differ only in reshape,
-   permute, view, slice, broadcast, the placement of transposes, the operand
-   order of commutative operations, or the name of a fold (`sum`,
-   `reduce(+)`, `mapreduce`) get the same plan. Programs that differ by a
+1. **Layout spelling does not matter.** Programs that differ only in reshape
+   (adding or dropping size-1 axes included), permute, view, slice,
+   broadcast, the placement of transposes, the operand order of commutative
+   operations, or the name of a fold (`sum`, `reduce(+)`, `mapreduce`) get the
+   same plan. Programs that differ by a
    rewrite the numerics policy permits (reassociation, `sum/n` against
    `sum·(1/n)`, online softmax) get the same plan under that policy. Inside a
    scalar function only operand order and common subexpressions are
@@ -152,6 +62,135 @@ What a user can rely on. Each one is checked by tests.
 6. **A second preparation takes seconds, in a new process.** Kernels are
    cached by content, not by Julia method, and a hit loads a compiled binary
    without generating code.
+7. **Coverage does not depend on a catalogue.** Every program in the primitive
+   language plans and runs with only the generator and the generic kernels,
+   whatever else is loaded. A composition nobody wrote code for (another score
+   function in attention, another spelling of softmax, an extra reduction,
+   gradients) gets a plan without anyone adding that combination, and stores
+   nothing that a streaming algorithm makes unnecessary; the coverage suite
+   checks the kernels and bytes stored (see Testing). An opaque operation is
+   outside this promise: it runs where an implementation claims it, and
+   preparation fails, naming it, where none does.
+
+## Purpose
+
+Tempest turns ordinary Julia array code (a loss, a training step, a forward
+pass) into a prepared program that runs as fast as the hardware and the best
+available kernels allow, and that explains every decision it made. The user
+writes what to compute. Tempest decides how: which values are stored, which are
+fused, how each kernel is scheduled and which implementation runs it, choosing
+among generated tile programs, vendor libraries and the user's own kernels.
+
+It exists because no other system combines three things:
+
+- **Julia functions are first class.** A pointwise function or a fold's
+  operator is Julia code. Tempest reads it to plan (its derivative, its cost,
+  its canonical form), and the kernel runs the function itself. It is never
+  mapped onto a fixed operator set.
+- **Custom kernels and custom derivatives compose with fusion.** A named
+  operation carries a reference definition, so it fuses like any other code
+  when no kernel claims it, and is replaced whole when a kernel claims it and
+  wins on cost. An operation without a reference is opaque, and still composes
+  at its inputs and outputs.
+- **The whole step is prepared once,** with fixed storage, and replayed as one
+  captured graph.
+
+## Scope
+
+Tempest is a foundation. jool-space builds new infrastructure for deep
+learning in Julia rather than extending today's frameworks, and Tempest is the
+compiler at its base: it turns array programs written in plain Julia (a forward
+pass, a loss, a training step) into fused, explained, captured programs on one
+GPU.
+
+- **What sits above it is separate.** Layers, optimizers, data loading and
+  models are packages built on Tempest, not parts of it. Libraries of
+  operations such as NNlib sit beside it. Integration with today's frameworks
+  is welcome where it comes nearly free, and does not shape the design.
+- **The same code runs eagerly.** Every function Tempest adds (folds with
+  custom operators, `logsumexp`, positions, verbs such as attention and
+  dropout) has a method on plain arrays, on the CPU or a GPU, so one source
+  runs untraced, array by array, and traced. The coverage goal is that slice:
+  Julia array code that runs eagerly should trace, except control flow on
+  array values. Existing array code traces as it is; only functions whose
+  bodies cannot trace need a declaration (see Operations).
+
+## Non-goals
+
+- A layer library, optimizers, data loading or a model zoo.
+- Another framework's operator list as a checklist. Coverage follows the array
+  code people write.
+- A code path per model or pattern. Every feature is formulas, folds and
+  scalar functions, or a claim at the edge.
+- Ambient numerics. There is no global or task-local math mode: the precision
+  a program computes in is written in the program, per operation, and printed
+  by `explain` (see Numerics).
+- Speed claims without their method. Every published number names the
+  hardware, the clocks, the precision, the harness and the baseline's
+  configuration, and can be reproduced from the repository.
+- Hardware in the core. Formulas, folds, scalar functions, the planner and the
+  generator's input are backend-neutral; vendor specifics live in
+  implementations and device defaults.
+
+## The idea
+
+Tempest describes every computation with three things and plans it with one
+decision. Each of the three comes with rules for rewriting it without changing
+its result, and those rules are what let the planner rearrange work freely.
+
+- **Formulas: where a value reads from.** Every read is `x[f(i)]`, where `f`
+  is index arithmetic: sums, constant multiples, and floor division and
+  remainder by constants. Transposes, reshapes, slices, broadcasts and
+  concatenations only change `f`, and formulas have one canonical form, so how
+  a layout is spelled does not matter.
+- **Folds: how a value reduces over axes.** Every reduction is three
+  functions: lift an element into a state, combine two states, observe the
+  result. Combining is associative and commutative, so every grouping and
+  every order is legal: resident, streamed, split, partial-then-merge and
+  online evaluation are one fold grouped differently. A fold whose combine is
+  associative but not commutative, such as a scan or a linear recurrence, must
+  keep its order; that extension is not built.
+- **Scalar functions: what happens to each element.** Julia functions, traced
+  into primitives with derivative rules. They are pure, so recomputing a value
+  instead of storing it is always legal.
+- **The decision.** For each value: store it, or recompute it wherever it is
+  read. A kernel is a set of maps and folds over one shared index domain, each
+  fold reducing its own subset of the axes, laid over tiles by a schedule.
+
+Nothing else is special. A matrix product is a sum fold of a product over
+`(m, n, k)`; split-K is the split schedule; an epilogue is a map over the
+fold's kept axes. Layer norm's forward and backward are folds in phases. Flash
+attention is a fold over keys whose state is the running maximum, the running
+sum and the weighted accumulator, with the rescale as the combine. Kernels
+follow from the program and a schedule; a hand-written kernel is an escape
+hatch at the edge, never a new kind in the core. The core (formulas, folds,
+scalar functions, the planner and the generator) stays small enough to read in
+an afternoon; backends are realizations of it.
+
+## What makes it a leap
+
+Today a fused kernel exists only when one of several hand-written paths accepts
+a group, each path with its own gates, and a new kind of fused kernel means a
+new path. Here a kernel exists when a schedule in one language expresses it,
+reached from any spelling through one decision. That makes reachable:
+
+- products fused with their neighbours: a norm's scale or a rotary embedding
+  as prologue; an activation, a residual or a two-output backward as epilogue;
+- attention variants (masks, score modifications, grouped heads, sliding
+  windows) as bodies and formulas, not as new kernels;
+- convolutions, as contractions whose read formulas shift;
+- a user's kernel written as a schedule over index-level bodies, so it fuses
+  with its neighbours instead of being opaque;
+- derivatives, costs and canonical forms of the user's own scalar functions;
+- plans that are deterministic given a record of measurements, explained
+  decision by decision, and prepared again in seconds in a new process.
+
+Speed follows from these. Plans are checked by their structure on every change,
+and times serve as an alarm against regressions. Speed claims are measured
+against torch, eager and compiled, on the same model at the same precision.
+Once capture and launch overhead are gone, what
+separates two systems is which kernels they use, how they fuse and at what
+precision, and that compares like for like.
 
 ## Four levels
 
@@ -173,14 +212,16 @@ vocabulary is small.
 - `gather` and `scatter` by runtime integer indices.
 - `positions`: the index itself, for masks, dropout and embeddings.
 - Layout: reshape, permute, view, slice, broadcast, concatenate.
-- `call`: a named verb with a reference written in the above, optional
-  realizations and an optional derivative rule.
+- `call`: a named operation (see Operations), with a reference written in the
+  above or, for an opaque one, declared result shapes; optional implementations
+  and an optional derivative rule.
 
 Tracing, differentiation and functional updates work at this level.
 Differentiation needs one pullback per primitive; a verb may bring its own. The
 backward graph is ordinary program code and is planned together with the
 forward. A library may claim a whole named call here, as cuDNN claims
-`attention`; a call nobody claims is replaced by its reference.
+`attention`; a call nobody claims is replaced by its reference, and an opaque
+call nobody claims fails preparation.
 
 **Scalar functions.** A callable broadcast over traced arrays enters the
 program as primitives: during tracing it runs on tracers that record each
@@ -293,6 +334,86 @@ concurrently. Groups with the same schedule and body over many arrays, such as
 an optimizer step over every parameter, are one launch over a table of arrays.
 Nothing is decided at this level.
 
+## Operations
+
+An operation is a Julia function. Three things about it are kept apart:
+
+- **its meaning,** what the function computes;
+- **its decomposition,** a reference that states the meaning in primitives,
+  which is optional;
+- **its implementations,** ways to run it, of which there may be several or
+  none.
+
+Opacity of an operation and opacity of a kernel are separate questions. cuBLAS
+runs opaque code for a fully understood product; a custom solver may be an
+operation with no reference at all.
+
+A Julia function meets Tempest in one of three ways.
+
+1. **Its body traces.** Generic array code (activations, `logsumexp`, a norm
+   written with broadcasts and sums) needs nothing: tracing runs it on traced
+   arrays, and Tempest plans its body. The name is not kept, and need not be:
+   an implementation recognizes the computation at the index level, where
+   spelling does not matter.
+2. **It keeps its name.** `@operation f` adds methods of `f` on traced arrays
+   that record a call of `f`. Eager execution is unchanged, since plain arrays
+   still reach `f`'s own methods. The reference is `f`'s generic method run on
+   traced arrays, unless one is given with `reference`. A name buys three
+   things: a derivative rule, a claim by name, and a boundary that `explain`
+   shows.
+3. **Its body does not trace.** A function that branches on array values,
+   mutates, loops over scalars, draws from a global random number generator or
+   has only device methods is declared the same way, with either a reference
+   that traces or, for an opaque operation, a declaration of its result shapes
+   and element types from its inputs'.
+
+An opaque operation has no decomposition. Its eager method is its meaning and
+the oracle its implementations are tested against. It differentiates only
+through a rule. At the index level it is an opaque value that reads and writes
+whole buffers, and it fuses with its neighbours only where its implementation
+takes an epilogue. With no implementation on the target, preparation fails and
+names it.
+
+Declarations for packages Tempest does not own go in package extensions, as
+methods on Tempest's traced arrays: for NNlib, the functions whose bodies do not
+trace, such as `softmax`, `batched_mul` and `conv`. An existing device method,
+such as a package's `CuArray` path, can serve as an implementation when it
+writes into a buffer it is given, runs on Tempest's stream, and neither
+synchronizes nor allocates per call.
+
+Julia dispatch decides which operation is requested; Tempest decides how it
+runs. Implementations do not dispatch on array types. They answer claims by
+operation (`typeof(f)`), target and input shapes, or by inspecting a group of
+index-level values.
+
+An extension author gets more for more effort:
+
+1. a reference: the operation composes, differentiates and fuses;
+2. a derivative rule;
+3. a kernel with conditions: it runs where it applies, and Tempest generates
+   its neighbours;
+4. a kernel that takes an epilogue: fusion across its output;
+5. a schedule in Tempest's language: fusion through it.
+
+## Meaning, algorithm, schedule
+
+A reference establishes what a computation means, not an acceptable way to run
+it: attention that stores its score matrix is correct and useless. Three layers
+stay distinguishable, even where they share code.
+
+- **Meaning** is in the reference, owned by the operation author: scores, a
+  mask, a softmax, a weighted sum.
+- **Algorithm** is in the plan, owned by Tempest: store or stream, an online
+  fold, a split, a fold recomputed inside its reader. Algorithms are rewrites of
+  folds and the store-or-recompute decision, chosen by cost and permitted by
+  the numerics policy. None is tied to one spelling or hidden inside one
+  implementation.
+- **Schedule** is owned by the implementation: tiles, sweeps, splits, launch
+  shapes.
+
+The generic kernels make every plan correct. The generator with Tempest's
+algorithms makes coverage worth having.
+
 ## Implementations
 
 Every implementation answers one question in one way: given a group of
@@ -319,8 +440,14 @@ Regions, calls, proposals and groups are all claims. The roles:
   covers what tile programs cannot express, such as
   deterministic scatters and opaque bodies. Because the floor always exists, a
   plan always exists; a claim whose build fails is removed and the cover is
-  recomputed.
-- **User kernels** arrive through verbs, as claims or as schedules.
+  recomputed. The floor makes every plan correct; it does not make coverage
+  worth having (see Meaning, algorithm, schedule).
+- **User kernels** arrive as implementations of operations or of groups (see
+  Operations).
+
+A library that accepts or declines whole graphs, as cuDNN's engines do, takes
+part by proposing groups and claiming those its engines accept. What it
+declines is generated around it.
 
 An implementation may claim a written-out pattern (attention spelled as two
 products around a softmax) as well as the named call. The index level is
@@ -418,10 +545,12 @@ sizes. A bounded size is served by a few specializations, each padded to its
 bucket, with the padding value set per operation (zero for products, −∞ for a
 softmax's keys).
 
-Tempest owns two caches on disk. The kernel cache maps a content hash of the
-group, schedule, device and policy to a compiled binary and its parameter
-layout, and compiles misses in parallel. The tuning record maps the content,
-shapes, policy and device of a measured claim to its times; it is local, and
+Tempest owns two caches on disk, in the depot's scratch spaces and overridable
+by environment variables. The kernel cache maps a content hash of the group,
+schedule, device and policy to a compiled binary and its parameter layout,
+compiles misses in parallel, and evicts the least recently used entries beyond
+a size cap. The tuning record maps the content, shapes, policy and device of a
+measured claim to its times; it is local, survives new versions of Tempest, and
 records for known devices can ship with the package.
 
 ## Testing
@@ -430,9 +559,19 @@ records for known devices can ship with the package.
   implementation and every plan is tested against it.
 - **Generated programs.** Random programs must agree with the interpreter, and
   respellings drawn from the permitted rewrites must produce identical plans.
-- **Speed is checked relatively, per device:** the default plan against the
-  floor, and estimates against measurements, so a planner change that loses
-  time fails a test.
+- **The coverage suite.** Compositions nobody wrote code for (attention with
+  another score function, a softcap or another spelling of softmax, an extra
+  reduction, gradients, a target with an implementation removed) must plan and
+  run. Each case checks its plan's structure, the kernels and the bytes
+  stored, against a recorded expectation. The check is deterministic and
+  independent of the device's speed, and a spelling that stores what another
+  spelling streams fails it.
+- **The eager slice.** A corpus of Julia array code that runs eagerly, NNlib's
+  functions first, is traced and checked against eager execution. How much of
+  it traces is reported with every change, and it only grows.
+- **Time is an alarm, not a target.** A plan that becomes much slower than its
+  recorded time fails a check. Speed claims are made separately, with their
+  method (see Non-goals).
 
 ## Lessons taken and left
 
@@ -447,7 +586,8 @@ records for known devices can ship with the package.
 
 ## Not now
 
-Control flow on traced values, mutation, several devices, budgeted
+Control flow on traced values, mutation, ordered folds (scans and recurrences,
+whose combine is not commutative), ragged sizes, several devices, budgeted
 checkpointing, symbolic sizes beyond bounded ones, serving, and an MLIR core.
 An explicit plan leaves room for each later.
 
@@ -463,6 +603,10 @@ An explicit plan leaves room for each later.
   is.
 - Whether cuDNN reads sliced operands, which decides whether packed QKV needs
   copies.
+- How an opaque operation declares its result shapes: as a function of its
+  inputs' shapes and element types, or as a signature.
+- What NNlib's `dropout` means under tracing. NNlib draws from a global random
+  number generator; Tempest takes an explicit seed.
 
 ## How we get there
 
@@ -477,40 +621,35 @@ proposals, graph regions and scalar regions, six request kinds, and decisions
 about what forms a kernel made in five places. Comparisons with it, and with
 torch, run as separate processes against recorded numbers.
 
-- **Milestones**, each closed by its gate:
-  1. The program level: tracing of broadcasts, folds, products, layout,
-     gathers and positions; scalar functions traced into primitives; the
-     interpreter; differentiation. Gate: forward and training programs, and
-     generated programs with their respellings, agree with the interpreter,
-     and gradients with finite differences.
-  2. The index level, the schedule language with sweeps, folds and contracts
-     from the start, the cuTile generator and the CUDA floor, for pointwise
-     work, folds and layout; the plan printed. Today's fold schedules are
-     ported as records. Gate: the forward guard-rail cases within 1.10 times
-     today's default plan in two consecutive runs, with no special case in the
-     generator for any sketch.
-  3. Contracts on cuTile with prologues and epilogues, cuBLAS as a schedule,
-     forms, the greedy cover, the tuning record, the kernel cache, and the
-     training steps of the MLP, RMSNorm and softmax cases. Gate: each product
-     picks the measured winner and replays it from the record, and the guard
-     rails' training cases hold.
-  4. Attention (the forward as a scheduled contract, the backward as a
-     hand-written record, cuDNN as a rival), functional updates and the GPT
-     step. Gate: parity with today's Tempest or better, then measured against
-     torch at the same precision.
+- **Where it stands.** The program and index levels, the cuTile generator, the
+  generic kernels, the cover with cuBLAS as a rival, the tuning record, the
+  kernel cache and the generated attention forward pass are built. The first
+  gates measured time against today's Tempest and held (the 29 forward
+  guard-rail cases at 0.94 of today's time). From here the gates are about what
+  Tempest can express; time is an alarm.
+- **Next, in order, each closed by its gate:**
+  1. The language: operations as declared above, folds with tuple states with
+     the online softmax as one, size-1 axes out of domains, and gathers by
+     runtime indices. Gate: the coverage suite passes as tests that fail, and
+     the eager slice is measured.
+  2. Numerics in the program. Gate: TF32 programs agree with the interpreter
+     up to summation order, and no implementation reads a mode.
+  3. The runtime and the GPT step: storage reuse, donation, capture and
+     functional updates. Gate: the GPT training step matches the interpreter,
+     then reaches parity with today's Tempest.
+  4. Speed: schedule search measured into the tuning record, cuDNN as a rival,
+     a generated attention backward pass. Gate: measured against torch, eager
+     and compiled, at the same precision.
   5. Bounded sizes and decode.
-- **Stopping rule.** Stop when a gate fails for a reason the design cannot
-  address: the forward guard-rail cases cannot come within 1.10 times today's
-  default plan; today's fold schedules cannot be ported as records without a
-  special case in the generator for some sketch; training steps cannot match
-  the interpreter; or the GPT step cannot reach parity. A gate not yet met
-  because the work is unfinished is not a reason to stop. On stopping, fold
-  what the new code proved (formulas on region inputs, forms, the kernel cache,
-  the tuning record) back into today's code step by step.
-- **The scorecard:** the spelling battery gives identical plans; generated
-  programs agree with the interpreter; the guard rails pass; the GPT step
-  matches or beats today's and holds up against torch at the same precision;
-  one place decides what forms a kernel.
+- **Stopping rule.** Stop and report when a gate fails for a reason the design
+  cannot address: a composition in the coverage suite needs a new kind of node
+  or value in the core, or a special case for one pattern in the generator; or
+  the GPT step cannot match the interpreter. A gate not yet met because the
+  work is unfinished is not a reason to stop.
+- **The scorecard:** the coverage suite and the spelling battery pass; the
+  eager slice grows; generated programs agree with the interpreter; the GPT
+  step matches today's and holds up against torch at the same precision; one
+  place decides what forms a kernel.
 
-When `next` passes milestone 4 it becomes `main`. Today's code, docs and
-reports stay in history.
+When `next` runs the GPT training step at parity with today's Tempest, it
+becomes `main`. Today's code, docs and reports stay in history.
