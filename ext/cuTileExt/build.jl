@@ -23,10 +23,11 @@ end
 
 # The block index of each kept tile axis, from the grid: the first two kept
 # axes through the swizzle when the schedule asks for one, the rest one grid
-# dimension each. A kept axis whose blocks cover several tiles (its `chunk`)
-# indexes them in a loop: `chunks` lists (axis, loop variable, chunk), and
-# `bases` the block index of each kept axis before chunking.
-function block_indices!(st, c::Context)
+# dimension each, those beyond the grid's `limit` of dimensions sharing its
+# last. A kept axis whose blocks cover several tiles (its `chunk`) indexes them
+# in a loop: `chunks` lists (axis, loop variable, chunk), and `bases` the block
+# index of each kept axis before chunking.
+function block_indices!(st, c::Context; limit = 3)
     s = c.s
     kept = [i for i in eachindex(s.tiling) if !s.tiling[i].reduced]
     blocks(i) = cld(cld(s.tiling[i].extent, s.tiling[i].tile), s.tiling[i].chunk)
@@ -43,11 +44,22 @@ function block_indices!(st, c::Context)
         push!(grid, blocks(i) * blocks(j))
         rest = kept[3:end]
     end
-    for i in rest
+    own = length(grid) + length(rest) <= limit ? length(rest) : max(0, limit - length(grid) - 1)
+    for i in rest[1:own]
         name = Symbol(:block_, i)
         push!(st, :($name = $(ct.bid)($(length(grid) + 1))))
         indices[i] = name
         push!(grid, blocks(i))
+    end
+    shared = rest[(own + 1):end]
+    if !isempty(shared)
+        push!(st, :(remaining = $(ct.bid)($(length(grid) + 1)) - Int32(1)))
+        for i in shared
+            name = Symbol(:block_, i)
+            push!(st, :($name = rem(remaining, Int32($(blocks(i)))) + Int32(1)), :(remaining = div(remaining, Int32($(blocks(i))))))
+            indices[i] = name
+        end
+        push!(grid, prod(blocks, shared))
     end
     bases = copy(indices)
     for i in kept
@@ -134,9 +146,21 @@ function unsplit_kernel(c::Context, workspaces, slots)
         end
         loop = resident ? body : Any[]
         t = resident ? one32 : gensym(:t)
-        valid = resident ? valid1 : elementwise(phase) ? valid_mask!(loop, c, t) : nothing
+        online = Dict{Int, Any}()
+        for r in phase
+            o = resident ? nothing : online_softmax(c, r)
+            o === nothing || (online[r] = o)
+        end
+        # The online softmax's running maximum and sum mask lanes too.
+        valid = resident ? valid1 : elementwise(phase) || !isempty(online) ? valid_mask!(loop, c, t) : nothing
         scope = resident ? names : merge(Dict{Term, Any}(), statistics)
         roots = [products[r] === nothing ? c.g.terms[r] : product_factor(c, products[r][q]) for r in phase for q in (1, 2)]
+        if !resident
+            hoist_folds!(k, body, c, unique(roots), scope, at(one32), Set(o[3] for o in values(online)))
+            for (r, o) in online
+                online[r] = online_step!(k, body, loop, c, o, scope, valid, at(t), products[r], only(accumulators[r]))
+            end
+        end
         emit_tiles!(k, loop, c, unique(roots), scope, at(t)...)
         states = Dict{Int, Vector{Any}}()
         for r in phase
@@ -154,6 +178,11 @@ function unsplit_kernel(c::Context, workspaces, slots)
         resident || push!(body, :(for $t in Int32(1):Int32($n)
             $(loop...)
         end))
+        for (r, total) in online
+            acc = only(accumulators[r])
+            push!(body, :($acc = $acc ./ $(products[r] === nothing ? total : matrix_tile(c, total, products[r][3], products[r][4]))))
+        end
+        isempty(online) || (k.name *= ", online softmax")
         for r in phase
             f, A = fold_of(c, r), accumulator(c, r)
             state = products[r] !== nothing ? product_state(c, products[r], only(accumulators[r])) :
@@ -206,6 +235,69 @@ function unsplit_kernel(c::Context, workspaces, slots)
         store_partial!(k, st, c, r, held_states[r], bases, slot, slots[r], workspaces)
     end
     [k]
+end
+
+# Recomputed folds that do not move along the swept axis are computed once,
+# before the sweep.
+function hoist_folds!(k, st, c::Context, roots, scope, indices, exclude)
+    axes = c.s.tiling[only(swept(c.s))].axes
+    for t in Tempest.subterms(roots; known = t -> haskey(scope, t))
+        t isa Tempest.Fold && !(t in exclude) || continue
+        any(q -> Tempest.mentions(t, q), axes) && continue
+        emit_tiles!(k, st, c, [t], scope, indices...)
+    end
+end
+
+# The online softmax: a sum whose term weighs by `exp(y - lse)`, where `lse` is
+# a recomputed logsumexp of `y` over the swept axis, accumulates in the sweep
+# that computes `lse`: each step raises the running maximum, rescales the sum
+# and the running sum of exponentials by how much it rose, and weighs by
+# `exp(y - maximum)`; the sum is divided by the sum of exponentials at the
+# end. Returns the weight, `y` and `lse`, or nothing.
+function online_softmax(c::Context, r)
+    c.s.online && fold_of(c, r) isa Tempest.SumFold || return nothing
+    axes = c.s.tiling[only(swept(c.s))].axes
+    length(axes) == 1 || return nothing
+    K = only(axes)
+    roots = (c.g.terms[r],)
+    for w in Tempest.subterms(roots)
+        w isa Apply && w.f === exp && length(w.args) == 1 || continue
+        d = only(w.args)
+        d isa Apply && d.f === (-) && length(d.args) == 2 && d.args[2] isa Tempest.Fold || continue
+        y, F = d.args
+        def = c.graph.values[F.value].definition
+        def.fold isa Tempest.LogSumExpFold && F.extents == (c.g.domain[K],) || continue
+        Tempest.mentions(F, K) && continue
+        index = ntuple(q -> q in def.reduced ? Tempest.var(K) : F.index[q], length(def.iteration))
+        Tempest.operand_term(c.graph, c.stored, c.g, def.operand, index, Tempest.Domain(c.g.domain)) == y || continue
+        # Nothing else reads the logsumexp, whose value is only known at the end.
+        all(s -> !(s isa Apply) || s == d || !(F in s.args), Tempest.subterms(roots)) || continue
+        return (w, y, F)
+    end
+    nothing
+end
+
+# One step of the online softmax for weight `w`: the running maximum and sum
+# start before the sweep, `w` becomes `exp(y - maximum)`, and the accumulator
+# of the sum it weighs is rescaled. Returns the running sum.
+function online_step!(k, before, loop, c::Context, (w, y, F), scope, valid, indices, product, acc)
+    p = only(swept(c.s))
+    A = Tempest.fold_types(Tempest.LogSumExpFold(), Tempest.term_eltype(y, c.graph)).accumulator
+    shape = Base.setindex(spanned_shape(c, y), 1, p)
+    m, l = gensym(:max), gensym(:sum)
+    push!(before, :($m = fill($(A(-Inf)), $shape)), :($l = fill($(zero(A)), $shape)))
+    emit_tiles!(k, loop, c, [y], scope, indices...)
+    x = as_accumulator(loop, scope[y], A, Tempest.term_eltype(y, c.graph), spanned_shape(c, y))
+    top, sh, rise, weight = gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
+    push!(loop, :($top = max.($m, maximum(ifelse.($valid, $x, $(A(-Inf))); dims = $p))))
+    push!(loop, :($sh = $SHIFT.($top)))
+    push!(loop, :($rise = exp.($m .- $sh)))
+    push!(loop, :($weight = exp.($x .- $sh)))
+    push!(loop, :($l = $l .* $rise .+ sum(ifelse.($valid, $weight, $(zero(A))); dims = $p)))
+    push!(loop, :($m = $top))
+    push!(loop, :($acc = $acc .* $(product === nothing ? rise : matrix_tile(c, rise, product[3], product[4]))))
+    scope[w] = weight
+    l
 end
 
 # Folds whose swept axis is shared among blocks: per phase, a launch of
@@ -268,8 +360,7 @@ end
 function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     k = TileKernel("partial states", (), c.s.occupancy)
     st = k.body
-    indices, grid, _, _ = block_indices!(st, c)
-    length(grid) < 3 || error("a split schedule has at most two grid dimensions of kept tiles")
+    indices, grid, _, _ = block_indices!(st, c; limit = 2)
     push!(st, :(part = $(ct.bid)($(length(grid) + 1))))
     k.grid = (grid..., c.s.splits)
     p = only(swept(c.s))

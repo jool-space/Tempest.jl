@@ -62,10 +62,41 @@ term_expr(t::Ix{T}, names, c) where {T} = :($T($(affine_expr(t.expr, c))))
 term_expr(t::Stat, names, c) = Symbol(:stat_, t.value)
 term_expr(t::Apply, names, c) = :(convert($(t.eltype), $(t.f)($(map(a -> names[a], t.args)...))))
 
-# Statements computing `roots`, each subterm once; returns the names.
-function emit_terms!(statements, roots, c; names = Dict{Term, Any}())
+# A recomputed fold: a loop over its reduced axes, the variables after the
+# domain's own, computing its body at each.
+function term_expr(t::Fold, names, c)
+    val = c.graph.values[t.value]
+    fold = val.definition.fold
+    A = fold_types(fold, term_eltype(t.body, c.graph)).accumulator
+    base = length(c.vars)
+    inner = base .+ (1:length(t.extents))
+    vars = [c.vars; [gensym(:i) for _ in inner]]
+    extents = (c.domain.extents..., t.extents...)
+    nested = EmitContext(c.graph, c.slots, vars, Domain(extents))
+    state, j = gensym(:state), gensym(:j)
+    loop = Expr(:block)
+    delinearize_expr(loop.args, j, inner, extents, vars)
+    body = emit_terms!(loop.args, [t.body], nested)
+    push!(loop.args, :($state = $fold_combine($fold, $state, $fold_lift($fold, convert($A, $(body[t.body]))))))
+    quote
+        $state = $fold_init($fold, $A)
+        for $j in 0:$(prod(t.extents; init = 1) - 1)
+            $loop
+        end
+        convert($(val.eltype), $fold_observe($fold, $state))
+    end
+end
+
+# Statements computing `roots`, each subterm once; returns the names. With
+# `hoisted`, the subterms that do not depend on the variables `swept` go to
+# `hoisted` instead, computed once before the loop of `statements`.
+function emit_terms!(statements, roots, c; names = Dict{Term, Any}(), hoisted = nothing, swept = ())
     for t in subterms(roots)
         haskey(names, t) && continue
+        if hoisted !== nothing && !any(k -> mentions(t, k), swept)
+            emit_terms!(hoisted, [t], c; names)
+            continue
+        end
         if t isa Lit
             names[t] = t.value
             continue
@@ -121,7 +152,7 @@ function scalar_kernel(graph, stored, g::Group, slots)
             push!(s, :($(states[r]) = $fold_init($fold, $A)))
         end
         delinearize_expr(loop.args, :sweep, reduced, D, vars)
-        names = emit_terms!(loop.args, [g.terms[r] for r in phase_reductions], c)
+        names = emit_terms!(loop.args, [g.terms[r] for r in phase_reductions], c; hoisted = s, swept = reduced)
         for r in phase_reductions
             fold = graph.values[r].definition.fold
             A = fold_types(fold, term_eltype(g.terms[r], graph)).accumulator

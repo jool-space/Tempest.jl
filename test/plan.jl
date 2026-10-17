@@ -15,6 +15,24 @@ agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), 
     end
 end
 
+# Folds recomputed where they are read, as plans for cuTile recompute them:
+# the same results, and attention's scores and logsumexp inside the one
+# kernel of the sum over keys.
+@testset "plans recomputing folds" begin
+    @testset "$name" for (name, f, args) in PROGRAMS
+        for p in (trace(f, args...), differentiate(trace(f, args...)))
+            planned = T.plan(T.lower(p); recompute_folds = true)
+            @test agree(T.execute(planned, args...), filter(!isnothing, T.leaves(interpret(p, args...))))
+        end
+    end
+    q, k, v = data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
+    p = trace((q, k, v) -> T.attention(q, k, v; causal = true), q, k, v)
+    planned = T.plan(T.lower(p); recompute_folds = true)
+    @test length(planned.groups) == 1
+    @test length(T.recomputed_in(only(planned.groups))) == 2
+    @test agree(T.execute(planned, q, k, v), [interpret(p, q, k, v)])
+end
+
 # A kernel is maps and folds over one domain, each fold over its own axes: the
 # loss and a weight gradient join the normalization's kernel, and the values
 # only they read are never stored.

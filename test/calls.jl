@@ -90,6 +90,8 @@ if CUDACore.functional()
             d = differentiate(p)
             ex = prepare(d, device((q, k, v, x))...; target)
             @test length(opaque_groups(ex)) == 2
+            # The log-sum-exp's cotangent, a constant, is generated too.
+            @test !any(d -> d isa T.FloorKernels, ex.kernels)
             @test close(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))); rtol)
         end
     end

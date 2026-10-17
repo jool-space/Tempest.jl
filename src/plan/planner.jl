@@ -61,8 +61,11 @@ end
 
 struct OutsideGroup <: Exception end
 
-"The term computing value `v` at `index`, an index over the group's domain."
-function value_term(graph, stored, g::Group, v, index)
+"""
+The term computing value `v` at `index`, an index over `domain`: the group's
+domain, or inside a recomputed fold that domain extended by the fold's axes.
+"""
+function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain))
     val = graph.values[v]
     d = val.definition
     if v in g.reductions
@@ -74,23 +77,37 @@ function value_term(graph, stored, g::Group, v, index)
         # A value the kernel computes itself, such as a claimed call's
         # result, is read as the kernel's tile of it.
         d isa Opaque && return Stat(v)
-        return definition_term(graph, stored, g, d, val, index)
+        return definition_term(graph, stored, g, d, val, index, domain)
     end
     stored[v] && return Load(v, index)
+    d isa Reduction && return fold_term(graph, stored, g, v, index, domain)
     d isa Pointwise || return Load(v, index)
-    definition_term(graph, stored, g, d, val, index)
+    definition_term(graph, stored, g, d, val, index, domain)
 end
 
-function definition_term(graph, stored, g, d::Pointwise, val, index)
-    domain = Domain(g.domain)
+function definition_term(graph, stored, g, d::Pointwise, val, index, domain)
     args = map(d.operands) do o
         operand_term(graph, stored, g, o, index, domain)
     end
     Apply(d.f, args, val.eltype)
 end
 
+# A fold recomputed where it is read: its operand over the domain extended by
+# its reduced axes.
+function fold_term(graph, stored, g, v, index, domain)
+    d = graph.values[v].definition
+    base = length(domain)
+    extents = Tuple(d.iteration[k] for k in d.reduced)
+    iteration = ntuple(length(d.iteration)) do k
+        j = findfirst(==(k), d.reduced)
+        j === nothing ? index[k] : var(base + j)
+    end
+    extended = Domain((domain.extents..., extents...))
+    Fold(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended))
+end
+
 operand_term(graph, stored, g, o::Read, index, domain) =
-    value_term(graph, stored, g, o.value, map(e -> substitute(e, index, domain), o.index))
+    value_term(graph, stored, g, o.value, map(e -> substitute(e, index, domain), o.index), domain)
 operand_term(graph, stored, g, o::Literal, index, domain) = Lit(o.value)
 operand_term(graph, stored, g, o::IndexOperand{T}, index, domain) where {T} =
     Ix{T}(substitute(o.expr, index, domain))
@@ -150,13 +167,15 @@ function try_add!(graph, stored, up, g::Group, v; fold)
 end
 
 """
-    plan(graph::IndexGraph; fixed = []) -> Plan
+    plan(graph::IndexGraph; fixed = [], recompute_folds = false, keep = ()) -> Plan
 
 Decide what is stored and form the kernels. Each set of values in `fixed`, a
 candidate an implementation proposed, forms a group of its own, its folds
-stored; the planner groups the rest around them.
+stored; the planner groups the rest around them. With `recompute_folds`, folds
+that `recomputed_folds` selects, apart from those in `keep` and `fixed`, are
+recomputed where they are read instead of stored.
 """
-function plan(graph::IndexGraph; fixed = Vector{Int}[])
+function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false, keep = ())
     graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
@@ -190,10 +209,19 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[])
         values[id].definition isa Opaque && instance(id) in running || continue
         foreach(o -> materialized[o.value] = true, operands(values[id].definition))
     end
+    recomputed = recompute_folds ? setdiff(recomputed_folds(graph, results, materialized), keep, fixed...) : Set{Int}()
+    # Maps of recomputed folds are recomputed with them.
+    after = falses(n)
+    for id in 1:n
+        d = values[id].definition
+        d isa Pointwise || continue
+        after[id] = any(o -> o isa Read && (o.value in recomputed || after[o.value]), d.operands)
+    end
     # A result of an opaque operation that nobody reads is not stored: its
     # kernel leaves it unwritten.
     stored = map(eachindex(values)) do id
         d = values[id].definition
+        id in results || materialized[id] || !(id in recomputed || after[id]) || return false
         d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : d isa Opaque ? live[id] : true
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
@@ -231,7 +259,7 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[])
     for id in 1:n
         live[id] && owner[id] == 0 || continue
         d = values[id].definition
-        d isa Reduction || continue
+        d isa Reduction && stored[id] || continue
         g = Group(:reduction, d.iteration)
         try_add!(graph, stored, up, g, id; fold = true)
         changed = true
@@ -240,7 +268,7 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[])
             for other in (id + 1):n
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
-                if od isa Reduction && od.iteration == g.domain
+                if od isa Reduction && od.iteration == g.domain && stored[other]
                     changed |= try_add!(graph, stored, up, g, other; fold = true)
                 elseif od isa Pointwise && stored[other]
                     changed |= try_add!(graph, stored, up, g, other; fold = false)
@@ -317,6 +345,65 @@ function fixed_group(graph, stored, up, owner, set)
     g
 end
 
+# A fold recomputed where it is read saves its storage and a kernel. Selected
+# when every value it reaches through maps is a fold over another domain (a
+# fold over the same domain joins its group as a later phase instead), each
+# reading fold computes it at most once per block (it moves along every kept
+# axis of the reader wider than a tile), and either the fold is a product over
+# few elements, recomputed as one product per tile, or no reading fold reads
+# it at positions that move along its own reduced axes, so a kernel computes
+# it once per block, before or during its sweep. Results and the operands of
+# opaque work stay stored.
+const RECOMPUTED_PRODUCT = 256
+const RECOMPUTED_SPAN = 128
+
+function recomputed_folds(graph, results, materialized)
+    values = graph.values
+    users = readers(graph)
+    gathered = Set{Int}()
+    for v in values, o in operands(v.definition)
+        o isa Read && foreach(e -> union!(gathered, indirect_values(e)), o.index)
+        o isa IndexOperand && union!(gathered, indirect_values(o.expr))
+    end
+    selected = Set{Int}()
+    for v in eachindex(values)
+        d = values[v].definition
+        d isa Reduction && !(v in results) && !materialized[v] && !(v in gathered) || continue
+        # The folds v reaches through maps, with the index at which each reads v.
+        consumers = Tuple{Int, Tuple{Vararg{Affine}}}[]
+        pending = [(u, v, identity_index(values[v].dims)) for u in unique(users[v])]
+        ok = true
+        while ok && !isempty(pending)
+            u, w, index = pop!(pending)
+            du = values[u].definition
+            domain = iteration_domain(values[u])
+            for o in reads(du)
+                o.value == w || continue
+                at = map(e -> substitute(e, o.index, domain), index)
+                if du isa Reduction
+                    push!(consumers, (u, at))
+                elseif du isa Pointwise && !(u in results) && !materialized[u]
+                    append!(pending, [(x, u, at) for x in unique(users[u])])
+                else
+                    ok = false
+                end
+            end
+        end
+        ok && !isempty(consumers) || continue
+        all(consumers) do (u, at)
+            du = values[u].definition
+            du.iteration != d.iteration &&
+                all(k -> k in du.reduced || du.iteration[k] <= RECOMPUTED_SPAN || any(e -> mentions(e, k), at), eachindex(du.iteration))
+        end || continue
+        o = d.operand
+        product = prod(k -> d.iteration[k], d.reduced; init = 1) <= RECOMPUTED_PRODUCT && o isa Read &&
+            values[o.value].definition isa Pointwise{typeof(*)} && length(values[o.value].definition.operands) == 2
+        product || all(((u, at),) -> !any(k -> any(e -> mentions(e, k), at), values[u].definition.reduced), consumers) || continue
+        push!(selected, v)
+    end
+    selected
+end
+
 # An epilogue: the chain of pointwise values after an opaque result, each read
 # only by the next, over the result's domain, whose other reads align with the
 # result's tile (the same index, or zero along an axis of extent one).
@@ -357,7 +444,7 @@ end
 function aligned(graph, t, D)
     whole = identity_index(D)
     for s in subterms((t,))
-        s isa Ix && return false
+        s isa Union{Ix, Fold} && return false
         s isa Load || continue
         Dv = graph.values[s.value].dims
         length(s.index) == length(Dv) <= length(D) || return false
@@ -411,7 +498,7 @@ function group_reads(graph, g::Group)
                 push!(reads, l.value)
                 foreach(e -> union!(reads, indirect_values(e)), l.index)
             end
-            for t in subterms((g.terms[v],))
+            for t in subterms((g.terms[v],); nested = true)
                 t isa Ix && union!(reads, indirect_values(t.expr))
             end
         else

@@ -1,7 +1,8 @@
-# Attention on GPT-like shapes: the reference fallback, the hand-written
-# kernel, and the kernel with a residual epilogue against the kernel followed
-# by a separate add. Device time is the minimum over samples of a captured
-# graph of a few milliseconds of executions.
+# Attention on GPT-like shapes: the kernel generated from the reference (one
+# fold over keys, online softmax or two passes), the hand-written kernel, and
+# the kernel with a residual epilogue against the kernel followed by a
+# separate add. Device time is the minimum over samples of a captured graph of
+# a few milliseconds of executions.
 #   julia --project=dev bench/attention.jl
 using Tempest, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
@@ -17,15 +18,21 @@ function replay_graph(ex; repetitions)
     CUDACore.instantiate(graph)
 end
 
+# Each captured graph is destroyed once timed: the garbage collector may
+# otherwise unload the kernels' modules first, which crashes the driver.
 function device_microseconds(ex; samples = 15, milliseconds = 4.0)
     once = let g = replay_graph(ex; repetitions = 1)
         CUDACore.launch(g)
-        minimum(_ -> CUDACore.@elapsed(CUDACore.launch(g)), 1:3)
+        t = minimum(_ -> CUDACore.@elapsed(CUDACore.launch(g)), 1:3)
+        finalize(g)
+        t
     end
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 1, 200)
     g = replay_graph(ex; repetitions)
     CUDACore.launch(g)
-    minimum(_ -> 1.0e6 * CUDACore.@elapsed(CUDACore.launch(g)) / repetitions, 1:samples)
+    t = minimum(_ -> 1.0e6 * CUDACore.@elapsed(CUDACore.launch(g)) / repetitions, 1:samples)
+    finalize(g)
+    t
 end
 
 data(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
@@ -46,16 +53,18 @@ function measure(name, p, args; target, check = true)
         err = NaN
     end
     t = device_microseconds(ex)
-    kinds = join(unique(d isa T.ScalarKernel ? "floor" : first(split(string(d), ":")) for d in ex.kernels), " + ")
+    kinds = join(unique(d isa T.FloorKernels ? "floor" : first(split(string(d), ":")) for d in ex.kernels), " + ")
     @printf("%-58s %10.1f us  err %.1e  %s\n", name, t, err, kinds)
     t
 end
 
 ext = Base.get_extension(Tempest, :cuTileExt)
-# Full precision: the kernels are not claimed; the reference runs, its
-# products on the floor until products have schedules of their own.
+# Full precision: the hand-written kernels do not claim; the reference is
+# planned, and generated as one kernel.
 println("== full")
-measure("reference fallback, forward", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget())
+measure("generated, forward", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget())
+measure("generated, forward, two passes", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(online = false))
+measure("training step (loss of attention + residual)", differentiate(trace(loss, q, k, v, x)), (q, k, v, x); target = T.CUDATarget())
 for precision in (:tf32,)
     target = T.CUDATarget(precision = precision)
     println("== ", precision)
@@ -67,3 +76,9 @@ for precision in (:tf32,)
     @printf("  epilogue saves %.1f us (%.0f%%)\n", separate - with_epilogue, 100 * (separate - with_epilogue) / separate)
     measure("training step (loss of attention + residual)", differentiate(trace(loss, q, k, v, x)), (q, k, v, x); target)
 end
+
+# The generated kernel in TF32, the hand-written forward kernel stepping aside.
+@eval Tempest.claims_call(::$(ext.cuTileAttention), ::T.CUDATarget, ::typeof(T.attention_forward), kwargs, inputs) = false
+println("== tf32, generated")
+measure("generated, forward", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(precision = :tf32))
+measure("generated, forward, two passes", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(precision = :tf32, online = false))

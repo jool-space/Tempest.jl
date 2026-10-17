@@ -41,7 +41,7 @@ rates(::CPUTarget) = Rates(2.0e10, 0.0, 1, 0.05)
 device_name(::CPUTarget) = "cpu"
 "The target's numerics, as part of the tuning record's key."
 numerics(::Target) = :default
-numerics(target::CUDATarget) = target.precision
+numerics(target::CUDATarget) = target.online ? target.precision : Symbol(target.precision, "-two-pass")
 
 """
     estimate(implementation, claim, target, plan, group) -> Vector{Work}
@@ -233,13 +233,14 @@ each when its proposer claims the group it forms and the plan with it is
 cheaper than without.
 """
 function cover(d::Decider)
-    base = plan(d.graph)
+    base, keep = generator_plan(d)
     proposals = Tuple{Vector{Int}, Implementation}[]
     for i in implementations(d.target), set in candidates(i, d.target, base)
         any(q -> q[1] == set, proposals) || push!(proposals, (set, i))
     end
+    recompute_folds = recomputes_folds(d.target)
     trial(sets) = try
-        plan(d.graph; fixed = sets)
+        plan(d.graph; fixed = sets, recompute_folds, keep)
     catch e
         e isa NotAGroup || rethrow()
         nothing
@@ -260,6 +261,27 @@ function cover(d::Decider)
         push!(accepted, set => i)
     end
     current, accepted
+end
+
+recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementations(target))
+
+recomputed_in(g::Group; nested = true) =
+    Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Fold)
+
+# The generator's plan, folds recomputed where they are read when an
+# implementation recomputes them, and the folds kept stored: the outermost ones
+# recomputed in a group no implementation claims (folds they recompute in turn
+# may still be recomputed in their kernels).
+function generator_plan(d::Decider)
+    recompute_folds = recomputes_folds(d.target)
+    keep = Set{Int}()
+    while true
+        p = plan(d.graph; recompute_folds, keep)
+        unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) &&
+                     all(i -> isempty(claims(i, d.target, p, g)), implementations(d.target))]
+        isempty(unclaimed) && return p, keep
+        foreach(g -> union!(keep, recomputed_in(g; nested = false)), unclaimed)
+    end
 end
 
 function proposer_claims(d::Decider, p::Plan, set, implementation)

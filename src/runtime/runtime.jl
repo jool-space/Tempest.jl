@@ -6,7 +6,7 @@ abstract type Target end
 struct CPUTarget <: Target end
 
 """
-    CUDATarget(packages...; precision = :full)
+    CUDATarget(packages...; precision = :full, online = true)
 
 Run on an NVIDIA GPU; needs CUDACore loaded. `packages` names the packages whose
 implementations the target may use, as in `CUDATarget(cuTile)`; by default it
@@ -15,16 +15,19 @@ always used. `precision` is the numerics policy for products: `:full` keeps
 Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
 `:tf32x3` splits each Float32 factor into two TF32 parts and sums three
 tensor-core products (close to Float32 accuracy). Half-precision products
-always accumulate in Float32.
+always accumulate in Float32. `online` permits the online softmax: a sum
+weighted by `exp(y - logsumexp(y))` accumulates in the same sweep as the
+log-sum-exp, rescaled as its maximum grows, which changes rounding.
 """
 struct CUDATarget <: Target
     precision::Symbol
+    online::Bool
     packages::Union{Nothing, Tuple{Vararg{Module}}}
 end
 
-function CUDATarget(packages::Module...; precision::Symbol = :full)
+function CUDATarget(packages::Module...; precision::Symbol = :full, online::Bool = true)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision, isempty(packages) ? nothing : packages)
+    CUDATarget(precision, online, isempty(packages) ? nothing : packages)
 end
 
 target_for(x::AbstractArray) = CPUTarget()
@@ -54,6 +57,9 @@ struct cuTileGenerator <: Implementation end
 
 claims(::Implementation, target, plan, group) = ()
 function build_claim end
+
+"Whether `implementation` realizes groups that recompute folds where they read them, on `target`."
+recomputes_folds(::Implementation, target) = false
 
 """
     claims_call(implementation, target, f, kwargs, inputs) -> Bool
@@ -246,7 +252,8 @@ function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
-        "; half-precision products accumulate in Float32")
+        "; half-precision products accumulate in Float32",
+        ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
     for (set, i) in ex.accepted
         println(io, "candidate ", join(map(v -> "%$v", set), " "), " from ", nameof(typeof(i)), " replaces the generator's grouping")
     end
