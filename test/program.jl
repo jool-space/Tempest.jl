@@ -98,6 +98,10 @@ end
     end
     # A copy of an input may be written.
     @test interpret(trace(x -> (y = copy(x); y[1] = 0; y), x), x) == (y = copy(x); y[1] = 0; y)
+    # A gradient's function never writes its arguments, traced or run eagerly.
+    writes(p) = (p[1] = 0; sum(p))
+    @test startswith(message(x -> T.gradient(writes, x)), "ArgumentError: mutation of the program's inputs is not supported")
+    @test_throws ArgumentError T.gradient(writes, x)
 end
 
 # A Julia array a function closes over is a constant factor of the products it

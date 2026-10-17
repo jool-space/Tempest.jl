@@ -278,7 +278,9 @@ function gradient(f, args...)
         x isa Union{AbstractFloat, AbstractArray{<:AbstractFloat}} || return x
         id = x isa Union{Traced, TracedArray} ? x.id : constant!(tape, x)
         n = tape.nodes[id]
-        handle_of(tape, record!(tape, Map(identity), (id,), n.dims, n.eltype; scalar = n.scalar))
+        s = record!(tape, Map(identity), (id,), n.dims, n.eltype; scalar = n.scalar)
+        # The function never writes its arguments, as a program its inputs.
+        n.scalar ? Traced(tape, s) : TracedArray(tape, s; input = true)
     end
     stand_ins = rebuild(stand_in, args)
     start = length(tape.nodes) + 1
