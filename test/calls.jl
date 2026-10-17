@@ -4,7 +4,7 @@
 # and an implementation's claim on it, one opaque group that may absorb the
 # pointwise work after a result as an epilogue, competes with that expansion
 # by cost.
-using Test
+using Test, NNlib
 include("cases.jl")
 
 # A claim on the CPU that realizes attention through its reference on the host.
@@ -101,7 +101,7 @@ rms(x, w; eps = 1.0e-5) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ eps
     @test all(map(≈, gradients(trace((a, w) -> sum(abs2, rms(a, w)), a, w), a, w),
         gradients(trace((a, w) -> sum(abs2, rmsnorm(a, w)), a, w), a, w)))
     # The methods on traced arrays add no ambiguity.
-    for f in (rms, T.attention_forward, T.attention_backward, T.dropout)
+    for f in (rms, T.attention_forward, T.attention_backward, T.dropout, NNlib.softmax, NNlib.logsoftmax, NNlib.batched_mul)
         ms = collect(methods(f))
         @test !any(Base.isambiguous(m, n) for m in ms for n in ms if m !== n)
     end
@@ -165,6 +165,72 @@ T.verb_pullback(::typeof(running_sum), (x,), y, dy) = (sum(dy) .- running_sum(dy
     end
 end
 
+# NNlib's functions whose bodies do not trace keep their names, and mean what
+# the same computations spelled in Tempest's primitives mean.
+const NNLIB = [
+    ("softmax", NNlib.softmax, (x, t) -> sum(NNlib.softmax(x; dims = 1) .* t),
+     (x, t) -> sum(exp.(x .- T.logsumexp(x; dims = 1)) .* t), (data(8, 6), data(8, 6; scale = 0.7))),
+    ("softmax over rows", NNlib.softmax, (x, t) -> sum(NNlib.softmax(x; dims = 2) .* t),
+     (x, t) -> sum(exp.(x .- T.logsumexp(x; dims = 2)) .* t), (data(8, 6), data(8, 6; scale = 0.7))),
+    ("logsoftmax", NNlib.logsoftmax, (x, t) -> sum(NNlib.logsoftmax(x) .* t),
+     (x, t) -> sum((x .- T.logsumexp(x; dims = 1)) .* t), (data(8, 6), data(8, 6; scale = 0.7))),
+    ("batched_mul", NNlib.batched_mul, (a, b) -> sum(abs2, NNlib.batched_mul(a, b)),
+     (a, b) -> sum(abs2, T.batched_mul(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
+    ("batched_mul of transposes", NNlib.batched_mul, (a, b) -> sum(abs2, NNlib.batched_mul(NNlib.batched_transpose(b), NNlib.batched_adjoint(a))),
+     (a, b) -> sum(abs2, T.batched_mul(permutedims(b, (2, 1, 3)), permutedims(a, (2, 1, 3)))), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
+    ("batched_mul sharing a batch", NNlib.batched_mul, (a, b) -> sum(abs2, NNlib.batched_mul(a, b)),
+     (a, b) -> sum(abs2, T.batched_mul(a .* ones(1, 1, 2), b)), (data(3, 4, 1), data(4, 5, 2; scale = 0.3))),
+]
+
+@testset "NNlib operations" begin
+    @testset "$name" for (name, op, f, spelled, args) in NNLIB
+        p = trace(f, args...)
+        @test any(n -> n.op isa T.Call && n.op.f === op, p.nodes)
+        @test interpret(p, args...) ≈ f(args...)
+        @test all(map(≈, gradients(p, args...), gradients(trace(spelled, args...), args...)))
+        for program in (p, differentiate(p))
+            @test agree(results(prepare(program, args...)), filter(!isnothing, T.leaves(interpret(program, args...))))
+        end
+    end
+end
+
+# An implementation of NNlib's softmax that also claims a softmax written out
+# by hand: the exponential of a value less its log-sum-exp over the first axis.
+struct HostSoftmax <: T.Implementation end
+T.claims_call(::HostSoftmax, ::T.CPUTarget, f, kwargs, inputs) = f === NNlib.softmax && kwargs == (dims = 1,)
+T.estimate(::HostSoftmax, claim, target, p, g) = [T.Work(0.0)]
+T.build_call(::HostSoftmax, p, g, buffers, target) = T.opaque_launch(p, g, buffers)
+function T.candidates(::HostSoftmax, ::T.CPUTarget, p)
+    graph = p.graph
+    found = []
+    for (e, v) in enumerate(graph.values)
+        v.definition isa T.Pointwise{typeof(exp)} || continue
+        s = only(v.definition.operands).value
+        d = graph.values[s].definition
+        d isa T.Pointwise{typeof(-)} && all(o -> o isa T.Read, d.operands) || continue
+        x, l = d.operands
+        x.index == T.identity_index(graph.values[x.value].dims) && graph.values[x.value].dims == v.dims || continue
+        lse = graph.values[l.value].definition
+        lse isa T.Reduction{T.LogSumExpFold} && lse.reduced == (1,) && lse.operand == x || continue
+        push!(found, T.ClaimedCall(T.call_site(graph, NNlib.softmax, (dims = 1,), [l.value, s, e], [x.value], [e]), ()))
+    end
+    found
+end
+
+@testset "claims of computations written out" begin
+    a = data(8, 6)
+    named = x -> NNlib.softmax(x; dims = 1)
+    written = x -> exp.(x .- T.logsumexp(x; dims = 1))
+    with_implementations(HostSoftmax()) do
+        for (f, instead) in ((named, "its reference expanded"), (written, "the computation as written"))
+            ex = prepare(trace(f, a), a)
+            @test length(opaque_groups(ex)) == 1
+            @test occursin("call of softmax (%", sprint(explain, ex)) && occursin("HostSoftmax's claim replaces $instead", sprint(explain, ex))
+            @test agree(results(ex), [f(a)])
+        end
+    end
+end
+
 using CUDACore, cuTile
 if CUDACore.functional()
     close(a, b; rtol) = all(map((x, y) -> isapprox(ndims(x) == 0 ? Array(x)[] : Array(x), y; rtol), a, b))
@@ -220,6 +286,25 @@ if CUDACore.functional()
             end
         finally
             write(path, join(lines, '\n') * '\n')
+        end
+    end
+    @testset "NNlib operations on CUDA" begin
+        @testset "$name" for (name, op, f, spelled, args) in NNLIB
+            args = map(a -> Float32.(a), args)
+            ex = prepare(trace(f, args...), map(CuArray, args)...)
+            @test close(T.leaves(execute!(ex)), [f(args...)]; rtol = 1.0e-4)
+        end
+        # Attention written with NNlib's softmax is one generated kernel, as
+        # it is with the log-sum-exp.
+        scores(q, k) = NNlib.batched_mul(NNlib.batched_transpose(k), q) .* (1 / sqrt(Float32(size(q, 1))))
+        spellings = [(q, k, v) -> NNlib.batched_mul(v, NNlib.softmax(scores(q, k); dims = 1)),
+            (q, k, v) -> (s = scores(q, k); NNlib.batched_mul(v, exp.(s .- T.logsumexp(s; dims = 1))))]
+        q, k, v = (Float32.(data(16, 200, 3; scale)) for scale in (0.1, 0.2, 0.3))
+        for f in spellings
+            ex = prepare(trace(f, q, k, v), map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
+            kernel = only(ex.kernels)
+            @test !(kernel isa T.FloorKernels) && occursin("online softmax", string(kernel))
+            @test close(T.leaves(execute!(ex)), [f(q, k, v)]; rtol = 1.0e-4)
         end
     end
 end
