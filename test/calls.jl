@@ -1,8 +1,9 @@
 # Operations: functions that keep their names under tracing. A call is
-# recorded per result and evaluated through its reference; at the index level
-# it is its reference expanded, and an implementation's claim on it, one opaque
-# group that may absorb the pointwise work after a result as an epilogue,
-# competes with that expansion by cost.
+# recorded per result and evaluated through its reference (an opaque one
+# through its own method); at the index level it is its reference expanded,
+# and an implementation's claim on it, one opaque group that may absorb the
+# pointwise work after a result as an epilogue, competes with that expansion
+# by cost.
 using Test
 include("cases.jl")
 
@@ -30,6 +31,7 @@ agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), 
 results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(execute!(ex))))
 gradients(p, args...) = filter(!isnothing, T.leaves(interpret(differentiate(p), args...)))
 with_implementations(f, implementations...) = (T.register!(@__MODULE__, implementations...); try f() finally T.register!(@__MODULE__) end)
+message(f) = try f(); "" catch e; sprint(showerror, e) end
 
 @testset "calls" begin
     p = trace(residual, q, k, v, x)
@@ -102,6 +104,64 @@ rms(x, w; eps = 1.0e-5) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ eps
     for f in (rms, T.attention_forward, T.attention_backward, T.dropout)
         ms = collect(methods(f))
         @test !any(Base.isambiguous(m, n) for m in ms for n in ms if m !== n)
+    end
+end
+
+# An opaque operation: its body loops over scalars, and it declares its
+# results' shapes and types.
+function running_sum(x::AbstractVector)
+    y, total = similar(x), zero(eltype(x))
+    for i in eachindex(x)
+        total += x[i]
+        y[i] = total
+    end
+    y
+end
+@operation running_sum(x::AbstractVector)
+T.declared_results(::typeof(running_sum), ((dims, T),)) = (dims, T)
+
+# A CPU implementation of it, which applies the work after it as an epilogue.
+struct HostRunningSum <: T.Implementation end
+T.claims_call(::HostRunningSum, ::T.CPUTarget, f, kwargs, inputs) = f === running_sum
+T.epilogue_results(::HostRunningSum, ::typeof(running_sum), kwargs) = (1,)
+T.build_call(::HostRunningSum, p, g, buffers, target) = T.opaque_launch(p, g, buffers)
+
+prefix(x) = running_sum(x .* 2) .+ 1
+prefix_loss(x) = sum(abs2, prefix(x))
+
+@testset "opaque operations" begin
+    a = data(12)
+    p = trace(prefix_loss, a)
+    @test only(calls(p)).op.f === running_sum
+    @test interpret(p, a) ≈ prefix_loss(a) # through its own method
+    # Without an implementation, preparation fails and names it; without a
+    # rule, so does differentiation.
+    @test occursin(r"no implementation on .*CPUTarget\(\) runs running_sum", message(() -> prepare(p, a)))
+    @test occursin("running_sum is an opaque operation without a derivative rule", message(() -> differentiate(p)))
+    with_implementations(HostRunningSum()) do
+        ex = prepare(p, a)
+        @test length(opaque_groups(ex)) == 1
+        @test agree(results(ex), [prefix_loss(a)])
+        # The + 1 is written in the result's place, which saves a kernel.
+        ex = prepare(trace(prefix, a), a)
+        @test length(only(opaque_groups(ex)).epilogues) == 1 && length(ex.kernels) == 2
+        @test occursin("HostRunningSum's claim with an epilogue replaces its claim without an epilogue", sprint(explain, ex))
+        @test agree(results(ex), [prefix(a)])
+    end
+end
+
+# With a rule, it differentiates: each element's cotangent is the sum of the
+# cotangents from it on.
+T.has_pullback(::typeof(running_sum)) = true
+T.verb_pullback(::typeof(running_sum), (x,), y, dy) = (sum(dy) .- running_sum(dy) .+ dy,)
+
+@testset "opaque operations with a rule" begin
+    a = data(12)
+    d = differentiate(trace(prefix_loss, a))
+    g = 2 .* (cumsum(2 .* a) .+ 1)
+    @test last(interpret(d, a)) ≈ 2 .* reverse(cumsum(reverse(g)))
+    with_implementations(HostRunningSum()) do
+        @test agree(results(prepare(d, a)), filter(!isnothing, T.leaves(interpret(d, a))))
     end
 end
 

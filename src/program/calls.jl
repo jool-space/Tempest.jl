@@ -3,7 +3,8 @@
 #
 # - its meaning: `f`'s own methods, which run on Julia arrays as they always do;
 # - its reference, the meaning in primitives: `f`'s method for the declared
-#   argument types run on traced arrays, or a method of `reference`;
+#   argument types run on traced arrays, or a method of `reference`. An opaque
+#   operation has none; it declares its results (`declared_results`) instead;
 # - its implementations, which claim calls of `f` (see `claims_call`), and an
 #   optional derivative rule, `verb_pullback`. Without a rule, differentiation
 #   goes through the reference.
@@ -11,7 +12,8 @@
 # `@operation` adds the methods of `f` on traced arrays that record a call. At
 # the index level a call is its reference expanded, with the call's place kept,
 # so it fuses like any other code; an implementation's claim on it competes by
-# cost with the reference fused into its neighbours.
+# cost with the reference fused into its neighbours. An opaque call runs only
+# where an implementation claims it.
 
 """
 One result of a call of `f` on the node's inputs. A call with several results
@@ -41,7 +43,9 @@ execution is unchanged: Julia arrays still reach `f`'s own methods.
 
 The reference, the call's meaning in primitives, is `f`'s method for the
 declared argument types run on traced arrays, unless `Tempest.reference` has a
-method for `f`; an operation whose body does not trace gives one.
+method for `f`. An operation whose body does not trace either gives a
+reference, or declares its results with `Tempest.declared_results` and is
+opaque.
 """
 macro operation(signature)
     Meta.isexpr(signature, :call) ||
@@ -97,6 +101,21 @@ function reference(f, args...; kwargs...)
 end
 
 """
+    declared_results(f, inputs; kwargs...) -> results
+
+The results of a call of the opaque operation `f` whose arguments have the
+`(dims, eltype)` in `inputs`: a `(dims, eltype)` per result, in the structure
+`f` returns them (alone, or in a tuple or a named tuple). Defining it makes `f`
+opaque: its body never runs on traced arrays, the interpreter runs its own
+method, it differentiates only through a rule, and it runs where an
+implementation claims it.
+"""
+function declared_results end
+
+"Whether `f` is an operation without a reference: one that declares its results."
+opaque(f) = hasmethod(declared_results, Tuple{typeof(f), Any})
+
+"""
     verb_pullback(f, args, results, cotangents; kwargs...) -> tuple
 
 The derivative rule of the operation `f`: the cotangents of `args` (each an
@@ -115,10 +134,15 @@ function record_call(f, args...; kwargs...)
     all(a -> a isa TracedArray && a.tape === tape, args) ||
         throw(ArgumentError("the arguments of a call of $f must be traced arrays of one program"))
     tape.expands(f) && return expand!(tape, f, args, values(kwargs))
-    # Each result's shape and type, from the reference traced on stand-ins.
-    scratch = Tape()
-    stand_ins = map(a -> TracedArray(scratch, record!(scratch, Argument(), (), size(a), eltype(a))), args)
-    probe = rebuild(node, reference(f, stand_ins...; kwargs...))
+    # Each result's shape and type: declared, or from the reference traced on
+    # stand-ins.
+    probe = if opaque(f)
+        declared(declared_results(f, map(a -> (size(a), eltype(a)), args); kwargs...), f)
+    else
+        scratch = Tape()
+        stand_ins = map(a -> TracedArray(scratch, record!(scratch, Argument(), (), size(a), eltype(a))), args)
+        rebuild(node, reference(f, stand_ins...; kwargs...))
+    end
     position = Ref(0)
     structure = rebuild(_ -> (position[] += 1), probe)
     instance = length(tape.nodes) + 1
@@ -127,6 +151,14 @@ function record_call(f, args...; kwargs...)
         record!(tape, op, map(a -> a.id, args), s.dims, s.eltype; scalar = s.scalar)
     end
     rebuild(k -> handle_of(tape, ids[k]), structure)
+end
+
+# Declared results as the nodes they become: a leaf is a `(dims, eltype)` pair.
+function declared(x, f)
+    x isa Tuple{Tuple{Vararg{Integer}}, Type} && return Node(Argument(), (), map(Int, x[1]), x[2], false)
+    x isa Union{Tuple, NamedTuple} && !isempty(x) ||
+        throw(ArgumentError("declared_results of $f gives a (dims, eltype) per result, got $x"))
+    map(r -> declared(r, f), x)
 end
 
 handle_of(tape, id) = tape.nodes[id].scalar ? Traced(tape, id) : TracedArray(tape, id)
@@ -195,15 +227,18 @@ function expand_calls(p::Program, expands)
     program, Expansion[tape.expansions...]
 end
 
-# One result of a call, through the reference.
-evaluate(op::Call, n, xs) = leaves(reference(op.f, xs...; op.kwargs...))[op.output]
+# A call's results on Julia arrays: an opaque operation's own method, else its
+# reference.
+evaluated(op::Call, xs) = leaves(opaque(op.f) ? op.f(xs...; op.kwargs...) : reference(op.f, xs...; op.kwargs...))
 
-# The interpreter evaluates a call through its reference, once for all results.
+# One result of a call.
+evaluate(op::Call, n, xs) = evaluated(op, xs)[op.output]
+
+# The interpreter evaluates a call once for all its results.
 function evaluate_call!(values, p_nodes, id)
     n = p_nodes[id]
-    op = n.op
-    out = leaves(reference(op.f, map(i -> values[i], n.inputs)...; op.kwargs...))
-    for (k, r) in enumerate(results_of(p_nodes, op.instance))
+    out = evaluated(n.op, map(i -> values[i], n.inputs))
+    for (k, r) in enumerate(results_of(p_nodes, n.op.instance))
         values[r] = out[k]
     end
 end
@@ -212,6 +247,8 @@ end
 # (zero where none), and hand them to the rule in the operation's structure.
 function call_pullback(n, id, cotangents, tape)
     op = n.op
+    has_pullback(op.f) ||
+        throw(ArgumentError("$(op.f) is an opaque operation without a derivative rule; define Tempest.verb_pullback and Tempest.has_pullback for it"))
     ids = results_of(tape.nodes, op.instance)
     results = rebuild(k -> handle_of(tape, ids[k]), op.structure)
     gradient = rebuild(op.structure) do k

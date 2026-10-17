@@ -30,6 +30,9 @@ function CUDATarget(packages::Module...; precision::Symbol = :full, online::Bool
     CUDATarget(precision, online, isempty(packages) ? nothing : packages)
 end
 
+Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", t.packages === nothing ? "" : join(map(string ∘ nameof, t.packages), ", ") * "; ",
+    "precision = :", t.precision, t.online ? "" : ", online = false", ")")
+
 target_for(x::AbstractArray) = CPUTarget()
 target_for(x) = nothing
 
@@ -69,7 +72,8 @@ keyword arguments on `target`; `inputs` holds the `(dims, eltype)` of each
 argument. A claimed call is one opaque group whose kernel computes all its
 results, estimated by `estimate` like any claim (the claim is a `CallClaim`).
 It replaces the call's reference only where it is cheaper than the reference
-expanded and fused into its neighbours.
+expanded and fused into its neighbours; an opaque call runs only where it is
+claimed.
 """
 claims_call(::Implementation, target, f, kwargs, inputs) = false
 

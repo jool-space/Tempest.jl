@@ -212,10 +212,17 @@ function group_claims(i::Implementation, target, p::Plan, g::Group)
     Any[cs...; CallClaim(op.f, op.kwargs)]
 end
 
-"Every claim on a group, cheapest estimate first; the floor when none claims it."
+"""
+Every claim on a group, cheapest estimate first; the floor when none claims
+it, except for a call, which only implementations run.
+"""
 function options(d::Decider, p::Plan, g::Group)
     os = Choice[choice(d, p, g, i, c) for i in implementations(d.target) for c in group_claims(i, d.target, p, g)]
-    isempty(os) && push!(os, choice(d, p, g, nothing, nothing))
+    if isempty(os)
+        op = called(p.graph, g)
+        op === nothing || throw(ArgumentError("no implementation on $(d.target) runs $(op.f), an operation without a reference"))
+        push!(os, choice(d, p, g, nothing, nothing))
+    end
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
 
@@ -278,8 +285,9 @@ end
 """
     ClaimedCall(site, epilogues)
 
-A call claimed in place of its reference expanded: the call's place in the
-graph, and the results after which the claimant applies an epilogue. An implementation may propose
+A call claimed in place of its reference expanded (an opaque call, in place of
+its claim without epilogues): the call's place in the graph, and the results
+after which the claimant applies an epilogue. An implementation may propose
 one among its `candidates` for a computation it recognizes (see `call_site`).
 """
 struct ClaimedCall
@@ -326,7 +334,8 @@ function claimed(graph::IndexGraph, calls)
     IndexGraph(values, graph.arguments, graph.results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls)
 end
 
-# The calls an implementation claims, with the epilogues it applies.
+# The calls an implementation claims, with the epilogues it applies. An opaque
+# call is proposed only with epilogues: without, its group is in every plan.
 function call_proposals(d::Decider, i::Implementation)
     graph = d.graph
     proposals = ClaimedCall[]
@@ -334,6 +343,7 @@ function call_proposals(d::Decider, i::Implementation)
         op = first(site.results).op
         claims_call(i, d.target, op.f, op.kwargs, call_inputs(graph, site.operands, site.shapes)) || continue
         epilogues = Tuple(k for k in eachindex(site.results) if k in epilogue_results(i, op.f, op.kwargs))
+        opaque(op.f) && isempty(epilogues) && continue
         push!(proposals, ClaimedCall(site, epilogues))
     end
     proposals
@@ -409,7 +419,8 @@ function explain(io::IO, p::Plan, c::Considered)
     v = first(site.reads).value
     epilogue = c.accepted && !isempty(p.groups[p.owner[v]].epilogues)
     claim = string(name, "'s claim", epilogue ? " with an epilogue" : "")
-    instead = any(s -> s === site, graph.calls) ? "its reference expanded" : "the computation as written"
+    instead = opaque(f) ? "its claim without an epilogue" :
+        any(s -> s === site, graph.calls) ? "its reference expanded" : "the computation as written"
     print(io, "call of ", f, " (", join(map(r -> "%$(r.value)", site.reads), " "), "): ")
     println(io, c.accepted ? string(claim, " replaces ", instead) : string(instead, " is kept over ", claim), why)
 end

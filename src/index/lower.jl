@@ -127,10 +127,13 @@ The program at the index level. A call with a reference is expanded in place,
 and its place kept for implementations to claim.
 """
 function lower(p::Program)
-    p, expansions = expand_calls(p, Returns(true))
+    p, expansions = expand_calls(p, f -> !opaque(f))
     nodes = p.nodes
     # A call computes all its results, used or not, from all its arguments.
     keep = live(nodes, [p.results; [i for e in expansions for i in [e.inputs; e.results]]])
+    for (id, n) in enumerate(nodes)
+        n.op isa Call && keep[id] && foreach(r -> keep[r] = true, results_of(nodes, n.op.instance))
+    end
     values = Value[]
     access = Vector{Access}(undef, length(nodes))
     gathers = IdDict{Any, Int}()
@@ -206,6 +209,9 @@ function lower(p::Program)
         elseif op isa Contract
             all(a -> a isa ValueAccess, inputs) || error("a product of a constant is not supported yet")
             contraction!(value!, op, inputs, input_dims, n)
+        elseif op isa Call
+            # An opaque call, which implementations alone realize.
+            value!(Opaque(n, map(dense, n.inputs), map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)), n)
         elseif op isa Union{Reshape, Permute, Select}
             compose(only(inputs), layout_index(op, n.dims, only(input_dims), d, gather), d)
         else
@@ -228,6 +234,13 @@ function lower(p::Program)
         site = expanded_site(values, collect(starts[k]:(first_value[last(e.nodes) + 1] - 1)), arguments_of[k],
             map(i -> (nodes[i].dims, nodes[i].scalar), Tuple(e.inputs)), returned, access[e.results])
         site === nothing || push!(calls, site)
+    end
+    for (id, n) in enumerate(nodes)
+        n.op isa Call && n.op.instance == id && keep[id] || continue
+        rs = results_of(nodes, id)
+        d = values[access[id].value].definition
+        push!(calls, CallSite([access[r].value for r in rs], d.operands, d.shapes, nodes[rs],
+            [Read(access[r].value, identity_index(nodes[r].dims)) for r in rs]))
     end
     sort!(calls; by = c -> (first(c.values), -length(c.values)))
     results = Operand[operand(access[r], nodes[r].dims, Domain(nodes[r].dims)) for r in p.results]
