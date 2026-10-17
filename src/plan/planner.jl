@@ -136,10 +136,34 @@ function ancestors(graph)
     up
 end
 
+"The kernels formed so far, and the kernel that owns each value (zero for none yet)."
+struct Dependencies
+    owner::Vector{Int}
+    groups::Vector{Group}
+end
+
+# Whether value `r` depends on a member of `group`: through the values it
+# reads, and through the kernels that own them, each of which runs after
+# everything any of its members reads. A kernel that read `r` and joined such
+# a member would make kernels depend on each other in a cycle.
+function depends(graph, deps::Dependencies, r, group)
+    stack, seen = [r], Set{Int}()
+    while !isempty(stack)
+        u = pop!(stack)
+        u in seen && continue
+        push!(seen, u)
+        u in group && return true
+        k = deps.owner[u]
+        k == 0 ? foreach(o -> append!(stack, read_values(o)), operands(graph.values[u].definition)) :
+            union!(stack, group_reads(graph, deps.groups[k]))
+    end
+    false
+end
+
 # Try to add a fold or an output to a group. Its term must stay inside the
 # group's domain, nothing it loads may depend on the group, and no member may
 # already load it.
-function try_add!(graph, stored, up, g::Group, v; fold)
+function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     val = graph.values[v]
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
@@ -156,9 +180,7 @@ function try_add!(graph, stored, up, g::Group, v; fold)
     end
     group = Set(members(g))
     reads = stored_reads(t)
-    for r in reads
-        (r in group || !isempty(intersect(up[r], group))) && return false
-    end
+    any(r -> depends(graph, deps, r, group), reads) && return false
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
     connected = isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads)
@@ -276,6 +298,7 @@ function group_values(graph, stored, live, results, running, fixed)
     up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
+    deps = Dependencies(owner, groups)
     # Opaque work first, one group per operation over its first result's
     # domain (all results of a claimed call together, in order), which may
     # absorb the pointwise work after a result as an epilogue its kernel
@@ -295,7 +318,7 @@ function group_values(graph, stored, live, results, running, fixed)
         values[o].definition.epilogue && absorb_epilogue!(graph, stored, users, results, owner, g, k, o)
     end
     for set in fixed
-        push!(groups, fixed_group(graph, stored, up, owner, set))
+        push!(groups, fixed_group(graph, stored, deps, set))
         foreach(m -> owner[m] = length(groups), set)
     end
     for id in 1:n
@@ -303,7 +326,7 @@ function group_values(graph, stored, live, results, running, fixed)
         d = values[id].definition
         d isa Reduction && stored[id] || continue
         g = Group(:reduction, d.iteration)
-        try_add!(graph, stored, up, g, id; fold = true)
+        try_add!(graph, stored, deps, g, id; fold = true)
         changed = true
         while changed
             changed = false
@@ -311,9 +334,9 @@ function group_values(graph, stored, live, results, running, fixed)
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
                 if od isa Reduction && od.iteration == g.domain && stored[other]
-                    changed |= try_add!(graph, stored, up, g, other; fold = true)
+                    changed |= try_add!(graph, stored, deps, g, other; fold = true)
                 elseif od isa Pointwise && stored[other]
-                    changed |= try_add!(graph, stored, up, g, other; fold = false)
+                    changed |= try_add!(graph, stored, deps, g, other; fold = false)
                 end
             end
         end
@@ -328,11 +351,11 @@ function group_values(graph, stored, live, results, running, fixed)
         d isa Union{Input, ConstantArray} && continue
         d isa Pointwise || error("value %$id has no kernel")
         g = Group(:pointwise, values[id].dims)
-        try_add!(graph, stored, up, g, id; fold = false)
+        try_add!(graph, stored, deps, g, id; fold = false)
         for other in (id + 1):n
             live[other] && owner[other] == 0 && stored[other] || continue
             values[other].definition isa Pointwise && values[other].dims == g.domain || continue
-            any(m -> m in up[other], members(g)) && try_add!(graph, stored, up, g, other; fold = false)
+            any(m -> m in up[other], members(g)) && try_add!(graph, stored, deps, g, other; fold = false)
         end
         push!(groups, g)
         foreach(m -> owner[m] = length(groups), members(g))
@@ -373,15 +396,15 @@ Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%
 # The group of exactly the values in `set`: its folds over one domain, then
 # stored pointwise values over it. A candidate spanning several domains waits
 # for groups that span them: a kernel is maps and folds over one domain.
-function fixed_group(graph, stored, up, owner, set)
+function fixed_group(graph, stored, deps, set)
     values = graph.values
-    all(v -> owner[v] == 0, set) || throw(NotAGroup(set))
+    all(v -> deps.owner[v] == 0, set) || throw(NotAGroup(set))
     d = values[first(set)].definition
     g = d isa Reduction ? Group(:reduction, d.iteration) : Group(:pointwise, values[first(set)].dims)
     for v in set
         dv = values[v].definition
-        added = dv isa Reduction ? dv.iteration == g.domain && try_add!(graph, stored, up, g, v; fold = true) :
-            dv isa Pointwise && stored[v] && try_add!(graph, stored, up, g, v; fold = false)
+        added = dv isa Reduction ? dv.iteration == g.domain && try_add!(graph, stored, deps, g, v; fold = true) :
+            dv isa Pointwise && stored[v] && try_add!(graph, stored, deps, g, v; fold = false)
         added || throw(NotAGroup(set))
     end
     g
