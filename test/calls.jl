@@ -1,7 +1,8 @@
-# Calls: recorded per result and evaluated through the reference. At the
-# index level a call is its reference expanded, and an implementation's claim
-# on it, one opaque group that may absorb the pointwise work after a result as
-# an epilogue, competes with that expansion by cost.
+# Operations: functions that keep their names under tracing. A call is
+# recorded per result and evaluated through its reference; at the index level
+# it is its reference expanded, and an implementation's claim on it, one opaque
+# group that may absorb the pointwise work after a result as an epilogue,
+# competes with that expansion by cost.
 using Test
 include("cases.jl")
 
@@ -27,6 +28,7 @@ calls(p) = [n for n in p.nodes if n.op isa T.Call]
 opaque_groups(ex) = [g for g in ex.plan.groups if g.kind === :opaque]
 agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), a, b))
 results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(execute!(ex))))
+gradients(p, args...) = filter(!isnothing, T.leaves(interpret(differentiate(p), args...)))
 with_implementations(f, implementations...) = (T.register!(@__MODULE__, implementations...); try f() finally T.register!(@__MODULE__) end)
 
 @testset "calls" begin
@@ -54,7 +56,7 @@ with_implementations(f, implementations...) = (T.register!(@__MODULE__, implemen
         @test isempty(only(opaque_groups(ex)).epilogues)
         @test agree(results(ex), [permuted(q, k, v, y)])
 
-        # Training claims the backward verb too.
+        # Training claims the backward operation too.
         d = differentiate(p)
         @test length(calls(d)) == 5 # o, lse; dq, dk, dv
         ex = prepare(d, q, k, v, x)
@@ -74,6 +76,35 @@ with_implementations(f, implementations...) = (T.register!(@__MODULE__, implemen
     end
 end
 
+# An operation from a generic function: its method is its reference.
+rms(x, w; eps = 1.0e-5) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ eps) .* w
+@operation rms(x::AbstractMatrix, w::AbstractVector; eps = 1.0e-5)
+
+@testset "operations" begin
+    a, w = data(8, 6), data(8; scale = 0.1)
+    p = trace(rms, a, w)
+    @test only(calls(p)).op.f === rms
+    @test interpret(p, a, w) ≈ rms(a, w)
+    ex = prepare(p, a, w)
+    @test length(ex.plan.groups) == 1
+    @test agree(results(ex), [rms(a, w)])
+    # A Julia array among the arguments is a constant; keywords are part of
+    # the call.
+    p = trace(a -> rms(a, w; eps = 0.1), a)
+    @test only(calls(p)).op.kwargs == (eps = 0.1,)
+    @test interpret(p, a) ≈ rms(a, w; eps = 0.1)
+    p = trace(w -> rms(a, w), w)
+    @test only(calls(p)).op.f === rms && interpret(p, w) ≈ rms(a, w)
+    # Gradients go through the reference.
+    @test all(map(≈, gradients(trace((a, w) -> sum(abs2, rms(a, w)), a, w), a, w),
+        gradients(trace((a, w) -> sum(abs2, rmsnorm(a, w)), a, w), a, w)))
+    # The methods on traced arrays add no ambiguity.
+    for f in (rms, T.attention_forward, T.attention_backward, T.dropout)
+        ms = collect(methods(f))
+        @test !any(Base.isambiguous(m, n) for m in ms for n in ms if m !== n)
+    end
+end
+
 using CUDACore, cuTile
 if CUDACore.functional()
     close(a, b; rtol) = all(map((x, y) -> isapprox(ndims(x) == 0 ? Array(x)[] : Array(x), y; rtol), a, b))
@@ -82,7 +113,7 @@ if CUDACore.functional()
         q, k, v = single(16, 4, 64, 2; scale = 0.1), single(16, 2, 64, 2; scale = 0.2), single(16, 2, 64, 2; scale = 0.3)
         x = single(16, 4, 64, 2; scale = 0.5)
         device(xs) = map(CuArray, xs)
-        # Untraced, the verbs run their references on device arrays.
+        # Untraced, the operations run their own methods on device arrays.
         @test Array(T.attention(device((q, k, v))...; causal = true)) ≈ T.attention(q, k, v; causal = true)
         seed = Int32[7]
         @test Array(T.dropout(CuArray(x), CuArray(seed); rate = 0.25)) == T.dropout(x, seed; rate = 0.25)

@@ -1,22 +1,22 @@
-# Calls: named operations with a reference. A verb is a Julia function `f`
-# with three parts:
+# Operations: Julia functions that keep their names under tracing. Three
+# things about an operation `f` are kept apart:
 #
-# - `reference(f, args...; kwargs...)`, its meaning in primitives. It runs on
-#   Julia arrays and on traced arrays alike.
-# - Optional realizations: implementations claim calls of `f` (see
-#   `claims_call`), and realize them as kernels of their own.
-# - An optional derivative rule, `verb_pullback`. Without one, differentiation
+# - its meaning: `f`'s own methods, which run on Julia arrays as they always do;
+# - its reference, the meaning in primitives: `f`'s method for the declared
+#   argument types run on traced arrays, or a method of `reference`;
+# - its implementations, which claim calls of `f` (see `claims_call`), and an
+#   optional derivative rule, `verb_pullback`. Without a rule, differentiation
 #   goes through the reference.
 #
-# At the index level a call is its reference expanded, with the call's place
-# kept, so it fuses like any other code; an implementation's claim on it, one
-# kernel group that may absorb pointwise work after it as an epilogue,
-# competes by cost with the reference fused into its neighbours.
+# `@operation` adds the methods of `f` on traced arrays that record a call. At
+# the index level a call is its reference expanded, with the call's place kept,
+# so it fuses like any other code; an implementation's claim on it competes by
+# cost with the reference fused into its neighbours.
 
 """
 One result of a call of `f` on the node's inputs. A call with several results
 has a node for each, consecutive, numbered by `output`; `instance` is the id of
-the first, shared by all. `structure` arranges the results as the reference
+the first, shared by all. `structure` arranges the results as the operation
 returns them, with leaf positions.
 """
 struct Call{F, K <: NamedTuple} <: Operation
@@ -30,34 +30,83 @@ end
 op_detail(op::Call) = string(" ", op.f, op.output > 1 || op.structure isa Union{Tuple, NamedTuple} ? " result $(op.output)" : "")
 
 """
+    @operation f(x::AbstractArray, w::AbstractArray; eps = 1.0f-6)
+
+Make `f` an operation: on traced arrays it records a call of `f` rather than
+running its body, so the program keeps its name, an implementation can claim
+it and `explain` shows it. Each positional argument is an array of the type
+given (`AbstractArray` by default); keywords are passed on as written and are
+part of the call. Julia arrays among the arguments become constants. Eager
+execution is unchanged: Julia arrays still reach `f`'s own methods.
+
+The reference, the call's meaning in primitives, is `f`'s method for the
+declared argument types run on traced arrays, unless `Tempest.reference` has a
+method for `f`; an operation whose body does not trace gives one.
+"""
+macro operation(signature)
+    Meta.isexpr(signature, :call) ||
+        throw(ArgumentError("@operation takes a signature, as in `@operation f(x::AbstractArray; dims = 1)`"))
+    f = signature.args[1]
+    keywords = [k for p in signature.args[2:end] if Meta.isexpr(p, :parameters) for k in p.args]
+    positional = [a for a in signature.args[2:end] if !Meta.isexpr(a, :parameters)]
+    all(a -> a isa Symbol || Meta.isexpr(a, :(::)), positional) ||
+        throw(ArgumentError("an operation's positional arguments are `x`, `x::T` or `::T`, without defaults"))
+    names = map(a -> a isa Symbol ? a : length(a.args) == 2 ? a.args[1] : gensym(), positional)
+    types = map(a -> a isa Symbol ? AbstractArray : last(a.args), positional)
+    keyword(k) = k isa Symbol ? k : keyword(first(k.args))
+    passed = map(k -> Meta.isexpr(k, :...) ? k : Expr(:kw, keyword(k), keyword(k)), keywords)
+    # A method for each nonempty set of traced arguments, the others of their
+    # declared types: every mix of traced and Julia arrays reaches one, and
+    # each is more specific than `f`'s own methods for the declared types.
+    methods = map(1:(2^length(names) - 1)) do traced
+        args = map(eachindex(names)) do k
+            :($(names[k])::$(isodd(traced >> (k - 1)) ? :($traced_type($(types[k]))) : types[k]))
+        end
+        call = isempty(keywords) ? :($f($(args...))) : :($f($(args...); $(keywords...)))
+        :($call = $record_call($f, $(names...); $(passed...)))
+    end
+    esc(quote
+        $Tempest.operation_signature(::typeof($f)) = $operation_types($(types...))
+        $(methods...)
+        nothing
+    end)
+end
+
+"The traced arrays among arrays of type `T`."
+traced_type(T) = typeintersect(TracedArray, T)
+
+function operation_types(types...)
+    all(T -> T <: AbstractArray, types) ||
+        throw(ArgumentError("an operation's positional arguments are arrays, got $(join(types, ", ")); pass other parameters as keywords"))
+    Tuple{types...}
+end
+
+"The argument types `@operation` declared for `f`, or nothing."
+operation_signature(f) = nothing
+
+"""
     reference(f, args...; kwargs...)
 
-The meaning of the verb `f`, written in primitives.
+The meaning of the operation `f` in primitives: by default, `f`'s own method
+for the argument types `@operation` declared.
 """
-function reference end
+function reference(f, args...; kwargs...)
+    signature = operation_signature(f)
+    signature === nothing && throw(ArgumentError("$f has no reference; declare it with @operation, or define Tempest.reference for it"))
+    invoke(f, signature, args...; kwargs...)
+end
 
 """
     verb_pullback(f, args, results, cotangents; kwargs...) -> tuple
 
-The derivative rule of the verb `f`: the cotangents of `args` (each an array
-or `nothing`), given the call's results and their cotangents, both in the
-structure the reference returns. Rules are traced code, and may call verbs.
-Declare one with `has_pullback(::typeof(f)) = true`.
+The derivative rule of the operation `f`: the cotangents of `args` (each an
+array or `nothing`), given the call's results and their cotangents, both in
+the structure `f` returns them. Rules are traced code, and may call
+operations. Declare one with `has_pullback(::typeof(f)) = true`.
 """
 function verb_pullback end
 
 has_pullback(f) = false
-
-"""
-    call(f, args...; kwargs...)
-
-Call the verb `f`: on traced arrays, record a call; on Julia arrays, evaluate
-its reference.
-"""
-function call(f, args...; kwargs...)
-    any(a -> a isa TracedArray, args) || return reference(f, args...; kwargs...)
-    record_call(f, args...; kwargs...)
-end
 
 function record_call(f, args...; kwargs...)
     tape = tape_of(args...)
@@ -66,15 +115,14 @@ function record_call(f, args...; kwargs...)
     all(a -> a isa TracedArray && a.tape === tape, args) ||
         throw(ArgumentError("the arguments of a call of $f must be traced arrays of one program"))
     tape.expands(f) && return expand!(tape, f, args, values(kwargs))
-    # The reference, traced on stand-ins, gives the results' shapes and types.
+    # Each result's shape and type, from the reference traced on stand-ins.
     scratch = Tape()
     stand_ins = map(a -> TracedArray(scratch, record!(scratch, Argument(), (), size(a), eltype(a))), args)
-    probe = reference(f, stand_ins...; kwargs...)
-    specs = map(node, leaves(probe))
+    probe = rebuild(node, reference(f, stand_ins...; kwargs...))
     position = Ref(0)
     structure = rebuild(_ -> (position[] += 1), probe)
     instance = length(tape.nodes) + 1
-    ids = map(enumerate(specs)) do (k, s)
+    ids = map(enumerate(leaves(probe))) do (k, s)
         op = Call(f, values(kwargs), k, instance, structure)
         record!(tape, op, map(a -> a.id, args), s.dims, s.eltype; scalar = s.scalar)
     end
@@ -161,7 +209,7 @@ function evaluate_call!(values, p_nodes, id)
 end
 
 # Differentiating a call with a rule: gather the cotangents of all its results
-# (zero where none), and hand them to the rule in the reference's structure.
+# (zero where none), and hand them to the rule in the operation's structure.
 function call_pullback(n, id, cotangents, tape)
     op = n.op
     ids = results_of(tape.nodes, op.instance)
