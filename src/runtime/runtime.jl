@@ -515,6 +515,19 @@ end
 
 Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, " items") for k in f.kernels), " then "))
 
+"""
+A floor kernel's launch on the CPU. Each kernel is a new function, so its
+launch holds the function and arguments untyped: a closure over them would be
+a new type too, and every method it passes through would compile again for it.
+"""
+struct HostLaunch
+    f::Any
+    args::Tuple
+    items::Int
+end
+
+(l::HostLaunch)() = Base.invokelatest(l.f, l.args, l.items)
+
 function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
     ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
     launches = map(ks) do k
@@ -524,8 +537,7 @@ function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
             end
             nothing
         end))
-        args = Tuple(buffers[v] for v in k.slots)
-        () -> Base.invokelatest(f, args, k.items)
+        HostLaunch(f, Tuple(buffers[v] for v in k.slots), k.items)
     end
     (() -> foreach(l -> l(), launches), FloorKernels(ks))
 end
