@@ -106,7 +106,7 @@ function fold_term(graph, stored, g, v, index, domain)
     extents = Tuple(d.iteration[k] for k in d.reduced)
     iteration = iteration_index(d, index, ntuple(j -> var(base + j), length(d.reduced)))
     extended = Domain((domain.extents..., extents...))
-    Fold(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended))
+    Recomputed(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended))
 end
 
 operand_term(graph, stored, g, o::Read, index, domain) =
@@ -533,7 +533,7 @@ function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
 end
 
 aligned(graph, t, D) =
-    all(s -> !(s isa Union{Ix, Fold}) && !(s isa Load && aligned_axes(graph, s, D) === nothing), subterms((t,)))
+    all(s -> !(s isa Union{Ix, Recomputed}) && !(s isa Load && aligned_axes(graph, s, D) === nothing), subterms((t,)))
 
 """
     aligned_axes(graph, load, domain) -> axes or nothing

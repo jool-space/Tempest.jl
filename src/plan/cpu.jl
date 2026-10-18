@@ -21,7 +21,7 @@ end
 evaluate_term(t::Apply, x, k, buffers, stats, graph) =
     convert(t.eltype, t.f(map(a -> evaluate_term(a, x, k, buffers, stats, graph), t.args)...))
 # A recomputed fold: its body over its reduced axes, after the domain's own.
-function evaluate_term(t::Fold, x, k, buffers, stats, graph)
+function evaluate_term(t::Recomputed, x, k, buffers, stats, graph)
     val = graph.values[t.value]
     fold = val.definition.fold
     A = fold_types(fold, term_eltype(t.body, graph)).accumulator

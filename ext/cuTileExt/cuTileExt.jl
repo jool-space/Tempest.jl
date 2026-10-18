@@ -212,7 +212,7 @@ function expressible(graph, stored, g::Group)
         val.eltype <: TILE_TYPES || return false
         m in g.reductions && !tile_fold(val.definition.fold, Tempest.term_eltype(g.terms[m], graph)) && return false
         for t in Tempest.subterms((g.terms[m],))
-            t isa Tempest.Fold && return false
+            t isa Tempest.Recomputed && return false
             t isa Ix && !positional(t) && return false
             t isa Apply && !tile_type(t.eltype) && return false
             t isa Lit && t.value isa Float64 && return false
@@ -264,7 +264,7 @@ function view_addresses(graph, stored, g::Group)
             gathers(t) || push!(found, Tempest.address(graph, t.value, t.index, Tempest.Domain(extents)))
         elseif t isa Apply
             foreach(a -> visit(a, extents), t.args)
-        elseif t isa Tempest.Fold
+        elseif t isa Tempest.Recomputed
             visit(t.body, (extents..., t.extents...))
         end
     end
@@ -435,10 +435,10 @@ end
 # the swept ones (before the sweep), and the folds inside it at every position
 # of its extents.
 function recomputed_flops(s::TileSchedule, g::Group)
-    inner(t) = prod(t.extents; init = 1.0) * (2.0 + sum(u -> u isa Tempest.Fold ? inner(u) : 0.0, Tempest.subterms((t.body,)); init = 0.0))
+    inner(t) = prod(t.extents; init = 1.0) * (2.0 + sum(u -> u isa Tempest.Recomputed ? inner(u) : 0.0, Tempest.subterms((t.body,)); init = 0.0))
     roots = [g.terms[m] for m in Tempest.members(g) if haskey(g.terms, m)]
     sum(Tempest.subterms(roots); init = 0.0) do t
-        t isa Tempest.Fold || return 0.0
+        t isa Tempest.Recomputed || return 0.0
         positions = prod(s.tiling; init = 1.0) do ax
             tiles = cld(ax.extent, ax.tile)
             any(a -> Tempest.mentions(t, a), ax.axes) ? tiles * ax.tile : ax.reduced && s.sketch !== :full ? 1 : tiles

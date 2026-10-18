@@ -148,7 +148,7 @@ function Tempest.candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
         length(Tempest.members(g)) > 1 && product(r, g.terms[r]) && Tempest.product_axes(graph, g) !== nothing && push!(found, [r])
         roots = [g.terms[m] for m in Tempest.members(g) if haskey(g.terms, m)]
         for t in Tempest.subterms(roots; nested = true)
-            t isa Tempest.Fold && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])
+            t isa Tempest.Recomputed && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])
         end
     end
     found

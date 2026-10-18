@@ -433,7 +433,7 @@ end
 recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementations(target))
 
 recomputed_in(g::Group; nested = true) =
-    Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Fold)
+    Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Recomputed)
 
 # A plan of `graph`, folds recomputed where they are read when an
 # implementation recomputes them, and the folds kept stored: those in `keep`,

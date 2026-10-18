@@ -212,7 +212,7 @@ end
 function hoist_folds!(k, st, c::Context, roots, scope, indices)
     axes = reduce(vcat, (c.s.tiling[q].axes for q in swept(c.s)))
     for t in Tempest.subterms(roots; known = t -> haskey(scope, t))
-        t isa Tempest.Fold || continue
+        t isa Tempest.Recomputed || continue
         any(q -> Tempest.mentions(t, q), axes) && continue
         emit_tiles!(k, st, c, [t], scope, indices...)
     end

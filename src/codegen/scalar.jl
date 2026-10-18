@@ -64,7 +64,7 @@ term_expr(t::Apply, names, c) = :(convert($(t.eltype), $(t.f)($(map(a -> names[a
 
 # A recomputed fold: a loop over its reduced axes, the variables after the
 # domain's own, computing its body at each.
-function term_expr(t::Fold, names, c)
+function term_expr(t::Recomputed, names, c)
     val = c.graph.values[t.value]
     fold = val.definition.fold
     A = fold_types(fold, term_eltype(t.body, c.graph)).accumulator

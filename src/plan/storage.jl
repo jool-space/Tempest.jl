@@ -105,7 +105,7 @@ function writes_over(graph, g::Group, r, a)
     D = Domain(g.domain)
     at = dense_address(graph.values[r].dims, placement(graph, g, r), D)
     for m in members(g), t in subterms((g.terms[m],))
-        t isa Fold && a in stored_reads(t) && return false
+        t isa Recomputed && a in stored_reads(t) && return false
         t isa Union{Load, Ix} && a in stored_reads(t) || continue
         t isa Load && t.value == a && !(a in reduce(vcat, map(indirect_values, t.index); init = Int[])) || return false
         dense_address(graph.values[a].dims, t.index, D) == at || return false

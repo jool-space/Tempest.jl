@@ -228,7 +228,7 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         name = gensym(:t)
         expr = if t isa Load
             load_tile(k, c, t, indices)
-        elseif t isa Tempest.Fold
+        elseif t isa Tempest.Recomputed
             emit_fold!(k, statements, c, t, indices)
         elseif t isa Ix
             x = index_tile(k, c, t.expr, indices)
@@ -531,7 +531,7 @@ function term_spans(c::Context, t::Term)
     spans = fill(false, length(c.s.tiling))
     for s in Tempest.subterms((t,))
         s isa Stat && return nothing
-        if s isa Union{Ix, Tempest.Fold} || s isa Load && elementwise(c, s)
+        if s isa Union{Ix, Tempest.Recomputed} || s isa Load && elementwise(c, s)
             for (i, ax) in enumerate(c.s.tiling)
                 any(k -> Tempest.mentions(s, k), ax.axes) && (spans[i] = true)
             end
@@ -607,7 +607,7 @@ end
 # product of tiles; any other folds elementwise.
 const INNER_TILE = 128
 
-function fold_context(c::Context, t::Tempest.Fold; lanes = INNER_TILE)
+function fold_context(c::Context, t::Tempest.Recomputed; lanes = INNER_TILE)
     base = length(c.g.domain)
     inner = [TileAxis([base + j], e, min(nextpow(2, e), lanes), true) for (j, e) in enumerate(t.extents)]
     s = c.s
@@ -618,7 +618,7 @@ function fold_context(c::Context, t::Tempest.Fold; lanes = INNER_TILE)
     if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
         return fold_context(c, t; lanes = product_step(s.precision, Tempest.term_eltype(product_factor(e, t.body.args[1]), c.graph)))
     end
-    any(x -> x isa Tempest.Fold, Tempest.subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
+    any(x -> x isa Tempest.Recomputed, Tempest.subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
     fold_context(c, t; lanes = s.tiling[sweep_axis(s)].tile)
 end
 
@@ -626,7 +626,7 @@ end
 spanned_shape(c::Context, t::Term) =
     ntuple(q -> any(k -> Tempest.mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
 
-function fold_expressible(c::Context, t::Tempest.Fold)
+function fold_expressible(c::Context, t::Tempest.Recomputed)
     val = c.graph.values[t.value]
     tile_fold(val.definition.fold, Tempest.term_eltype(t.body, c.graph)) && length(t.extents) == 1 || return false
     terms_expressible(fold_context(c, t), (t.body,))
@@ -636,7 +636,7 @@ end
 function terms_expressible(c::Context, roots; stats = false)
     for s in Tempest.subterms(roots)
         s isa Stat && !stats && return false
-        s isa Tempest.Fold && !fold_expressible(c, s) && return false
+        s isa Tempest.Recomputed && !fold_expressible(c, s) && return false
         s isa Ix && !positional(s) && return false
         s isa Apply && !tile_type(s.eltype) && return false
         s isa Lit && s.value isa Float64 && return false
@@ -646,7 +646,7 @@ function terms_expressible(c::Context, roots; stats = false)
 end
 
 # A recomputed fold at block indices `indices`, as a tile over the tiling.
-function emit_fold!(k, st, c::Context, t::Tempest.Fold, indices)
+function emit_fold!(k, st, c::Context, t::Tempest.Recomputed, indices)
     e = fold_context(c, t)
     n = length(c.s.tiling)
     p = n + 1

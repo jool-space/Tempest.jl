@@ -53,7 +53,7 @@ function product_claim(target, p::Plan, g::Group)
     factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
         first(Tempest.product_factors(first(folds), g.terms[first(g.reductions)])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
-    recomputed = [s for r in g.reductions for s in Tempest.subterms((g.terms[r],)) if s isa Tempest.Fold]
+    recomputed = [s for r in g.reductions for s in Tempest.subterms((g.terms[r],)) if s isa Tempest.Recomputed]
     recomputing = !isempty(recomputed)
     # A recomputed fold that does not move along the summed axes is computed
     # once per block, before the sweep.

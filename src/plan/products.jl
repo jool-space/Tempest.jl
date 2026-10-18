@@ -62,7 +62,7 @@ function product_factors(::OnlineSoftmax, t)
     i = findnext(a -> !(a isa Lit), t.args, 2)
     i === nothing ? nothing : (t.args[i], t.args[1])
 end
-product_factors(::Fold, t) = nothing
+product_factors(::Recomputed, t) = nothing
 
 """
     group_stride(e, axes, domain) -> stride or nothing

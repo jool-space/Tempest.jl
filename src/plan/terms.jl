@@ -36,7 +36,7 @@ A fold the kernel recomputes where it reads it, at `index`: the fold of value
 `value`, whose operand is `body` over the reader's domain extended by the
 fold's reduced axes, of `extents`, numbered after the domain's own variables.
 """
-struct Fold <: Term
+struct Recomputed <: Term
     value::Int
     index::Tuple{Vararg{Affine}}
     extents::Tuple{Vararg{Int}}
@@ -48,7 +48,7 @@ term_eltype(t::Lit, graph) = typeof(t.value)
 term_eltype(::Ix{T}, graph) where {T} = T
 term_eltype(t::Apply, graph) = t.eltype
 term_eltype(t::Stat, graph) = graph.values[t.value].eltype
-term_eltype(t::Fold, graph) = graph.values[t.value].eltype
+term_eltype(t::Recomputed, graph) = graph.values[t.value].eltype
 
 # Every subterm once, operands before their users; with `nested`, also those
 # of recomputed folds' bodies, which are over a longer domain. Terms for which
@@ -60,7 +60,7 @@ function subterms(roots; nested = false, known = t -> false)
     function visit(t)
         (haskey(seen, t) || known(t)) && return
         t isa Apply && foreach(visit, t.args)
-        nested && t isa Fold && visit(t.body)
+        nested && t isa Recomputed && visit(t.body)
         seen[t] = length(order) + 1
         push!(order, t)
     end
@@ -88,7 +88,7 @@ end
 mentions(t::Load, n) = any(e -> mentions(e, n), t.index)
 mentions(t::Ix, n) = mentions(t.expr, n)
 mentions(t::Apply, n) = any(a -> mentions(a, n), t.args)
-mentions(t::Fold, n) = mentions(t.body, n)
+mentions(t::Recomputed, n) = mentions(t.body, n)
 mentions(::Union{Lit, Stat}, n) = false
 stats(t::Term) = [s.value for s in subterms((t,); nested = true) if s isa Stat]
 
@@ -96,7 +96,7 @@ show_term(io, t::Load) = print(io, "%", t.value, "[", join(map(string, t.index),
 show_term(io, t::Lit) = print(io, repr(t.value))
 show_term(io, t::Ix{T}) where {T} = print(io, T, "(", t.expr, ")")
 show_term(io, t::Stat) = print(io, "⟨%", t.value, "⟩")
-function show_term(io, t::Fold)
+function show_term(io, t::Recomputed)
     print(io, "⟪%", t.value, " = fold over ", join(t.extents, "×"), " of ")
     show_term(io, t.body)
     print(io, "⟫")
