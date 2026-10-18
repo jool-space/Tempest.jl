@@ -150,7 +150,7 @@ fold_lift(f::GenericFold, x) = f.lift(x)
 fold_combine(f::GenericFold, a, b) = f.combine(a, b)
 fold_observe(f::GenericFold, s) = f.observe(s)
 
-const HalfFloat = Union{Float16, Core.BFloat16}
+const HalfFloat = Union{Float16, BFloat16}
 fold_accumulator(::Union{SumFold, ProdFold, LogSumExpFold}, ::Type{<:HalfFloat}) = Float32
 
 # Reference evaluation, through Base's reductions. Sums keep Base's pairwise

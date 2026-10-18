@@ -195,7 +195,7 @@ function view_of(graph, v, index, g, groups...; scalar = ())
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach)
 end
 
-const TILE_TYPES = Union{Float32, Float16, Core.BFloat16, Bool, Int32}
+const TILE_TYPES = Union{Float32, Float16, Tempest.BFloat16, Bool, Int32}
 
 # Tile types, and tuples of them: a fold's element of several components.
 tile_type(T) = T <: TILE_TYPES || T <: Tuple && all(tile_type, fieldtypes(T))

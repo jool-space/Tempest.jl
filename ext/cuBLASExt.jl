@@ -31,7 +31,7 @@ struct GemmClaim
     result::DataType
 end
 
-const FACTOR_TYPES = (Float32, Float16, Core.BFloat16)
+const FACTOR_TYPES = (Float32, Float16, Tempest.BFloat16)
 
 # The compute type of a product of `T` factors under the target's numerics:
 # Float32 in full or as TF32, half factors accumulating in Float32. The one place

@@ -256,11 +256,11 @@ if CUDA_FUNCTIONAL
         end
         # A conversion to BFloat16 is part of the epilogue: one kernel, and
         # only the BFloat16 result is stored.
-        p = trace((w, x, b) -> Core.BFloat16.(gelu.(w * x .+ b)), w, x, b)
+        p = trace((w, x, b) -> BFloat16.(gelu.(w * x .+ b)), w, x, b)
         ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile; precision = :tf32))
         @test length(ex.kernels) == 1 && only(ex.kernels).schedule.sketch === :product
         y = only(T.leaves(execute!(ex)))
-        @test eltype(y) === Core.BFloat16
+        @test eltype(y) === BFloat16
         @test isapprox(Float32.(Array(y)), Float32.(interpret(p, w, x, b)); rtol = 1.0e-2)
         # Half operands accumulate in Float32 and round once.
         h, y = Float16.(data(64, 48; scale = 0.1)), Float16.(data(48, 32))
@@ -294,7 +294,7 @@ if CUDA_FUNCTIONAL
         layouts = [((a, b) -> a * b, (a, b)), ((at, b) -> transpose(at) * b, (at, b)),
             ((a, bt) -> a * transpose(bt), (a, bt)), ((at, bt) -> transpose(at) * transpose(bt), (at, bt)),
             ((a, b) -> T.contract(a, b, (1, 2), (2, 3), (3, 1)), (a, b)), ((A, B) -> T.batched_mul(A, B), (A, B)),
-            ((a, b) -> a * b, (Float16.(a), Float16.(b))), ((a, b) -> a * b, (Core.BFloat16.(a), Core.BFloat16.(b)))]
+            ((a, b) -> a * b, (Float16.(a), Float16.(b))), ((a, b) -> a * b, (BFloat16.(a), BFloat16.(b)))]
         for (f, args) in layouts, target in (T.CUDATarget(cuBLAS), T.CUDATarget(cuBLAS; precision = :tf32))
             p = trace(f, args...)
             ex = prepare(p, map(CuArray, args)...; target)

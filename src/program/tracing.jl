@@ -179,7 +179,7 @@ Base.show(io::IO, ::Cast{T}) where {T} = print(io, T)
 
 cast(::Type{T}, x::Traced) where {T} = node(x).eltype === T ? x : record_map(Cast{T}(), x)
 
-for T in (Float16, Float32, Float64, Core.BFloat16, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Bool)
+for T in (Float16, Float32, Float64, BFloat16, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Bool)
     @eval (::Type{$T})(x::Traced) = cast($T, x)
 end
 

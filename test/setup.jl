@@ -1,6 +1,6 @@
 # Evaluated in every test's module, after the packages runtests.jl loads: what
 # all tests share. Programs that several tests run are in fixtures/programs.jl.
-using LinearAlgebra
+using LinearAlgebra, BFloat16s
 import Tempest as T
 
 const CUDA_FUNCTIONAL = CUDACore.functional()
