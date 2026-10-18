@@ -26,7 +26,7 @@ permuted(q, k, v, y) = sum(abs2, permutedims(T.attention(q, k, v; causal = true)
 
 calls(p) = [n for n in p.nodes if n.op isa T.Call]
 opaque_groups(ex) = [g for g in ex.plan.groups if g.kind === :opaque]
-results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(execute!(ex))))
+results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(outputs(execute!(ex)))))
 gradients(p, args...) = filter(!isnothing, T.leaves(interpret(differentiate(p), args...)))
 with_implementations(f, implementations...) = (T.register!(@__MODULE__, implementations...); try f() finally T.register!(@__MODULE__) end)
 
@@ -244,7 +244,7 @@ if CUDA_FUNCTIONAL
         p = trace(residual, q, k, v, x)
         ex = prepare(p, device((q, k, v, x))...)
         @test isempty(opaque_groups(ex))
-        @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
+        @test close(filter(!isnothing, T.leaves(outputs(execute!(ex)))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
         # Under TF32 the hand-written kernels claim attention, and compete with
         # the attention generated from the reference. In training the forward
         # kernel wins by its estimate; at these sizes the backward kernel and
@@ -256,7 +256,7 @@ if CUDA_FUNCTIONAL
         @test occursin(r"call of attention_forward \(.*\): cuTileAttention's claim", sprint(explain, ex))
         # The log-sum-exp's cotangent, a constant, is generated too.
         @test !any(d -> d isa T.FloorKernels, ex.kernels)
-        @test close(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))); rtol)
+        @test close(filter(!isnothing, T.leaves(outputs(execute!(ex)))), filter(!isnothing, T.leaves(interpret(d, q, k, v, x))); rtol)
         # The forward pass alone is a close call, measured: whichever the
         # tuning record, one of this test's own, says is faster runs.
         f = trace((q, k, v) -> T.attention(q, k, v; causal = true), q, k, v)
@@ -276,12 +276,12 @@ if CUDA_FUNCTIONAL
                     @test length(only(opaque_groups(ex)).epilogues) == 1
                     @test any(d -> d isa Base.get_extension(Tempest, :cuTileExt).BuiltAttention, ex.kernels)
                 end
-                @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(p, q, k, v, x)]; rtol)
+                @test close(filter(!isnothing, T.leaves(outputs(execute!(ex)))), [interpret(p, q, k, v, x)]; rtol)
                 # The kernel leaves the log-sum-exp unwritten when nobody reads it.
                 ex = prepare(f, device((q, k, v))...; target)
                 @test isempty(opaque_groups(ex)) != claimed
                 claimed && @test count(v -> ex.plan.stored[v], only(opaque_groups(ex)).outputs) == 1
-                @test close(filter(!isnothing, T.leaves(execute!(ex))), [interpret(f, q, k, v)]; rtol)
+                @test close(filter(!isnothing, T.leaves(outputs(execute!(ex)))), [interpret(f, q, k, v)]; rtol)
             end
         end
     end
@@ -289,7 +289,7 @@ if CUDA_FUNCTIONAL
         @testset "$name" for (name, op, f, spelled, args) in NNLIB
             args = map(a -> Float32.(a), args)
             ex = prepare(trace(f, args...), map(CuArray, args)...)
-            @test close(T.leaves(execute!(ex)), [f(args...)]; rtol = 1.0e-4)
+            @test close(T.leaves(outputs(execute!(ex))), [f(args...)]; rtol = 1.0e-4)
         end
         # Attention written with NNlib's softmax is one generated kernel, as
         # it is with the log-sum-exp.
@@ -301,7 +301,7 @@ if CUDA_FUNCTIONAL
             ex = prepare(trace(f, q, k, v), map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
             kernel = only(ex.kernels)
             @test !(kernel isa T.FloorKernels) && occursin("online softmax", string(kernel))
-            @test close(T.leaves(execute!(ex)), [f(q, k, v)]; rtol = 1.0e-4)
+            @test close(T.leaves(outputs(execute!(ex))), [f(q, k, v)]; rtol = 1.0e-4)
         end
     end
 end

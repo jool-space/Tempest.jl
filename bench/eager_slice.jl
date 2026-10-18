@@ -229,7 +229,7 @@ function check(f, args)
         stage = "interpret"
         agree(eager, interpret(p, args...)) || return false, "other", "interpreted results differ from eager ones"
         stage = "prepare"
-        agree(eager, execute!(prepare(p, args...))) || return false, "other", "prepared results differ from eager ones"
+        agree(eager, outputs(execute!(prepare(p, args...)))) || return false, "other", "prepared results differ from eager ones"
         true, "", ""
     catch err
         why, detail = classify(err, stacktrace(catch_backtrace()))

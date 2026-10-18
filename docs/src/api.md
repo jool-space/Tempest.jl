@@ -29,5 +29,6 @@ prepare
 bind!
 execute!
 capture!
+replay!
 outputs
 ```

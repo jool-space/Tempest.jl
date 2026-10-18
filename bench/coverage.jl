@@ -19,11 +19,11 @@ const ALARM = 1.5
 # graph that captures a few milliseconds of executions.
 function device_microseconds(ex; samples = 15, milliseconds = 4.0)
     execute!(ex)
-    execute!(capture!(ex))
-    once = minimum(_ -> CUDACore.@elapsed(execute!(ex)), 1:3)
+    replay!(capture!(ex))
+    once = minimum(_ -> CUDACore.@elapsed(replay!(ex)), 1:3)
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 1, 200)
-    execute!(capture!(ex; repetitions))
-    minimum(_ -> 1.0e6 * CUDACore.@elapsed(execute!(ex)) / repetitions, 1:samples)
+    replay!(capture!(ex; repetitions))
+    minimum(_ -> 1.0e6 * CUDACore.@elapsed(replay!(ex)) / repetitions, 1:samples)
 end
 
 device = CUDACore.name(CUDACore.device())

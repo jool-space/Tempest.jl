@@ -11,11 +11,11 @@ import Tempest as T
 # graph that captures a few milliseconds of executions.
 function device_microseconds(ex; samples = 15, milliseconds = 4.0)
     execute!(ex)
-    execute!(capture!(ex))
-    once = minimum(_ -> CUDACore.@elapsed(execute!(ex)), 1:3)
+    replay!(capture!(ex))
+    once = minimum(_ -> CUDACore.@elapsed(replay!(ex)), 1:3)
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 1, 200)
-    execute!(capture!(ex; repetitions))
-    minimum(_ -> 1.0e6 * CUDACore.@elapsed(execute!(ex)) / repetitions, 1:samples)
+    replay!(capture!(ex; repetitions))
+    minimum(_ -> 1.0e6 * CUDACore.@elapsed(replay!(ex)) / repetitions, 1:samples)
 end
 
 data(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
@@ -29,7 +29,7 @@ loss(q, k, v, x) = sum(abs2, T.attention(q, k, v; causal = true) .+ x)
 function measure(name, p, args; target, check = true)
     ex = prepare(p, map(CuArray, args)...; target)
     if check
-        got = map(r -> Array(r), filter(!isnothing, T.leaves(execute!(ex))))
+        got = map(r -> Array(r), filter(!isnothing, T.leaves(outputs(execute!(ex)))))
         ref = filter(!isnothing, T.leaves(interpret(p, args...)))
         err = maximum(map((a, b) -> maximum(abs.(a .- b)) / max(maximum(abs.(b)), eps(Float32)), got, ref))
     else

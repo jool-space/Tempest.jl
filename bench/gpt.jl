@@ -168,7 +168,8 @@ function Step(params, batch, c, cfg; target, device)
     Step(program, ex)
 end
 
-launch!(s::Step) = execute!(s.ex)
+# One step: the captured graph once there is one, else kernel by kernel.
+launch!(s::Step) = s.ex.captured === nothing ? execute!(s.ex) : replay!(s.ex)
 
 bind_batch!(s::Step, batch) = bind!(s.ex, 3 => batch)
 

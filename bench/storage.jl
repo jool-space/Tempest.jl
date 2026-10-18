@@ -13,7 +13,7 @@ include(joinpath(@__DIR__, "..", "test", "fixtures", "compositions.jl"))
 
 function report(name, p, args; target = T.CUDATarget())
     ex = prepare(p, map(CuArray, args)...; target, measure = false)
-    got = filter(!isnothing, T.leaves(execute!(ex)))
+    got = filter(!isnothing, T.leaves(outputs(execute!(ex))))
     ref = filter(!isnothing, T.leaves(interpret(p, args...)))
     err = maximum(map((a, b) -> maximum(abs.(Array(a) .- b)) / max(maximum(abs.(b)), eps(Float32)), got, ref))
     bytes, apart = T.footprint(ex)

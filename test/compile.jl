@@ -33,6 +33,9 @@ end
     # buffers the next call overwrites.
     @test a == (10.0, [2.0, 4.0, 6.0, 8.0]) && b == (100.0, [20.0, 40.0, 60.0, 80.0])
     @test compile(x -> (; total = sum(x), twice = 2 .* x), data(3))([1.0, 2, 3]) == (total = 6.0, twice = [2.0, 4.0, 6.0])
+    # A number comes back as a number, an array of no dimensions as one.
+    @test compile(sum, data(1))([3.0]) === 3.0
+    @test compile(x -> reshape(x, ()), data(1))([3.0]) == fill(3.0)
     @test occursin("1 kernel", sprint(show, compile(sum, data(4))))
     @test occursin("kernel 1", sprint(explain, compile(sum, data(4))))
 end

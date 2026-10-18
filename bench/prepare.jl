@@ -29,7 +29,7 @@ function prepare_times()
         t2 = time()
         ex = prepare(p, map(CuArray, args)...; target)
         t3 = time()
-        got = map(host, T.leaves(execute!(ex)))
+        got = map(host, T.leaves(outputs(execute!(ex))))
         CUDACore.synchronize()
         t4 = time()
         # Preparing plans again; the build is the rest.

@@ -12,7 +12,7 @@ function check_prepared(device, expected_target; rtol = 1.0e-10, precision = ide
             reference = filter(!isnothing, T.leaves(interpret(p, args...)))
             ex = prepare(p, map(device, args)...)
             @test ex.target == expected_target
-            got = filter(!isnothing, T.leaves(execute!(ex)))
+            got = filter(!isnothing, T.leaves(outputs(execute!(ex))))
             @test agree(got, reference; rtol)
         end
     end
@@ -20,6 +20,23 @@ end
 
 @testset "prepared on the CPU" begin
     check_prepared(identity, T.CPUTarget())
+end
+
+# The results are a place: the same arrays every time, which each run fills
+# again. `execute!` launches kernel by kernel, captured or not; `replay!` runs
+# the capture.
+@testset "running a prepared program" begin
+    x = data(4)
+    ex = prepare(trace(x -> (sum(x), 2 .* x), x), x)
+    out = outputs(ex)
+    @test execute!(ex) === ex && outputs(ex) === out
+    @test out[1][] ≈ sum(x) && out[2] ≈ 2 .* x
+    @test occursin("capture! records the program first", message(() -> replay!(ex)))
+    bind!(ex, [1.0, 2.0, 3.0, 4.0])
+    @test replay!(capture!(ex)) === ex && out[1][] == 10.0
+    bind!(ex, [2.0, 2.0, 2.0, 2.0])
+    execute!(ex)
+    @test out[1][] == 8.0 && out[2] == [4.0, 4.0, 4.0, 4.0]
 end
 
 # Values other than inputs and results share slots where their lifetimes do
@@ -77,7 +94,7 @@ function check_steps(device; rtol, by_reference = (), captured = false)
     expected = (params, adam_state)
     for batch in batches
         bind!(ex, 3 => on(batch))
-        got = T.leaves(execute!(ex))
+        got = T.leaves(outputs(captured ? replay!(ex) : execute!(ex)))
         reference = interpret(p, expected..., batch)
         @test agree(got, T.leaves(reference); rtol)
         expected = reference[2:3]
@@ -105,7 +122,7 @@ function check_replacing(device)
     expected = a
     for _ in 1:2
         reference = interpret(p, expected, x)
-        @test agree(execute!(ex), reference; rtol = 1.0e-6)
+        @test agree(outputs(execute!(ex)), reference; rtol = 1.0e-6)
         expected = reference[1]
     end
     w = data(5, 5; scale = 0.4)
@@ -114,7 +131,7 @@ function check_replacing(device)
     @test isempty(ex.storage.donated) && length(ex.storage.staged) == 1
     @test occursin("staged, then copied into input 1", sprint(explain, ex))
     execute!(ex)
-    @test Array(only(execute!(ex))) ≈ 4 .* w
+    @test Array(only(outputs(execute!(ex)))) ≈ 4 .* w
     @test_throws ArgumentError prepare(trace(w -> (w .* 2, w), w), device(w); replaces = (1 => 1,))
     @test_throws ArgumentError prepare(trace(w -> (sum(w),), w), device(w); replaces = (1 => 1,))
 end
@@ -146,7 +163,7 @@ T.build_claim(::HostProducts, claim, target, p, g, buffers) = T.build_floor(targ
         ex = prepare(p, a, b)
         @test length(only(taken(ex))) == 1
         @test length(ex.plan.groups) == 2
-        @test isapprox(only(T.leaves(execute!(ex))), interpret(p, a, b); rtol = 1.0e-12)
+        @test isapprox(only(T.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
         @test occursin("from HostProducts replaces", sprint(explain, ex))
         # The product, the tanh and a sum over the result span two domains.
         graph = T.lower(trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b))
@@ -185,7 +202,7 @@ attention_cases = [
             p = trace(f, args...)
             ex = prepare(p, args...)
             @test !isempty(T.recomputed_in(only(ex.plan.groups)))
-            @test agree(T.leaves(execute!(ex)), [interpret(p, args...)])
+            @test agree(T.leaves(outputs(execute!(ex))), [interpret(p, args...)])
         end
     end
 end
@@ -227,7 +244,7 @@ if CUDA_FUNCTIONAL
                 p = trace(f, args...)
                 ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(@__MODULE__))
                 @test all(d -> d isa T.FloorKernels, ex.kernels)
-                @test agree(T.leaves(execute!(ex)), [interpret(p, args...)]; rtol = 1.0e-8)
+                @test agree(T.leaves(outputs(execute!(ex))), [interpret(p, args...)]; rtol = 1.0e-8)
             end
         end
     end
@@ -252,14 +269,14 @@ if CUDA_FUNCTIONAL
             p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
             ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target)
             @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
-            @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, w, x, b); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
+            @test isapprox(Array(only(T.leaves(outputs(execute!(ex))))), interpret(p, w, x, b); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
         # A conversion to BFloat16 is part of the epilogue: one kernel, and
         # only the BFloat16 result is stored.
         p = trace((w, x, b) -> BFloat16.(gelu.(w * x .+ b)), w, x, b)
         ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile; precision = :tf32))
         @test length(ex.kernels) == 1 && only(ex.kernels).schedule.sketch === :product
-        y = only(T.leaves(execute!(ex)))
+        y = only(T.leaves(outputs(execute!(ex))))
         @test eltype(y) === BFloat16
         @test isapprox(Float32.(Array(y)), Float32.(interpret(p, w, x, b)); rtol = 1.0e-2)
         # Half operands accumulate in Float32 and round once.
@@ -267,19 +284,19 @@ if CUDA_FUNCTIONAL
         p = trace((h, y) -> h * y, h, y)
         ex = prepare(p, CuArray(h), CuArray(y); target = T.CUDATarget(cuTile))
         @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
-        @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, h, y); rtol = eps(Float16))
+        @test isapprox(Array(only(T.leaves(outputs(execute!(ex))))), interpret(p, h, y); rtol = eps(Float16))
         # A product spelled as a broadcast and a sum is a product too.
         a, c = Float32.(data(64, 48; scale = 0.1)), Float32.(data(48, 80))
         ex = prepare(trace(spelled_product, a, c), CuArray(a), CuArray(c); target = T.CUDATarget(cuTile))
         @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
-        @test isapprox(Array(only(T.leaves(execute!(ex)))), a * c; rtol = 1.0e-4)
+        @test isapprox(Array(only(T.leaves(outputs(execute!(ex))))), a * c; rtol = 1.0e-4)
         # A long sum over a small output splits among blocks (split-K) and merges.
         u, z = Float32.(data(64, 3000; scale = 0.01)), Float32.(data(3000, 48))
         for target in (T.CUDATarget(cuTile), T.CUDATarget(cuTile; precision = :tf32))
             p = trace((u, z) -> u * z, u, z)
             ex = prepare(p, CuArray(u), CuArray(z); target)
             @test any(d -> !(d isa T.FloorKernels) && d.schedule.sketch === :product && d.schedule.splits > 1, ex.kernels)
-            @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, u, z); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
+            @test isapprox(Array(only(T.leaves(outputs(execute!(ex))))), interpret(p, u, z); rtol = target.precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
     end
     using cuBLAS
@@ -300,7 +317,7 @@ if CUDA_FUNCTIONAL
             ex = prepare(p, map(CuArray, args)...; target)
             @test length(built(ex)) == 1
             rtol = eltype(args[1]) === Float32 ? (target.precision === :tf32 ? 1.0e-2 : 1.0e-5) : 2 * eps(eltype(args[1]))
-            @test isapprox(Float32.(Array(only(T.leaves(execute!(ex))))), Float32.(interpret(p, args...)); rtol)
+            @test isapprox(Float32.(Array(only(T.leaves(outputs(execute!(ex)))))), Float32.(interpret(p, args...)); rtol)
         end
         # With work after the product, cuBLAS's candidate is the product
         # alone, and the work after it a kernel of its own.
@@ -308,7 +325,7 @@ if CUDA_FUNCTIONAL
         p = trace((a, b, w) -> tanh.(a * b .+ w), a, b, w)
         ex = prepare(p, CuArray(a), CuArray(b), CuArray(w); target = T.CUDATarget(cuBLAS))
         @test length(built(ex)) == 1 && length(taken(ex)) == 1 && length(ex.kernels) == 2
-        @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, a, b, w); rtol = 1.0e-5)
+        @test isapprox(Array(only(T.leaves(outputs(execute!(ex))))), interpret(p, a, b, w); rtol = 1.0e-5)
         ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
         @test isempty(built(ex))
     end
@@ -336,7 +353,7 @@ if CUDA_FUNCTIONAL
         @test only(prepared().decisions).choice.key == other.key
         rewrite((k, t) -> 1.0e-5)
         @test only(prepared().decisions).choice.key == first(x.options).key
-        @test isapprox(Array(only(T.leaves(execute!(prepared())))), interpret(p, a, b); rtol = 2 * eps(Float16))
+        @test isapprox(Array(only(T.leaves(outputs(execute!(prepared()))))), interpret(p, a, b); rtol = 2 * eps(Float16))
     end
     @testset "implementation sets" begin
         w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
@@ -379,7 +396,7 @@ if CUDA_FUNCTIONAL
                 reference = T.leaves(interpret(p, args...))
                 ex = prepare(p, map(x -> x isa AbstractArray ? CuArray(x) : x, args)...)
                 @test all(d -> !(d isa T.FloorKernels), ex.kernels)
-                @test agree(T.leaves(execute!(ex)), reference; rtol = 2.0e-3)
+                @test agree(T.leaves(outputs(execute!(ex))), reference; rtol = 2.0e-3)
             end
         end
     end
@@ -404,7 +421,7 @@ if CUDA_FUNCTIONAL
             p = trace(x -> T.fold(VARIANCE, x; dims), x)
             ex = prepare(p, CuArray(x); target = T.CUDATarget(cuTile))
             @test only(ex.kernels).schedule.sketch === sketch
-            @test isapprox(Array(only(T.leaves(execute!(ex)))), interpret(p, x); rtol = 1.0e-4)
+            @test isapprox(Array(only(T.leaves(outputs(execute!(ex))))), interpret(p, x); rtol = 1.0e-4)
         end
     end
 end
@@ -438,7 +455,7 @@ if CUDA_FUNCTIONAL
             p = trace(f, args...)
             ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
             @test all(d -> !(d isa T.FloorKernels), ex.kernels)
-            @test agree(T.leaves(execute!(ex)), T.leaves(interpret(p, args...)); rtol = 2.0e-4)
+            @test agree(T.leaves(outputs(execute!(ex))), T.leaves(interpret(p, args...)); rtol = 2.0e-4)
         end
     end
 end
@@ -465,7 +482,7 @@ if CUDA_FUNCTIONAL
             p = trace(f, args...)
             ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
             @test length(ex.kernels) == kernels && all(d -> !(d isa T.FloorKernels), ex.kernels)
-            @test agree(T.leaves(execute!(ex)), T.leaves(interpret(p, args...)); rtol = 1.0e-3)
+            @test agree(T.leaves(outputs(execute!(ex))), T.leaves(interpret(p, args...)); rtol = 1.0e-3)
         end
     end
 end
@@ -493,7 +510,7 @@ if CUDA_FUNCTIONAL
             p = training ? differentiate(trace(f, args...)) : trace(f, args...)
             ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
             @test all(k -> (ex.kernels[k] isa T.FloorKernels) == (ex.plan.groups[k].kind === :opaque), eachindex(ex.kernels))
-            @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(p, args...))); rtol = 1.0e-4)
+            @test agree(filter(!isnothing, T.leaves(outputs(execute!(ex)))), filter(!isnothing, T.leaves(interpret(p, args...))); rtol = 1.0e-4)
         end
     end
 end
@@ -517,12 +534,12 @@ if CUDA_FUNCTIONAL
             ex = prepare(p, map(CuArray, args)...)
             scatters = [k for (k, g) in enumerate(ex.plan.groups) if g.kind === :opaque]
             @test !isempty(scatters) && all(k -> ex.kernels[k] isa T.FloorKernels, scatters)
-            first_run = map(Array, T.leaves(execute!(ex))[2:2])
-            @test first_run == map(Array, T.leaves(execute!(ex))[2:2])
+            first_run = map(Array, T.leaves(outputs(execute!(ex)))[2:2])
+            @test first_run == map(Array, T.leaves(outputs(execute!(ex)))[2:2])
             @test first_run == T.leaves(interpret(p, args...))[2:2]
             # A scatter runs on the device, so the program can be captured.
             capture!(ex)
-            @test first_run == map(Array, T.leaves(execute!(ex))[2:2])
+            @test first_run == map(Array, T.leaves(outputs(replay!(ex)))[2:2])
         end
     end
 end
@@ -546,7 +563,7 @@ if CUDA_FUNCTIONAL
                 kernel = only(ex.kernels)
                 @test !(kernel isa T.FloorKernels)
                 @test occursin("online softmax", string(kernel)) == online
-                @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v)]; rtol = 1.0e-4)
+                @test agree(T.leaves(outputs(execute!(ex))), [interpret(p, q, k, v)]; rtol = 1.0e-4)
             end
         end
         # Softmax spelled with a maximum and a sum: rewritten into the same one
@@ -561,7 +578,7 @@ if CUDA_FUNCTIONAL
         for precision in (:full, :tf32)
             ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile; precision))
             @test occursin("online softmax", string(only(ex.kernels)))
-            @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v)]; rtol = precision === :tf32 ? 1.0e-2 : 1.0e-4)
+            @test agree(T.leaves(outputs(execute!(ex))), [interpret(p, q, k, v)]; rtol = precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
         # The reference's gradient: every product generated, also those that
         # sum over key heads shared by one query head each.
@@ -569,7 +586,7 @@ if CUDA_FUNCTIONAL
         d = differentiate(trace((q, k, v) -> sum(abs2, T.attention(q, k, v; causal = true)), q, k, v))
         ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
         @test all(d -> !(d isa T.FloorKernels), ex.kernels)
-        @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+        @test agree(filter(!isnothing, T.leaves(outputs(execute!(ex)))), filter(!isnothing, T.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
         # With grouped heads, the products into the key and value gradients sum
         # over the query heads of a group and the queries, which no strided
         # axis spans: the queries are tiled and the heads swept in turn.
@@ -578,13 +595,13 @@ if CUDA_FUNCTIONAL
         ex = prepare(d, map(CuArray, (g, k, v))...; target = T.CUDATarget(cuTile))
         @test all(d -> !(d isa T.FloorKernels), ex.kernels)
         @test any(d -> occursin("in turn", string(d)), ex.kernels)
-        @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, g, k, v))); rtol = 1.0e-4)
+        @test agree(filter(!isnothing, T.leaves(outputs(execute!(ex)))), filter(!isnothing, T.leaves(interpret(d, g, k, v))); rtol = 1.0e-4)
         # A residual is part of the one kernel, also with a key head per query
         # head, where the reference groups heads along an axis of extent one.
         x = single(data(16, 2, 70, 2; scale = 0.5))
         p = trace((q, k, v, x) -> T.attention(q, k, v; causal = true) .+ x, q, k, v, x)
         ex = prepare(p, map(CuArray, (q, k, v, x))...; target = T.CUDATarget(cuTile))
         @test length(ex.kernels) == 1 && !(only(ex.kernels) isa T.FloorKernels)
-        @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
+        @test agree(T.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
     end
 end

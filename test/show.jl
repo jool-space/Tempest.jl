@@ -15,7 +15,7 @@ plain(x) = sprint(show, MIME"text/plain"(), x)
         Executable on CPUTarget(): Float64(2,) → Float64(2,)
           1 kernel: 1 floor
           explain(ex) shows what each kernel computes and stores, and what runs it"""
-    @test occursin("captured: execute! replays its launches", plain(capture!(ex)))
+    @test occursin("captured: replay! runs the recording", plain(capture!(ex)))
     @test plain(ex.plan) == "Plan: 1 kernel; 1 value stored (16 bytes), 0 recomputed where read\n  explain(plan) shows each kernel"
     @test sprint(show, [ex.plan]) == "Tempest.Plan[Plan(1 kernel)]"
 end

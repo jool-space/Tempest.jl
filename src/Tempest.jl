@@ -8,7 +8,7 @@ using LinearAlgebra
 # BFloat16s' type, which is Core.BFloat16 only where LLVM can store it.
 using BFloat16s: BFloat16
 
-export compile, trace, differentiate, interpret, explain, prepare, bind!, execute!, capture!, outputs, @operation
+export compile, trace, differentiate, interpret, explain, prepare, bind!, execute!, capture!, replay!, outputs, @operation
 
 # The program level.
 include("program/program.jl")

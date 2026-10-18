@@ -9,11 +9,11 @@ const SAMPLES = 15
 
 function device_microseconds(ex; samples = SAMPLES, milliseconds = 4.0)
     execute!(ex)
-    execute!(capture!(ex))
-    once = minimum(_ -> CUDACore.@elapsed(execute!(ex)), 1:3)
+    replay!(capture!(ex))
+    once = minimum(_ -> CUDACore.@elapsed(replay!(ex)), 1:3)
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 2, 200)
-    execute!(capture!(ex; repetitions)); execute!(ex)
-    minimum(_ -> 1.0e6 * CUDACore.@elapsed(execute!(ex)) / repetitions, 1:samples)
+    replay!(capture!(ex; repetitions))
+    minimum(_ -> 1.0e6 * CUDACore.@elapsed(replay!(ex)) / repetitions, 1:samples)
 end
 
 guard_data(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
@@ -92,7 +92,7 @@ function main(path = nothing)
     for (name, f, args, training) in [map(c -> (c..., false), CASES); map(c -> (c..., true), TRAINING)]
         p = training ? differentiate(trace(f, args...)) : trace(f, args...)
         ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET)
-        got = map(host, T.leaves(execute!(ex)))
+        got = map(host, T.leaves(outputs(execute!(ex))))
         ref = T.leaves(interpret(p, args...))
         ok = all(map((g, r) -> isapprox(g, r; rtol = TARGET.precision === :tf32 ? 2.0e-2 : 2.0e-3, atol = 1.0e-3), got, ref))
         if TARGET.precision === :tf32x3

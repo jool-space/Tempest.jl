@@ -10,7 +10,7 @@ include("fixtures/compositions.jl")
 
 "The largest difference from the interpreter's results, relative to their largest magnitude."
 function relative_error(ex, reference)
-    got = filter(!isnothing, T.leaves(execute!(ex)))
+    got = filter(!isnothing, T.leaves(outputs(execute!(ex))))
     maximum(map((a, b) -> maximum(abs.(Array(a) .- b)) / max(maximum(abs.(b)), eps(Float32)), got, reference))
 end
 

@@ -150,8 +150,9 @@ implementations(target) = Implementation[i for (m, is) in REGISTERED if m in use
 A program prepared for a target: its plan, its storage, and a launch per
 kernel. Each stored value has a buffer: inputs, constants and results their
 own, other values a view of their slot, and a result that replaces an argument
-the argument's. `bind!` copies inputs into the buffers the executable owns;
-`outputs` returns the result buffers, which the next execution overwrites.
+the argument's. `bind!` copies inputs into the buffers the executable owns,
+`execute!` and `replay!` run the program over them, and `outputs` is where
+the results are, overwritten by each run.
 """
 mutable struct Executable{T <: Target}
     program::Program
@@ -167,6 +168,8 @@ mutable struct Executable{T <: Target}
     referenced::Vector{Any}
     # Per result: an array over its buffer, or over the argument's it replaces.
     results::Vector{Any}
+    # The results in the program's output structure, as `outputs` gives them.
+    outputs::Any
     launches::Vector{Any}
     kernels::Vector{Any}
     decisions::Vector{Any}
@@ -208,9 +211,11 @@ optimizer state:
 ```julia
 ex = prepare(trace(step, params, state, batch), params, state, batch; replaces = (2 => 1, 3 => 2))
 capture!(ex)
+loss = first(outputs(ex))       # where each step leaves the loss
 for batch in batches
     bind!(ex, 3 => batch)       # only the batch is new
-    loss, _, _ = execute!(ex)   # parameters and state are updated where they are
+    replay!(ex)                 # parameters and state are updated where they are
+    @show loss[]
 end
 ```
 
@@ -266,7 +271,8 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
-    ex = Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results,
+    outs = rebuild(k -> k === nothing ? nothing : results[k], program.output_structure)
+    ex = Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results, outs,
         Any[first(b) for b in built], Any[last(b) for b in built], Any[ds...], Any[considered...], copies, nothing)
     bind!(ex, inputs...)
     ex
@@ -370,7 +376,7 @@ julia> ex = prepare(trace(x -> 2 .* x, [1.0, 2.0]), [1.0, 2.0]);
 
 julia> bind!(ex, [3.0, 4.0]);
 
-julia> execute!(ex)
+julia> outputs(execute!(ex))
 2-element Vector{Float64}:
  6.0
  8.0
@@ -394,18 +400,19 @@ function bind_leaves!(ex, positions, xs)
 end
 
 """
-    execute!(ex) -> results
+    execute!(ex) -> ex
 
-Run the program on the inputs bound last: replay its captured graph, or else
-run every kernel in order, then copy staged results into the arguments they
-replace. The results are `outputs(ex)`, arrays over the executable's buffers
-that the next execution overwrites.
+Run the program on the inputs bound last, launching every kernel in order,
+then copy staged results into the arguments they replace. The results are in
+`outputs(ex)`. Whether or not the program is captured, this launches kernel by
+kernel; `replay!` runs the capture.
 """
 function execute!(ex::Executable)
-    ex.captured === nothing ? run_once(ex) : replay(ex.target, ex.captured)
-    outputs(ex)
+    run_once(ex)
+    ex
 end
 
+# What an execution launches, and what a capture records.
 function run_once(ex::Executable)
     foreach(launch -> launch(), ex.launches)
     foreach(copy -> copy(), ex.copies)
@@ -414,19 +421,19 @@ end
 """
     capture!(ex; repetitions = 1) -> ex
 
-Capture the program's launches as one graph, which `execute!` replays from
-then on, each replay `repetitions` executions of the program (for timing).
-What varies between replays lives in device buffers: inputs bound by copy or
-by reference, scalars and seeds among them, are read where they are, so they
-need no new capture. Capturing again replaces the graph. A program with work
-on the host cannot be captured; on a target without graphs, replaying runs
-the kernels.
+Record what `execute!` launches as one graph, for `replay!` to run, each
+replay `repetitions` executions of the program (for timing). Recording runs
+nothing. What varies between replays lives in device buffers: inputs bound by
+copy or by reference, scalars and seeds among them, are read where they are,
+so they need no new capture. Capturing again replaces the graph. A program
+with work on the host cannot be captured; on a target without graphs, a
+replay launches the kernels.
 
 ```julia
 ex = capture!(prepare(p, CuArray(x)))
-execute!(ex)                    # replays the graph
+replay!(ex)                     # runs the graph
 bind!(ex, CuArray(y))           # copied into the buffers the graph reads
-execute!(ex)                    # the same graph, on the new values
+replay!(ex)                     # the same graph, on the new values
 ```
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
@@ -434,12 +441,20 @@ function capture!(ex::Executable; repetitions::Integer = 1)
     k === nothing || throw(ArgumentError("kernel $k runs on the host, so the program cannot be captured"))
     ex.captured === nothing || release(ex.target, ex.captured)
     ex.captured = nothing
-    launches, copies = ex.launches, ex.copies
-    run() = for _ in 1:repetitions
-        foreach(launch -> launch(), launches)
-        foreach(copy -> copy(), copies)
-    end
-    ex.captured = capture(ex.target, run, (launches, copies))
+    ex.captured = capture(ex.target, () -> foreach(_ -> run_once(ex), 1:repetitions), (ex.launches, ex.copies))
+    ex
+end
+
+"""
+    replay!(ex) -> ex
+
+Run what `capture!` recorded, on the inputs bound last: what `execute!` does,
+`repetitions` times over, as one launch of a graph on a target with graphs.
+The results are in `outputs(ex)`.
+"""
+function replay!(ex::Executable)
+    ex.captured === nothing && throw(ArgumentError("nothing to replay: capture! records the program first"))
+    replay(ex.target, ex.captured)
     ex
 end
 
@@ -489,18 +504,19 @@ function Base.show(io::IO, ::MIME"text/plain", ex::Executable)
     runners = map(k -> runner(ex, k), eachindex(ex.kernels))
     counts = sort!([(count(==(r), runners), r) for r in unique(runners)]; rev = true)
     println(io, "  ", counted(length(runners), "kernel"), ": ", join(map(((n, r),) -> "$n $r", counts), ", "))
-    ex.captured === nothing || println(io, "  captured: execute! replays its launches")
+    ex.captured === nothing || println(io, "  captured: replay! runs the recording")
     print(io, "  explain(ex) shows what each kernel computes and stores, and what runs it")
 end
 
 """
     outputs(ex) -> results
 
-The results of the last execution, in the program's output structure, as
-arrays over the executable's buffers rather than copies: the next execution
-overwrites them, so copy what you keep. `execute!` returns them.
+Where the executable leaves its results, in the program's output structure:
+arrays over its buffers, the same arrays every time, which each `execute!` or
+`replay!` fills again. Copy what you keep. A number is an array of no
+dimensions here, since it lives in a buffer too; `compile` returns numbers.
 """
-outputs(ex::Executable) = rebuild(k -> k === nothing ? nothing : ex.results[k], ex.program.output_structure)
+outputs(ex::Executable) = ex.outputs
 
 # The CPU target.
 allocate(::CPUTarget, T, n) = Vector{T}(undef, n)

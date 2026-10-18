@@ -126,7 +126,7 @@ if CUDA_FUNCTIONAL
                     ex = prepare(p, map(CuArray, args)...; target)
                     after = T.cache_counts()
                     (after.loaded - before.loaded, after.compiled - before.compiled,
-                        map(on_host, filter(!isnothing, T.leaves(execute!(ex)))), ex.kernels)
+                        map(on_host, filter(!isnothing, T.leaves(outputs(execute!(ex))))), ex.kernels)
                 end
                 (loaded, compiled, first, kernels), (reloaded, recompiled, second, _) = results
                 # The first pass may also compile the side of a close call it
@@ -147,14 +147,14 @@ if CUDA_FUNCTIONAL
             using Tempest, CUDACore, cuTile
             x = CUDACore.CuArray(Float32.(reshape(1:4096, 64, 64)))
             p = trace(x -> sum(abs2, x * x; dims = 1), x)
-            captured() = (ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32)); execute!(capture!(ex)); ex.captured)
+            captured() = (ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32)); replay!(capture!(ex)); ex.captured)
             graphs = [captured() for _ in 1:3]
             CUDACore.synchronize()
             foreach(_ -> GC.gc(true), 1:3)
             graphs = nothing
             foreach(_ -> GC.gc(true), 1:3)
             ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32))
-            execute!(capture!(ex))
+            replay!(capture!(ex))
             CUDACore.synchronize()
             """
         @test success(pipeline(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`; stderr = devnull))

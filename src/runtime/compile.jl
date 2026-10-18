@@ -20,13 +20,13 @@ julia> c([1.0, 2.0, 3.0, 4.0])
 30.0
 ```
 
-With `capture`, the program's launches are captured once as one graph that
-each call replays, as `capture!` does, unless the program has work on the host.
-Results are the same either way.
+With `capture`, the program's launches are recorded once as one graph that
+each call replays, as `capture!` and `replay!` do, unless the program has work
+on the host. Results are the same either way.
 
 For a step that updates its state where it is and replays without copies,
-use `prepare`, `bind!` and `execute!`; `c.executable` is the prepared program,
-and `explain(c)` shows it.
+use `prepare`, `bind!` and `execute!` or `replay!`; `c.executable` is the
+prepared program, and `explain(c)` shows it.
 """
 function compile(f, @nospecialize(args...); target = default_target(args), measure::Bool = true, capture::Bool = true)
     ex = prepare(trace(f, args...), args...; target, measure)
@@ -44,13 +44,15 @@ end
 function (c::Compiled)(@nospecialize(args...))
     d = difference(c.signature, signature(args))
     d === nothing || throw(ArgumentError("$(c.f) was compiled for other arguments: $d"))
-    bind!(c.executable, args...)
-    rebuild(fresh, execute!(c.executable))
+    ex = c.executable
+    bind!(ex, args...)
+    ex.captured === nothing ? execute!(ex) : replay!(ex)
+    rebuild(k -> k === nothing ? nothing : fresh(ex.results[k], ex.plan.graph.result_scalar[k]), ex.program.output_structure)
 end
 
-# A result apart from the buffers the next call overwrites.
-fresh(x::AbstractArray) = ndims(x) == 0 ? Array(x)[] : copy(x)
-fresh(x) = x
+# A result apart from the buffers the next call overwrites: a number where the
+# program computed a number, else an array, though it have no dimensions.
+fresh(x, scalar) = scalar ? Array(x)[] : copy(x)
 
 "An input as a call must match it: its element type, and its size if an array."
 struct InputType
