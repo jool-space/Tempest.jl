@@ -250,7 +250,7 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
         values[id].definition isa Opaque && instance(graph, id) in running || continue
         foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
-    recomputed = recompute_folds ? setdiff(recomputed_folds(graph, results, materialized), keep, fixed...) : Set{Int}()
+    recomputed = recompute_folds ? recomputed_folds(graph, results, materialized, union(Set{Int}(keep), fixed...)) : Set{Int}()
     # Maps of recomputed folds are recomputed with them.
     after = falses(n)
     for id in 1:n
@@ -429,18 +429,21 @@ end
 # axis of the reader wider than a tile), and either the fold is a product over
 # few elements, recomputed as one product per tile, or no reading fold reads
 # it at positions that move along its own reduced axes, so a kernel computes
-# it once per block, before or during its sweep. Results, the operands of
-# opaque work and the indices of gathers stay stored.
+# it once per block, before or during its sweep. A fold that recomputes one
+# selected before it is selected only in the last case: inside a reader's
+# sweep, the folds it recomputes would be recomputed at every step, for every
+# position they do not depend on. Results, the operands of opaque work, the
+# indices of gathers and the folds `kept` stay stored.
 const RECOMPUTED_PRODUCT = 256
 const RECOMPUTED_SPAN = 128
 
-function recomputed_folds(graph, results, materialized)
+function recomputed_folds(graph, results, materialized, kept = Set{Int}())
     values = graph.values
     users = readers(graph)
     selected = Set{Int}()
     for v in eachindex(values)
         d = values[v].definition
-        d isa Reduction && !(v in results) && !materialized[v] || continue
+        d isa Reduction && !(v in results) && !materialized[v] && !(v in kept) || continue
         # The folds v reaches through maps, with the index at which each reads v.
         consumers = Tuple{Int, Tuple{Vararg{Affine}}}[]
         pending = [(u, v, identity_index(values[v].dims)) for u in unique(users[v])]
@@ -470,10 +473,26 @@ function recomputed_folds(graph, results, materialized)
         o = d.operand
         product = prod(k -> d.iteration[k], d.reduced; init = 1) <= RECOMPUTED_PRODUCT && o isa Read &&
             values[o.value].definition isa Pointwise{typeof(*)} && length(values[o.value].definition.operands) == 2
-        product || all(((u, at),) -> !any(k -> any(e -> mentions(e, k), at), values[u].definition.reduced), consumers) || continue
+        hoisted = all(((u, at),) -> !any(k -> any(e -> mentions(e, k), at), values[u].definition.reduced), consumers)
+        hoisted || product && !recomputes(values, v, selected, results, materialized) || continue
         push!(selected, v)
     end
     selected
+end
+
+# Whether fold `v` reads a fold of `selected` through maps that stay unstored.
+function recomputes(values, v, selected, results, materialized)
+    pending, seen = [v], Set([v])
+    while !isempty(pending)
+        for o in reads(values[pop!(pending)].definition)
+            u = o.value
+            u in selected && return true
+            values[u].definition isa Pointwise && !(u in results) && !materialized[u] && !(u in seen) || continue
+            push!(seen, u)
+            push!(pending, u)
+        end
+    end
+    false
 end
 
 # An epilogue: the chain of pointwise values after an opaque result, each read

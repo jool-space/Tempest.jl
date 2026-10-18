@@ -33,6 +33,25 @@ end
     @test agree(T.execute(planned, q, k, v), [interpret(p, q, k, v)])
 end
 
+# A fold that recomputes another is recomputed only where its reader computes
+# it once per block. Here a sum over keys recomputing the scores is read by a
+# sum over queries, along which it moves, as attention's query gradient is by
+# the gradient of the weights before it: it is stored, and its kernel
+# recomputes the scores.
+@testset "a fold recomputed inside a sweep recomputes no other" begin
+    q, k, x = data(4, 8), data(4, 8), data(6, 8)
+    function f(q, k, x)
+        e = exp.(T.contract(k, q, (1, 2), (1, 3), (2, 3)))
+        d = T.contract(k, e, (1, 2), (2, 3), (1, 3))
+        T.contract(x, d, (1, 3), (2, 3), (1, 2))
+    end
+    p = trace(f, q, k, x)
+    planned = T.plan(T.lower(p); recompute_folds = true)
+    @test all(g -> T.recomputed_in(g) == T.recomputed_in(g; nested = false), planned.groups)
+    @test count(g -> !isempty(T.recomputed_in(g)), planned.groups) == 1
+    @test agree(T.execute(planned, q, k, x), [interpret(p, q, k, x)])
+end
+
 # Rewrites of sums, which change rounding: rewritten programs plan and compute
 # what they computed, and the two spellings of a softmax weighting a sum plan
 # alike, one online softmax recomputing the scores in the kernel of the sum.
