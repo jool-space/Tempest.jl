@@ -1,4 +1,0 @@
-# Development sessions skip the precompile workloads, which add about 40 s to
-# every rebuild after a source edit. Tests that cover them run them directly.
-[Tempest]
-precompile_workload = false

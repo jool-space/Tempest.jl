@@ -1,0 +1,9 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
+
+[sources]
+Tempest = {path = ".."}
+
+[compat]
+Documenter = "1.19.0"

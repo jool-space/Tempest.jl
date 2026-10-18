@@ -595,5 +595,3 @@ if CUDACore.functional()
         @test agree(T.leaves(execute!(ex)), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
     end
 end
-
-include("cache.jl")
