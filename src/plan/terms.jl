@@ -20,8 +20,10 @@ struct Ix{T} <: Term
     expr::Affine
 end
 
-struct Apply{F} <: Term
-    f::F
+# `f` is untyped: terms are data to plan and emit, and an `Apply{typeof(f)}` would
+# compile every method that handles terms again for each function applied.
+struct Apply <: Term
+    f::Any
     args::Tuple{Vararg{Term}}
     eltype::DataType
 end
