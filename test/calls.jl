@@ -310,3 +310,19 @@ if CUDACore.functional()
         end
     end
 end
+
+# A claim that fails to build, met while measuring a close call, loses: it is
+# never timed, and preparation goes on without it.
+struct Unbuildable <: T.Implementation end
+T.estimate(::Unbuildable, claim, target, p, g) = [T.Work(1.0)]
+T.build_claim(::Unbuildable, claim, target, p, g, buffers) = error("this claim does not build")
+
+@testset "a claim that fails to build loses" begin
+    graph = T.lower(trace(x -> sum(abs2, x), data(8)))
+    planned = T.plan(graph)
+    d = T.Decider(T.CPUTarget(), graph)
+    g = only(planned.groups)
+    o = T.choice(d, planned, g, Unbuildable(), nothing)
+    T.measure!(d, planned, g, o)
+    @test d.record[o.key] == Inf
+end

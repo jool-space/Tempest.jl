@@ -510,7 +510,15 @@ end
 
 function measure!(d::Decider, p::Plan, g::Group, o::Choice)
     haskey(d.record, o.key) && return
-    launch, _ = build_choice!(d, p, g, o)
+    # A claim that fails to build loses every comparison in this preparation;
+    # the record keeps only times.
+    launch = try
+        first(build_choice!(d, p, g, o))
+    catch err
+        @debug "claim failed to build; it loses" o.implementation exception = err
+        d.record[o.key] = Inf
+        return
+    end
     t = time_launch(d.target, launch)
     d.record[o.key] = t
     save_record(d.record_path, o.key, t)
