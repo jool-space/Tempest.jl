@@ -171,8 +171,8 @@ function depends(graph, deps::Dependencies, reads, group)
 end
 
 # Try to add a fold or an output to a group. Its term must stay inside the
-# group's domain, nothing it loads may depend on the group, and no member may
-# already load it.
+# group's domain, nothing it loads may depend on the group, nothing the group
+# loads may depend on it, and no member may already load it.
 function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     val = graph.values[v]
     # An output covers the domain, or the positions of the primary folds.
@@ -193,6 +193,8 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     depends(graph, deps, reads, group) && return false
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
+    # Nor may what the group reads from other kernels depend on `v`.
+    depends(graph, deps, filter(!in(group), shared), Set((v,))) && return false
     connected = isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads)
     connected || return false
     push!(fold ? g.reductions : g.outputs, v)

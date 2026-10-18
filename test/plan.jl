@@ -92,6 +92,22 @@ end
     end
 end
 
+# No kernel waits on itself: a fold does not join a kernel that already reads,
+# from another kernel, a value computed from that fold, as Adam's update of a
+# parameter reads its moment, computed from the gradient's fold.
+@testset "no kernel joins a fold its reads wait on" begin
+    p, q, m, w = data(8, 6), data(8, 6; scale = 0.3), data(8, 1), data(8, 1; scale = 0.5)
+    function f(p, q, m, w)
+        a = sum(p; dims = 2)
+        g = sum(q; dims = 2)
+        b = p .+ q
+        n = m .+ g
+        (a, b, w .- n .* a, n)
+    end
+    planned = T.plan(T.lower(trace(f, p, q, m, w)))
+    @test agree(T.execute(planned, p, q, m, w), T.leaves(f(p, q, m, w)))
+end
+
 # A kernel is maps and folds over one domain, each fold over its own axes: the
 # loss and a weight gradient join the normalization's kernel, and the values
 # only they read are never stored.
