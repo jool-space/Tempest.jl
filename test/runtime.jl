@@ -447,6 +447,60 @@ if CUDACore.functional()
     end
 end
 
+# Folds and broadcasts over part of the axes a schedule collapses into one
+# tile axis: a sum over the middle axis of an array, spelled directly and
+# through `permutedims`, and a long one that splits; a positional embedding
+# broadcast over the batch; a table broadcast over heads and batch, as rotary
+# positions read it. The gradient of the embedding and layer norm sums over
+# the batch alone; only its scatter is on the floor.
+const PARTIAL_COLLAPSE = [
+    ("sum over the middle axis", x -> sum(x; dims = 2), (data(8, 64, 6),), false),
+    ("sum over the middle axis, permuted", x -> sum(permutedims(x, (2, 1, 3)); dims = 1), (data(64, 8, 6),), false),
+    ("long sum over the middle axis", x -> sum(abs2, x; dims = 2), (data(40, 3000, 7),), false),
+    ("positional embedding", (E, t, P) -> E[:, t] .+ P, (data(64, 1000; scale = 0.01), reshape(tokens, 80, 3), data(64, 80)), false),
+    ("a table broadcast over heads and batch", (x, c) -> x .* c, (data(32, 4, 64, 16), data(32, 1, 64)), false),
+    ("positional embedding and layer norm, training", (E, t, P, w) -> sum(abs2, layernorm32(E[:, t] .+ P, w)),
+     (data(64, 1000; scale = 0.01), reshape(tokens, 80, 3), data(64, 80; scale = 0.2), data(64; scale = 0.1)), true),
+]
+
+if CUDACore.functional()
+    @testset "folds over part of a collapsed axis on cuTile" begin
+        @testset "$name" for (name, f, args, training) in PARTIAL_COLLAPSE
+            args = map(single, args)
+            p = training ? differentiate(trace(f, args...)) : trace(f, args...)
+            ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+            @test all(k -> (ex.kernels[k] isa T.FloorKernels) == (ex.plan.groups[k].kind === :opaque), eachindex(ex.kernels))
+            @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(p, args...))); rtol = 1.0e-4)
+        end
+    end
+end
+
+# A gather's adjoint scatters on the device, deterministically: each element
+# of the result sums what was selected there in a fixed order, the
+# interpreter's, with repeated indices, two index arrays, and ranges and
+# integers beside an index array.
+const SCATTERS = [
+    ("embedding", (E, t, g) -> sum(E[:, t] .* g), (data(64, 109), Int32.(mod1.(37 .* (1:1024) .^ 2, 109)), data(64, 1024; scale = 0.37))),
+    ("repeated indices in two arrays", (x, i, j) -> sum(abs2, x[i, j]), (data(8, 6), [3, 1, 3, 8, 3], Int32[6, 6, 1])),
+    ("a strided range and an integer beside index arrays", x -> sum(abs2, x[2:2:8, [1, 4, 4]]) + sum(abs2, x[3, [2, 2]]), (data(8, 6),)),
+    ("a reversed range", x -> sum(abs2, x[8:-3:1, [2, 2, 5]]), (data(8, 6),)),
+]
+
+if CUDACore.functional()
+    @testset "scatters on the device" begin
+        @testset "$name" for (name, f, args) in SCATTERS
+            args = map(single, args)
+            p = differentiate(trace(f, args...))
+            ex = prepare(p, map(CuArray, args)...)
+            scatters = [k for (k, g) in enumerate(ex.plan.groups) if g.kind === :opaque]
+            @test !isempty(scatters) && all(k -> ex.kernels[k] isa T.FloorKernels, scatters)
+            first_run = map(Array, T.leaves(execute!(ex))[2:2])
+            @test first_run == map(Array, T.leaves(execute!(ex))[2:2])
+            @test first_run == T.leaves(interpret(p, args...))[2:2]
+        end
+    end
+end
+
 # Attention generated from its reference: one kernel, a fold over keys whose
 # scores and logsumexp are recomputed in it, online or in two passes.
 const GENERATED_ATTENTION = [
@@ -490,6 +544,15 @@ if CUDACore.functional()
         ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
         @test all(d -> !(d isa T.FloorKernels), ex.kernels)
         @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+        # With grouped heads, the products into the key and value gradients sum
+        # over the query heads of a group and the queries, which no strided
+        # axis spans: the queries are tiled and the heads swept in turn.
+        g = single(data(16, 4, 70, 2; scale = 0.1))
+        d = differentiate(trace((q, k, v) -> sum(abs2, T.attention(q, k, v; causal = true)), g, k, v))
+        ex = prepare(d, map(CuArray, (g, k, v))...; target = T.CUDATarget(cuTile))
+        @test all(d -> !(d isa T.FloorKernels), ex.kernels)
+        @test any(d -> occursin("in turn", string(d)), ex.kernels)
+        @test agree(filter(!isnothing, T.leaves(execute!(ex))), filter(!isnothing, T.leaves(interpret(d, g, k, v))); rtol = 1.0e-4)
         # A residual is part of the one kernel, also with a key head per query
         # head, where the reference groups heads along an axis of extent one.
         x = single(data(16, 2, 70, 2; scale = 0.5))

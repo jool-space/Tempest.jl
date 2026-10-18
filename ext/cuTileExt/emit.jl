@@ -357,9 +357,10 @@ function as_accumulator(st, x, A, T, shape)
     name
 end
 
-# A mask of the lanes of tile `t` along the reduced axis inside the domain.
+# A mask of the lanes of tile `t` along the swept axis the schedule tiles
+# inside the domain.
 function valid_mask!(st, c::Context, t)
-    p = only(swept(c.s))
+    p = sweep_axis(c.s)
     T, E = c.s.tiling[p].tile, c.s.tiling[p].extent
     shape = ntuple(i -> i == p ? T : 1, length(c.s.tiling))
     name = gensym(:valid)
@@ -519,9 +520,9 @@ function bilinear_over(c::Context, f, t::Term, p)
 end
 
 function bilinear(c::Context, r)
-    sw = swept(c.s)
-    length(sw) == 1 || return nothing
-    bilinear_over(c, fold_of(c, r), c.g.terms[r], only(sw))
+    p = sweep_axis(c.s)
+    all(q -> q == p || c.s.tiling[q].tile == 1, swept(c.s)) || return nothing
+    bilinear_over(c, fold_of(c, r), c.g.terms[r], p)
 end
 
 # The tile axes a term's loads, positions and recomputed folds span, or
@@ -566,7 +567,7 @@ function from_matrix(c::Context, m, u, w)
 end
 
 # Accumulate step `t` of a product over tile axis `p` into `acc`.
-function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = only(swept(c.s)))
+function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = sweep_axis(c.s))
     tk = tile(c)[p]
     fa, fb = product_factor(c, a), product_factor(c, b)
     xa, xb = gensym(:a), gensym(:b)
@@ -617,9 +618,8 @@ function fold_context(c::Context, t::Tempest.Fold; lanes = INNER_TILE)
     if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
         return fold_context(c, t; lanes = product_step(s.precision, Tempest.term_eltype(product_factor(e, t.body.args[1]), c.graph)))
     end
-    sw = swept(s)
-    any(x -> x isa Tempest.Fold, Tempest.subterms((t.body,))) && !isempty(sw) && s.tiling[first(sw)].tile != INNER_TILE || return e
-    fold_context(c, t; lanes = s.tiling[first(sw)].tile)
+    any(x -> x isa Tempest.Fold, Tempest.subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
+    fold_context(c, t; lanes = s.tiling[sweep_axis(s)].tile)
 end
 
 # The shape of a term's tile: the tile along each axis it spans, one elsewhere.

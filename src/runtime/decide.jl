@@ -487,10 +487,10 @@ build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =
     get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, (group_identity(p, g), o.key))
 
 # A group's kernels: its choice, or the next claim when a build fails, and
-# the floor last; a call's group has no floor. Opaque work other than calls
-# runs on the host.
+# the floor last; a call's group has no floor. Opaque work other than calls,
+# a scatter, runs on the floor.
 function build_group(d::Decider, p::Plan, g::Group, x, buffers)
-    x === nothing && return opaque_launch(p, g, buffers)
+    x === nothing && return build_floor(d.target, p, g, buffers)
     failure = nothing
     for o in [x.choice; filter(!=(x.choice), x.options)]
         o.implementation === nothing && break

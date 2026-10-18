@@ -143,8 +143,31 @@ pullback(op::Permute, n, id, g, tape) =
 
 # A selection and a scatter are each other's adjoints; their index arrays get
 # no cotangent.
-pullback(op::Select, n, id, g, tape) = adjoint_selection(Scatter(op.indices), n, g, tape)
+function pullback(op::Select, n, id, g, tape)
+    inverse = inverse_selection(op, n, g, tape)
+    inverse === nothing || return (h(tape, inverse), map(_ -> nothing, Base.tail(n.inputs))...)
+    adjoint_selection(Scatter(op.indices), n, g, tape)
+end
 pullback(op::Scatter, n, id, g, tape) = adjoint_selection(Select(op.indices), n, g, tape)
+
+# A selection of whole axes, each by a constant permutation or as it is, has
+# the selection by the inverse permutations as its adjoint: a gather, which
+# fuses, where a scatter would not. Nothing for any other selection.
+function inverse_selection(op, n, g, tape)
+    x = tape.nodes[first(n.inputs)]
+    length(op.indices) == length(x.dims) && n.dims == x.dims || return nothing
+    inputs = [g.id]
+    indices = map(enumerate(op.indices)) do (axis, i)
+        i isa AbstractRange && i == 1:x.dims[axis] && return i
+        i isa IndexInput || return nothing
+        c = tape.nodes[n.inputs[i.input]].op
+        c isa Constant && c.value isa AbstractVector && length(c.value) == x.dims[axis] && isperm(c.value) || return nothing
+        push!(inputs, constant!(tape, invperm(c.value)))
+        IndexInput(length(inputs))
+    end
+    any(isnothing, indices) && return nothing
+    record!(tape, Select(Tuple(indices)), inputs, x.dims, node(g).eltype)
+end
 
 function adjoint_selection(op, n, g, tape)
     x, indices... = n.inputs

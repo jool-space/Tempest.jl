@@ -133,7 +133,9 @@ if CUDACore.functional()
                         map(host, filter(!isnothing, T.leaves(execute!(ex)))), ex.kernels)
                 end
                 (loaded, compiled, first, kernels), (reloaded, recompiled, second, _) = results
-                @test compiled > 0 && recompiled == 0 && reloaded == loaded + compiled
+                # The first pass may also compile the side of a close call it
+                # measures and does not keep.
+                @test compiled > 0 && recompiled == 0 && 0 < reloaded <= loaded + compiled
                 @test isequal(first, second)
                 @test all(isapprox.(first, filter(!isnothing, T.leaves(interpret(p, args...))); rtol = 1.0e-2))
                 name == "the floor" && @test all(d -> d isa T.FloorKernels, kernels)
