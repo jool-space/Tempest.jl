@@ -1,0 +1,100 @@
+# The front door: a function traced and prepared once, then called like the
+# function. `prepare` and `execute!` are the level beneath it.
+
+"""
+    compile(f, args...; target, measure = true) -> Compiled
+
+`f` traced on `args` and prepared, to be called like `f`: `compile(f, x)(y)`
+computes `f(y)` for any `y` alike `x` in structure, shapes and element types.
+It returns what `f` returns, in arrays of its own, with numbers as numbers.
+
+Which leaves of the arguments are inputs follows `trace`: arrays and numbers,
+also inside tuples, named tuples and immutable structs, except integers, which
+are constants. A call whose arguments differ in anything but the values of
+inputs throws, naming the difference.
+
+    julia> c = Tempest.compile(x -> sum(abs2, x), rand(4));
+
+    julia> c([1.0, 2.0, 3.0, 4.0])
+    30.0
+
+For a step that updates its state where it is and replays without copies,
+use `prepare`, `bind!` and `execute!`; `c.executable` is the prepared program,
+and `explain(c)` shows it.
+"""
+function compile(f, @nospecialize(args...); target = default_target(args), measure::Bool = true)
+    ex = prepare(trace(f, args...), args...; target, measure)
+    Compiled(f, ex, signature(args))
+end
+
+"A function traced and prepared by `compile`."
+struct Compiled{F}
+    f::F
+    executable::Executable
+    signature::Tuple
+end
+
+function (c::Compiled)(@nospecialize(args...))
+    d = difference(c.signature, signature(args))
+    d === nothing || throw(ArgumentError("$(c.f) was compiled for other arguments: $d"))
+    bind!(c.executable, args...)
+    rebuild(fresh, execute!(c.executable))
+end
+
+# A result apart from the buffers the next call overwrites.
+fresh(x::AbstractArray) = ndims(x) == 0 ? Array(x)[] : copy(x)
+fresh(x) = x
+
+"An input as a call must match it: its element type, and its size if an array."
+struct InputType
+    eltype::Type
+    dims::Union{Nothing, Tuple}
+end
+
+# The arguments as a call must match them: inputs by type, any other leaf as it is.
+signature(args) = structure_of(x -> is_input(x) ? InputType(eltype(x), x isa Number ? nothing : size(x)) : x, args)
+
+# Where `got` differs from `expected`, in words, or `nothing`.
+function difference(expected::Tuple, got::Tuple)
+    length(expected) == length(got) ||
+        return string("it takes ", length(expected), length(expected) == 1 ? " argument" : " arguments", ", not ", length(got))
+    for k in eachindex(expected)
+        d = difference(expected[k], got[k], "argument $k")
+        d === nothing || return d
+    end
+    nothing
+end
+
+function difference(expected, got, path)
+    e, g = inner(expected), inner(got)
+    if e !== nothing && g !== nothing && kind(expected) == kind(got) && keys(e) == keys(g)
+        for k in keys(e)
+            d = difference(e[k], g[k], expected isa Tuple ? "$path[$k]" : "$path.$k")
+            d === nothing || return d
+        end
+        return nothing
+    end
+    isequal(expected, got) ? nothing : string(path, " is ", describe(got), ", not ", describe(expected))
+end
+
+inner(x::Union{Tuple, NamedTuple}) = x
+inner(x::Fields) = x.fields
+inner(x) = nothing
+
+kind(::Tuple) = Tuple
+kind(::NamedTuple) = NamedTuple
+kind(::Fields{T}) where {T} = Base.typename(T).wrapper
+
+describe(x::InputType) = x.dims === nothing ? string("a ", x.eltype) : string("a ", x.eltype, " array of size ", x.dims)
+describe(x::Fields{T}) where {T} = string("a ", nameof(T))
+describe(x::Tuple) = string("a tuple of ", length(x))
+describe(x::NamedTuple) = string("a named tuple of ", join(keys(x), ", "))
+describe(x) = string("the constant ", sprint(show, x; context = :limit => true))
+
+function Base.show(io::IO, c::Compiled)
+    n = length(c.executable.kernels)
+    print(io, "Compiled(", c.f, "; ", c.executable.target, ", ", n, n == 1 ? " kernel)" : " kernels)")
+end
+
+explain(io::IO, c::Compiled) = explain(io, c.executable)
+explain(c::Compiled) = explain(stdout, c)

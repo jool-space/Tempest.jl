@@ -262,23 +262,13 @@ slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
 bindable(::Target, x) = false
 bindable(::CPUTarget, x) = x isa Array
 
-# Each argument of the program among `inputs`, in the structure it was traced with.
-function argument_leaves(program, inputs)
-    positions = leaves(program.input_structure)
-    xs = leaves(inputs)
-    length(positions) == length(xs) || throw(ArgumentError("the program takes $(length(positions)) inputs, got $(length(xs))"))
-    out = Vector{Any}(nothing, length(program.arguments))
-    foreach((k, x) -> k === nothing || (out[k] = x), positions, xs)
-    out
-end
-
 # The results that replace arguments: pairs of a result's position among the
 # program's results and the argument's among its arguments, leaf by leaf.
 function replacements(program, replaces)
     pairs = Pair{Int, Int}[]
     for (k, j) in (replaces isa Pair ? (replaces,) : replaces)
         out, in = program.output_structure[k], program.input_structure[j]
-        rebuild(Returns(nothing), out) == rebuild(Returns(nothing), in) ||
+        structure_of(Returns(nothing), out) == structure_of(Returns(nothing), in) ||
             throw(ArgumentError("result $k cannot replace argument $j, whose structure differs"))
         for (r, a) in zip(leaves(out), leaves(in))
             (r === nothing) == (a === nothing) ||

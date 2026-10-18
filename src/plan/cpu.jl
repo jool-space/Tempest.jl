@@ -126,7 +126,7 @@ Run a plan on the CPU.
 """
 function execute(p::Plan, inputs...)
     graph = p.graph
-    arguments = leaves(inputs)
+    arguments = filter(is_input, leaves(inputs))
     buffers = Vector{Any}(undef, length(graph.values))
     for (id, v) in enumerate(graph.values)
         d = v.definition

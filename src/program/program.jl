@@ -107,7 +107,8 @@ end
     Program
 
 A traced program: its nodes, the nodes that are its inputs and results, and
-the structures they came in, as nested tuples and named tuples of leaf indices.
+the structures they came in, as nested tuples, named tuples and `Fields` of
+leaf indices.
 """
 struct Program
     nodes::Vector{Node}
@@ -145,15 +146,69 @@ function Base.show(io::IO, ::MIME"text/plain", p::Program)
     show_nodes(io, p.nodes, p.results)
 end
 
-# Nested inputs and outputs: tuples and named tuples of leaves.
-leaves(x::Union{Tuple, NamedTuple}) = reduce(vcat, map(leaves, values(x)); init = Any[])
-leaves(x) = Any[x]
+# Nested inputs and outputs: tuples, named tuples and immutable structs, down to
+# leaves. A program's structures record a struct as `Fields`, since the leaf
+# indices they hold could not be its fields.
 
-function rebuild(f, structure::Union{Tuple, NamedTuple})
-    rebuilt = map(s -> rebuild(f, s), values(structure))
-    structure isa NamedTuple ? NamedTuple{keys(structure)}(rebuilt) : rebuilt
+"A struct in a structure: its type, and its fields."
+struct Fields{T}
+    fields::NamedTuple
 end
-rebuild(f, leaf) = f(leaf)
+
+# Whether `x` is a struct to look inside. Mutable structs are leaves, as
+# closures are: their identity is theirs, and a program does not write them.
+# So are Tempest's own, such as the nodes in a call's structure.
+function nested(x)
+    T = typeof(x)
+    !(x isa Union{AbstractArray, Number, Function, Type, Module, AbstractString, Symbol, AbstractDict, Tuple, NamedTuple}) &&
+        isstructtype(T) && !ismutabletype(T) && fieldcount(T) > 0 && parentmodule(T) !== @__MODULE__
+end
+
+fields(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))
+
+# A struct of the kind of `T` with these fields, its type parameters found anew.
+function construct(T, fields::NamedTuple)
+    try
+        Base.typename(T).wrapper(values(fields)...)
+    catch err
+        throw(ArgumentError("Tempest builds a $(nameof(T)) from new fields to trace through it, and its constructor " *
+            "failed; fields holding arrays or numbers need types that are parameters of the struct\n" * sprint(showerror, err)))
+    end
+end
+
+leaves(x::Union{Tuple, NamedTuple}) = reduce(vcat, map(leaves, values(x)); init = Any[])
+leaves(x::Fields) = leaves(x.fields)
+leaves(x) = nested(x) ? leaves(fields(x)) : Any[x]
+
+# `g` on each element of a tuple or named tuple, its names kept.
+each(g, x::Tuple) = map(g, x)
+each(g, x::NamedTuple) = NamedTuple{keys(x)}(map(g, values(x)))
+
+# `x` with `f` applied to each leaf, structs built anew from their fields.
+rebuild(f, x::Union{Tuple, NamedTuple}) = each(y -> rebuild(f, y), x)
+rebuild(f, x::Fields{T}) where {T} = construct(T, rebuild(f, x.fields))
+rebuild(f, x) = nested(x) ? construct(typeof(x), rebuild(f, fields(x))) : f(x)
+
+# The structure of `x`, `f` applied to each leaf: as `rebuild`, with structs as `Fields`.
+structure_of(f, x::Union{Tuple, NamedTuple}) = each(y -> structure_of(f, y), x)
+structure_of(f, x::Fields{T}) where {T} = Fields{T}(structure_of(f, x.fields))
+structure_of(f, x) = nested(x) ? Fields{typeof(x)}(structure_of(f, fields(x))) : f(x)
+
+# As `structure_of`, with each struct a named tuple of its fields: the structure
+# of a gradient, which has no value for a struct's other fields.
+tangent(f, x::Union{Tuple, NamedTuple}) = each(y -> tangent(f, y), x)
+tangent(f, x::Fields) = tangent(f, x.fields)
+tangent(f, x) = nested(x) ? tangent(f, fields(x)) : f(x)
+
+# Each of the program's arguments among `inputs`, given in the structure it was traced with.
+function argument_leaves(p, inputs)
+    positions = leaves(p.input_structure)
+    xs = leaves(inputs)
+    length(positions) == length(xs) || throw(ArgumentError("the program takes $(length(positions)) leaves, got $(length(xs))"))
+    out = Vector{Any}(nothing, length(p.arguments))
+    foreach((k, x) -> k === nothing || (out[k] = x), positions, xs)
+    out
+end
 
 function live(nodes, results)
     keep = falses(length(nodes))

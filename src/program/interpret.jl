@@ -80,7 +80,7 @@ end
 Evaluate `program` on Julia arrays and numbers, in the structure of its results.
 """
 function interpret(p::Program, args...)
-    inputs = leaves(args)
+    inputs = argument_leaves(p, args)
     values = Vector{Any}(undef, length(p.nodes))
     for (k, id) in enumerate(p.arguments)
         values[id] = inputs[k]

@@ -248,7 +248,7 @@ expands_to_differentiate(f) = !has_pullback(f) && !opaque(f)
 The program extended by its reverse pass. `program` must have one scalar
 result, the loss. The new program returns the loss and, in the structure of the
 inputs, the gradient with respect to every floating-point input (`nothing` for
-other inputs).
+other inputs), with each struct a named tuple of its fields'.
 """
 function differentiate(p::Program)
     length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
@@ -265,7 +265,7 @@ function differentiate(p::Program)
         push!(results, g.id)
         length(results)
     end
-    gradients = rebuild(result, p.input_structure)
+    gradients = tangent(result, p.input_structure)
     # Rules may build what nothing reads, such as a constant operand's share.
     prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...)))
 end
@@ -275,7 +275,8 @@ end
 
 The value of `f(args...)`, a number, and its gradient with respect to each
 argument, in that argument's structure: an array or a number for each
-floating-point array or number, and `nothing` for anything else. On Julia
+floating-point array or number, and `nothing` for anything else. A struct's
+gradient is a named tuple of its fields'. On Julia
 arrays this is `interpret(differentiate(trace(f, args...)), args...)`.
 
 In traced code it differentiates `f` where it is called, so a training step
@@ -318,7 +319,7 @@ function gradient(f, args...)
     value isa Traced && value.tape === tape && node(value).scalar ||
         throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
     cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))
-    gradients = rebuild(stand_ins) do x
+    gradients = tangent(stand_ins) do x
         x isa Union{Traced, TracedArray} || return nothing
         g = cotangent!(tape, cotangents, x.id)
         g === nothing ? nothing : handle_of(tape, g.id)

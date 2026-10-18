@@ -55,7 +55,7 @@ end
 Evaluate an index graph on the CPU, value by value.
 """
 function interpret(graph::IndexGraph, inputs...)
-    arguments = leaves(inputs)
+    arguments = filter(is_input, leaves(inputs))
     arrays = Vector{Any}(undef, length(graph.values))
     for (id, v) in enumerate(graph.values)
         arrays[id] = evaluate_value(v.definition, v, arrays, graph, arguments)

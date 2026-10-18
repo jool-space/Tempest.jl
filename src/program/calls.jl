@@ -141,10 +141,10 @@ function record_call(f, args...; kwargs...)
     else
         scratch = Tape()
         stand_ins = map(a -> TracedArray(scratch, record!(scratch, Argument(), (), size(a), eltype(a)); input = true), args)
-        rebuild(node, reference(f, stand_ins...; kwargs...))
+        structure_of(node, reference(f, stand_ins...; kwargs...))
     end
     position = Ref(0)
-    structure = rebuild(_ -> (position[] += 1), probe)
+    structure = structure_of(_ -> (position[] += 1), probe)
     instance = length(tape.nodes) + 1
     ids = map(enumerate(leaves(probe))) do (k, s)
         op = Call(f, values(kwargs), k, instance, structure)
@@ -192,7 +192,7 @@ function expand!(tape, f, args, kwargs)
     start = length(tape.nodes)
     out = reference(f, map(as_input, args)...; kwargs...)
     position = Ref(0)
-    structure = rebuild(_ -> (position[] += 1), out)
+    structure = structure_of(_ -> (position[] += 1), out)
     push!(tape.expansions, Expansion(f, kwargs, [a.id for a in args], structure, (start + 1):length(tape.nodes), [r.id for r in leaves(out)]))
     out
 end

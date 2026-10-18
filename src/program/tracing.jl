@@ -527,12 +527,18 @@ axis_positions(x::AbstractArray, axis::Integer) =
 
 # Tracing a function.
 
+# What becomes a program's input among the leaves of its arguments.
+is_input(leaf) = leaf isa AbstractArray{<:Number} || leaf isa Number && !(leaf isa Integer)
+
 """
     trace(f, args...) -> Program
 
 Run `f` on stand-ins for `args` and record what it computes. Arrays and numbers
-among `args`, also inside tuples and named tuples, become the program's inputs.
-Among the results, `nothing` stays `nothing`.
+among `args`, also inside tuples, named tuples and immutable structs, become the
+program's inputs, except integers: they are constants, so that they can be
+sizes, and an integer that varies between executions is an array of one. The
+results are arrays and numbers in the same kinds of structure, and `nothing`
+stays `nothing`.
 """
 function trace(f, args...)
     tape = Tape()
@@ -542,7 +548,7 @@ function trace(f, args...)
             id = record!(tape, Argument(), (), size(leaf), eltype(leaf))
             push!(arguments, id)
             return TracedArray(tape, id; input = true)
-        elseif leaf isa Number
+        elseif is_input(leaf)
             id = record!(tape, Argument(), (), (), typeof(leaf); scalar = true)
             push!(arguments, id)
             return Traced(tape, id)
@@ -551,10 +557,10 @@ function trace(f, args...)
     end
     traced = rebuild(stand_in, args)
     position = Dict(id => k for (k, id) in enumerate(arguments))
-    input_structure = rebuild(t -> t isa Union{Traced, TracedArray} ? position[t.id] : nothing, traced)
+    input_structure = structure_of(t -> t isa Union{Traced, TracedArray} ? position[t.id] : nothing, traced)
     output = f(traced...)
     results = Int[]
-    output_structure = rebuild(output) do leaf
+    output_structure = structure_of(output) do leaf
         # As a gradient has for an integer argument.
         leaf === nothing && return nothing
         id = if leaf isa Union{Traced, TracedArray}
