@@ -6,8 +6,8 @@ include("fixtures/programs.jl")
 @testset "plans" begin
     @testset "$name" for (name, f, args) in PROGRAMS
         for p in (trace(f, args...), differentiate(trace(f, args...)))
-            planned = T.plan(T.lower(p))
-            @test agree(T.execute(planned, args...), filter(!isnothing, T.leaves(interpret(p, args...))))
+            planned = C.plan(C.lower(p))
+            @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))
         end
     end
 end
@@ -18,16 +18,16 @@ end
 @testset "plans recomputing folds" begin
     @testset "$name" for (name, f, args) in PROGRAMS
         for p in (trace(f, args...), differentiate(trace(f, args...)))
-            planned = T.plan(T.lower(p); recompute_folds = true)
-            @test agree(T.execute(planned, args...), filter(!isnothing, T.leaves(interpret(p, args...))))
+            planned = C.plan(C.lower(p); recompute_folds = true)
+            @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))
         end
     end
     q, k, v = data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
-    p = trace((q, k, v) -> T.attention(q, k, v; causal = true), q, k, v)
-    planned = T.plan(T.lower(p); recompute_folds = true)
+    p = trace((q, k, v) -> Ops.attention(q, k, v; causal = true), q, k, v)
+    planned = C.plan(C.lower(p); recompute_folds = true)
     @test length(planned.groups) == 1
-    @test length(T.recomputed_in(only(planned.groups))) == 2
-    @test agree(T.execute(planned, q, k, v), [interpret(p, q, k, v)])
+    @test length(C.recomputed_in(only(planned.groups))) == 2
+    @test agree(C.execute(planned, q, k, v), [interpret(p, q, k, v)])
 end
 
 # A fold that recomputes another is recomputed only where its reader computes
@@ -43,10 +43,10 @@ end
         T.contract(x, d, (1, 3), (2, 3), (1, 2))
     end
     p = trace(f, q, k, x)
-    planned = T.plan(T.lower(p); recompute_folds = true)
-    @test all(g -> T.recomputed_in(g) == T.recomputed_in(g; nested = false), planned.groups)
-    @test count(g -> !isempty(T.recomputed_in(g)), planned.groups) == 1
-    @test agree(T.execute(planned, q, k, x), [interpret(p, q, k, x)])
+    planned = C.plan(C.lower(p); recompute_folds = true)
+    @test all(g -> C.recomputed_in(g) == C.recomputed_in(g; nested = false), planned.groups)
+    @test count(g -> !isempty(C.recomputed_in(g)), planned.groups) == 1
+    @test agree(C.execute(planned, q, k, x), [interpret(p, q, k, x)])
 end
 
 # Rewrites of sums, which change rounding: rewritten programs plan and compute
@@ -65,19 +65,19 @@ end
 @testset "rewritten sums" begin
     @testset "$name" for (name, f, args) in PROGRAMS
         for p in (trace(f, args...), differentiate(trace(f, args...)))
-            planned = T.plan(T.rewrite(T.lower(p)); recompute_folds = true)
-            @test agree(T.execute(planned, args...), filter(!isnothing, T.leaves(interpret(p, args...))))
+            planned = C.plan(C.rewrite(C.lower(p)); recompute_folds = true)
+            @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))
         end
     end
-    groups(f, args...) = T.plan(T.rewrite(T.lower(trace(f, args...))); recompute_folds = true).groups
+    groups(f, args...) = C.plan(C.rewrite(C.lower(trace(f, args...))); recompute_folds = true).groups
     q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
     a, b = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v))
     @test a.terms == b.terms
-    graph = T.rewrite(T.lower(trace(by_maximum, q, k, v)))
-    @test graph.values[only(b.reductions)].definition.fold == T.OnlineSoftmax(/)
-    @test length(T.recomputed_in(b)) == 1
-    planned = T.plan(graph; recompute_folds = true)
-    @test agree(T.execute(planned, q, k, v), [interpret(trace(by_maximum, q, k, v), q, k, v)])
+    graph = C.rewrite(C.lower(trace(by_maximum, q, k, v)))
+    @test graph.values[only(b.reductions)].definition.fold == C.OnlineSoftmax(/)
+    @test length(C.recomputed_in(b)) == 1
+    planned = C.plan(graph; recompute_folds = true)
+    @test agree(C.execute(planned, q, k, v), [interpret(trace(by_maximum, q, k, v), q, k, v)])
     @test occursin("online softmax", sprint(explain, planned))
 end
 
@@ -87,9 +87,9 @@ end
     x = data(8, 6)
     for f in (x -> (e = exp.(x); e ./ sum(e; dims = 1)), x -> exp.(x) ./ sum(exp.(x); dims = 1))
         p = trace(f, x)
-        planned = T.plan(T.lower(p))
+        planned = C.plan(C.lower(p))
         @test length(planned.groups) == 1
-        @test agree(T.execute(planned, x), [interpret(p, x)])
+        @test agree(C.execute(planned, x), [interpret(p, x)])
     end
 end
 
@@ -101,10 +101,10 @@ end
     for (f, args) in ((x -> sum(abs2, padded(x); dims = 1), (x,)), ((x, v) -> vcat(x, v) .* 2, (x, v)),
                       ((x, v) -> (y = copy(x); y[2:4, :] = v; tanh.(y)), (x, v)))
         p = trace(f, args...)
-        planned = T.plan(T.lower(p))
+        planned = C.plan(C.lower(p))
         @test length(planned.groups) == 1
-        @test T.structure(planned).stored == [o.value for o in planned.graph.results]
-        @test agree(T.execute(planned, args...), [interpret(p, args...)])
+        @test C.structure(planned).stored == [o.value for o in planned.graph.results]
+        @test agree(C.execute(planned, args...), [interpret(p, args...)])
     end
 end
 
@@ -120,8 +120,8 @@ end
         n = m .+ g
         (a, b, w .- n .* a, n)
     end
-    planned = T.plan(T.lower(trace(f, p, q, m, w)))
-    @test agree(T.execute(planned, p, q, m, w), T.leaves(f(p, q, m, w)))
+    planned = C.plan(C.lower(trace(f, p, q, m, w)))
+    @test agree(C.execute(planned, p, q, m, w), C.leaves(f(p, q, m, w)))
 end
 
 # A kernel is maps and folds over one domain, each fold over its own axes: the
@@ -129,25 +129,25 @@ end
 # only they read are never stored.
 @testset "folds over other axes join a kernel" begin
     full_domain_stored(p, g) = [v for v in eachindex(p.graph.values) if p.stored[v] &&
-        p.graph.values[v].dims == g.domain && p.graph.values[v].definition isa T.Pointwise]
+        p.graph.values[v].dims == g.domain && p.graph.values[v].definition isa C.Pointwise]
     results(p) = Set(o.value for o in p.graph.results)
 
-    softmax = T.plan(T.lower(differentiate(trace((x, t) -> sum(softmax_columns(x) .* t), data(8, 6), data(8, 6; scale = 0.7)))))
+    softmax = C.plan(C.lower(differentiate(trace((x, t) -> sum(softmax_columns(x) .* t), data(8, 6), data(8, 6; scale = 0.7)))))
     @test length(softmax.groups) == 1
     g = only(softmax.groups)
-    @test sort([T.fold_axes(softmax.graph, r) for r in g.reductions]) == [(1,), (1,), (1, 2)]
+    @test sort([C.fold_axes(softmax.graph, r) for r in g.reductions]) == [(1,), (1,), (1, 2)]
     @test issubset(full_domain_stored(softmax, g), results(softmax))
 
-    norm = T.plan(T.lower(differentiate(trace((x, w) -> sum(abs2, rmsnorm(x, w)), data(8, 6), data(8; scale = 0.1)))))
+    norm = C.plan(C.lower(differentiate(trace((x, w) -> sum(abs2, rmsnorm(x, w)), data(8, 6), data(8; scale = 0.1)))))
     # The weight gradient, reshaped from (8, 1) to (8,), is the fold's own
     # buffer: no copy.
     @test length(norm.groups) == 1
     g = only(norm.groups)
-    @test Set(T.fold_axes(norm.graph, r) for r in g.reductions) == Set([(1,), (2,), (1, 2)])
+    @test Set(C.fold_axes(norm.graph, r) for r in g.reductions) == Set([(1,), (2,), (1, 2)])
     @test issubset(full_domain_stored(norm, g), results(norm))
     # Within the group nothing reads a fold over other than the primary axes.
-    for m in T.members(g), s in T.stats(g.terms[m])
-        @test T.primary(norm.graph, g, s)
+    for m in C.members(g), s in C.stats(g.terms[m])
+        @test C.primary(norm.graph, g, s)
     end
 end
 
@@ -156,7 +156,7 @@ end
 # and attention, whose grouped heads have such an axis with one query head per
 # key head, against attention written out without it.
 @testset "axes of extent one" begin
-    explained(p) = [sprint(explain, T.plan(T.lower(p); recompute_folds)) for recompute_folds in (false, true)]
+    explained(p) = [sprint(explain, C.plan(C.lower(p); recompute_folds)) for recompute_folds in (false, true)]
     same(f, g, args...) = explained(trace(f, args...)) == explained(trace(g, args...))
     same_gradient(f, g, args...) = explained(differentiate(trace(f, args...))) == explained(differentiate(trace(g, args...)))
     x, w, c = data(8, 6), data(8; scale = 0.1), data(5)
@@ -176,5 +176,5 @@ end
     scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* scale
     causal(s) = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, -Inf)
     written(q, k, v) = (s = causal(scores(q, k)); T.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4)))
-    @test same((q, k, v, r) -> T.attention(q, k, v; causal = true) .+ r, (q, k, v, r) -> written(q, k, v) .+ r, q, k, v, r)
+    @test same((q, k, v, r) -> Ops.attention(q, k, v; causal = true) .+ r, (q, k, v, r) -> written(q, k, v) .+ r, q, k, v, r)
 end

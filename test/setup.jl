@@ -2,6 +2,9 @@
 # all tests share. Programs that several tests run are in fixtures/programs.jl.
 using LinearAlgebra, BFloat16s
 import Tempest as T
+using Tempest.Compiler
+import Tempest.Compiler as C
+import Tempest.Operations as Ops
 
 const CUDA_FUNCTIONAL = CUDACore.functional()
 

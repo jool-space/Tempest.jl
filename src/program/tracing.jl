@@ -349,6 +349,24 @@ end
 Base.reduce(op, x::TracedArray{<:Real}; dims = :, init = nothing) = mapreduce(identity, op, x; dims, init)
 
 # Products. Julia arrays among the factors are constants of the program.
+
+"""
+    Tempest.contract(a, b, la, lb, lo)
+
+The product of `a` and `b` summed over shared axes, as an einsum: `la` and `lb`
+label the axes of `a` and `b`, `lo` those of the result, and labels of both
+factors missing from the result are summed over. Every product is one: `a * b`
+of matrices is `contract(a, b, (1, 2), (2, 3), (1, 3))`.
+
+```jldoctest
+julia> Tempest.contract([1.0 2; 3 4], [5.0 6; 7 8], (1, 2), (2, 3), (1, 3))
+2×2 Matrix{Float64}:
+ 19.0  22.0
+ 43.0  50.0
+```
+"""
+function contract end
+
 function contract(a::TracedArray, b::TracedArray, la, lb, lo)
     T = promote_type(eltype(a), eltype(b))
     labels = Dict{Int, Int}()
@@ -361,6 +379,7 @@ end
 
 contract(a::TracedArray, b::AbstractArray{<:Number}, la, lb, lo) = contract(a, TracedArray(a.tape, constant!(a.tape, b)), la, lb, lo)
 contract(a::AbstractArray{<:Number}, b::TracedArray, la, lb, lo) = contract(TracedArray(b.tape, constant!(b.tape, a)), b, la, lb, lo)
+contract(a::AbstractArray, b::AbstractArray, la, lb, lo) = einsum(a, la, b, lb, lo)
 
 # Each product with a traced factor, the other traced or not.
 for (A, B) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (AbstractArray, TracedArray))

@@ -4,6 +4,7 @@
 # Development sessions skip it, so a test runs `workload` too.
 
 using PrecompileTools: @compile_workload
+using .Operations: attention, dropout
 
 "Trace, differentiate, interpret, prepare, run and explain small programs of each kind on the CPU."
 function workload()
@@ -28,11 +29,11 @@ function workload()
         (x -> (y = copy(x); y[2:3, :] .= 0; sum(abs2, vcat(y, x))), (x,)),
     ]
     for (f, args) in losses
-        p = trace(f, args...)
-        for program in (p, differentiate(p))
-            interpret(program, args...)
-            ex = prepare(program, args...)
-            execute!(ex)
+        p = Compiler.trace(f, args...)
+        for program in (p, Compiler.differentiate(p))
+            Compiler.interpret(program, args...)
+            ex = Compiler.prepare(program, args...)
+            Compiler.execute!(ex)
             explain(devnull, ex)
         end
     end

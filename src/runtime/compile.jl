@@ -25,8 +25,9 @@ each call replays, as `capture!` and `replay!` do, unless the program has work
 on the host. Results are the same either way.
 
 For a step that updates its state where it is and replays without copies,
-use `prepare`, `bind!` and `execute!` or `replay!`; `c.executable` is the
-prepared program, and `explain(c)` shows it.
+use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
+`execute!` or `replay!`. `c.executable` is the prepared program, and
+`explain(c)` shows it.
 """
 function compile(f, @nospecialize(args...); target = default_target(args), measure::Bool = true, capture::Bool = true)
     ex = prepare(trace(f, args...), args...; target, measure)

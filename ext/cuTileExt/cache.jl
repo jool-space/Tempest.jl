@@ -1,6 +1,6 @@
 # Tile kernels through Tempest's kernel cache, and their launches.
 #
-# A kernel compiles once per content key (see `Tempest.content_key`): on a hit
+# A kernel compiles once per content key (see `Tempest.Compiler.content_key`): on a hit
 # its CUBIN loads without inference or code generation. A launch passes the
 # parameters cuTile's code generation gives the kernel, packed once at build
 # time, since a prepared program's buffers never move.
@@ -18,10 +18,10 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     tt = Tuple{map(Core.Typeof, args)...}
     groups = alias_groups(args)
     arch = ct.device_sm_arch()
-    key = Tempest.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
+    key = Tempest.Compiler.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
         ct.tileiras_version(), ct.bytecode_version(), ENTRY)
-    found = Tempest.load_kernel(key)
-    entry, cubin = found !== nothing ? found : Tempest.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
+    found = Tempest.Compiler.load_kernel(key)
+    entry, cubin = found !== nothing ? found : Tempest.Compiler.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
         argtypes, constants = ct.unwrap_argtypes(f, tt)
         job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
             name = ENTRY, alias_groups = groups)
@@ -29,10 +29,10 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
             ct.invoke_frozen(ct.compile_or_lookup, job).cubin
         catch err
             # A kernel cuTile cannot express fails the same way next time.
-            err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.store_failure(key, sprint(showerror, err))
+            err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(key, sprint(showerror, err))
             rethrow()
         end
-        Tempest.store_kernel(key, ENTRY, cubin)
+        Tempest.Compiler.store_kernel(key, ENTRY, cubin)
     end)
     CuFunction(CuModule(cubin), entry)
 end

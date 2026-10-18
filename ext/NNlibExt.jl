@@ -8,7 +8,8 @@
 module NNlibExt
 
 using Tempest, NNlib
-import Tempest: @operation, TracedArray, contract, logsumexp
+import Tempest: @operation, contract, logsumexp
+import Tempest.Compiler: TracedArray
 
 @operation NNlib.softmax(x::AbstractArray; dims = 1)
 @operation NNlib.logsoftmax(x::AbstractArray; dims = 1)
@@ -29,7 +30,7 @@ end
 
 # A batched transpose is a layout that shares its array's memory, as NNlib's
 # lazy one does.
-NNlib.batched_transpose(a::TracedArray{<:Real, 3}) = Tempest.permuted(a, (2, 1, 3))
-NNlib.batched_adjoint(a::TracedArray{<:Real, 3}) = Tempest.permuted(a, (2, 1, 3))
+NNlib.batched_transpose(a::TracedArray{<:Real, 3}) = Tempest.Compiler.permuted(a, (2, 1, 3))
+NNlib.batched_adjoint(a::TracedArray{<:Real, 3}) = Tempest.Compiler.permuted(a, (2, 1, 3))
 
 end

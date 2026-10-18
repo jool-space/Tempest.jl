@@ -309,7 +309,7 @@ function replacements(program, replaces)
 end
 
 """
-    Tempest.footprint(ex) -> (; bytes, apart)
+    Tempest.Compiler.footprint(ex) -> (; bytes, apart)
 
 The bytes of a prepared program's buffers (inputs, constants, results and
 slots), and what they would be with each value stored apart instead of in

@@ -6,9 +6,10 @@ module cuBLASExt
 using Tempest
 using CUDACore
 using cuBLAS
-import Tempest: CUDATarget, Plan, Group, Load, Apply, Domain
+import Tempest: CUDATarget
+import Tempest.Compiler: Plan, Group, Load, Apply, Domain
 
-struct cuBLASProducts <: Tempest.Implementation end
+struct cuBLASProducts <: Tempest.Compiler.Implementation end
 
 "A factor or the result as cuBLAS reads it: column-major with a leading dimension."
 struct Operand
@@ -31,7 +32,7 @@ struct GemmClaim
     result::DataType
 end
 
-const FACTOR_TYPES = (Float32, Float16, Tempest.BFloat16)
+const FACTOR_TYPES = (Float32, Float16, Tempest.Compiler.BFloat16)
 
 # The compute type of a product of `T` factors under the target's numerics:
 # Float32 in full or as TF32, half factors accumulating in Float32. The one place
@@ -42,11 +43,11 @@ compute_type(target::CUDATarget, T) =
 # Strides of value `v` read at `index` along each group of axes, and its offset;
 # nothing when the read is not a strided view over them.
 function strides(graph, v, index, g::Group, groups...)
-    e = Tempest.address(graph, v, index, Domain(g.domain))
-    Tempest.is_affine(e) || return nothing
+    e = Tempest.Compiler.address(graph, v, index, Domain(g.domain))
+    Tempest.Compiler.is_affine(e) || return nothing
     covered = reduce(vcat, groups; init = Int[])
-    any(k -> g.domain[k] > 1 && Tempest.coefficient(e, k) != 0 && !(k in covered), eachindex(g.domain)) && return nothing
-    s = map(grp -> Tempest.group_stride(e, grp, g.domain), groups)
+    any(k -> g.domain[k] > 1 && Tempest.Compiler.coefficient(e, k) != 0 && !(k in covered), eachindex(g.domain)) && return nothing
+    s = map(grp -> Tempest.Compiler.group_stride(e, grp, g.domain), groups)
     any(x -> x === nothing || x < 0, s) && return nothing
     (e.constant, s...)
 end
@@ -70,18 +71,18 @@ end
 # Float32, whose products cuBLAS accumulates in Float32 exactly.
 factor_load(t::Load, graph) = t
 function factor_load(t::Apply, graph)
-    t.f isa Tempest.Cast{Float32} && only(t.args) isa Load || return nothing
+    t.f isa Tempest.Compiler.Cast{Float32} && only(t.args) isa Load || return nothing
     l = only(t.args)
-    graph.values[l.value].eltype <: Tempest.HalfFloat ? l : nothing
+    graph.values[l.value].eltype <: Tempest.Compiler.HalfFloat ? l : nothing
 end
 factor_load(t, graph) = nothing
 
-function Tempest.claims(::cuBLASProducts, target::CUDATarget, p::Plan, g::Group)
+function Tempest.Compiler.claims(::cuBLASProducts, target::CUDATarget, p::Plan, g::Group)
     g.kind === :reduction && length(g.reductions) == 1 && isempty(g.outputs) || return GemmClaim[]
     graph = p.graph
     r = only(g.reductions)
-    p.stored[r] && graph.values[r].definition.fold isa Tempest.SumFold || return GemmClaim[]
-    found = Tempest.product_axes(graph, g)
+    p.stored[r] && graph.values[r].definition.fold isa Tempest.Compiler.SumFold || return GemmClaim[]
+    found = Tempest.Compiler.product_axes(graph, g)
     found === nothing && return GemmClaim[]
     M, N, K, B = found
     x, y = map(f -> factor_load(f, graph), g.terms[r].args)
@@ -94,7 +95,7 @@ function Tempest.claims(::cuBLASProducts, target::CUDATarget, p::Plan, g::Group)
     max(m, n, k, batch) < typemax(Int32) || return GemmClaim[]
     sx = strides(graph, x.value, x.index, g, M, K, B)
     sy = strides(graph, y.value, y.index, g, K, N, B)
-    sc = strides(graph, r, Tempest.placement(graph, g, r), g, M, N, B)
+    sc = strides(graph, r, Tempest.Compiler.placement(graph, g, r), g, M, N, B)
     (sx === nothing || sy === nothing || sc === nothing) && return GemmClaim[]
     left, right = (x.value, sx[1], (sx[2], sx[3]), sx[4]), (y.value, sy[1], (sy[2], sy[3]), sy[4])
     out = (r, sc[1], (sc[2], sc[3]), sc[4])
@@ -128,27 +129,27 @@ function product_rate(target::CUDATarget, T)
     T === Float32 ? (compute_type(target, T) == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? r.tf32 : r.full) : r.half
 end
 
-Tempest.estimate(::cuBLASProducts, c::GemmClaim, target, p::Plan, g::Group) =
-    [Tempest.Work(Tempest.group_bytes(p, g); flops = 2.0 * c.m * c.n * c.k * c.batch, rate = product_rate(target, c.factor))]
+Tempest.Compiler.estimate(::cuBLASProducts, c::GemmClaim, target, p::Plan, g::Group) =
+    [Tempest.Compiler.Work(Tempest.Compiler.group_bytes(p, g); flops = 2.0 * c.m * c.n * c.k * c.batch, rate = product_rate(target, c.factor))]
 
-Tempest.record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transposes..., " ", c.m, "×", c.n, "×", c.k,
+Tempest.Compiler.record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transposes..., " ", c.m, "×", c.n, "×", c.k,
     c.batch > 1 ? " batch $(c.batch)" : "", " leading ", (c.a.leading, c.b.leading, c.c.leading), " ", c.factor, " to ", c.result)
 
 # Candidates: each product fold the generator groups with other work, alone,
 # so that its group is this claim's and the work after it a kernel of its own,
 # and each product fold it recomputes inside another's, stored by this claim.
-function Tempest.candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
+function Tempest.Compiler.candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
     graph = p.graph
-    product(r, t) = graph.values[r].definition.fold isa Tempest.SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
+    product(r, t) = graph.values[r].definition.fold isa Tempest.Compiler.SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
         all(f -> factor_load(f, graph) !== nothing, t.args)
     found = Vector{Int}[]
     for g in p.groups
         g.kind === :reduction || continue
         r = first(g.reductions)
-        length(Tempest.members(g)) > 1 && product(r, g.terms[r]) && Tempest.product_axes(graph, g) !== nothing && push!(found, [r])
-        roots = [g.terms[m] for m in Tempest.members(g) if haskey(g.terms, m)]
-        for t in Tempest.subterms(roots; nested = true)
-            t isa Tempest.Recomputed && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])
+        length(Tempest.Compiler.members(g)) > 1 && product(r, g.terms[r]) && Tempest.Compiler.product_axes(graph, g) !== nothing && push!(found, [r])
+        roots = [g.terms[m] for m in Tempest.Compiler.members(g) if haskey(g.terms, m)]
+        for t in Tempest.Compiler.subterms(roots; nested = true)
+            t isa Tempest.Compiler.Recomputed && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])
         end
     end
     found
@@ -190,7 +191,7 @@ function Base.show(io::IO, b::BuiltProduct)
         b.compute == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : c.factor === Float32 ? "full precision" : "$(c.factor) accumulating in Float32")
 end
 
-function Tempest.build_claim(::cuBLASProducts, c::GemmClaim, target, p::Plan, g::Group, buffers)
+function Tempest.Compiler.build_claim(::cuBLASProducts, c::GemmClaim, target, p::Plan, g::Group, buffers)
     lib = library()
     address(o::Operand, T) = pointer(buffers[o.value]) + o.offset * sizeof(T)
     a, b, y = address(c.a, c.factor), address(c.b, c.factor), address(c.c, c.result)
@@ -210,6 +211,6 @@ function Tempest.build_claim(::cuBLASProducts, c::GemmClaim, target, p::Plan, g:
     (launch, BuiltProduct(c, compute))
 end
 
-__init__() = Tempest.register!(cuBLAS, cuBLASProducts())
+__init__() = Tempest.Compiler.register!(cuBLAS, cuBLASProducts())
 
 end

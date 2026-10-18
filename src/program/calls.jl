@@ -79,7 +79,7 @@ macro operation(signature)
         :($call = $record_call($f, $(names...); $(passed...)))
     end
     esc(quote
-        $Tempest.operation_signature(::typeof($f)) = $operation_types($(types...))
+        $(@__MODULE__).operation_signature(::typeof($f)) = $operation_types($(types...))
         $(methods...)
         nothing
     end)
@@ -134,6 +134,13 @@ operations. Declare one with `has_pullback(::typeof(f)) = true`.
 """
 function verb_pullback end
 
+"""
+    has_pullback(f) -> Bool
+
+Whether the operation `f` has a derivative rule, `verb_pullback`. An opaque
+operation needs one to be differentiated; an operation with a reference is
+differentiated through it unless it has one.
+"""
 has_pullback(f) = false
 
 function record_call(f, args...; kwargs...)

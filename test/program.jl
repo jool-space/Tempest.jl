@@ -26,8 +26,8 @@ end
         @test interpret(p, args...) ≈ f(args...)
         d = differentiate(p)
         # Every node is read by a result, or is a call's result beside one.
-        read = T.live(d.nodes, d.results)
-        @test all(id -> read[id] || id in d.arguments || d.nodes[id].op isa T.Call, eachindex(d.nodes))
+        read = C.live(d.nodes, d.results)
+        @test all(id -> read[id] || id in d.arguments || d.nodes[id].op isa C.Call, eachindex(d.nodes))
         loss, gradients... = interpret(d, args...)
         @test loss ≈ f(args...)
         for k in eachindex(args)
@@ -35,13 +35,13 @@ end
             @test isapprox(gradients[k], finite_difference(f, args, k); rtol = 1.0e-5, atol = 1.0e-7)
         end
     end
-    @test any(n -> n.op isa T.Map && n.op.f === leaky, trace(x -> leaky.(x), data(3)).nodes)
-    @test !any(n -> n.op isa T.Map && n.op.f === swish, trace(x -> swish.(x), data(3)).nodes)
+    @test any(n -> n.op isa C.Map && n.op.f === leaky, trace(x -> leaky.(x), data(3)).nodes)
+    @test !any(n -> n.op isa C.Map && n.op.f === swish, trace(x -> swish.(x), data(3)).nodes)
     # The adjoint of a selection by a constant permutation is a selection by
     # its inverse, not a scatter.
     d = differentiate(trace(x -> sum(abs2, x[[3, 4, 1, 2], :] .* data(4, 1)), data(4, 6)))
-    @test !any(n -> n.op isa T.Scatter, d.nodes)
-    @test any(n -> n.op isa T.Scatter, differentiate(trace(x -> sum(abs2, x[[3, 4, 1, 1], :]), data(4, 6))).nodes)
+    @test !any(n -> n.op isa C.Scatter, d.nodes)
+    @test any(n -> n.op isa C.Scatter, differentiate(trace(x -> sum(abs2, x[[3, 4, 1, 1], :]), data(4, 6))).nodes)
 end
 
 # A gradient in traced code is the differentiated program inlined where it is
@@ -50,9 +50,9 @@ end
 @testset "gradients in traced code" begin
     same(a, b) = a === nothing ? b === nothing : isapprox(a, b; rtol = 1.0e-12)
     @testset "$name" for (name, f, args) in PROGRAMS
-        expected = T.leaves(interpret(differentiate(trace(f, args...)), args...))
-        @test all(map(same, expected, T.leaves(interpret(trace((xs...) -> T.gradient(f, xs...), args...), args...))))
-        @test all(map(same, expected, T.leaves(T.gradient(f, args...))))
+        expected = C.leaves(interpret(differentiate(trace(f, args...)), args...))
+        @test all(map(same, expected, C.leaves(interpret(trace((xs...) -> T.gradient(f, xs...), args...), args...))))
+        @test all(map(same, expected, C.leaves(T.gradient(f, args...))))
     end
     x, y = data(8, 6), data(8, 6; scale = 0.3)
     loss, dx = interpret(trace((x, y) -> T.gradient(a -> sum(a .* y .* x), x), x, y), x, y)

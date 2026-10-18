@@ -119,7 +119,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
     for r in partial
         held(r) || continue
         f, A = fold_of(c, r), accumulator(c, r)
-        held_states[r] = [Symbol(:partial_, r, :_, i) for i in eachindex(Tempest.fold_init(f, A))]
+        held_states[r] = [Symbol(:partial_, r, :_, i) for i in eachindex(Tempest.Compiler.fold_init(f, A))]
         init_state!(st, held_states[r], f, A, fold_tile_shape(c, r))
     end
     body = isempty(chunks) ? st : Any[]
@@ -146,14 +146,14 @@ function unsplit_kernel(c::Context, workspaces, slots)
                 fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t))
             else
                 f, A = fold_of(c, r), accumulator(c, r)
-                x = as_accumulator(loop, scope[c.g.terms[r]], A, Tempest.term_eltype(c.g.terms[r], c.graph), tile(c))
+                x = as_accumulator(loop, scope[c.g.terms[r]], A, Tempest.Compiler.term_eltype(c.g.terms[r], c.graph), tile(c))
                 states[r] = direct_state!(loop, f, A, x, valid1, p)
             end
         end
         resident || push!(body, :(for $t in Int32(1):Int32($n)
             $(loop...)
         end))
-        any(r -> fold_of(c, r) isa Tempest.OnlineSoftmax, phase) && (k.name *= ", online softmax")
+        any(r -> fold_of(c, r) isa Tempest.Compiler.OnlineSoftmax, phase) && (k.name *= ", online softmax")
         for r in phase
             f, A = fold_of(c, r), accumulator(c, r)
             state = haskey(states, r) ? states[r] : fold_state!(body, c, r, sums[r], accumulators[r])
@@ -211,9 +211,9 @@ end
 # before the sweep.
 function hoist_folds!(k, st, c::Context, roots, scope, indices)
     axes = reduce(vcat, (c.s.tiling[q].axes for q in swept(c.s)))
-    for t in Tempest.subterms(roots; known = t -> haskey(scope, t))
-        t isa Tempest.Recomputed || continue
-        any(q -> Tempest.mentions(t, q), axes) && continue
+    for t in Tempest.Compiler.subterms(roots; known = t -> haskey(scope, t))
+        t isa Tempest.Compiler.Recomputed || continue
+        any(q -> Tempest.Compiler.mentions(t, q), axes) && continue
         emit_tiles!(k, st, c, [t], scope, indices...)
     end
 end
@@ -226,14 +226,14 @@ end
 # elementwise in their state.
 struct Weight end
 
-weight(c::Context, y) = Apply(Weight(), (y,), Tempest.term_eltype(y, c.graph))
+weight(c::Context, y) = Apply(Weight(), (y,), Tempest.Compiler.term_eltype(y, c.graph))
 
 function sweep_sums(c::Context, f, body, p)
-    if f isa Tempest.OnlineSoftmax
+    if f isa Tempest.Compiler.OnlineSoftmax
         w = weight(c, first(body.args))
         return map(Base.tail(body.args)) do g
             term = g isa Lit && isone(g.value) ? w : Apply(*, (g, w), w.eltype)
-            (term, bilinear_over(c, Tempest.SumFold(), term, p))
+            (term, bilinear_over(c, Tempest.Compiler.SumFold(), term, p))
         end
     end
     product = bilinear_over(c, f, body, p)
@@ -246,7 +246,7 @@ end
 function step_roots(c::Context, f, body, sums)
     sums === nothing && return Term[body]
     factors = Term[product_factor(c, x) for (_, product) in sums if product !== nothing for x in product[1:2] if !(x isa Apply && x.f isa Weight)]
-    f isa Tempest.OnlineSoftmax ? [first(body.args); factors] : factors
+    f isa Tempest.Compiler.OnlineSoftmax ? [first(body.args); factors] : factors
 end
 
 # Accumulators of sums, named from `prefix`: an online softmax's running
@@ -255,9 +255,9 @@ end
 function sum_accumulators!(st, c::Context, f, body, sums, p, prefix)
     starts = Any[product === nothing ? :(fill($(zero(term.eltype)), $(Base.setindex(spanned_shape(c, term), 1, p)))) :
         :(fill(0.0f0, ($(tile(c)[product[3]]), $(tile(c)[product[4]])))) for (term, product) in sums]
-    if f isa Tempest.OnlineSoftmax
+    if f isa Tempest.Compiler.OnlineSoftmax
         y = first(body.args)
-        pushfirst!(starts, :(fill($(Tempest.term_eltype(y, c.graph)(-Inf)), $(Base.setindex(spanned_shape(c, y), 1, p)))))
+        pushfirst!(starts, :(fill($(Tempest.Compiler.term_eltype(y, c.graph)(-Inf)), $(Base.setindex(spanned_shape(c, y), 1, p)))))
     end
     acc = [Symbol(prefix, :_, i) for i in eachindex(starts)]
     foreach((a, x) -> push!(st, :($a = $x)), acc, starts)
@@ -269,15 +269,15 @@ end
 # extent weigh nothing. Then each sum adds its terms.
 function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices, p)
     rise = nothing
-    if f isa Tempest.OnlineSoftmax
+    if f isa Tempest.Compiler.OnlineSoftmax
         y = first(body.args)
-        T = Tempest.term_eltype(y, c.graph)
+        T = Tempest.Compiler.term_eltype(y, c.graph)
         x = as_accumulator(st, scope[y], T, T, spanned_shape(c, y))
         m = first(acc)
         masked, top, shift, rise, w = gensym(:y), gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
         push!(st, :($masked = ifelse.($valid, $x, $(T(-Inf)))))
         push!(st, :($top = max.($m, maximum($masked; dims = $p))))
-        push!(st, :($shift = $(Tempest.lse_shift).($top)))
+        push!(st, :($shift = $(Tempest.Compiler.lse_shift).($top)))
         push!(st, :($rise = exp.($m .- $shift)))
         push!(st, :($w = exp.($masked .- $shift)))
         push!(st, :($m = $top))
@@ -315,7 +315,7 @@ end
 function fold_step!(k, st, c::Context, r, sums, acc, scope, valid, indices)
     f, A, term = fold_of(c, r), accumulator(c, r), c.g.terms[r]
     sums === nothing || return sum_step!(k, st, c, f, term, sums, acc, scope, valid, indices, sweep_axis(c.s))
-    x = as_accumulator(st, scope[term], A, Tempest.term_eltype(term, c.graph), tile(c))
+    x = as_accumulator(st, scope[term], A, Tempest.Compiler.term_eltype(term, c.graph), tile(c))
     accumulate_elements!(st, f, A, acc, x, valid)
 end
 
@@ -488,7 +488,7 @@ function Base.show(io::IO, b::BuiltTiles)
     print(io, "cuTile ", b.schedule, ": ", join((string(k.name, " grid ", k.grid) for k in b.kernels), "; "))
 end
 
-function Tempest.build_claim(::Tempest.cuTileGenerator, claim::Claim, target, p::Plan, g::Group, buffers)
+function Tempest.Compiler.build_claim(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, p::Plan, g::Group, buffers)
     c = Context(p.graph, p.stored, g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
     launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule, target)
@@ -496,8 +496,8 @@ end
 
 function launch_kernels(kernels, workspaces, buffers, schedule, target)
     scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in workspaces)
-    launches = Tempest.concurrently(kernels, target) do k
-        f = Tempest.generated(source(k))
+    launches = Tempest.Compiler.concurrently(kernels, target) do k
+        f = Tempest.Compiler.generated(source(k))
         arrays = map(spec -> tile_array(spec.buffer isa Int ? buffers[spec.buffer] : scratch[spec.buffer], spec), k.args)
         tile_launch(f, arrays, k.grid; k.occupancy)
     end

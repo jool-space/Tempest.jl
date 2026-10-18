@@ -1,7 +1,7 @@
 using Tempest
 using Documenter
 
-DocMeta.setdocmeta!(Tempest, :DocTestSetup, :(using Tempest); recursive = true)
+DocMeta.setdocmeta!(Tempest, :DocTestSetup, :(using Tempest, Tempest.Compiler); recursive = true)
 
 makedocs(;
     modules = [Tempest],

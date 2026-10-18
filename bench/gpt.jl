@@ -19,8 +19,9 @@
 # TEMPEST_GPT_{HIDDEN,HEADS,KV_HEADS,FFN,LAYERS,T,B} give the shape.
 module GPT
 
-using Tempest, CUDACore, Random, Printf
+using Tempest, Tempest.Compiler, CUDACore, Random, Printf
 import Tempest as T
+import Tempest.Compiler as C
 
 ## Data, as nanoGPT's data.jl.
 
@@ -89,7 +90,7 @@ function attention(x, p, c, cfg)
     q = rope(project(p.wq), c, swap)
     k = rope(project(p.wk), c, swap)
     # Query head j reads key/value head cld(j, group): nanoGPT's (g h) axis.
-    o = Tempest.attention(q, k, project(p.wv); causal = true, scale = 1 / sqrt(Float32(head_dim)))
+    o = Tempest.Operations.attention(q, k, project(p.wv); causal = true, scale = 1 / sqrt(Float32(head_dim)))
     reshape(p.wo, :, D)' * reshape(o, :, N)
 end
 
@@ -156,8 +157,8 @@ results, so each execution takes the next step, and only the batch is bound
 between steps.
 """
 struct Step
-    program::T.Program
-    ex::T.Executable
+    program::C.Program
+    ex::C.Executable
 end
 
 function Step(params, batch, c, cfg; target, device)
@@ -214,11 +215,11 @@ function steady_milliseconds(s::Step, rng, corpus, cfg; steps)
 end
 
 # What a kernel is, for a profile: its implementation and sketch.
-kind(k) = k isa T.FloorKernels ? "floor" : (x = string(k); startswith(x, "cuTile ") ? join(split(x)[1:2], " ") :
+kind(k) = k isa C.FloorKernels ? "floor" : (x = string(k); startswith(x, "cuTile ") ? join(split(x)[1:2], " ") :
     startswith(x, "cuBLAS") ? "cuBLAS product" : first(split(x, ",")))
 
 "Device time of every kernel of a prepared program, timed alone: (kernel, seconds)."
-profile(ex) = [(k, T.time_launch(ex.target, l)) for (k, l) in zip(ex.kernels, ex.launches)]
+profile(ex) = [(k, C.time_launch(ex.target, l)) for (k, l) in zip(ex.kernels, ex.launches)]
 
 function report_profile(io, s::Step)
     rows = profile(s.ex)
@@ -227,7 +228,7 @@ function report_profile(io, s::Step)
         a, n = get(totals, kind(k), (0.0, 0))
         totals[kind(k)] = (a + t, n + 1)
     end
-    copies = isempty(s.ex.copies) ? 0.0 : T.time_launch(s.ex.target, () -> foreach(copy -> copy(), s.ex.copies))
+    copies = isempty(s.ex.copies) ? 0.0 : C.time_launch(s.ex.target, () -> foreach(copy -> copy(), s.ex.copies))
     @printf(io, "%-44s %10s %8s\n", "kernels timed alone", "ms", "count")
     for (name, (t, n)) in sort!(collect(totals); by = x -> -x[2][1])
         @printf(io, "%-44s %10.3f %8d\n", name, 1.0e3 * t, n)
@@ -255,19 +256,19 @@ function main()
     precision = Symbol(get(ENV, "TEMPEST_GPT_PRECISION", "full"))
     target = T.CUDATarget(; precision)
     println("corpus: ", length(corpus.data), " chars, vocabulary ", cfg.vocabulary, "; T=", cfg.T, " B=", cfg.B, ", ",
-        sum(length, T.leaves(params)), " parameters, ", cfg.layers, " layers; ", target)
+        sum(length, C.leaves(params)), " parameters, ", cfg.layers, " layers; ", target)
     seconds = @elapsed s = Step(params, batch, c, cfg; target, device = CuArray)
     storage = s.ex.storage
     println("trace, differentiate and prepare: ", round(seconds; digits = 1), " s; ", length(s.ex.kernels), " kernels; ",
         length(storage.donated), " results in place of their arguments, ", length(storage.staged), " staged")
     for (k, g) in zip(s.ex.kernels, s.ex.plan.groups)
-        k isa T.FloorKernels && println("  on the floor: ", g.kind === :opaque ? "a scatter" : "a $(g.kind) group", " over ", g.domain, " (", k, ")")
+        k isa C.FloorKernels && println("  on the floor: ", g.kind === :opaque ? "a scatter" : "a $(g.kind) group", " over ", g.domain, " (", k, ")")
     end
     path = get(ENV, "TEMPEST_GPT_EXPLAIN", "")
     isempty(path) || open(io -> explain(io, s.ex), path, "w")
     # The first step from the initial parameters, twice, bit for bit; its
     # first moments are a tenth of the gradients, against the interpreter's.
-    first_moments() = map(Array, T.leaves(outputs(s.ex)[3].first))
+    first_moments() = map(Array, C.leaves(outputs(s.ex)[3].first))
     launch!(s)
     first_run = first_moments()
     restart!(s, params, batch)
@@ -275,7 +276,7 @@ function main()
     println("first step bitwise identical in a second run: ", first_run == first_moments())
     if get(ENV, "TEMPEST_GPT_CHECK", "1") != "0"
         reference = interpret(s.program, params, state_of(params), batch)
-        errors = map((a, b) -> maximum(abs.(a .- b)) / maximum(abs.(b)), first_run, T.leaves(reference[3].first))
+        errors = map((a, b) -> maximum(abs.(a .- b)) / maximum(abs.(b)), first_run, C.leaves(reference[3].first))
         @printf("loss %.7f, the interpreter's %.7f; gradients' largest relative difference %.1e (median %.1e)\n",
             loss_value(s), reference[1], maximum(errors), sort(errors)[(length(errors) + 1) ÷ 2])
     end

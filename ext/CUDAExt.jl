@@ -4,14 +4,15 @@ module CUDAExt
 
 using Tempest
 using CUDACore
-import Tempest: CUDATarget, Plan, Group
+import Tempest: CUDATarget
+import Tempest.Compiler: Plan, Group
 
-Tempest.target_for(::CuArray) = CUDATarget()
-Tempest.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
-Tempest.upload(::CUDATarget, x) = CuArray(x)
-Tempest.bindable(::CUDATarget, x) = x isa CuArray
+Tempest.Compiler.target_for(::CuArray) = CUDATarget()
+Tempest.Compiler.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
+Tempest.Compiler.upload(::CUDATarget, x) = CuArray(x)
+Tempest.Compiler.bindable(::CUDATarget, x) = x isa CuArray
 
-function Tempest.task_state(::CUDATarget)
+function Tempest.Compiler.task_state(::CUDATarget)
     context, stream = CUDACore.context(), CUDACore.stream()
     () -> (CUDACore.context!(context); CUDACore.stream!(stream))
 end
@@ -25,9 +26,9 @@ const DEVICE_BANDWIDTH = Dict("NVIDIA GB10" => 220.0e9)
 const LAUNCH_SECONDS = 1.0e-6
 const NOISE = 0.05
 
-Tempest.device_name(::CUDATarget) = CUDACore.name(CUDACore.device())
+Tempest.Compiler.device_name(::CUDATarget) = CUDACore.name(CUDACore.device())
 
-function Tempest.rates(target::CUDATarget)
+function Tempest.Compiler.rates(target::CUDATarget)
     device = CUDACore.device()
     attribute(a) = CUDACore.attribute(device, a)
     sms = attribute(CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
@@ -35,10 +36,10 @@ function Tempest.rates(target::CUDATarget)
         0.85 * 2.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE) *
             attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8
     end
-    Tempest.Rates(bandwidth, LAUNCH_SECONDS, sms, NOISE)
+    Tempest.Compiler.Rates(bandwidth, LAUNCH_SECONDS, sms, NOISE)
 end
 
-Tempest.measurable(::CUDATarget) = true
+Tempest.Compiler.measurable(::CUDATarget) = true
 
 # A captured graph. The driver crashes destroying a graph whose kernels'
 # modules were unloaded first, and objects that die in one collection are
@@ -51,7 +52,7 @@ end
 
 const GRAPHS = WeakKeyDict{Graph, Any}()
 
-function Tempest.capture(::CUDATarget, run, keep)
+function Tempest.Compiler.capture(::CUDATarget, run, keep)
     graph = CUDACore.capture(run)
     exec = CUDACore.instantiate(graph)
     # The executable graph does not need the graph it was made from.
@@ -61,31 +62,31 @@ function Tempest.capture(::CUDATarget, run, keep)
     g
 end
 
-Tempest.replay(::CUDATarget, g::Graph) = CUDACore.launch(g.exec)
-Tempest.release(::CUDATarget, g::Graph) = finalize(g)
+Tempest.Compiler.replay(::CUDATarget, g::Graph) = CUDACore.launch(g.exec)
+Tempest.Compiler.release(::CUDATarget, g::Graph) = finalize(g)
 
 __init__() = atexit(() -> foreach(finalize, collect(keys(GRAPHS))))
 
 # Device seconds of one launch: the minimum over samples of a captured graph
 # of about a millisecond of launches.
-function Tempest.time_launch(target::CUDATarget, launch; samples = 5, milliseconds = 1.0)
+function Tempest.Compiler.time_launch(target::CUDATarget, launch; samples = 5, milliseconds = 1.0)
     launch()
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / max(once, 1.0e-6)), 1, 100)
-    g = Tempest.capture(target, () -> foreach(_ -> launch(), 1:repetitions), launch)
-    Tempest.replay(target, g)
-    t = minimum(_ -> CUDACore.@elapsed(Tempest.replay(target, g)), 1:samples) / repetitions
-    Tempest.release(target, g)
+    g = Tempest.Compiler.capture(target, () -> foreach(_ -> launch(), 1:repetitions), launch)
+    Tempest.Compiler.replay(target, g)
+    t = minimum(_ -> CUDACore.@elapsed(Tempest.Compiler.replay(target, g)), 1:samples) / repetitions
+    Tempest.Compiler.release(target, g)
     t
 end
 
-Tempest.build_floor(::CUDATarget, p::Plan, g::Group, buffers) = floor(p, g, buffers)
+Tempest.Compiler.build_floor(::CUDATarget, p::Plan, g::Group, buffers) = floor(p, g, buffers)
 
 function floor(p::Plan, g::Group, buffers)
-    ks = Tempest.scalar_kernels(p.graph, p.stored, g, Tempest.kernel_slots(p, g))
+    ks = Tempest.Compiler.scalar_kernels(p.graph, p.stored, g, Tempest.Compiler.kernel_slots(p, g))
     launches = map(ks) do k
-        f = Tempest.generated(:(function (buffers, n)
+        f = Tempest.Compiler.generated(:(function (buffers, n)
             lin = ($(CUDACore.blockIdx)().x - 1) * $(CUDACore.blockDim)().x + $(CUDACore.threadIdx)().x - 1
             lin < n || return
             $(k.body)
@@ -95,7 +96,7 @@ function floor(p::Plan, g::Group, buffers)
         threads = min(THREADS, k.items)
         FloorLaunch(floor_function(f, args, k.items)..., (args, k.items), cld(k.items, threads), threads)
     end
-    (() -> foreach(l -> l(), launches), Tempest.FloorKernels(ks))
+    (() -> foreach(l -> l(), launches), Tempest.Compiler.FloorKernels(ks))
 end
 
 # A floor kernel and its exception slot, from the kernel cache or compiled and
@@ -105,22 +106,22 @@ function floor_function(@nospecialize(f), @nospecialize(args), n)
     Base.issingletontype(typeof(f)) || error("a floor kernel captures values, which its launch does not pass")
     tt = Tuple{typeof(args), typeof(n)}
     device = CUDACore.device()
-    key = Tempest.content_key("CUDA kernel", f, tt, CUDACore.capability(device), CUDACore.GPUCompiler,
+    key = Tempest.Compiler.content_key("CUDA kernel", f, tt, CUDACore.capability(device), CUDACore.GPUCompiler,
         CUDACore.CUDA_Compiler_jll, Base.libllvm_version)
-    found = Tempest.load_kernel(key)
+    found = Tempest.Compiler.load_kernel(key)
     if found !== nothing
         entry, image = found
         fun = CUDACore.link_kernel(image, entry, CUDACore.GPUCompiler.Relocations())
         return fun, CUDACore.create_exceptions!(fun.mod)
     end
-    compiled = Tempest.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
+    compiled = Tempest.Compiler.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
         job = CUDACore.CompilerJob(CUDACore.methodinstance(typeof(f), tt), CUDACore.compiler_config(device))
         Base.@lock CUDACore.cufunction_lock CUDACore.compile_or_lookup(job)
     end)
     if isempty(compiled.relocations.records)
-        Tempest.store_kernel(key, compiled.entry, compiled.image)
+        Tempest.Compiler.store_kernel(key, compiled.entry, compiled.image)
     else
-        Threads.atomic_add!(Tempest.CACHE_COUNTS.compiled, 1)
+        Threads.atomic_add!(Tempest.Compiler.CACHE_COUNTS.compiled, 1)
     end
     fun = CUDACore.link_kernel(compiled.image, compiled.entry, compiled.relocations)
     fun, CUDACore.create_exceptions!(fun.mod)

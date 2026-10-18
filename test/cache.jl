@@ -12,43 +12,43 @@ closure(s) = x -> s * x
 @testset "content keys" begin
     # Generated names count up through a session; keys number them instead.
     a, b = gensym(:t), gensym(:t)
-    @test T.content_key(:(for $a in 1:2; f($a); end)) == T.content_key(:(for $b in 1:2; f($b); end))
-    @test T.content_key(:(x + 1)) != T.content_key(:(x + 2))
-    @test T.content_key(1.0f0) != T.content_key(1.0)
+    @test C.content_key(:(for $a in 1:2; f($a); end)) == C.content_key(:(for $b in 1:2; f($b); end))
+    @test C.content_key(:(x + 1)) != C.content_key(:(x + 2))
+    @test C.content_key(1.0f0) != C.content_key(1.0)
     # A generated function is its source.
-    f, g, h = map(n -> T.generated(:(function (x) x + $n end)), (1, 1, 2))
-    @test T.content_key(f) == T.content_key(g) != T.content_key(h)
-    @test_throws ErrorException T.content_key(Core.eval(T.Generated, :(function (x) x end)))
+    f, g, h = map(n -> C.generated(:(function (x) x + $n end)), (1, 1, 2))
+    @test C.content_key(f) == C.content_key(g) != C.content_key(h)
+    @test_throws ErrorException C.content_key(Core.eval(C.Generated, :(function (x) x end)))
     # Package code is identified by its package; other code by its code, and
     # a closure by what it captures too.
-    @test occursin("Tempest = sources", T.canonical_text(T.logsumexp))
-    @test occursin("Base = julia", T.canonical_text(sin))
-    before = T.content_key(Elsewhere.scale)
+    @test occursin("Tempest = sources", C.canonical_text(T.logsumexp))
+    @test occursin("Base = julia", C.canonical_text(sin))
+    before = C.content_key(Elsewhere.scale)
     Core.eval(Elsewhere, :(scale(x) = 3x))
-    @test T.content_key(Elsewhere.scale) != before
-    @test T.content_key(closure(1.0f0)) != T.content_key(closure(2.0f0))
+    @test C.content_key(Elsewhere.scale) != before
+    @test C.content_key(closure(1.0f0)) != C.content_key(closure(2.0f0))
 end
 
 @testset "where the caches live" begin
     # In Tempest's scratch spaces, unless the environment names a directory.
     scratch(depot, key) = joinpath(depot, "scratchspaces", string(Base.PkgId(Tempest).uuid), key)
     withenv("TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
-        @test T.kernel_cache() == scratch(first(DEPOT_PATH), "kernels") && isdir(T.kernel_cache())
-        @test T.tuning_directory() == scratch(first(DEPOT_PATH), "tuning") && isdir(T.tuning_directory())
+        @test C.kernel_cache() == scratch(first(DEPOT_PATH), "kernels") && isdir(C.kernel_cache())
+        @test C.tuning_directory() == scratch(first(DEPOT_PATH), "tuning") && isdir(C.tuning_directory())
     end
     withenv("TEMPEST_KERNEL_CACHE" => "0") do
-        @test T.kernel_cache() === nothing
+        @test C.kernel_cache() === nothing
     end
     elsewhere = mktempdir()
     withenv("TEMPEST_KERNEL_CACHE" => elsewhere, "TEMPEST_CACHE" => elsewhere) do
-        @test T.kernel_cache() == elsewhere
-        @test T.tuning_directory() == joinpath(elsewhere, "tuning")
-        @test dirname(T.record_path(T.CPUTarget())) == joinpath(elsewhere, "tuning")
+        @test C.kernel_cache() == elsewhere
+        @test C.tuning_directory() == joinpath(elsewhere, "tuning")
+        @test dirname(C.record_path(T.CPUTarget())) == joinpath(elsewhere, "tuning")
     end
     # The paths are found when Tempest loads, not baked in when it
     # precompiles: a process with another first depot keeps its caches there.
     depot = mktempdir()
-    script = "using Tempest; print(Tempest.kernel_cache(), '\\n', Tempest.tuning_directory())"
+    script = "using Tempest; print(Tempest.Compiler.kernel_cache(), '\\n', Tempest.Compiler.tuning_directory())"
     paths = withenv("JULIA_DEPOT_PATH" => join([depot; DEPOT_PATH], Sys.iswindows() ? ';' : ':'),
         "TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
         readchomp(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`)
@@ -59,27 +59,27 @@ end
 @testset "the kernel cache's size" begin
     # Beyond its limit the cache removes the entries used least recently.
     withenv("TEMPEST_KERNEL_CACHE" => mktempdir(), "TEMPEST_KERNEL_CACHE_LIMIT" => "3000") do
-        keys = [T.content_key(n) for n in 1:4]
+        keys = [C.content_key(n) for n in 1:4]
         binary = zeros(UInt8, 990) # entries of 1000 bytes, the name and its length included
-        kept() = map(key -> isfile(T.entry_path(T.kernel_cache(), key)), keys)
+        kept() = map(key -> isfile(C.entry_path(C.kernel_cache(), key)), keys)
         # Modification times tell entries apart only so finely.
         for key in keys[1:3]
-            T.store_kernel(key, "kernel", binary)
+            C.store_kernel(key, "kernel", binary)
             sleep(0.05)
         end
         @test kept() == [true, true, true, false]
         # A hit marks its entry used, so the second entry goes first.
-        @test T.load_kernel(keys[1]) == ("kernel", binary)
+        @test C.load_kernel(keys[1]) == ("kernel", binary)
         sleep(0.05)
-        T.store_kernel(keys[4], "kernel", binary)
+        C.store_kernel(keys[4], "kernel", binary)
         @test kept() == [true, false, true, true]
-        @test T.load_kernel(keys[2]) === nothing
+        @test C.load_kernel(keys[2]) === nothing
     end
     for (limit, bytes) in (nothing => 1 << 30, "2048" => 2048, "64K" => 64 << 10, "1g" => 1 << 30)
-        withenv(() -> @test(T.kernel_cache_limit() == bytes), "TEMPEST_KERNEL_CACHE_LIMIT" => limit)
+        withenv(() -> @test(C.kernel_cache_limit() == bytes), "TEMPEST_KERNEL_CACHE_LIMIT" => limit)
     end
     withenv("TEMPEST_KERNEL_CACHE_LIMIT" => "lots") do
-        @test (@test_logs (:warn, r"TEMPEST_KERNEL_CACHE_LIMIT") T.kernel_cache_limit()) == 1 << 30
+        @test (@test_logs (:warn, r"TEMPEST_KERNEL_CACHE_LIMIT") C.kernel_cache_limit()) == 1 << 30
     end
 end
 
@@ -93,7 +93,7 @@ if CUDA_FUNCTIONAL
         # Launch parameters are those cuTile's code generation gives the kernel.
         ext = Base.get_extension(Tempest, :cuTileExt)
         y = CuArray{Float32}(undef, 16, 8)
-        epilogue = ext.Epilogue(T.generated(:(function (y, arrays, index) y end)), (ext.tile_array(y, (16, 8)),))
+        epilogue = ext.Epilogue(C.generated(:(function (y, arrays, index) y end)), (ext.tile_array(y, (16, 8)),))
         for argument in (ext.tile_array(y, (16, 8)), cuTile.Constant(64), 1.5f0, epilogue, (cuTile.Constant(true), 2.0f0))
             expressions, types = Any[], Any[]
             cuTile.flatten_params!(expressions, types, typeof(argument), :argument)
@@ -115,26 +115,26 @@ if CUDA_FUNCTIONAL
                 ("a product with an epilogue", trace((w, x, b) -> gelu.(w * x .+ b), w, x, b), (w, x, b), T.CUDATarget()),
                 ("training, TF32", differentiate(trace((w, x, b) -> sum(abs2, gelu.(w * x .+ b)), w, x, b)), (w, x, b),
                     T.CUDATarget(precision = :tf32)),
-                ("attention claims", differentiate(trace((q, k, v) -> sum(abs2, T.attention(q, k, v; causal = true)), q, k, v)),
+                ("attention claims", differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v)),
                     (q, k, v), T.CUDATarget(precision = :tf32)),
                 # Float64 elements, which tiles do not take.
                 ("the floor", trace(x -> T.fold(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),
             ]
             @testset "$name" for (name, p, args, target) in programs
                 results = map(1:2) do pass
-                    before = T.cache_counts()
+                    before = C.cache_counts()
                     ex = prepare(p, map(CuArray, args)...; target)
-                    after = T.cache_counts()
+                    after = C.cache_counts()
                     (after.loaded - before.loaded, after.compiled - before.compiled,
-                        map(on_host, filter(!isnothing, T.leaves(outputs(execute!(ex))))), ex.kernels)
+                        map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex))))), ex.kernels)
                 end
                 (loaded, compiled, first, kernels), (reloaded, recompiled, second, _) = results
                 # The first pass may also compile the side of a close call it
                 # measures and does not keep.
                 @test compiled > 0 && recompiled == 0 && 0 < reloaded <= loaded + compiled
                 @test isequal(first, second)
-                @test all(isapprox.(first, filter(!isnothing, T.leaves(interpret(p, args...))); rtol = 1.0e-2))
-                name == "the floor" && @test all(d -> d isa T.FloorKernels, kernels)
+                @test all(isapprox.(first, filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-2))
+                name == "the floor" && @test all(d -> d isa C.FloorKernels, kernels)
             end
         finally
             previous === nothing ? delete!(ENV, "TEMPEST_KERNEL_CACHE") : (ENV["TEMPEST_KERNEL_CACHE"] = previous)
@@ -144,7 +144,7 @@ if CUDA_FUNCTIONAL
         # unloaded: graphs that outlive their programs and are collected
         # after them, and a graph alive when the process exits.
         script = """
-            using Tempest, CUDACore, cuTile
+            using Tempest, Tempest.Compiler, CUDACore, cuTile
             x = CUDACore.CuArray(Float32.(reshape(1:4096, 64, 64)))
             p = trace(x -> sum(abs2, x * x; dims = 1), x)
             captured() = (ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32)); replay!(capture!(ex)); ex.captured)

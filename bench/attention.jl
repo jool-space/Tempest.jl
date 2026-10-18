@@ -4,8 +4,10 @@
 # separate add. Device time is the minimum over samples of a captured graph of
 # a few milliseconds of executions.
 #   julia --project=test bench/attention.jl
-using Tempest, CUDACore, cuBLAS, cuTile, Printf
+using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
+import Tempest.Compiler as C
+import Tempest.Operations as Ops
 
 # Microseconds of one execution: the minimum over samples of replays of a
 # graph that captures a few milliseconds of executions.
@@ -22,21 +24,21 @@ data(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(di
 D, H, KV, S, B = 64, 12, 12, 256, 16
 q, k, v = data(D, H, S, B; scale = 0.001f0), data(D, KV, S, B; scale = 0.002f0), data(D, KV, S, B; scale = 0.003f0)
 x = data(D, H, S, B; scale = 0.5f0)
-attend(q, k, v) = T.attention(q, k, v; causal = true)
-residual(q, k, v, x) = T.attention(q, k, v; causal = true) .+ x
-loss(q, k, v, x) = sum(abs2, T.attention(q, k, v; causal = true) .+ x)
+attend(q, k, v) = Ops.attention(q, k, v; causal = true)
+residual(q, k, v, x) = Ops.attention(q, k, v; causal = true) .+ x
+loss(q, k, v, x) = sum(abs2, Ops.attention(q, k, v; causal = true) .+ x)
 
 function measure(name, p, args; target, check = true)
     ex = prepare(p, map(CuArray, args)...; target)
     if check
-        got = map(r -> Array(r), filter(!isnothing, T.leaves(outputs(execute!(ex)))))
-        ref = filter(!isnothing, T.leaves(interpret(p, args...)))
+        got = map(r -> Array(r), filter(!isnothing, C.leaves(outputs(execute!(ex)))))
+        ref = filter(!isnothing, C.leaves(interpret(p, args...)))
         err = maximum(map((a, b) -> maximum(abs.(a .- b)) / max(maximum(abs.(b)), eps(Float32)), got, ref))
     else
         err = NaN
     end
     t = device_microseconds(ex)
-    kinds = join(unique(d isa T.FloorKernels ? "floor" : first(split(string(d), ":")) for d in ex.kernels), " + ")
+    kinds = join(unique(d isa C.FloorKernels ? "floor" : first(split(string(d), ":")) for d in ex.kernels), " + ")
     @printf("%-58s %10.1f us  err %.1e  %s\n", name, t, err, kinds)
     t
 end
@@ -53,15 +55,15 @@ for precision in (:tf32,)
     println("== ", precision)
     measure("hand-written kernel, forward", trace(attend, q, k, v), (q, k, v); target)
     with_epilogue = measure("kernel + residual as an epilogue", trace(residual, q, k, v, x), (q, k, v, x); target)
-    @eval Tempest.epilogue_results(::$(ext.cuTileAttention), ::typeof(Tempest.attention_forward), kwargs) = ()
+    @eval Tempest.Compiler.epilogue_results(::$(ext.cuTileAttention), ::typeof(Tempest.Operations.attention_forward), kwargs) = ()
     separate = measure("kernel, then a separate residual add", trace(residual, q, k, v, x), (q, k, v, x); target)
-    @eval Tempest.epilogue_results(::$(ext.cuTileAttention), ::typeof(Tempest.attention_forward), kwargs) = (1,)
+    @eval Tempest.Compiler.epilogue_results(::$(ext.cuTileAttention), ::typeof(Tempest.Operations.attention_forward), kwargs) = (1,)
     @printf("  epilogue saves %.1f us (%.0f%%)\n", separate - with_epilogue, 100 * (separate - with_epilogue) / separate)
     measure("training step (loss of attention + residual)", differentiate(trace(loss, q, k, v, x)), (q, k, v, x); target)
 end
 
 # The generated kernel in TF32, the hand-written forward kernel stepping aside.
-@eval Tempest.claims_call(::$(ext.cuTileAttention), ::T.CUDATarget, ::typeof(T.attention_forward), kwargs, inputs) = false
+@eval Tempest.Compiler.claims_call(::$(ext.cuTileAttention), ::T.CUDATarget, ::typeof(Ops.attention_forward), kwargs, inputs) = false
 println("== tf32, generated")
 measure("generated, forward", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(precision = :tf32))
 measure("generated, forward, two passes", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(precision = :tf32, online = false))

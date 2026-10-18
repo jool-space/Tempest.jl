@@ -175,7 +175,7 @@ end
 function nested(x)
     T = typeof(x)
     !(x isa Union{AbstractArray, Number, Function, Type, Module, AbstractString, Symbol, AbstractDict, Tuple, NamedTuple}) &&
-        isstructtype(T) && !ismutabletype(T) && fieldcount(T) > 0 && parentmodule(T) !== @__MODULE__
+        isstructtype(T) && !ismutabletype(T) && fieldcount(T) > 0 && Base.moduleroot(parentmodule(T)) !== Base.moduleroot(@__MODULE__)
 end
 
 fields(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))

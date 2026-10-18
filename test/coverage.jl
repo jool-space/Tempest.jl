@@ -10,13 +10,13 @@ include("fixtures/compositions.jl")
 
 "The largest difference from the interpreter's results, relative to their largest magnitude."
 function relative_error(ex, reference)
-    got = filter(!isnothing, T.leaves(outputs(execute!(ex))))
+    got = filter(!isnothing, C.leaves(outputs(execute!(ex))))
     maximum(map((a, b) -> maximum(abs.(Array(a) .- b)) / max(maximum(abs.(b)), eps(Float32)), got, reference))
 end
 
 function structure(ex)
-    s = T.structure(ex.plan)
-    largest = maximum(v -> T.value_bytes(ex.plan.graph.values[v]), s.stored; init = 0)
+    s = C.structure(ex.plan)
+    largest = maximum(v -> C.value_bytes(ex.plan.graph.values[v]), s.stored; init = 0)
     (kernels = s.kernels, bytes = s.bytes, largest)
 end
 
@@ -40,7 +40,7 @@ end
 const TOLERANCE = 1.0e-3
 
 if CUDA_FUNCTIONAL
-    references = Dict(c.name => filter(!isnothing, T.leaves(interpret(c.program, c.args...))) for c in COMPOSITIONS)
+    references = Dict(c.name => filter(!isnothing, C.leaves(interpret(c.program, c.args...))) for c in COMPOSITIONS)
     prepared(c, target) = prepare(c.program, map(CuArray, c.args)...; target, measure = false)
 
     @testset "coverage" begin

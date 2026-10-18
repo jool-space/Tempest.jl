@@ -6,7 +6,7 @@
 #   julia --project=test bench/coverage.jl [record.tsv]
 # The record is bench/coverage-<device>.tsv by default; delete a line of it to
 # record that case again.
-using Tempest, CUDACore, cuBLAS, cuTile, Printf
+using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 
 # Plans by estimate, as the tests make them.

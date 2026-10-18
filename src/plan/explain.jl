@@ -6,7 +6,7 @@ function describe_value(graph, v)
 end
 
 """
-    Tempest.structure(plan) -> (; kernels, stored, bytes)
+    Tempest.Compiler.structure(plan) -> (; kernels, stored, bytes)
 
 What tests compare between plans: the number of kernels, the values written
 to storage (inputs and constants apart), and their bytes.

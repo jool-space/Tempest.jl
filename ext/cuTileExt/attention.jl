@@ -12,7 +12,7 @@
 # index, or extent one along an axis); positions are not available; each
 # distinct epilogue compiles its own kernel variant.
 
-struct cuTileAttention <: Tempest.Implementation end
+struct cuTileAttention <: Tempest.Compiler.Implementation end
 
 const ATTENTION_TILE = 64
 
@@ -162,9 +162,9 @@ end
 # for today's composed form on cuBLAS. The kernels keep the full-precision
 # variant behind their `tf32` flag. A claim competes by cost with the
 # attention generated from the reference.
-function Tempest.claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, inputs)
+function Tempest.Compiler.claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, inputs)
     target.precision === :tf32 || return false
-    f in (Tempest.attention_forward, Tempest.attention_backward) || return false
+    f in (Tempest.Operations.attention_forward, Tempest.Operations.attention_backward) || return false
     (qd, qt), (kd, kt), (vd, vt) = inputs[1], inputs[2], inputs[3]
     qt === kt === vt === Float32 || return false
     qd[1] in (16, 32, 64, 128) && vd[1] == qd[1] || return false
@@ -172,27 +172,27 @@ function Tempest.claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, i
     all(i -> i[2] === Float32, inputs)
 end
 
-Tempest.epilogue_results(::cuTileAttention, ::typeof(Tempest.attention_forward), kwargs) = (1,)
+Tempest.Compiler.epilogue_results(::cuTileAttention, ::typeof(Tempest.Operations.attention_forward), kwargs) = (1,)
 
 # The launches' work: the forward kernel computes two products per query and
 # key, the backward a row term, then four products per key block and three
 # per query block; a causal mask halves them. Products run at the generator's
 # rate.
-function Tempest.estimate(::cuTileAttention, claim, target, p::Plan, g::Group)
+function Tempest.Compiler.estimate(::cuTileAttention, claim, target, p::Plan, g::Group)
     _, d = call_parts(p, g)
     op = d.node.op
     (D, H, T, B), (_, KV, keys, _) = first(d.shapes[1]), first(d.shapes[2])
     product = 2.0 * D * T * keys * H * B / (op.kwargs.causal ? 2 : 1)
-    rate, bytes = product_rate(target, Float32), Tempest.group_bytes(p, g)
+    rate, bytes = product_rate(target, Float32), Tempest.Compiler.group_bytes(p, g)
     blocks = cld(T, ATTENTION_TILE) * H * B
-    op.f === Tempest.attention_forward && return [Tempest.Work(bytes; flops = 2product, rate, blocks)]
-    [Tempest.Work(0.0; blocks), Tempest.Work(bytes; flops = 4product, rate, blocks = cld(keys, ATTENTION_TILE) * KV * B),
-     Tempest.Work(0.0; flops = 3product, rate, blocks)]
+    op.f === Tempest.Operations.attention_forward && return [Tempest.Compiler.Work(bytes; flops = 2product, rate, blocks)]
+    [Tempest.Compiler.Work(0.0; blocks), Tempest.Compiler.Work(bytes; flops = 4product, rate, blocks = cld(keys, ATTENTION_TILE) * KV * B),
+     Tempest.Compiler.Work(0.0; flops = 3product, rate, blocks)]
 end
 
 # The opaque results of the group, by result number, and the operands.
 function call_parts(p, g)
-    outs = sort([v for v in g.outputs if p.graph.values[v].definition isa Tempest.Opaque];
+    outs = sort([v for v in g.outputs if p.graph.values[v].definition isa Tempest.Compiler.Opaque];
         by = v -> p.graph.values[v].definition.node.op.output)
     d = p.graph.values[first(outs)].definition
     outs, d
@@ -211,16 +211,16 @@ function epilogue_for(p, g, o, buffers, shape)
     # The group's domain is the result's axes wider than one; a load spans
     # those it reads along.
     result = graph.values[o].definition.node.dims
-    wide = Tempest.wide_axes(result)
+    wide = Tempest.Compiler.wide_axes(result)
     function spanned(s)
-        axes = Tempest.aligned_axes(graph, s, g.domain)
+        axes = Tempest.Compiler.aligned_axes(graph, s, g.domain)
         ntuple(k -> k in wide && findfirst(==(k), wide) in axes ? result[k] : 1, rank)
     end
     arrays = Any[]
     slot = Dict{Int, Int}()
     names = Dict{Term, Any}()
     body = Any[]
-    for s in Tempest.subterms((t,))
+    for s in Tempest.Compiler.subterms((t,))
         if s isa Lit
             names[s] = s.value
             continue
@@ -239,14 +239,14 @@ function epilogue_for(p, g, o, buffers, shape)
             :($(ct.load)(arrays[$j]; index = ($(index...),), shape = $tile))
         elseif s isa Apply
             args = map(a -> names[a], s.args)
-            s.f isa Tempest.Cast ? :(convert($(ct.Tile){$(s.eltype)}, $(only(args)))) : :($(s.f).($(args...)))
+            s.f isa Tempest.Compiler.Cast ? :(convert($(ct.Tile){$(s.eltype)}, $(only(args)))) : :($(s.f).($(args...)))
         else
             error("no epilogue lowering for $(typeof(s))")
         end
         push!(body, :($name = $expr))
         names[s] = name
     end
-    f = Tempest.generated(:(function (y, arrays, index)
+    f = Tempest.Compiler.generated(:(function (y, arrays, index)
         $(body...)
         return $(names[t])
     end))
@@ -263,7 +263,7 @@ end
 Base.show(io::IO, b::BuiltAttention) = print(io, "cuTile attention kernels for ", b.f,
     b.tf32 ? " (TF32)" : " (Float32)", b.epilogue ? ", with an epilogue on the output" : "")
 
-function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, target::CUDATarget)
+function Tempest.Compiler.build_call(::cuTileAttention, p::Plan, g::Group, buffers, target::CUDATarget)
     outs, d = call_parts(p, g)
     op = d.node.op
     (; causal, scale) = op.kwargs
@@ -278,7 +278,7 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     constants = (ct.Constant(D), tile, tile, ct.Constant(causal), ct.Constant(H), ct.Constant(G), ct.Constant(tf32))
     grid = (cld(T, ATTENTION_TILE), H * B)
     s = Float32(scale)
-    if op.f === Tempest.attention_forward
+    if op.f === Tempest.Operations.attention_forward
         o, lse = outs
         epilogue, target_o = epilogue_for(p, g, o, buffers, (D, 1, ATTENTION_TILE, 1))
         lse_array = buffers[lse] === nothing ? nothing : tile_array(buffers[lse], (1, H, T, B))
@@ -297,7 +297,7 @@ function Tempest.build_call(::cuTileAttention, p::Plan, g::Group, buffers, targe
     kv_grid = (cld(keys, ATTENTION_TILE), KV * B)
     kernels = ((attention_delta_kernel, delta_args, grid), (attention_dkdv_kernel, dkdv_args, kv_grid),
         (attention_dq_kernel, dq_args, grid))
-    launches = Tempest.concurrently(k -> tile_launch(k...), kernels, target)
+    launches = Tempest.Compiler.concurrently(k -> tile_launch(k...), kernels, target)
     launch = () -> (foreach(l -> l(), launches); workspace; places; nothing)
     (launch, BuiltAttention(op.f, false, tf32))
 end

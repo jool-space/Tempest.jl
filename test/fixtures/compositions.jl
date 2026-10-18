@@ -6,8 +6,10 @@
 # apart) and the largest single value stored, a bound: attention stores no
 # value as large as its scores. A `Gap` is an expectation the plan does not
 # meet yet, with what closes it.
-using Tempest
+using Tempest, Tempest.Compiler
 import Tempest as T
+import Tempest.Compiler as C
+import Tempest.Operations as Ops
 
 "An expectation not met yet, and the work that closes the gap."
 struct Gap
@@ -17,7 +19,7 @@ end
 
 struct Composition
     name::String
-    program::T.Program
+    program::C.Program
     args::Tuple
     expected::NamedTuple # with every implementation loaded
     generated::NamedTuple # with the generator and the floor alone
@@ -39,7 +41,7 @@ const LSE = 4 * H * S * B            # bytes of one value per query
 q, k, v = sample(D, H, S, B; scale = 0.1f0), sample(D, H, S, B; scale = 0.2f0), sample(D, H, S, B; scale = 0.3f0)
 x = sample(D, H, S, B; scale = 0.5f0)
 
-attend(q, k, v) = T.attention(q, k, v; causal = true)
+attend(q, k, v) = Ops.attention(q, k, v; causal = true)
 
 # Written out: scores (keys, heads, queries, batch), a mask, and the weighted
 # sum of values.

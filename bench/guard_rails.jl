@@ -2,8 +2,9 @@
 # earlier Tempest measured them: the minimum over SAMPLES launches of a
 # captured CUDA graph of a few milliseconds of executions.
 #   julia --project=test bench/guard_rails.jl [output.tsv]
-using Tempest, CUDACore, cuBLAS, cuTile, Printf
+using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
+import Tempest.Compiler as C
 
 const SAMPLES = 15
 
@@ -92,14 +93,14 @@ function main(path = nothing)
     for (name, f, args, training) in [map(c -> (c..., false), CASES); map(c -> (c..., true), TRAINING)]
         p = training ? differentiate(trace(f, args...)) : trace(f, args...)
         ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET)
-        got = map(host, T.leaves(outputs(execute!(ex))))
-        ref = T.leaves(interpret(p, args...))
+        got = map(host, C.leaves(outputs(execute!(ex))))
+        ref = C.leaves(interpret(p, args...))
         ok = all(map((g, r) -> isapprox(g, r; rtol = TARGET.precision === :tf32 ? 2.0e-2 : 2.0e-3, atol = 1.0e-3), got, ref))
         if TARGET.precision === :tf32x3
             println("    max relative error ", maximum(map((g, r) -> maximum(abs.(g .- r)) / maximum(abs.(r)), got, ref)))
         end
         t = device_microseconds(ex)
-        kinds = join((d isa T.FloorKernels ? "floor" : hasproperty(d, :schedule) && hasproperty(d.schedule, :sketch) ? string(d.schedule.sketch) : string(d) for d in ex.kernels), "+")
+        kinds = join((d isa C.FloorKernels ? "floor" : hasproperty(d, :schedule) && hasproperty(d.schedule, :sketch) ? string(d.schedule.sketch) : string(d) for d in ex.kernels), "+")
         line = @sprintf("%-44s %9.1f  %-5s %s", name, t, ok ? "ok" : "WRONG", kinds)
         println(line)
         push!(rows, string(name, '\t', t, '\t', ok, '\t', kinds))

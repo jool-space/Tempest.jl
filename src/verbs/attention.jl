@@ -8,7 +8,7 @@
 # contractions need no gather.
 
 """
-    Tempest.attention(q, k, v; causal = false, scale = 1 / sqrt(size(q, 1)))
+    Tempest.Operations.attention(q, k, v; causal = false, scale = 1 / sqrt(size(q, 1)))
 
 Scaled dot-product attention over `(features, heads, positions, batch)` arrays,
 with grouped-query attention when `k` and `v` have fewer heads than `q`. Three
@@ -37,8 +37,6 @@ function attention_checks(q, k, v, causal)
     nothing
 end
 
-contract(a::AbstractArray, b::AbstractArray, la, lb, lo) = einsum(a, la, b, lb, lo)
-
 # Labels: d features, g query heads per kv head, h kv heads, m queries,
 # b batch, n keys.
 const D_, G_, H_, M_, B_, N_ = 1, 2, 3, 4, 5, 6
@@ -53,7 +51,7 @@ function attention_scores(q, k; causal, scale)
 end
 
 """
-    Tempest.attention_forward(q, k, v; causal, scale) -> (o, lse)
+    Tempest.Operations.attention_forward(q, k, v; causal, scale) -> (o, lse)
 
 Attention's output and the log-sum-exp of each query's scores, of size
 `(1, heads, queries, batch)`.
@@ -73,7 +71,7 @@ verb_pullback(::typeof(attention_forward), (q, k, v), y, dy; causal, scale) =
     Tuple(attention_backward(q, k, v, y.o, y.lse, dy.o, dy.lse; causal, scale))
 
 """
-    Tempest.attention_backward(q, k, v, o, lse, dout, dlse; causal, scale) -> (dq, dk, dv)
+    Tempest.Operations.attention_backward(q, k, v, o, lse, dout, dlse; causal, scale) -> (dq, dk, dv)
 
 The pullback of attention, as an operation of its own so a kernel can claim
 it. With p the probabilities and delta = Σ_d dout·o − dlse, the scores'

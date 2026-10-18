@@ -15,7 +15,8 @@ module cuTileExt
 using Tempest
 using CUDACore
 import cuTile as ct
-import Tempest: Affine, Group, Plan, Term, Load, Lit, Ix, Apply, Stat, CUDATarget
+import Tempest: CUDATarget
+import Tempest.Compiler: Affine, Group, Plan, Term, Load, Lit, Ix, Apply, Stat
 
 # Defaults measured on GB10 (48 SMs, 24 MiB L2) by the earlier cuTile schedules.
 const RESIDENT_ROWS = 4096       # columns up to this many rows stay in one tile
@@ -130,7 +131,7 @@ end
 # C, are bound by the grid; nothing when the primary axes are not a run.
 function collapse_axes(graph, g::Group)
     r = length(g.domain)
-    R = sort!(collect(Tempest.primary_axes(graph, g)))
+    R = sort!(collect(Tempest.Compiler.primary_axes(graph, g)))
     if g.kind === :pointwise
         return (1:min(r, 1), 2:r, 0, 1:0)
     elseif R == collect(1:r)
@@ -166,12 +167,12 @@ View(value, offset, strides, spans) = View(value, offset, strides, spans, nothin
 # formula, which becomes the view's offset per block, as does the part of the
 # address over such a group that does not chain.
 function view_of(graph, v, index, g, groups...; scalar = ())
-    domain = Tempest.Domain(g.domain)
-    e = Tempest.address(graph, v, index, domain)
-    rest = [t for t in e.terms if !(t.first isa Tempest.Var)]
-    e = Affine(e.constant, Tuple(t for t in e.terms if t.first isa Tempest.Var))
+    domain = Tempest.Compiler.Domain(g.domain)
+    e = Tempest.Compiler.address(graph, v, index, domain)
+    rest = [t for t in e.terms if !(t.first isa Tempest.Compiler.Var)]
+    e = Affine(e.constant, Tuple(t for t in e.terms if t.first isa Tempest.Compiler.Var))
     for i in scalar
-        s = Tempest.group_stride(e, groups[i], g.domain)
+        s = Tempest.Compiler.group_stride(e, groups[i], g.domain)
         s !== nothing && s >= 0 && continue
         append!(rest, [t for t in e.terms if t.first.n in groups[i]])
         e = Affine(e.constant, Tuple(t for t in e.terms if !(t.first.n in groups[i])))
@@ -181,38 +182,38 @@ function view_of(graph, v, index, g, groups...; scalar = ())
     if !isempty(rest)
         dynamic = Affine(0, Tuple(rest))
         bound = reduce(vcat, (groups[i] for i in scalar); init = Int[])
-        isempty(Tempest.indirect_values(dynamic)) || return nothing
-        all(k -> k in bound || g.domain[k] == 1 || !Tempest.mentions(dynamic, k), eachindex(g.domain)) || return nothing
-        lo, hi = Tempest.affine_range(dynamic, domain)
+        isempty(Tempest.Compiler.indirect_values(dynamic)) || return nothing
+        all(k -> k in bound || g.domain[k] == 1 || !Tempest.Compiler.mentions(dynamic, k), eachindex(g.domain)) || return nothing
+        lo, hi = Tempest.Compiler.affine_range(dynamic, domain)
         lo >= 0 || return nothing
         reach = hi + 1
     end
     for k in 1:length(g.domain)
-        g.domain[k] > 1 && Tempest.coefficient(e, k) != 0 && !any(grp -> k in grp, groups) && return nothing
+        g.domain[k] > 1 && Tempest.Compiler.coefficient(e, k) != 0 && !any(grp -> k in grp, groups) && return nothing
     end
-    strides = map(grp -> Tempest.group_stride(e, grp, g.domain), groups)
+    strides = map(grp -> Tempest.Compiler.group_stride(e, grp, g.domain), groups)
     any(s -> s === nothing || s < 0, strides) && return nothing
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach)
 end
 
-const TILE_TYPES = Union{Float32, Float16, Tempest.BFloat16, Bool, Int32}
+const TILE_TYPES = Union{Float32, Float16, Tempest.Compiler.BFloat16, Bool, Int32}
 
 # Tile types, and tuples of them: a fold's element of several components.
 tile_type(T) = T <: TILE_TYPES || T <: Tuple && all(tile_type, fieldtypes(T))
 
 # Positions computed from a formula without gathers.
-positional(t::Ix) = isempty(Tempest.indirect_values(t.expr)) && Tempest.term_eltype(t, nothing) <: TILE_TYPES
+positional(t::Ix) = isempty(Tempest.Compiler.indirect_values(t.expr)) && Tempest.Compiler.term_eltype(t, nothing) <: TILE_TYPES
 
 # Whether the generator can express a group: tile-typed values, supported
 # folds, and positions without gathers; its loads are checked with a schedule.
 function expressible(graph, stored, g::Group)
     collapse_axes(graph, g) === nothing && return false
-    for m in Tempest.members(g)
+    for m in Tempest.Compiler.members(g)
         val = graph.values[m]
         val.eltype <: TILE_TYPES || return false
-        m in g.reductions && !tile_fold(val.definition.fold, Tempest.term_eltype(g.terms[m], graph)) && return false
-        for t in Tempest.subterms((g.terms[m],))
-            t isa Tempest.Recomputed && return false
+        m in g.reductions && !tile_fold(val.definition.fold, Tempest.Compiler.term_eltype(g.terms[m], graph)) && return false
+        for t in Tempest.Compiler.subterms((g.terms[m],))
+            t isa Tempest.Compiler.Recomputed && return false
             t isa Ix && !positional(t) && return false
             t isa Apply && !tile_type(t.eltype) && return false
             t isa Lit && t.value isa Float64 && return false
@@ -261,16 +262,16 @@ function view_addresses(graph, stored, g::Group)
     found = Affine[]
     function visit(t, extents)
         if t isa Load
-            gathers(t) || push!(found, Tempest.address(graph, t.value, t.index, Tempest.Domain(extents)))
+            gathers(t) || push!(found, Tempest.Compiler.address(graph, t.value, t.index, Tempest.Compiler.Domain(extents)))
         elseif t isa Apply
             foreach(a -> visit(a, extents), t.args)
-        elseif t isa Tempest.Recomputed
+        elseif t isa Tempest.Compiler.Recomputed
             visit(t.body, (extents..., t.extents...))
         end
     end
-    for m in Tempest.members(g)
+    for m in Tempest.Compiler.members(g)
         visit(g.terms[m], g.domain)
-        stored[m] && push!(found, Tempest.address(graph, m, Tempest.placement(graph, g, m), Tempest.Domain(g.domain)))
+        stored[m] && push!(found, Tempest.Compiler.address(graph, m, Tempest.Compiler.placement(graph, g, m), Tempest.Compiler.Domain(g.domain)))
     end
     found
 end
@@ -287,7 +288,7 @@ generated.
 function refined(c)
     graph, g, s = c.graph, c.g, c.s
     addresses = view_addresses(graph, c.stored, g)
-    folds = [Tempest.fold_axes(graph, r) for r in partial_folds(c)]
+    folds = [Tempest.Compiler.fold_axes(graph, r) for r in partial_folds(c)]
     tiling = TileAxis[]
     for ax in s.tiling
         ax.reduced && (push!(tiling, ax); continue)
@@ -308,9 +309,9 @@ or the axes of a fold in `folds` begin or end; and the longest piece every
 address reads affinely, or zero when none does.
 """
 function pieces(axes, addresses, domain, folds = ())
-    affine(k) = all(e -> Tempest.coefficient(e, k) !== nothing, addresses)
+    affine(k) = all(e -> Tempest.Compiler.coefficient(e, k) !== nothing, addresses)
     chains(k, l) = affine(k) && affine(l) &&
-        all(e -> Tempest.coefficient(e, l) == Tempest.coefficient(e, k) * domain[k], addresses)
+        all(e -> Tempest.Compiler.coefficient(e, l) == Tempest.Compiler.coefficient(e, k) * domain[k], addresses)
     joined(k, l) = chains(k, l) && all(S -> (k in S) == (l in S), folds)
     found = Vector{Int}[]
     for k in axes
@@ -323,7 +324,7 @@ end
 
 # Whether the generator can load every load of the group under a schedule, and
 # each fold over other axes than the swept ones reduces whole tile axes.
-fits(c) = all(l -> loadable(c, l), (l for m in Tempest.members(c.g) for l in Tempest.loads(c.g.terms[m]))) &&
+fits(c) = all(l -> loadable(c, l), (l for m in Tempest.Compiler.members(c.g) for l in Tempest.Compiler.loads(c.g.terms[m]))) &&
     all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
 
 function default_tiles(extent, reduced)
@@ -377,9 +378,9 @@ end
 # small.
 const PARTIAL_BLOCKS = 256
 
-Tempest.recomputes_folds(::Tempest.cuTileGenerator, target) = target isa CUDATarget
+Tempest.Compiler.recomputes_folds(::Tempest.Compiler.cuTileGenerator, target) = target isa CUDATarget
 
-function Tempest.claims(::Tempest.cuTileGenerator, target::CUDATarget, p::Plan, g::Group)
+function Tempest.Compiler.claims(::Tempest.Compiler.cuTileGenerator, target::CUDATarget, p::Plan, g::Group)
     g.kind in (:pointwise, :reduction) || return Claim[]
     product = product_claim(target, p, g)
     product === nothing || return [product]
@@ -419,7 +420,7 @@ function product_rate(target::CUDATarget, T)
         scale = CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT) / 48
         map(x -> scale * x, PRODUCT_RATES["NVIDIA GB10"])
     end
-    T <: Tempest.HalfFloat ? r.half : target.precision === :full ? r.full : target.precision === :tf32 ? r.tf32 : r.tf32 / 3
+    T <: Tempest.Compiler.HalfFloat ? r.half : target.precision === :full ? r.full : target.precision === :tf32 ? r.tf32 : r.tf32 / 3
 end
 
 # The blocks of a schedule's first launch: one per kept tile (or chunk of
@@ -435,13 +436,13 @@ end
 # the swept ones (before the sweep), and the folds inside it at every position
 # of its extents.
 function recomputed_flops(s::TileSchedule, g::Group)
-    inner(t) = prod(t.extents; init = 1.0) * (2.0 + sum(u -> u isa Tempest.Recomputed ? inner(u) : 0.0, Tempest.subterms((t.body,)); init = 0.0))
-    roots = [g.terms[m] for m in Tempest.members(g) if haskey(g.terms, m)]
-    sum(Tempest.subterms(roots); init = 0.0) do t
-        t isa Tempest.Recomputed || return 0.0
+    inner(t) = prod(t.extents; init = 1.0) * (2.0 + sum(u -> u isa Tempest.Compiler.Recomputed ? inner(u) : 0.0, Tempest.Compiler.subterms((t.body,)); init = 0.0))
+    roots = [g.terms[m] for m in Tempest.Compiler.members(g) if haskey(g.terms, m)]
+    sum(Tempest.Compiler.subterms(roots); init = 0.0) do t
+        t isa Tempest.Compiler.Recomputed || return 0.0
         positions = prod(s.tiling; init = 1.0) do ax
             tiles = cld(ax.extent, ax.tile)
-            any(a -> Tempest.mentions(t, a), ax.axes) ? tiles * ax.tile : ax.reduced && s.sketch !== :full ? 1 : tiles
+            any(a -> Tempest.Compiler.mentions(t, a), ax.axes) ? tiles * ax.tile : ax.reduced && s.sketch !== :full ? 1 : tiles
         end
         positions * inner(t)
     end
@@ -450,28 +451,28 @@ end
 # A schedule's launches: the main kernel over its blocks, products (and the
 # folds it recomputes) at the generator's rate, and a merge of partial states
 # when blocks share a tile.
-function Tempest.estimate(::Tempest.cuTileGenerator, claim::Claim, target, p::Plan, g::Group)
+function Tempest.Compiler.estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, p::Plan, g::Group)
     s = claim.schedule
     blocks = first_blocks(s)
-    bytes = Tempest.group_bytes(p, g)
+    bytes = Tempest.Compiler.group_bytes(p, g)
     recomputed = recomputed_flops(s, g)
     work = if s.sketch === :product
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
         r = first(g.reductions)
-        t = first(Tempest.product_factors(p.graph.values[r].definition.fold, g.terms[r]))
-        factor = t isa Apply && t.f isa Tempest.Cast{Float32} ? only(t.args) : t
-        rate = product_rate(target, Tempest.term_eltype(factor, p.graph))
-        [Tempest.Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions) + recomputed, rate, blocks)]
+        t = first(Tempest.Compiler.product_factors(p.graph.values[r].definition.fold, g.terms[r]))
+        factor = t isa Apply && t.f isa Tempest.Compiler.Cast{Float32} ? only(t.args) : t
+        rate = product_rate(target, Tempest.Compiler.term_eltype(factor, p.graph))
+        [Tempest.Compiler.Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions) + recomputed, rate, blocks)]
     else
-        [Tempest.Work(bytes; flops = recomputed, rate = product_rate(target, Float32), blocks)]
+        [Tempest.Compiler.Work(bytes; flops = recomputed, rate = product_rate(target, Float32), blocks)]
     end
     if s.splits > 1 || s.sketch === :full
         # Each of the blocks that share a kept tile writes a partial state of
         # it, and the merge reads them.
         kept = prod((ax.extent for ax in s.tiling if !ax.reduced); init = 1)
         sharing = blocks / prod((cld(cld(ax.extent, ax.tile), ax.chunk) for ax in s.tiling if !ax.reduced); init = 1)
-        push!(work, Tempest.Work(2.0 * 4 * kept * sharing * length(g.reductions); blocks = max(1, kept / 256)))
+        push!(work, Tempest.Compiler.Work(2.0 * 4 * kept * sharing * length(g.reductions); blocks = max(1, kept / 256)))
     end
     work
 end
@@ -482,7 +483,7 @@ include("build.jl")
 include("contract.jl")
 include("attention.jl")
 
-__init__() = Tempest.register!(ct, Tempest.cuTileGenerator(), cuTileAttention())
+__init__() = Tempest.Compiler.register!(ct, Tempest.Compiler.cuTileGenerator(), cuTileAttention())
 
 include("precompile.jl")
 

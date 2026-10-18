@@ -287,7 +287,7 @@ function canonical_type(c::Canonical, @nospecialize(T::DataType))
         return canonical(c, source)
     end
     m = T.name.module
-    m === Generated && error("$T was generated without `Tempest.generated`, so it cannot be part of a cache key")
+    m === Generated && error("$T was generated without `Tempest.Compiler.generated`, so it cannot be part of a cache key")
     canonical(c, m)
     print(c.io, ".", T.name.name)
     if !isempty(T.parameters)

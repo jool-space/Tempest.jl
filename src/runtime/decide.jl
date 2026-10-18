@@ -530,7 +530,7 @@ end
 ## The tuning record: measured seconds by claim, one file per device.
 
 """
-    Tempest.tuning_directory() -> directory or nothing
+    Tempest.Compiler.tuning_directory() -> directory or nothing
 
 Where Tempest keeps what it measures: `tuning` in `ENV["TEMPEST_CACHE"]` when
 set, otherwise Tempest's `tuning` scratch space.

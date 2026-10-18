@@ -4,7 +4,7 @@
 # projection and a residual) and of an MLP, and the coverage suite's
 # compositions. Kernels' own workspaces are not counted.
 #   julia --project=test bench/storage.jl
-using Tempest, CUDACore, cuBLAS, cuTile, Printf
+using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 
 # Plans by estimate, as the tests make them.
@@ -13,10 +13,10 @@ include(joinpath(@__DIR__, "..", "test", "fixtures", "compositions.jl"))
 
 function report(name, p, args; target = T.CUDATarget())
     ex = prepare(p, map(CuArray, args)...; target, measure = false)
-    got = filter(!isnothing, T.leaves(outputs(execute!(ex))))
-    ref = filter(!isnothing, T.leaves(interpret(p, args...)))
+    got = filter(!isnothing, C.leaves(outputs(execute!(ex))))
+    ref = filter(!isnothing, C.leaves(interpret(p, args...)))
     err = maximum(map((a, b) -> maximum(abs.(Array(a) .- b)) / max(maximum(abs.(b)), eps(Float32)), got, ref))
-    bytes, apart = T.footprint(ex)
+    bytes, apart = C.footprint(ex)
     @printf("%-46s %9.2f MiB apart %9.2f MiB in slots  %5.1f%% less  err %.1e\n", name, apart / 2^20, bytes / 2^20,
         100 * (1 - bytes / apart), err)
 end

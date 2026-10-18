@@ -27,7 +27,7 @@ end
 scalar_partials(::DropoutScale, g, y, key, i) = (nothing, nothing)
 
 """
-    Tempest.dropout(x, seed; rate, stream = 0)
+    Tempest.Operations.dropout(x, seed; rate, stream = 0)
 
 Zero each element of `x` with probability `rate` and scale the rest by
 `1 / (1 - rate)`. `seed` is an integer array whose first element keys the draw;

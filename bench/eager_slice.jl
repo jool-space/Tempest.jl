@@ -7,8 +7,9 @@
 # generator, misses a method on traced arrays, or something else. NNlib comes
 # first, then Base, Statistics and LinearAlgebra. The slice should only grow.
 #   julia --project=test bench/eager_slice.jl
-using Tempest, NNlib, Statistics, LinearAlgebra, Random
+using Tempest, Tempest.Compiler, NNlib, Statistics, LinearAlgebra, Random
 import Tempest as T
+import Tempest.Compiler as C
 
 sample(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
 
@@ -153,7 +154,7 @@ case!("Base", "zero(x) .+ x", x -> zero(x) .+ x, x)
 scalar(r) = r isa AbstractArray && ndims(r) == 0 ? r[] : r
 
 function agree(eager, traced)
-    es, ts = T.leaves(eager), map(scalar, T.leaves(traced))
+    es, ts = C.leaves(eager), map(scalar, C.leaves(traced))
     length(es) == length(ts) || return false
     all(zip(es, ts)) do (e, t)
         e isa Number && t isa Number && return isapprox(e, t; rtol = 1.0e-4, atol = 1.0e-5)
@@ -162,7 +163,7 @@ function agree(eager, traced)
     end
 end
 
-traced_type(@nospecialize(S)) = S isa DataType && (S <: Union{T.TracedArray, T.Traced} || any(traced_type, S.parameters))
+traced_type(@nospecialize(S)) = S isa DataType && (S <: Union{C.TracedArray, C.Traced} || any(traced_type, S.parameters))
 traced_value(@nospecialize(z)) = traced_type(typeof(z)) || (z isa Type && traced_type(z))
 
 const RNG = (:rand, :randn, :rand!, :randn!, :randexp, :default_rng, :shuffle, :randperm)
@@ -186,7 +187,7 @@ function classify(err, frames)
     names = Set(f.func for f in frames[1:something(outer, length(frames) + 1) - 1])
     message = sprint(showerror, err)
     detail = first(replace(first(split(message, '\n')), r"\s+" => " "), 110)
-    why = if err isa TypeError && err.got isa T.Traced && err.expected === Bool ||
+    why = if err isa TypeError && err.got isa C.Traced && err.expected === Bool ||
              err isa MethodError && err.f === Bool && any(traced_value, err.args)
         "branches on array values"
     elseif :LogicalIndex in names || err isa MethodError && any(a -> a isa Tuple && any(traced_value, a), err.args)
@@ -197,7 +198,7 @@ function classify(err, frames)
     elseif :iterate in names || err isa BoundsError && occursin("CartesianIndex", message) ||
            occursin("invalid index: Traced", message) || occursin(r"results are arrays and numbers, got \w+\{Any\}", message)
         "scalar loops"
-    elseif err isa Base.CanonicalIndexError || err isa TypeError && err.got isa T.Traced ||
+    elseif err isa Base.CanonicalIndexError || err isa TypeError && err.got isa C.Traced ||
            err isa MethodError && nameof(err.f) in MUTATING
         "mutation"
     elseif err isa MethodError && any(traced_value, err.args) || occursin("unsupported index", message) ||
