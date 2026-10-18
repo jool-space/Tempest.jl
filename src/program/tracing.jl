@@ -539,6 +539,14 @@ program's inputs, except integers: they are constants, so that they can be
 sizes, and an integer that varies between executions is an array of one. The
 results are arrays and numbers in the same kinds of structure, and `nothing`
 stays `nothing`.
+
+```jldoctest
+julia> p = trace(x -> sum(abs2, x), [1.0, 2.0, 3.0])
+Program with 3 nodes: Float64(3,) → Float64
+  %1 = argument :: Float64(3,)
+  %2 = map abs2 %1 :: Float64(3,)
+  %3 = reduce sum over (1,) %2 :: Float64  [result]
+```
 """
 function trace(f, args...)
     tape = Tape()

@@ -13,10 +13,12 @@ also inside tuples, named tuples and immutable structs, except integers, which
 are constants. A call whose arguments differ in anything but the values of
 inputs throws, naming the difference.
 
-    julia> c = Tempest.compile(x -> sum(abs2, x), rand(4));
+```jldoctest
+julia> c = compile(x -> sum(abs2, x), [0.0, 0.0, 0.0, 0.0]);
 
-    julia> c([1.0, 2.0, 3.0, 4.0])
-    30.0
+julia> c([1.0, 2.0, 3.0, 4.0])
+30.0
+```
 
 With `capture`, the program's launches are captured once as one graph that
 each call replays, as `capture!` does, unless the program has work on the host.
@@ -97,8 +99,8 @@ describe(x::NamedTuple) = string("a named tuple of ", join(keys(x), ", "))
 describe(x) = string("the constant ", sprint(show, x; context = :limit => true))
 
 function Base.show(io::IO, c::Compiled)
-    n = length(c.executable.kernels)
-    print(io, "Compiled(", c.f, "; ", c.executable.target, ", ", n, n == 1 ? " kernel)" : " kernels)")
+    ex = c.executable
+    print(io, "Compiled(", c.f, ": ", flow(ex.program), "; ", ex.target, ", ", counted(length(ex.kernels), "kernel"), ")")
 end
 
 explain(io::IO, c::Compiled) = explain(io, c.executable)

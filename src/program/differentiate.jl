@@ -249,6 +249,13 @@ The program extended by its reverse pass. `program` must have one scalar
 result, the loss. The new program returns the loss and, in the structure of the
 inputs, the gradient with respect to every floating-point input (`nothing` for
 other inputs), with each struct a named tuple of its fields'.
+
+```jldoctest
+julia> p = differentiate(trace(x -> sum(abs2, x), [1.0, 2.0, 3.0]));
+
+julia> interpret(p, [1.0, 2.0, 3.0])
+(14.0, [2.0, 4.0, 6.0])
+```
 """
 function differentiate(p::Program)
     length(p.results) == 1 && p.nodes[only(p.results)].scalar ||

@@ -141,8 +141,22 @@ function show_nodes(io::IO, nodes, results)
     end
 end
 
+# `n` of something, as people count it.
+counted(n, word) = n == 1 ? "1 $word" : "$n $(word)s"
+
+node_type(n::Node) = n.scalar ? string(n.eltype) : string(n.eltype, n.dims)
+
+# The program's inputs and results by type and shape, or by number when many.
+function flow(p::Program)
+    side(ids, word) = isempty(ids) ? "()" : length(ids) > 3 ? counted(length(ids), word) :
+        join(map(id -> node_type(p.nodes[id]), ids), ", ")
+    string(side(p.arguments, "input"), " → ", side(p.results, "result"))
+end
+
+Base.show(io::IO, p::Program) = print(io, "Program(", flow(p), "; ", counted(length(p.nodes), "node"), ")")
+
 function Base.show(io::IO, ::MIME"text/plain", p::Program)
-    println(io, "Program with $(length(p.nodes)) nodes")
+    println(io, "Program with ", counted(length(p.nodes), "node"), ": ", flow(p))
     show_nodes(io, p.nodes, p.results)
 end
 

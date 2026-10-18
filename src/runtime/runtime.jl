@@ -5,6 +5,8 @@ abstract type Target end
 "Run on the CPU, through the same generated floor code CUDA runs."
 struct CPUTarget <: Target end
 
+Base.show(io::IO, ::CPUTarget) = print(io, "CPUTarget()")
+
 """
     CUDATarget(packages...; precision = :full, online = true)
 
@@ -199,6 +201,21 @@ Inputs are copied into storage the executable owns, except the arrays at the
 positions in `by_reference`, which must be of the target's array type: they
 are the executable's storage. The caller keeps them alive and may write them
 between executions, and a result that replaces one writes into it.
+
+A training loop, where the step returns the loss and the new parameters and
+optimizer state:
+
+```julia
+ex = prepare(trace(step, params, state, batch), params, state, batch; replaces = (2 => 1, 3 => 2))
+capture!(ex)
+for batch in batches
+    bind!(ex, 3 => batch)       # only the batch is new
+    loss, _, _ = execute!(ex)   # parameters and state are updated where they are
+end
+```
+
+For a function called on new arguments each time, `compile` does the binding
+and copying.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true,
         replaces = (), by_reference = ())
@@ -347,6 +364,17 @@ Copy inputs into the executable's input buffers: all of them, in the
 structure `prepare` took them, or those at the positions given, as a new
 batch while parameters stay where the last execution left them. An array
 bound by reference and bound again is not copied.
+
+```jldoctest
+julia> ex = prepare(trace(x -> 2 .* x, [1.0, 2.0]), [1.0, 2.0]);
+
+julia> bind!(ex, [3.0, 4.0]);
+
+julia> execute!(ex)
+2-element Vector{Float64}:
+ 6.0
+ 8.0
+```
 """
 function bind!(ex::Executable, @nospecialize(inputs...))
     bind_leaves!(ex, leaves(ex.program.input_structure), leaves(inputs))
@@ -368,8 +396,10 @@ end
 """
     execute!(ex) -> results
 
-Run the program: replay its captured graph, or else run every kernel in
-order, then copy staged results into the arguments they replace.
+Run the program on the inputs bound last: replay its captured graph, or else
+run every kernel in order, then copy staged results into the arguments they
+replace. The results are `outputs(ex)`, arrays over the executable's buffers
+that the next execution overwrites.
 """
 function execute!(ex::Executable)
     ex.captured === nothing ? run_once(ex) : replay(ex.target, ex.captured)
@@ -391,6 +421,13 @@ by reference, scalars and seeds among them, are read where they are, so they
 need no new capture. Capturing again replaces the graph. A program with work
 on the host cannot be captured; on a target without graphs, replaying runs
 the kernels.
+
+```julia
+ex = capture!(prepare(p, CuArray(x)))
+execute!(ex)                    # replays the graph
+bind!(ex, CuArray(y))           # copied into the buffers the graph reads
+execute!(ex)                    # the same graph, on the new values
+```
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
     k = findfirst(k -> k === :opaque, ex.kernels)
@@ -436,7 +473,33 @@ end
 
 explain(ex::Executable) = explain(stdout, ex)
 
-"The results, in the program's output structure, as arrays over the buffers."
+# What runs kernel `k`: an implementation, the floor, or the host.
+function runner(ex::Executable, k)
+    ex.kernels[k] === :opaque && return "on the host"
+    d = ex.decisions[k]
+    d === nothing || d.choice.implementation === nothing ? "floor" : string(nameof(typeof(d.choice.implementation)))
+end
+
+function Base.show(io::IO, ex::Executable)
+    print(io, "Executable(", flow(ex.program), "; ", ex.target, ", ", counted(length(ex.kernels), "kernel"), ")")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", ex::Executable)
+    println(io, "Executable on ", ex.target, ": ", flow(ex.program))
+    runners = map(k -> runner(ex, k), eachindex(ex.kernels))
+    counts = sort!([(count(==(r), runners), r) for r in unique(runners)]; rev = true)
+    println(io, "  ", counted(length(runners), "kernel"), ": ", join(map(((n, r),) -> "$n $r", counts), ", "))
+    ex.captured === nothing || println(io, "  captured: execute! replays its launches")
+    print(io, "  explain(ex) shows what each kernel computes and stores, and what runs it")
+end
+
+"""
+    outputs(ex) -> results
+
+The results of the last execution, in the program's output structure, as
+arrays over the executable's buffers rather than copies: the next execution
+overwrites them, so copy what you keep. `execute!` returns them.
+"""
 outputs(ex::Executable) = rebuild(k -> k === nothing ? nothing : ex.results[k], ex.program.output_structure)
 
 # The CPU target.

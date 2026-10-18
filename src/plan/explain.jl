@@ -17,12 +17,39 @@ function structure(p::Plan)
     (kernels = length(p.groups), stored, bytes = sum(v -> value_bytes(graph.values[v]), stored; init = 0))
 end
 
+"""
+    explain([io], c::Compiled)
+    explain([io], ex::Executable)
+    explain([io], plan)
+
+Print what Tempest decided for a program. For each kernel: what it computes,
+what it reads, and which values it stores or leaves to be recomputed where
+they are read. For a prepared program, also the precision of its products,
+the close calls measured between implementations, how values share storage,
+and which implementation runs each kernel, at what estimated or measured time.
+
+It describes how Tempest keeps its promises today; what it prints may change.
+"""
+function explain end
+
+# The plan's size, in a line: kernels, and values stored and recomputed.
+function plan_summary(p::Plan)
+    s = structure(p)
+    recomputed = count(id -> !p.stored[id], eachindex(p.graph.values))
+    string(counted(s.kernels, "kernel"), "; ", counted(length(s.stored), "value"), " stored (",
+        Base.format_bytes(s.bytes), "), ", recomputed, " recomputed where read")
+end
+
+Base.show(io::IO, p::Plan) = print(io, "Plan(", counted(length(p.groups), "kernel"), ")")
+
+function Base.show(io::IO, ::MIME"text/plain", p::Plan)
+    println(io, "Plan: ", plan_summary(p))
+    print(io, "  explain(plan) shows each kernel")
+end
+
 function explain(io::IO, p::Plan)
     graph = p.graph
-    s = structure(p)
-    recomputed = count(id -> !p.stored[id], eachindex(graph.values))
-    println(io, s.kernels, " kernels; ", length(s.stored), " values stored (", Base.format_bytes(s.bytes), "), ",
-        recomputed, " recomputed where read")
+    println(io, plan_summary(p))
     for (v, note) in graph.rewrites
         println(io, "rewritten: ", describe_value(graph, v), ", ", note)
     end

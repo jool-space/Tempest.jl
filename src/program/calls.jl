@@ -46,6 +46,15 @@ declared argument types run on traced arrays, unless `Tempest.reference` has a
 method for `f`. An operation whose body does not trace either gives a
 reference, or declares its results with `Tempest.declared_results` and is
 opaque.
+
+```julia
+rmsnorm(x, w; eps = 1.0f-6) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ eps) .* w
+@operation rmsnorm(x, w; eps = 1.0f-6)
+```
+
+Traced, `rmsnorm(x, w)` is one call in the program, which `explain` names;
+an implementation package may claim it with a kernel of its own, and where
+none does, it runs as the body above.
 """
 macro operation(signature)
     Meta.isexpr(signature, :call) ||

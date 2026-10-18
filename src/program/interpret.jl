@@ -77,7 +77,14 @@ end
 """
     interpret(program, args...) -> results
 
-Evaluate `program` on Julia arrays and numbers, in the structure of its results.
+Evaluate `program` on Julia arrays and numbers, in the structure of its
+results, node by node: the reference that prepared programs are tested
+against, with no plan and no kernels.
+
+```jldoctest
+julia> interpret(trace(sum, [1.0, 2.0]), [3.0, 4.0])
+7.0
+```
 """
 function interpret(p::Program, args...)
     inputs = argument_leaves(p, args)
