@@ -12,7 +12,9 @@ makedocs(;
         edit_link = "main",
         assets = String[],
     ),
-    pages = [],
+    pages = ["Home" => "index.md", "API" => "api.md"],
+    # Internal docstrings are for reading the source; the manual covers the exports.
+    checkdocs = :exports,
 )
 
 deploydocs(;
