@@ -1,3 +1,10 @@
+"""
+How a program becomes kernels: the program, index and plan levels, code
+generation, the kernel cache, prepared programs, and the interface kernel
+packages implement. Its exports are the levels beneath `compile`: `trace`,
+`differentiate` and `interpret` for programs, and `prepare`, `bind!`,
+`execute!`, `capture!`, `replay!` and `outputs` for prepared ones.
+"""
 module Compiler
 
 using LinearAlgebra
