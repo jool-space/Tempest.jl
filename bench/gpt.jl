@@ -4,9 +4,8 @@
 # token embedding with a tied head, RMSNorm, grouped-query attention with
 # rotary positions and a causal mask, SwiGLU, cross-entropy and Adam.
 #
-# The step is two prepared programs: the loss differentiated, then Adam over
-# the parameters, their moments and the gradients, with the outputs copied
-# into the inputs of the next step on the device. Both and the copies are
+# The step is one traced program, the gradient of the loss and Adam, prepared
+# with the parameters and Adam's state replaced by its results in place, and
 # replayed as one captured graph.
 #
 #   TEMPEST_GPT_TEXT=~/dev/jool/Tempest/docs/src julia --project=dev bench/gpt.jl
@@ -139,91 +138,59 @@ end
 
 ## The step, prepared.
 
-"""
-The training step on a target: the loss differentiated and Adam, prepared
-from the initial parameters and the first batch. After the gradient program
-its gradients are copied into the update's inputs, and after the update its
-parameters and state into the inputs of both.
-"""
-struct Step
-    gradient::T.Executable
-    update::T.Executable
-    gradients::Vector{Pair{Any, Any}} # source => destination
-    carried::Vector{Pair{Any, Any}}
-    tokens::Any
-    targets::Any
-end
-
-# The input buffers of a prepared program, in the order of its arguments, as
-# arrays of their shapes.
-function input_arrays(ex)
-    found = Dict{Int, Any}()
-    for (id, v) in enumerate(ex.plan.graph.values)
-        d = v.definition
-        d isa T.Input && (found[d.argument] = ex.buffers[id])
-    end
-    nodes = ex.program.nodes
-    [reshape(found[k], nodes[a].scalar ? () : nodes[a].dims) for (k, a) in enumerate(ex.program.arguments)]
-end
-
 state_of(params) = (first = map_leaves(zero, params), second = map_leaves(zero, params), step = zeros(Float32, 1))
 
-gradient_program(params, batch, c, cfg) = differentiate(trace((p, b) -> loss(p, b, c, cfg), params, batch))
+# A training step as a function: the loss and its gradient, then Adam.
+function train_step(p, state, batch, c, cfg)
+    l, g = Tempest.gradient(q -> loss(q, batch, c, cfg), p)
+    p, state = adam(p, state, g)
+    (l, p, state)
+end
+
+step_program(params, state, batch, c, cfg) = trace((p, s, b) -> train_step(p, s, b, c, cfg), params, state, batch)
+
+"""
+The training step on a target, prepared from the initial parameters, Adam's
+state and the first batch: its parameters and state are replaced by its
+results, so each execution takes the next step, and only the batch is bound
+between steps.
+"""
+struct Step
+    program::T.Program
+    ex::T.Executable
+end
 
 function Step(params, batch, c, cfg; target, device)
     state = state_of(params)
-    gradient = prepare(gradient_program(params, batch, c, cfg), map_leaves(device, params), map_leaves(device, batch); target)
-    grads = execute!(gradient)[2]
-    update = prepare(trace(adam, params, state, map_leaves(Array, grads)), map_leaves(device, params), map_leaves(device, state), grads; target)
-    # The gradient program's inputs are the parameters and the batch; the
-    # update's the parameters, the state and the gradients.
-    np, ns = length(T.leaves(params)), length(T.leaves(state))
-    g_in, u_in, u_out = input_arrays(gradient), input_arrays(update), T.leaves(outputs(update))
-    gradients = Pair{Any, Any}[g => u for (g, u) in zip(T.leaves(grads), u_in[(np + ns + 1):end])]
-    carried = Pair{Any, Any}[[o => i for (o, i) in zip(u_out[1:np], g_in[1:np])];
-        [o => i for (o, i) in zip(u_out, u_in[1:(np + ns)])]]
-    Step(gradient, update, gradients, carried, g_in[np + 1], g_in[np + 2])
+    program = step_program(params, state, batch, c, cfg)
+    ex = prepare(program, map_leaves(device, params), map_leaves(device, state), map_leaves(device, batch); target,
+        replaces = (2 => 1, 3 => 2))
+    Step(program, ex)
 end
 
-"Every launch of a step and its copies, in order."
-launches(s::Step) = Any[s.gradient.launches; [() -> copyto!(b, a) for (a, b) in s.gradients];
-    s.update.launches; [() -> copyto!(b, a) for (a, b) in s.carried]]
+launch!(s::Step) = execute!(s.ex)
 
-launch!(s::Step) = foreach(l -> l(), launches(s))
+bind_batch!(s::Step, batch) = bind!(s.ex, 3 => batch)
 
-function bind_batch!(s::Step, batch)
-    copyto!(s.tokens, batch.tokens)
-    copyto!(s.targets, batch.targets)
-end
+"Start again from parameters, a fresh state and a batch."
+restart!(s::Step, params, batch) = bind!(s.ex, params, state_of(params), batch)
 
-loss_value(s::Step) = Array(first(outputs(s.gradient)))[]
+loss_value(s::Step) = Array(first(outputs(s.ex)))[]
 
 ## Measuring.
-
-# A captured graph of `repetitions` steps; destroyed once timed, since the
-# garbage collector may otherwise unload the kernels' modules first.
-function captured(s::Step; repetitions = 1)
-    graph = CUDACore.capture() do
-        foreach(_ -> launch!(s), 1:repetitions)
-    end
-    CUDACore.instantiate(graph)
-end
 
 "Device time of one step, the minimum over samples of a captured graph of several."
 function device_milliseconds(s::Step; samples = 10, milliseconds = 200.0)
     launch!(s)
+    capture!(s.ex)
+    launch!(s)
     CUDACore.synchronize()
-    once = let g = captured(s)
-        CUDACore.launch(g)
-        t = minimum(_ -> CUDACore.@elapsed(CUDACore.launch(g)), 1:3)
-        finalize(g)
-        t
-    end
+    once = minimum(_ -> CUDACore.@elapsed(launch!(s)), 1:3)
     repetitions = clamp(round(Int, 1.0e-3 * milliseconds / once), 1, 100)
-    g = captured(s; repetitions)
-    CUDACore.launch(g)
-    t = minimum(_ -> 1.0e3 * CUDACore.@elapsed(CUDACore.launch(g)) / repetitions, 1:samples)
-    finalize(g)
+    capture!(s.ex; repetitions)
+    launch!(s)
+    t = minimum(_ -> 1.0e3 * CUDACore.@elapsed(launch!(s)) / repetitions, 1:samples)
+    capture!(s.ex)
     t
 end
 
@@ -233,18 +200,16 @@ drawn on the host and bound before each replay of the captured step, the loss
 is read every ten steps, and the time covers the second half of the run.
 """
 function steady_milliseconds(s::Step, rng, corpus, cfg; steps)
-    g = captured(s)
+    s.ex.captured === nothing && capture!(s.ex)
     halfway = 0.0
     for i in 1:steps
         bind_batch!(s, get_batch(rng, corpus.data, cfg.T, cfg.B))
-        CUDACore.launch(g)
+        launch!(s)
         i % 10 == 0 && loss_value(s)
         i == steps ÷ 2 && (CUDACore.synchronize(); halfway = time())
     end
     CUDACore.synchronize()
-    t = 1.0e3 * (time() - halfway) / (steps - steps ÷ 2)
-    finalize(g)
-    t
+    1.0e3 * (time() - halfway) / (steps - steps ÷ 2)
 end
 
 # What a kernel is, for a profile: its implementation and sketch.
@@ -255,18 +220,18 @@ kind(k) = k isa T.FloorKernels ? "floor" : (x = string(k); startswith(x, "cuTile
 profile(ex) = [(k, T.time_launch(ex.target, l)) for (k, l) in zip(ex.kernels, ex.launches)]
 
 function report_profile(io, s::Step)
-    rows = [profile(s.gradient); profile(s.update)]
+    rows = profile(s.ex)
     totals = Dict{String, Tuple{Float64, Int}}()
     for (k, t) in rows
         a, n = get(totals, kind(k), (0.0, 0))
         totals[kind(k)] = (a + t, n + 1)
     end
-    copies = T.time_launch(s.gradient.target, () -> foreach(((a, b),) -> copyto!(b, a), [s.gradients; s.carried]))
+    copies = isempty(s.ex.copies) ? 0.0 : T.time_launch(s.ex.target, () -> foreach(copy -> copy(), s.ex.copies))
     @printf(io, "%-44s %10s %8s\n", "kernels timed alone", "ms", "count")
     for (name, (t, n)) in sort!(collect(totals); by = x -> -x[2][1])
         @printf(io, "%-44s %10.3f %8d\n", name, 1.0e3 * t, n)
     end
-    @printf(io, "%-44s %10.3f %8d\n", "copies between the programs", 1.0e3 * copies, length(s.gradients) + length(s.carried))
+    @printf(io, "%-44s %10.3f %8d\n", "copies of staged results", 1.0e3 * copies, length(s.ex.copies))
     @printf(io, "%-44s %10.3f\n", "sum", 1.0e3 * (sum(last, rows) + copies))
     println(io, "slowest kernels:")
     for (k, t) in sort(rows; by = r -> -r[2])[1:min(8, length(rows))]
@@ -291,24 +256,30 @@ function main()
     println("corpus: ", length(corpus.data), " chars, vocabulary ", cfg.vocabulary, "; T=", cfg.T, " B=", cfg.B, ", ",
         sum(length, T.leaves(params)), " parameters, ", cfg.layers, " layers; ", target)
     seconds = @elapsed s = Step(params, batch, c, cfg; target, device = CuArray)
-    println("trace, differentiate and prepare: ", round(seconds; digits = 1), " s; ",
-        length(s.gradient.kernels), " + ", length(s.update.kernels), " kernels")
-    for ex in (s.gradient, s.update), (k, g) in zip(ex.kernels, ex.plan.groups)
+    storage = s.ex.storage
+    println("trace, differentiate and prepare: ", round(seconds; digits = 1), " s; ", length(s.ex.kernels), " kernels; ",
+        length(storage.donated), " results in place of their arguments, ", length(storage.staged), " staged")
+    for (k, g) in zip(s.ex.kernels, s.ex.plan.groups)
         k isa T.FloorKernels && println("  on the floor: ", g.kind === :opaque ? "a scatter" : "a $(g.kind) group", " over ", g.domain, " (", k, ")")
     end
     path = get(ENV, "TEMPEST_GPT_EXPLAIN", "")
-    isempty(path) || open(io -> (explain(io, s.gradient); println(io); explain(io, s.update)), path, "w")
-    # Gradients at the initial parameters: the interpreter's, and the same in
-    # a second run, bit for bit.
-    first_run = map(Array, T.leaves(execute!(s.gradient)[2]))
-    println("gradients bitwise identical in a second run: ", first_run == map(Array, T.leaves(execute!(s.gradient)[2])))
+    isempty(path) || open(io -> explain(io, s.ex), path, "w")
+    # The first step from the initial parameters, twice, bit for bit; its
+    # first moments are a tenth of the gradients, against the interpreter's.
+    first_moments() = map(Array, T.leaves(outputs(s.ex)[3].first))
+    launch!(s)
+    first_run = first_moments()
+    restart!(s, params, batch)
+    launch!(s)
+    println("first step bitwise identical in a second run: ", first_run == first_moments())
     if get(ENV, "TEMPEST_GPT_CHECK", "1") != "0"
-        reference = interpret(gradient_program(params, batch, c, cfg), params, batch)
-        errors = map((a, b) -> maximum(abs.(a .- b)) / maximum(abs.(b)), first_run, T.leaves(reference[2]))
+        reference = interpret(s.program, params, state_of(params), batch)
+        errors = map((a, b) -> maximum(abs.(a .- b)) / maximum(abs.(b)), first_run, T.leaves(reference[3].first))
         @printf("loss %.7f, the interpreter's %.7f; gradients' largest relative difference %.1e (median %.1e)\n",
             loss_value(s), reference[1], maximum(errors), sort(errors)[(length(errors) + 1) ÷ 2])
     end
     # Losses step by step, the first on the batch the step was prepared with.
+    restart!(s, params, batch)
     losses = Float32[]
     for i in 1:3
         i > 1 && bind_batch!(s, get_batch(rng, corpus.data, cfg.T, cfg.B))
