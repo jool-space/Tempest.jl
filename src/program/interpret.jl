@@ -12,11 +12,15 @@ end
 evaluate(op::Permute, n, xs) = permutedims(only(xs), op.perm)
 
 function evaluate(op::Map, n, xs)
-    n.scalar && return convert(n.eltype, op.f(xs...))
+    n.scalar && return apply_scalar(op.f, n.eltype, xs)
     out = Array{n.eltype}(undef, n.dims)
     out .= op.f.(xs...)
     out
 end
+
+# A scalar node's inputs are numbers. Inferred with the arrays other nodes
+# pass, `f(xs...)` would compile `f` of matrices (sqrt, exp, tanh) that never runs.
+Base.@nospecializeinfer apply_scalar(@nospecialize(f), T, @nospecialize(xs)) = convert(T, f(xs...))
 
 function evaluate(op::Reduce, n, xs)
     y = fold_array(op.fold, only(xs), op.axes)
