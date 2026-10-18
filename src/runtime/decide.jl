@@ -378,14 +378,13 @@ function cover(d::Decider)
     for i in implementations(d.target), q in [call_proposals(d, i); candidates(i, d.target, base)]
         any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
     end
-    recompute_folds = recomputes_folds(d.target)
     function trial(qs)
         sets = Vector{Int}[q for q in qs if q isa Vector{Int}]
         calls = ClaimedCall[q for q in qs if q isa ClaimedCall]
         # A value belongs to one proposal.
         allunique(Iterators.flatten([sets; [c.site.values for c in calls]])) || return nothing
         try
-            plan(claimed(d.graph, calls); fixed = sets, recompute_folds, keep)
+            first(claimed_plan(d, claimed(d.graph, calls); fixed = sets, keep))
         catch e
             e isa NotAGroup || rethrow()
             nothing
@@ -436,15 +435,19 @@ recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementations
 recomputed_in(g::Group; nested = true) =
     Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Fold)
 
-# The generator's plan, folds recomputed where they are read when an
-# implementation recomputes them, and the folds kept stored: the outermost ones
-# recomputed in a group no implementation claims (folds they recompute in turn
-# may still be recomputed in their kernels).
-function generator_plan(d::Decider)
+# A plan of `graph`, folds recomputed where they are read when an
+# implementation recomputes them, and the folds kept stored: those in `keep`,
+# and the outermost ones recomputed in a group no implementation claims (folds
+# they recompute in turn may still be recomputed in their kernels). The
+# generator's plan is the plan of the program as written; the cover's trials
+# fix proposals, which leave other folds to recompute.
+generator_plan(d::Decider) = claimed_plan(d, d.graph)
+
+function claimed_plan(d::Decider, graph; fixed = Vector{Int}[], keep = Set{Int}())
     recompute_folds = recomputes_folds(d.target)
-    keep = Set{Int}()
+    keep = Set{Int}(keep)
     while true
-        p = plan(d.graph; recompute_folds, keep)
+        p = plan(graph; fixed, recompute_folds, keep)
         unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) &&
                      all(i -> isempty(claims(i, d.target, p, g)), implementations(d.target))]
         isempty(unclaimed) && return p, keep

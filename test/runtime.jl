@@ -196,6 +196,36 @@ attention_cases = [
     end
 end
 
+# A proposal the cover tries leaves other folds to recompute, and a fold
+# recomputed where no implementation claims its reader stays stored, as in
+# the generator's plan. This implementation claims groups over three axes, or
+# that recompute nothing, finds recomputing slow, and proposes storing each
+# fold it recomputes: storing `q` lets `s` be recomputed in the logsumexp,
+# over two axes, which it does not claim.
+struct RecomputesOverThree <: T.Implementation end
+T.recomputes_folds(::RecomputesOverThree, target) = true
+T.claims(::RecomputesOverThree, target, p, g) = isempty(T.recomputed_in(g)) || length(g.domain) >= 3 ? (:claim,) : ()
+T.estimate(::RecomputesOverThree, claim, target, p, g) = [T.Work(0.0; flops = isempty(T.recomputed_in(g)) ? 1.0e-6 : 1.0, rate = 1.0)]
+T.candidates(::RecomputesOverThree, target::T.CPUTarget, p) = [[v] for g in p.groups for v in T.recomputed_in(g)]
+
+@testset "a fold recomputed where nothing claims its reader stays stored" begin
+    T.register!(@__MODULE__, RecomputesOverThree())
+    try
+        x, w = data(8, 6), data(8, 8)
+        function f(x, w)
+            q = T.contract(w, x, (1, 2), (1, 3), (2, 3))
+            s = T.contract(q, q, (1, 2), (1, 3), (2, 3))
+            T.logsumexp(s; dims = 1)
+        end
+        d = T.Decider(T.CPUTarget(), T.lower(trace(f, x, w)); measure = false)
+        p, considered = T.cover(d)
+        @test any(c -> c.accepted, considered)
+        @test all(g -> !isempty(T.claims(RecomputesOverThree(), d.target, p, g)), p.groups)
+    finally
+        T.register!(@__MODULE__)
+    end
+end
+
 using CUDACore
 if CUDACore.functional()
     @testset "recomputed folds on the CUDA floor" begin
