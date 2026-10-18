@@ -1,7 +1,5 @@
 # `compile`: a function traced and prepared, called like the function, with
 # structs among its arguments and integers as constants.
-using Test
-include("cases.jl")
 
 struct Dense{W, B, F}
     w::W
@@ -15,7 +13,6 @@ struct Fixed
 end
 
 loss(m, x) = sum(abs2, m(x))
-message(f) = try f(); "" catch err; sprint(showerror, err) end
 
 function finite_difference_weights(m, x)
     g = similar(m.w)
@@ -81,10 +78,8 @@ end
     @test occursin("need types that are parameters", message(() -> trace(f -> sum(f.w), Fixed(data(2, 2)))))
 end
 
-using CUDACore
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "compiled on CUDA" begin
-        single(x) = Float32.(x)
         m, x = Dense(single(data(64, 32; scale = 0.3)), single(data(64)), tanh), single(data(32, 16; scale = 0.5))
         c = compile((m, x) -> (loss(m, x), m(x)), Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x))
         value, y = c(Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x))

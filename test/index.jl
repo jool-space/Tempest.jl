@@ -1,11 +1,9 @@
 # The index level computes what the program level computes: every program and
 # its differentiated form, lowered and interpreted value by value, agrees with
 # the program interpreter, and layout leaves no trace among the values.
-using Test
-include("cases.jl")
+include("fixtures/programs.jl")
 
 flat(x) = filter(!isnothing, T.leaves(x))
-agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), a, b))
 
 @testset "index level" begin
     @testset "$name" for (name, f, args) in PROGRAMS

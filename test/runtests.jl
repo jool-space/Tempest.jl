@@ -1,7 +1,9 @@
 # Each file in test/ runs as its own test, in parallel worker processes:
-# `julia --project=test test/runtests.jl [--jobs=N] [--list] [name prefixes...]`.
-# cases.jl and compositions.jl hold the programs the tests share; neither runs
-# as a test. Tests on CUDA skip themselves when no GPU is functional.
+# `julia --project=test test/runtests.jl [--jobs=N] [--list] [name prefixes...]`,
+# as in `julia --project=test test/runtests.jl plan` for one. setup.jl is
+# evaluated in every test's module; fixtures/ holds programs that several tests
+# include, and runs as no test. Tests on CUDA skip themselves when no GPU is
+# functional.
 using ParallelTestRunner
 using Tempest
 import CUDACore
@@ -10,13 +12,14 @@ const CUDA_FUNCTIONAL = CUDACore.functional()
 CUDA_FUNCTIONAL || @warn "CUDA unavailable; GPU tests skipped"
 
 testsuite = find_tests(@__DIR__)
-filter!(((name, _),) -> !(name in ("cases", "compositions")), testsuite)
+filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/"), testsuite)
 
 # Every worker loads the same packages, so no test sees an extension that an
 # earlier test on its worker happened to load.
 const init_code = quote
     using Tempest, Test, NNlib, CUDACore
     import Statistics, cuBLAS, cuTile
+    include($(joinpath(@__DIR__, "setup.jl")))
 end
 
 # Each worker holds a CUDA context and its own compiled kernels. The GPU's

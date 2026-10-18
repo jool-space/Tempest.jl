@@ -1,8 +1,5 @@
 # What the REPL shows: programs as their nodes, prepared programs and plans in
 # a few lines that point to `explain`, and each in one line inside containers.
-using Test
-include("cases.jl")
-
 plain(x) = sprint(show, MIME"text/plain"(), x)
 
 @testset "displays" begin

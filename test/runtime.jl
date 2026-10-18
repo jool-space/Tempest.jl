@@ -1,13 +1,7 @@
 # Prepared programs compute what programs compute, through generated kernels,
 # on the CPU (and on CUDA when it is loaded and functional).
-using Test
-include("cases.jl")
+include("fixtures/programs.jl")
 
-scalar(x) = ndims(x) == 0 ? x[] : x
-agree(a, b; rtol = 1.0e-10) = all(map((x, y) -> isapprox(scalar(Array(x)), y; rtol, atol = rtol * 1.0e-2), a, b))
-host(x) = x isa AbstractArray ? x : x
-
-single(x) = x isa AbstractArray{<:AbstractFloat} ? Float32.(x) : x isa AbstractFloat ? Float32(x) : x
 # The proposals the cover took.
 taken(ex) = [c.proposal for c in ex.considered if c.accepted]
 
@@ -226,8 +220,7 @@ T.candidates(::RecomputesOverThree, target::T.CPUTarget, p) = [[v] for g in p.gr
     end
 end
 
-using CUDACore
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "recomputed folds on the CUDA floor" begin
         with_recomputing_floor() do
             @testset "$name" for (name, f, args) in attention_cases
@@ -378,7 +371,7 @@ const LARGE = [
     ("layer norm training", (x, w) -> sum(abs2, layernorm32(x, w)), (data(256, 700), data(256; scale = 0.1))),
 ]
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "several blocks with cuTile, Float32" begin
         @testset "$name" for (name, f, args) in LARGE
             args = map(single, args)
@@ -403,7 +396,7 @@ end
 const VARIANCE = T.GenericFold(; init = T -> (zero(T), zero(T), zero(T)), lift = x -> (one(x), x, zero(x)),
     combine = welford, observe = s -> s[3] / s[1])
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "a fold with a tuple state on cuTile" begin
         for (sketch, x, dims) in ((:resident, data(300, 200), 1), (:streamed, data(9000, 40), 1), (:split, data(100, 3000), 2),
             (:full, data(512, 300), (1, 2)))
@@ -438,7 +431,7 @@ const POSITIONAL = [
      x -> sum(reshape(reshape(x, 64, 1, 3, 10) .* ones(Float32, 1, 2, 1, 1), 64, 6, 10); dims = 1), (data(64, 3, 10),)),
 ]
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "positions and per-block formulas on cuTile" begin
         @testset "$name" for (name, f, args) in POSITIONAL
             args = map(single, args)
@@ -465,7 +458,7 @@ const GATHERS = [
     ("product with a gathered factor", (W, E, t) -> W * E[:, t], (data(96, 64; scale = 0.02), data(64, 1000; scale = 0.01), tokens), 1),
 ]
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "gathers on cuTile" begin
         @testset "$name" for (name, f, args, kernels) in GATHERS
             args = map(single, args)
@@ -493,7 +486,7 @@ const PARTIAL_COLLAPSE = [
      (data(64, 1000; scale = 0.01), reshape(tokens, 80, 3), data(64, 80; scale = 0.2), data(64; scale = 0.1)), true),
 ]
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "folds over part of a collapsed axis on cuTile" begin
         @testset "$name" for (name, f, args, training) in PARTIAL_COLLAPSE
             args = map(single, args)
@@ -516,7 +509,7 @@ const SCATTERS = [
     ("a reversed range", x -> sum(abs2, x[8:-3:1, [2, 2, 5]]), (data(8, 6),)),
 ]
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "scatters on the device" begin
         @testset "$name" for (name, f, args) in SCATTERS
             args = map(single, args)
@@ -543,7 +536,7 @@ const GENERATED_ATTENTION = [
     ("one head", (8, 1, 1, 133, 1), false),
 ]
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "attention generated on cuTile" begin
         @testset "$name" for (name, (D, H, KV, S, B), causal) in GENERATED_ATTENTION
             q, k, v = single(data(D, H, S, B; scale = 0.1)), single(data(D, KV, S, B; scale = 0.2)), single(data(D, KV, S, B; scale = 0.3))

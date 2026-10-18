@@ -1,17 +1,12 @@
 # The coverage suite: compositions nobody wrote code for plan and run, and each
-# plan has the structure recorded for it (test/compositions.jl): its kernels,
+# plan has the structure recorded for it (fixtures/compositions.jl): its kernels,
 # the bytes it stores, and no stored value larger than a bound. Plans are
 # chosen by estimate, so the checks are deterministic and do not depend on the
 # device's speed. An expectation not met yet is `@test_broken`, under a
 # testset that names what closes the gap.
-using Test
-using CUDACore, cuBLAS, cuTile
-
-# Plans by estimate: measurements stay out of the user's tuning record, and
-# none is recorded to override an estimate.
-ENV["TEMPEST_CACHE"] = mktempdir()
-
-include("compositions.jl")
+# Plans are by estimate: setup.jl keeps measurements out of the user's tuning
+# record, so none is recorded to override an estimate.
+include("fixtures/compositions.jl")
 
 "The largest difference from the interpreter's results, relative to their largest magnitude."
 function relative_error(ex, reference)
@@ -44,7 +39,7 @@ end
 
 const TOLERANCE = 1.0e-3
 
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     references = Dict(c.name => filter(!isnothing, T.leaves(interpret(c.program, c.args...))) for c in COMPOSITIONS)
     prepared(c, target) = prepare(c.program, map(CuArray, c.args)...; target, measure = false)
 

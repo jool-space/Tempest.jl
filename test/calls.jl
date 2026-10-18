@@ -4,8 +4,7 @@
 # and an implementation's claim on it, one opaque group that may absorb the
 # pointwise work after a result as an epilogue, competes with that expansion
 # by cost.
-using Test, NNlib
-include("cases.jl")
+include("fixtures/programs.jl")
 
 # A claim on the CPU that realizes attention through its reference on the host.
 struct HostAttention <: T.Implementation end
@@ -27,11 +26,9 @@ permuted(q, k, v, y) = sum(abs2, permutedims(T.attention(q, k, v; causal = true)
 
 calls(p) = [n for n in p.nodes if n.op isa T.Call]
 opaque_groups(ex) = [g for g in ex.plan.groups if g.kind === :opaque]
-agree(a, b) = all(map((x, y) -> isapprox(x, y; rtol = 1.0e-10, atol = 1.0e-12), a, b))
 results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, T.leaves(execute!(ex))))
 gradients(p, args...) = filter(!isnothing, T.leaves(interpret(differentiate(p), args...)))
 with_implementations(f, implementations...) = (T.register!(@__MODULE__, implementations...); try f() finally T.register!(@__MODULE__) end)
-message(f) = try f(); "" catch e; sprint(showerror, e) end
 
 @testset "calls" begin
     p = trace(residual, q, k, v, x)
@@ -233,13 +230,11 @@ end
     end
 end
 
-using CUDACore, cuTile
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     close(a, b; rtol) = all(map((x, y) -> isapprox(ndims(x) == 0 ? Array(x)[] : Array(x), y; rtol), a, b))
     @testset "cuTile attention claims" begin
-        single(dims...; scale) = Float32.(data(dims...; scale))
-        q, k, v = single(16, 4, 64, 2; scale = 0.1), single(16, 2, 64, 2; scale = 0.2), single(16, 2, 64, 2; scale = 0.3)
-        x = single(16, 4, 64, 2; scale = 0.5)
+        q, k, v = single(data(16, 4, 64, 2; scale = 0.1)), single(data(16, 2, 64, 2; scale = 0.2)), single(data(16, 2, 64, 2; scale = 0.3))
+        x = single(data(16, 4, 64, 2; scale = 0.5))
         device(xs) = map(CuArray, xs)
         # Untraced, the operations run their own methods on device arrays.
         @test Array(T.attention(device((q, k, v))...; causal = true)) ≈ T.attention(q, k, v; causal = true)

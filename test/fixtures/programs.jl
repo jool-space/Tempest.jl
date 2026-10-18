@@ -1,10 +1,5 @@
-# Programs shared by the tests: each a function, and its arguments in Float64
+# Programs several tests run: each a function, and its arguments in Float64
 # so that finite differences are accurate.
-using Tempest, LinearAlgebra
-import Tempest as T
-
-# Measurements the tests take stay out of the user's tuning record.
-ENV["TEMPEST_CACHE"] = mktempdir()
 
 swish(x) = x / (1 + exp(-x))
 leaky(x) = x > 0 ? x : oftype(x, 0.01) * x
@@ -21,8 +16,6 @@ mlp(x, w1, b1, w2, b2) = w2 * tanh.(w1 * x .+ b1) .+ b2
 gelu(x) = x / 2 * (1 + tanh(oftype(x, 0.7978846) * (x + oftype(x, 0.044715) * x * x * x)))
 # A product spelled as a broadcast and a sum over the shared axis.
 spelled_product(a, b) = dropdims(sum(reshape(a, size(a, 1), size(a, 2), 1) .* reshape(b, 1, size(b, 1), size(b, 2)); dims = 2); dims = 2)
-
-data(dims...; scale = 1.0) = 2.0 .* sin.(scale .* reshape(Float64.(1:prod(dims)), dims...))
 
 # Writes into an array the program allocates, as NNlib pads.
 function padded(x)

@@ -9,7 +9,7 @@ import Tempest as T
 
 # Plans by estimate, as the tests make them.
 ENV["TEMPEST_CACHE"] = mktempdir()
-include(joinpath(@__DIR__, "..", "test", "compositions.jl"))
+include(joinpath(@__DIR__, "..", "test", "fixtures", "compositions.jl"))
 
 function report(name, p, args; target = T.CUDATarget())
     ex = prepare(p, map(CuArray, args)...; target, measure = false)

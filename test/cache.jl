@@ -1,7 +1,6 @@
 # The kernel cache: keys name content and are the same in every session; a
 # kernel compiles once per key and loads from disk after.
-using Test
-include("cases.jl")
+include("fixtures/programs.jl")
 
 # Code outside any package, identified by its code.
 module Elsewhere
@@ -89,8 +88,7 @@ end
     @test T.workload() === nothing
 end
 
-using CUDACore, cuTile
-if CUDACore.functional()
+if CUDA_FUNCTIONAL
     @testset "kernel cache" begin
         # Launch parameters are those cuTile's code generation gives the kernel.
         ext = Base.get_extension(Tempest, :cuTileExt)
@@ -110,7 +108,6 @@ if CUDACore.functional()
         previous = get(ENV, "TEMPEST_KERNEL_CACHE", nothing)
         ENV["TEMPEST_KERNEL_CACHE"] = mktempdir()
         try
-            single(x) = Float32.(x)
             w, x, b = single(data(96, 80; scale = 0.1)), single(data(80, 112)), single(data(96))
             q, k, v = single(data(16, 4, 64, 2; scale = 0.1)), single(data(16, 2, 64, 2; scale = 0.2)), single(data(16, 2, 64, 2; scale = 0.3))
             sums = T.GenericFold(init = T -> (zero(T),), combine = (a, b) -> (a[1] + b[1],))
@@ -123,14 +120,13 @@ if CUDACore.functional()
                 # Float64 elements, which tiles do not take.
                 ("the floor", trace(x -> T.fold(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),
             ]
-            host(r) = (a = Array(r); ndims(a) == 0 ? a[] : a)
             @testset "$name" for (name, p, args, target) in programs
                 results = map(1:2) do pass
                     before = T.cache_counts()
                     ex = prepare(p, map(CuArray, args)...; target)
                     after = T.cache_counts()
                     (after.loaded - before.loaded, after.compiled - before.compiled,
-                        map(host, filter(!isnothing, T.leaves(execute!(ex)))), ex.kernels)
+                        map(on_host, filter(!isnothing, T.leaves(execute!(ex)))), ex.kernels)
                 end
                 (loaded, compiled, first, kernels), (reloaded, recompiled, second, _) = results
                 # The first pass may also compile the side of a close call it

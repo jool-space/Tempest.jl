@@ -1,4 +1,4 @@
-# Device time of the coverage suite's plans (test/compositions.jl), each
+# Device time of the coverage suite's plans (test/fixtures/compositions.jl), each
 # against its time recorded in a TSV, which the first run writes: a plan more
 # than 1.5 times slower than its record sounds an alarm, and the script exits
 # with an error. Time is an alarm, not a target; the suite itself checks
@@ -11,7 +11,7 @@ import Tempest as T
 
 # Plans by estimate, as the tests make them.
 ENV["TEMPEST_CACHE"] = mktempdir()
-include(joinpath(@__DIR__, "..", "test", "compositions.jl"))
+include(joinpath(@__DIR__, "..", "test", "fixtures", "compositions.jl"))
 
 const ALARM = 1.5
 

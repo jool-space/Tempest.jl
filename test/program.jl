@@ -1,7 +1,6 @@
 # The program level: traced programs agree with plain Julia, and gradients of
 # differentiated programs agree with finite differences.
-using Test
-include("cases.jl")
+include("fixtures/programs.jl")
 
 function finite_difference(f, args, k)
     x = args[k]
