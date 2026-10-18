@@ -1,7 +1,7 @@
 # Device time of the default plan for the guard-rail cases, measured as the
 # earlier Tempest measured them: the minimum over SAMPLES launches of a
 # captured CUDA graph of a few milliseconds of executions.
-#   julia --project=dev bench/guard_rails.jl [output.tsv]
+#   julia --project=test bench/guard_rails.jl [output.tsv]
 using Tempest, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 

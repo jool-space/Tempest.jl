@@ -3,7 +3,7 @@
 # attention, of an attention block (projections, attention, an output
 # projection and a residual) and of an MLP, and the coverage suite's
 # compositions. Kernels' own workspaces are not counted.
-#   julia --project=dev bench/storage.jl
+#   julia --project=test bench/storage.jl
 using Tempest, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 

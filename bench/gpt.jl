@@ -8,7 +8,7 @@
 # with the parameters and Adam's state replaced by its results in place, and
 # replayed as one captured graph.
 #
-#   TEMPEST_GPT_TEXT=~/dev/jool/Tempest/docs/src julia --project=dev bench/gpt.jl
+#   TEMPEST_GPT_TEXT=~/dev/jool/Tempest/docs/src julia --project=test bench/gpt.jl
 #
 # TEMPEST_GPT_TEXT is a directory of .md files or a file (today's Tempest
 # trains on its docs/src; nanoGPT on Reactant's). TEMPEST_GPT_PRECISION is full

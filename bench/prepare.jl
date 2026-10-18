@@ -2,7 +2,7 @@
 # execution, in one process: run it in a new process with a cold cache and
 # again with a warm one. `--save path` writes the results, `--compare path`
 # checks them bit for bit against a saved run.
-#   julia --project=dev bench/prepare.jl [--save|--compare path]
+#   julia --project=test bench/prepare.jl [--save|--compare path]
 include("guard_rails.jl")
 using Serialization
 

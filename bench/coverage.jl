@@ -3,7 +3,7 @@
 # than 1.5 times slower than its record sounds an alarm, and the script exits
 # with an error. Time is an alarm, not a target; the suite itself checks
 # structure (test/coverage.jl). Hold the GPU alone while this runs.
-#   julia --project=dev bench/coverage.jl [record.tsv]
+#   julia --project=test bench/coverage.jl [record.tsv]
 # The record is bench/coverage-<device>.tsv by default; delete a line of it to
 # record that case again.
 using Tempest, CUDACore, cuBLAS, cuTile, Printf
