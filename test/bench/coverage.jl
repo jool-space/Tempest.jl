@@ -3,15 +3,15 @@
 # than 1.5 times slower than its record sounds an alarm, and the script exits
 # with an error. Time is an alarm, not a target; the suite itself checks
 # structure (test/coverage.jl). Hold the GPU alone while this runs.
-#   julia --project=test bench/coverage.jl [record.tsv]
-# The record is bench/coverage-<device>.tsv by default; delete a line of it to
-# record that case again.
+#   julia --project=test test/bench/coverage.jl [record.tsv]
+# The record is test/bench/coverage-<device>.tsv by default; delete a line of
+# it to record that case again.
 using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 
 # Plans by estimate, as the tests make them.
 ENV["TEMPEST_CACHE"] = mktempdir()
-include(joinpath(@__DIR__, "..", "test", "fixtures", "compositions.jl"))
+include(joinpath(@__DIR__, "..", "fixtures", "compositions.jl"))
 
 const ALARM = 1.5
 

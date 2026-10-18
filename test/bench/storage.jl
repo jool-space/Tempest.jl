@@ -3,13 +3,13 @@
 # attention, of an attention block (projections, attention, an output
 # projection and a residual) and of an MLP, and the coverage suite's
 # compositions. Kernels' own workspaces are not counted.
-#   julia --project=test bench/storage.jl
+#   julia --project=test test/bench/storage.jl
 using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 
 # Plans by estimate, as the tests make them.
 ENV["TEMPEST_CACHE"] = mktempdir()
-include(joinpath(@__DIR__, "..", "test", "fixtures", "compositions.jl"))
+include(joinpath(@__DIR__, "..", "fixtures", "compositions.jl"))
 
 function report(name, p, args; target = T.CUDATarget())
     ex = prepare(p, map(CuArray, args)...; target, measure = false)

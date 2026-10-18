@@ -3,7 +3,7 @@
 # the kernel with a residual epilogue against the kernel followed by a
 # separate add. Device time is the minimum over samples of a captured graph of
 # a few milliseconds of executions.
-#   julia --project=test bench/attention.jl
+#   julia --project=test test/bench/attention.jl
 using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
 import Tempest as T
 import Tempest.Compiler as C

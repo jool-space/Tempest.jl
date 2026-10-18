@@ -2,8 +2,8 @@
 # `julia --project=test test/runtests.jl [--jobs=N] [--list] [name prefixes...]`,
 # as in `julia --project=test test/runtests.jl plan` for one. setup.jl is
 # evaluated in every test's module; fixtures/ holds programs that several tests
-# include, and runs as no test. Tests on CUDA skip themselves when no GPU is
-# functional.
+# include, and bench/ the scripts that time Tempest; neither runs as a test.
+# Tests on CUDA skip themselves when no GPU is functional.
 using ParallelTestRunner
 using Tempest
 import CUDACore
@@ -12,7 +12,7 @@ const CUDA_FUNCTIONAL = CUDACore.functional()
 CUDA_FUNCTIONAL || @warn "CUDA unavailable; GPU tests skipped"
 
 testsuite = find_tests(@__DIR__)
-filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/"), testsuite)
+filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/") && !startswith(name, "bench/"), testsuite)
 
 # Every worker loads the same packages, so no test sees an extension that an
 # earlier test on its worker happened to load.

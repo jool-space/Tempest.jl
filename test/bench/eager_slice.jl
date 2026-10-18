@@ -6,7 +6,7 @@
 # from them), mutates, loops over scalars, draws from a global random number
 # generator, misses a method on traced arrays, or something else. NNlib comes
 # first, then Base, Statistics and LinearAlgebra. The slice should only grow.
-#   julia --project=test bench/eager_slice.jl
+#   julia --project=test test/bench/eager_slice.jl
 using Tempest, Tempest.Compiler, NNlib, Statistics, LinearAlgebra, Random
 import Tempest as T
 import Tempest.Compiler as C
