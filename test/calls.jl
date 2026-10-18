@@ -47,6 +47,8 @@ message(f) = try f(); "" catch e; sprint(showerror, e) end
         @test agree(results(ex), [residual(q, k, v, x)])
         @test occursin("call of attention_forward (%", sprint(explain, ex))
         @test occursin("HostAttention's claim with an epilogue replaces its reference expanded", sprint(explain, ex))
+        # Its kernel runs on host copies, so the program cannot be captured.
+        @test_throws r"runs on the host, so the program cannot be captured" capture!(ex)
 
         # A result nobody reads is not stored.
         ex = prepare(trace((q, k, v) -> T.attention(q, k, v; causal = true), q, k, v), q, k, v)

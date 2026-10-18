@@ -497,6 +497,9 @@ if CUDACore.functional()
             first_run = map(Array, T.leaves(execute!(ex))[2:2])
             @test first_run == map(Array, T.leaves(execute!(ex))[2:2])
             @test first_run == T.leaves(interpret(p, args...))[2:2]
+            # A scatter runs on the device, so the program can be captured.
+            capture!(ex)
+            @test first_run == map(Array, T.leaves(execute!(ex))[2:2])
         end
     end
 end

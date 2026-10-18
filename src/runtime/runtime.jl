@@ -403,7 +403,7 @@ on the host cannot be captured; on a target without graphs, replaying runs
 the kernels.
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
-    k = findfirst(isnothing, ex.decisions)
+    k = findfirst(k -> k === :opaque, ex.kernels)
     k === nothing || throw(ArgumentError("kernel $k runs on the host, so the program cannot be captured"))
     ex.captured === nothing || release(ex.target, ex.captured)
     ex.captured = nothing
