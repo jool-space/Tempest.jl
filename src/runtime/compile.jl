@@ -2,7 +2,7 @@
 # function. `prepare` and `execute!` are the level beneath it.
 
 """
-    compile(f, args...; target, measure = true) -> Compiled
+    compile(f, args...; target, measure = true, capture = true) -> Compiled
 
 `f` traced on `args` and prepared, to be called like `f`: `compile(f, x)(y)`
 computes `f(y)` for any `y` alike `x` in structure, shapes and element types.
@@ -18,12 +18,17 @@ inputs throws, naming the difference.
     julia> c([1.0, 2.0, 3.0, 4.0])
     30.0
 
+With `capture`, the program's launches are captured once as one graph that
+each call replays, as `capture!` does, unless the program has work on the host.
+Results are the same either way.
+
 For a step that updates its state where it is and replays without copies,
 use `prepare`, `bind!` and `execute!`; `c.executable` is the prepared program,
 and `explain(c)` shows it.
 """
-function compile(f, @nospecialize(args...); target = default_target(args), measure::Bool = true)
+function compile(f, @nospecialize(args...); target = default_target(args), measure::Bool = true, capture::Bool = true)
     ex = prepare(trace(f, args...), args...; target, measure)
+    capture && !any(k -> k === :opaque, ex.kernels) && capture!(ex)
     Compiled(f, ex, signature(args))
 end
 

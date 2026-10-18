@@ -90,5 +90,14 @@ if CUDACore.functional()
         value, y = c(Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x))
         @test value isa Float32 && isapprox(value, loss(m, x); rtol = 1.0e-4)
         @test y isa CuArray && isapprox(Array(y), m(x); rtol = 1.0e-4)
+        # Each call replays one captured graph, unless told to launch kernel by
+        # kernel; new values are copied into the buffers the graph reads.
+        @test c.executable.captured !== nothing
+        other, z = Dense(single(data(64, 32; scale = 0.7)), single(data(64; scale = 0.2)), tanh), single(data(32, 16; scale = 0.9))
+        value2, y2 = c(Dense(CuArray(other.w), CuArray(other.b), tanh), CuArray(z))
+        @test isapprox(value2, loss(other, z); rtol = 1.0e-4) && isapprox(Array(y2), other(z); rtol = 1.0e-4)
+        launched = compile((m, x) -> (loss(m, x), m(x)), Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x); capture = false)
+        @test launched.executable.captured === nothing
+        @test launched(Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x))[1] == value
     end
 end
