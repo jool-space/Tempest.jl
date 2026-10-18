@@ -579,11 +579,13 @@ sizes. A bounded size is served by a few specializations, each padded to its
 bucket, with the padding value set per operation (zero for products, −∞ for a
 softmax's keys).
 
-Tempest owns two caches on disk, in the depot's scratch spaces and overridable
-by environment variables. The kernel cache maps a content hash of the group,
-schedule, device and policy to a compiled binary and its parameter layout,
-compiles misses in parallel, and evicts the least recently used entries beyond
-a size cap. The tuning record maps the content, shapes, policy and device of a
+Tempest keeps two caches on disk. The kernel cache maps a content hash of the
+group, schedule, device and policy to a compiled binary and its parameter
+layout, and compiles misses in parallel. Its key is Tempest's, computed before
+any inference; its entries live in Julia's object cache through CompilerCaching,
+beside the kernel packages' own, which bounds their size and evicts the least
+recently used. The tuning record, in the depot's scratch space and overridable
+by an environment variable, maps the content, shapes, policy and device of a
 measured claim to its times; it is local, survives new versions of Tempest, and
 records for known devices can ship with the package.
 

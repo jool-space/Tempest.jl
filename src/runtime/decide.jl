@@ -529,6 +529,16 @@ end
 
 ## The tuning record: measured seconds by claim, one file per device.
 
+using Scratch: @get_scratch!
+
+# Tempest's `tuning` scratch space in the depot. Its path is found when Tempest
+# loads, so it is not part of the precompiled image; while Tempest precompiles
+# there is none, and its workload records nothing unless an environment
+# variable names a directory.
+const TUNING = Ref{Union{Nothing, String}}(nothing)
+
+__init__() = (TUNING[] = @get_scratch!("tuning"); nothing)
+
 """
     Tempest.Compiler.tuning_directory() -> directory or nothing
 
@@ -537,7 +547,7 @@ set, otherwise Tempest's `tuning` scratch space.
 """
 function tuning_directory()
     dir = get(ENV, "TEMPEST_CACHE", nothing)
-    dir === nothing ? SCRATCH.tuning[] : joinpath(dir, "tuning")
+    dir === nothing ? TUNING[] : joinpath(dir, "tuning")
 end
 
 function record_path(target)

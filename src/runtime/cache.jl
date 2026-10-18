@@ -1,6 +1,6 @@
-# The kernel cache: compiled binaries on disk, keyed by the content of what was
-# compiled, so that preparing a program in a new process loads binaries instead
-# of inferring and compiling kernels again.
+# The kernel cache: compiled binaries kept across sessions, keyed by the content
+# of what was compiled, so that preparing a program in a new process loads
+# binaries instead of inferring and compiling kernels again.
 #
 # A key is a hash of the kernel's code and everything that decides its binary:
 # the generated source, written out with every function and type it names; the
@@ -10,41 +10,27 @@
 # code. The binary's parameters follow from the argument types, so a cached
 # kernel is its entry name and its binary.
 #
-# The cache keeps its size under a limit by removing the entries used least
-# recently: an entry's modification time is when it was written or last loaded.
+# The binaries are kept in Julia's object cache, through CompilerCaching, with
+# cuTile's: the runtime's store from Julia 1.14, a store of CompilerCaching's
+# before. The store is shared and bounded (`JULIA_OBJCACHE_CAPACITY`, by default
+# 512 MiB), removes the entries used least recently, and may lose a write, so a
+# kernel can compile again; `JULIA_OBJCACHE=0` turns it off.
 
 using SHA
-using Scratch: @get_scratch!
-
-# Tempest's caches live in its scratch spaces in the depot: `kernels` and
-# `tuning`, the tuning record. Their paths are found when Tempest loads, so
-# none is part of its precompiled image; while Tempest precompiles there are
-# none, and its workload uses no cache unless an environment variable names one.
-const SCRATCH = (kernels = Ref{Union{Nothing, String}}(nothing), tuning = Ref{Union{Nothing, String}}(nothing))
-
-function __init__()
-    SCRATCH.kernels[] = @get_scratch!("kernels")
-    SCRATCH.tuning[] = @get_scratch!("tuning")
-end
-
-"""
-    kernel_cache() -> directory or nothing
-
-Where compiled kernels are kept: `ENV["TEMPEST_KERNEL_CACHE"]` when set, otherwise
-Tempest's `kernels` scratch space. Empty or `"0"` turns the cache off.
-"""
-function kernel_cache()
-    dir = get(ENV, "TEMPEST_KERNEL_CACHE", nothing)
-    dir === nothing && return SCRATCH.kernels[]
-    dir in ("", "0") ? nothing : dir
-end
+using CompilerCaching: ObjCache
 
 "Kernels loaded from the cache and kernels compiled (or failed to), in this session."
 const CACHE_COUNTS = (loaded = Threads.Atomic{Int}(0), compiled = Threads.Atomic{Int}(0))
 
 cache_counts() = (loaded = CACHE_COUNTS.loaded[], compiled = CACHE_COUNTS.compiled[])
 
-entry_path(dir, key) = joinpath(dir, key[1:2], key)
+# Tempest's kernels in the object cache, and the version of an entry's layout:
+# the length of the entry name, the name and the binary, or a length of zero
+# and the compiler's message for a kernel that failed to compile.
+const KERNELS = "Tempest/kernel"
+const KERNEL_SCHEMA = 1
+
+store_key(key) = ObjCache.keyhash(KERNEL_SCHEMA, key)
 
 """
     load_kernel(key) -> (entry, binary) or nothing
@@ -53,29 +39,8 @@ The cached kernel under `key`, if there is one. A kernel that failed to compile
 fails again, with the compiler's message.
 """
 function load_kernel(key)
-    dir = kernel_cache()
-    dir === nothing && return nothing
-    path = entry_path(dir, key)
-    isfile(path) || return nothing
-    bytes = try
-        # Read and mark used, through one handle: an entry evicted meanwhile is
-        # a miss, never an empty file made again. A cache this process may not
-        # write is still read.
-        file = Base.Filesystem.open(path, Base.Filesystem.JL_O_RDONLY)
-        try
-            try
-                touch(file)
-            catch err
-                @debug "could not mark a kernel cache entry used" path exception = err
-            end
-            read(file)
-        finally
-            close(file)
-        end
-    catch err
-        @debug "unreadable kernel cache entry" path exception = err
-        return nothing
-    end
+    bytes = ObjCache.get(KERNELS, store_key(key))
+    bytes === nothing && return nothing
     n = Int(only(reinterpret(UInt32, bytes[1:4])))
     Threads.atomic_add!(CACHE_COUNTS.loaded, 1)
     n == 0 && error("this kernel failed to compile before:\n", String(bytes[5:end]))
@@ -85,82 +50,23 @@ end
 """
     store_kernel(key, entry, binary) -> (entry, binary)
 
-Count a compiled kernel and keep it under `key`. Writing is atomic, so processes
-preparing at once never read a partial entry; a failure to write only loses the
-entry.
+Count a compiled kernel and keep it under `key`. A failure to write only loses
+the entry.
 """
 function store_kernel(key, entry::String, binary::Vector{UInt8})
     Threads.atomic_add!(CACHE_COUNTS.compiled, 1)
-    write_entry(key, entry, binary)
+    put_entry(key, entry, binary)
     (entry, binary)
 end
 
 "Count a kernel that failed to compile and keep the compiler's message."
 function store_failure(key, message::String)
     Threads.atomic_add!(CACHE_COUNTS.compiled, 1)
-    write_entry(key, "", Vector{UInt8}(message))
+    put_entry(key, "", Vector{UInt8}(message))
 end
 
-function write_entry(key, entry, binary)
-    dir = kernel_cache()
-    dir === nothing && return
-    path = entry_path(dir, key)
-    try
-        mkpath(dirname(path))
-        temporary = string(path, ".", getpid(), ".", rand(UInt32), ".partial")
-        write(temporary, reinterpret(UInt8, [UInt32(ncodeunits(entry))]), entry, binary)
-        mv(temporary, path; force = true)
-    catch err
-        @debug "could not write a kernel cache entry" path exception = err
-    end
-    evict!(dir, kernel_cache_limit())
-end
-
-"""
-    kernel_cache_limit() -> bytes
-
-The size of the kernel cache beyond which its least recently used entries are
-removed: `ENV["TEMPEST_KERNEL_CACHE_LIMIT"]`, in bytes or with a `K`, `M` or `G`
-suffix, by default 1 GiB, ten thousand kernels of the 80 kB they average. A
-value that is not a size warns and keeps the default, since a store that threw
-would only lose its kernel.
-"""
-function kernel_cache_limit()
-    s = strip(get(ENV, "TEMPEST_KERNEL_CACHE_LIMIT", ""))
-    m = match(r"^(\d+)([KMG]?)$"i, s)
-    if m === nothing
-        isempty(s) || @warn "TEMPEST_KERNEL_CACHE_LIMIT is a number of bytes, optionally with K, M or G, not \"$s\"; the limit is 1 GiB" maxlog = 1
-        return 1 << 30
-    end
-    parse(Int, m[1]) << (10 * (findfirst(==(uppercase(m[2])), ("", "K", "M", "G")) - 1))
-end
-
-const EVICTION_LOCK = ReentrantLock()
-
-"""
-    evict!(dir, limit)
-
-Remove the least recently used entries of the kernel cache in `dir` until the
-rest take at most `limit` bytes. Another process may remove the same entries.
-"""
-function evict!(dir, limit)
-    @lock EVICTION_LOCK begin
-        entries = Tuple{Float64, Int, String}[]
-        for (root, _, files) in walkdir(dir; onerror = _ -> nothing), file in files
-            s = stat(joinpath(root, file))
-            isfile(s) && push!(entries, (s.mtime, s.size, joinpath(root, file)))
-        end
-        total = sum(e -> e[2], entries; init = 0)
-        for (_, size, path) in sort!(entries)
-            total <= limit && break
-            try
-                rm(path; force = true)
-            catch err
-                @debug "could not remove a kernel cache entry" path exception = err
-            end
-            total -= size
-        end
-    end
+function put_entry(key, entry, binary)
+    ObjCache.put!(KERNELS, store_key(key), [reinterpret(UInt8, [UInt32(ncodeunits(entry))]); codeunits(entry); binary])
     nothing
 end
 

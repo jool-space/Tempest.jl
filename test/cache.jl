@@ -29,58 +29,25 @@ closure(s) = x -> s * x
     @test C.content_key(closure(1.0f0)) != C.content_key(closure(2.0f0))
 end
 
-@testset "where the caches live" begin
-    # In Tempest's scratch spaces, unless the environment names a directory.
-    scratch(depot, key) = joinpath(depot, "scratchspaces", string(Base.PkgId(Tempest).uuid), key)
-    withenv("TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
-        @test C.kernel_cache() == scratch(first(DEPOT_PATH), "kernels") && isdir(C.kernel_cache())
-        @test C.tuning_directory() == scratch(first(DEPOT_PATH), "tuning") && isdir(C.tuning_directory())
-    end
-    withenv("TEMPEST_KERNEL_CACHE" => "0") do
-        @test C.kernel_cache() === nothing
+@testset "where the tuning record lives" begin
+    # In Tempest's scratch space, unless the environment names a directory.
+    scratch(depot) = joinpath(depot, "scratchspaces", string(Base.PkgId(Tempest).uuid), "tuning")
+    withenv("TEMPEST_CACHE" => nothing) do
+        @test C.tuning_directory() == scratch(first(DEPOT_PATH)) && isdir(C.tuning_directory())
     end
     elsewhere = mktempdir()
-    withenv("TEMPEST_KERNEL_CACHE" => elsewhere, "TEMPEST_CACHE" => elsewhere) do
-        @test C.kernel_cache() == elsewhere
+    withenv("TEMPEST_CACHE" => elsewhere) do
         @test C.tuning_directory() == joinpath(elsewhere, "tuning")
         @test dirname(C.record_path(T.CPUTarget())) == joinpath(elsewhere, "tuning")
     end
-    # The paths are found when Tempest loads, not baked in when it
-    # precompiles: a process with another first depot keeps its caches there.
+    # The path is found when Tempest loads, not baked in when it precompiles:
+    # a process with another first depot keeps its record there.
     depot = mktempdir()
-    script = "using Tempest; print(Tempest.Compiler.kernel_cache(), '\\n', Tempest.Compiler.tuning_directory())"
-    paths = withenv("JULIA_DEPOT_PATH" => join([depot; DEPOT_PATH], Sys.iswindows() ? ';' : ':'),
-        "TEMPEST_KERNEL_CACHE" => nothing, "TEMPEST_CACHE" => nothing) do
+    script = "using Tempest; print(Tempest.Compiler.tuning_directory())"
+    path = withenv("JULIA_DEPOT_PATH" => join([depot; DEPOT_PATH], Sys.iswindows() ? ';' : ':'), "TEMPEST_CACHE" => nothing) do
         readchomp(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`)
     end
-    @test split(paths, '\n') == [scratch(depot, "kernels"), scratch(depot, "tuning")]
-end
-
-@testset "the kernel cache's size" begin
-    # Beyond its limit the cache removes the entries used least recently.
-    withenv("TEMPEST_KERNEL_CACHE" => mktempdir(), "TEMPEST_KERNEL_CACHE_LIMIT" => "3000") do
-        keys = [C.content_key(n) for n in 1:4]
-        binary = zeros(UInt8, 990) # entries of 1000 bytes, the name and its length included
-        kept() = map(key -> isfile(C.entry_path(C.kernel_cache(), key)), keys)
-        # Modification times tell entries apart only so finely.
-        for key in keys[1:3]
-            C.store_kernel(key, "kernel", binary)
-            sleep(0.05)
-        end
-        @test kept() == [true, true, true, false]
-        # A hit marks its entry used, so the second entry goes first.
-        @test C.load_kernel(keys[1]) == ("kernel", binary)
-        sleep(0.05)
-        C.store_kernel(keys[4], "kernel", binary)
-        @test kept() == [true, false, true, true]
-        @test C.load_kernel(keys[2]) === nothing
-    end
-    for (limit, bytes) in (nothing => 1 << 30, "2048" => 2048, "64K" => 64 << 10, "1g" => 1 << 30)
-        withenv(() -> @test(C.kernel_cache_limit() == bytes), "TEMPEST_KERNEL_CACHE_LIMIT" => limit)
-    end
-    withenv("TEMPEST_KERNEL_CACHE_LIMIT" => "lots") do
-        @test (@test_logs (:warn, r"TEMPEST_KERNEL_CACHE_LIMIT") C.kernel_cache_limit()) == 1 << 30
-    end
+    @test path == scratch(depot)
 end
 
 # What Tempest compiles while it precompiles, which development sessions skip.
@@ -105,39 +72,14 @@ if CUDA_FUNCTIONAL
             @test ext.alias_groups(arguments) == cuTile.alias_groups(arguments...)
         end
 
-        previous = get(ENV, "TEMPEST_KERNEL_CACHE", nothing)
-        ENV["TEMPEST_KERNEL_CACHE"] = mktempdir()
-        try
-            w, x, b = single(data(96, 80; scale = 0.1)), single(data(80, 112)), single(data(96))
-            q, k, v = single(data(16, 4, 64, 2; scale = 0.1)), single(data(16, 2, 64, 2; scale = 0.2)), single(data(16, 2, 64, 2; scale = 0.3))
-            sums = T.GenericFold(init = T -> (zero(T),), combine = (a, b) -> (a[1] + b[1],))
-            programs = [
-                ("a product with an epilogue", trace((w, x, b) -> gelu.(w * x .+ b), w, x, b), (w, x, b), T.CUDATarget()),
-                ("training, TF32", differentiate(trace((w, x, b) -> sum(abs2, gelu.(w * x .+ b)), w, x, b)), (w, x, b),
-                    T.CUDATarget(precision = :tf32)),
-                ("attention claims", differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v)),
-                    (q, k, v), T.CUDATarget(precision = :tf32)),
-                # Float64 elements, which tiles do not take.
-                ("the floor", trace(x -> T.fold(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),
-            ]
-            @testset "$name" for (name, p, args, target) in programs
-                results = map(1:2) do pass
-                    before = C.cache_counts()
-                    ex = prepare(p, map(CuArray, args)...; target)
-                    after = C.cache_counts()
-                    (after.loaded - before.loaded, after.compiled - before.compiled,
-                        map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex))))), ex.kernels)
-                end
-                (loaded, compiled, first, kernels), (reloaded, recompiled, second, _) = results
-                # The first pass may also compile the side of a close call it
-                # measures and does not keep.
-                @test compiled > 0 && recompiled == 0 && 0 < reloaded <= loaded + compiled
-                @test isequal(first, second)
-                @test all(isapprox.(first, filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-2))
-                name == "the floor" && @test all(d -> d isa C.FloorKernels, kernels)
-            end
-        finally
-            previous === nothing ? delete!(ENV, "TEMPEST_KERNEL_CACHE") : (ENV["TEMPEST_KERNEL_CACHE"] = previous)
+        # Kernels compile once and load after, from a store this test starts
+        # empty, in a process of its own; it prints its failures.
+        mktempdir() do store
+            child = `$(Base.julia_cmd()) --project=$(Base.active_project()) $(joinpath(@__DIR__, "fixtures", "kernel_cache.jl"))`
+            output = IOBuffer()
+            process = run(pipeline(ignorestatus(addenv(child, "JULIA_OBJCACHE_PATH" => store)); stdout = output, stderr = output))
+            success(process) || println(stderr, String(take!(output)))
+            @test success(process)
         end
 
         # Captured graphs are destroyed before the modules they launch are
