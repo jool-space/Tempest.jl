@@ -401,14 +401,16 @@ end
 
 Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%$v", e.values), " "), " do not form one group")
 
-# The group of exactly the values in `set`: its folds over one domain, then
-# stored pointwise values over it. A candidate spanning several domains waits
-# for groups that span them: a kernel is maps and folds over one domain.
+# The group of exactly the values in `set`, added in order: a reduction group
+# over the domain of its folds, whichever value comes first, or with no fold a
+# pointwise group over the first value's domain. A candidate spanning several
+# domains waits for groups that span them: a kernel is maps and folds over one
+# domain.
 function fixed_group(graph, stored, deps, set)
     values = graph.values
     all(v -> deps.owner[v] == 0, set) || throw(NotAGroup(set))
-    d = values[first(set)].definition
-    g = d isa Reduction ? Group(:reduction, d.iteration) : Group(:pointwise, values[first(set)].dims)
+    folds = filter(v -> values[v].definition isa Reduction, set)
+    g = isempty(folds) ? Group(:pointwise, values[first(set)].dims) : Group(:reduction, values[first(folds)].definition.iteration)
     for v in set
         dv = values[v].definition
         added = dv isa Reduction ? dv.iteration == g.domain && try_add!(graph, stored, deps, g, v; fold = true) :

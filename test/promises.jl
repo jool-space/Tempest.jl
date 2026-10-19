@@ -19,7 +19,6 @@ const RESULT_FORMULAS = "a result written through its formula, so a permute of a
 const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
 const SCALING_FORMS = "sum / n and sum · (1 / n) one form under the numerics policy"
 const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decision)"
-const FIXED_GROUP_KIND = "a fixed set's group takes its kind from its folds, not from its first value (fixed_group)"
 
 @testset "promise 1: layout spelling does not matter" begin
     a, b = data(8, 6), data(8, 6; scale = 0.3)
@@ -68,12 +67,8 @@ end
     # The alternative, as a proposal would fix it: the map and the fold in one group.
     alternative = C.plan(graph; fixed = [[y, s]])
     @test C.structure(alternative).kernels == 2
-    # The set's first value is the map, so the group is pointwise and its fold
-    # never runs.
-    @testset "gap: $FIXED_GROUP_KIND" begin
-        @test_broken first(alternative.groups).kind === :reduction
-        @test_broken agree(C.execute(alternative, x, w), C.leaves(map_fold_product(x, w)))
-    end
+    @test first(alternative.groups).kind === :reduction
+    @test agree(C.execute(alternative, x, w), C.leaves(map_fold_product(x, w)))
     @testset "gap: $PRICED_GROUPING" begin
         @test_broken estimated(p, T.CPUTarget()) <= estimated(alternative, T.CPUTarget())
         @test_broken C.structure(p).kernels == 2
