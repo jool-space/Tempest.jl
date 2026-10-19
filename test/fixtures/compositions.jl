@@ -148,7 +148,7 @@ const UPDATES = [
     # selects, and that of the array written is masked. The map between the
     # update and the loss is stored for the gradients' kernels.
     Composition("a slice written, a training step", training((x, v) -> sum(abs2, tanh.(overwritten(x, v))), X, V), (X, V),
-        (kernels = Gap(2, RECOMPUTE), bytes = Gap(Y + 4 * 64 * M + 4, RECOMPUTE), largest = Y)),
+        (kernels = 2, bytes = Gap(Y + 4 * 64 * M + 4, RECOMPUTE), largest = Y)),
 ]
 
 const COMPOSITIONS = [ATTENTION; SPELLINGS; UPDATES]

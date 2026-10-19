@@ -413,8 +413,8 @@ end
 
 "A proposal the cover compared with its plan at the time, and whether it took it."
 struct Considered
-    proposal::Any # a set of values, or a `ClaimedCall`
-    implementation::Implementation
+    proposal::Any # a set of values, a `ClaimedCall`, or a `Join`
+    implementation::Union{Nothing, Implementation} # nothing for the planner's own
     comparison::Comparison
     accepted::Bool
 end
@@ -485,8 +485,15 @@ function neighbours(p::Plan, a::Around, v)
     found
 end
 
+"A stored value joined into the group of a kernel that reads it: a proposal of the planner's own."
+struct Join
+    value::Int
+    group::Vector{Int}
+end
+
 "The values a proposal fixes as one group, or nothing for a call."
 fixes(q::Vector{Int}) = q
+fixes(q::Join) = q.group
 fixes(q::ClaimedCall) = nothing
 
 "The values a proposal touches."
@@ -511,6 +518,7 @@ function proposal_key(p::Plan, a::Around, q)
             print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", haskey(g.terms, m) ? g.terms[m] : computed(v.definition))
         end
     end
+    q isa Join && print(io, " || join %", q.value)
     q isa ClaimedCall && print(io, " || call of ", first(q.site.results).op.f, " ", first(q.site.results).op.kwargs, " absorbing ", q.epilogues)
     print(io, " || ", join(map(v -> "%$v", touches(q)), " "))
     numbers = Dict{String, Int}()
@@ -522,13 +530,29 @@ function proposal_key(p::Plan, a::Around, q)
     string(text, "; ", join(shapes, ", "))
 end
 
+# Every stored value of a kernel that another kernel reads, joined into the
+# reader's group: a choice the planner's rules make, offered to the cover.
+function joins(p::Plan)
+    a = Around(p, Vector{Int}[])
+    found = Join[]
+    for (k, g) in enumerate(p.groups)
+        g.kind in (:reduction, :pointwise) || continue
+        for v in sort!(collect(group_reads(p.graph, g)))
+            j = p.owner[v]
+            j == 0 || j == k || p.groups[j].kind === :opaque || push!(found, Join(v, sort!([a.owned[k]; v])))
+        end
+    end
+    found
+end
+
 """
     cover(decider) -> (plan, considered)
 
-The generator's groups, with the proposals implementations make and the
-calls they claim accepted greedily by estimated gain over the generator's
-plan, then by their values, each when its proposer claims the group it
-forms. Proposals alike in the generator's plan (`proposal_key`) are one edit
+The generator's groups, with the proposals implementations make, the calls
+they claim, and the planner's own joins accepted greedily by estimated gain
+over the generator's plan, then by their values, each when its proposer
+claims the group it forms (any claim, or the floor, for a join). Proposals
+alike in the generator's plan (`proposal_key`) are one edit
 in identical layers: priced once, and taken together. A proposal is priced
 again in the current plan when an edit taken already changed a group around
 it. Each trial plans the whole graph, and is compared with the plan it
@@ -537,9 +561,12 @@ or not.
 """
 function cover(d::Decider)
     base, keep = generator_plan(d)
-    proposals = Tuple{Any, Implementation}[]
+    proposals = Tuple{Any, Union{Nothing, Implementation}}[]
     for i in implementations(d.target), q in [call_proposals(d, i); candidates(i, d.target, base)]
         any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
+    end
+    for q in joins(base)
+        any(x -> fixes(x[1]) == q.group, proposals) || push!(proposals, (q, nothing))
     end
     arounds = IdDict{Plan, Around}()
     around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if !(x isa ClaimedCall)]), arounds, p)
@@ -562,12 +589,12 @@ function cover(d::Decider)
     price(current, taken, q, i, key) = get!(priced, key) do
         p = trial(current, taken, Any[q])
         p === nothing && return nothing
-        j = claimant(d, p, q, i)
-        j === nothing && return nothing
+        j = i === nothing ? nothing : claimant(d, p, q, i)
+        i === nothing || j !== nothing || return nothing
         (compare(d, p, current), j)
     end
     a = around(base, Any[])
-    ranked = Tuple{Float64, Any, Implementation, String}[]
+    ranked = Tuple{Float64, Any, Union{Nothing, Implementation}, String}[]
     for (q, i) in proposals
         k = proposal_key(base, a, q)
         x = price(base, Any[], q, i, k)
@@ -619,52 +646,16 @@ function cover(d::Decider)
     current, considered
 end
 
-# The cover as it was, each proposal priced and taken alone: the oracle of
-# the cover's classes for one commit (test/regions.jl).
-function whole_cover(d::Decider)
-    base, keep = generator_plan(d)
-    proposals = Tuple{Any, Implementation}[]
-    for i in implementations(d.target), q in [call_proposals(d, i); candidates(i, d.target, base)]
-        any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
-    end
-    function trial(qs)
-        sets = Vector{Int}[q for q in qs if q isa Vector{Int}]
-        calls = ClaimedCall[q for q in qs if q isa ClaimedCall]
-        # A value belongs to one proposal.
-        allunique(Iterators.flatten([sets; [c.site.values for c in calls]])) || return nothing
-        try
-            first(claimed_plan(d, claimed(d.graph, calls); fixed = sets, keep))
-        catch e
-            e isa NotAGroup || rethrow()
-            nothing
-        end
-    end
-    total(p) = sum(g -> decide(d, p, g).choice.estimate, filter(g -> chosen(p, g), p.groups); init = 0.0)
-    ranked = map(proposals) do (q, i)
-        p = trial([q])
-        j = p === nothing ? nothing : claimant(d, p, q, i)
-        j === nothing ? nothing : (total(base) - total(p), q, j)
-    end
-    order(q) = q isa ClaimedCall ? (1, [minimum(q.site.values); q.epilogues...]) : (0, q)
-    ranked = sort!(filter(!isnothing, ranked); by = r -> (-r[1], order(r[2])))
-    current, considered = base, Considered[]
-    for (_, q, i) in ranked
-        p = trial(Any[[c.proposal for c in considered if c.accepted]; [q]])
-        p === nothing && continue
-        claimant(d, p, q, i) === nothing && continue
-        c = compare(d, p, current)
-        push!(considered, Considered(q, i, c, cheaper(c)))
-        cheaper(c) && (current = p)
-    end
-    current, considered
-end
-
 function explain(io::IO, p::Plan, c::Considered)
     q, t, graph = c.proposal, c.comparison, p.graph
-    name = label(c.implementation)
     μs(x) = string(round(1.0e6 * x; sigdigits = 3), " μs")
     times = c.accepted ? (t.new, t.old) : (t.old, t.new)
     why = string(" (the kernels that differ: ", μs(times[1]), " against ", μs(times[2]), ", ", t.how, ")")
+    if q isa Join
+        c.accepted && println(io, "%", q.value, " joins the kernel of %", first(v for v in q.group if v != q.value), ", which reads it", why)
+        return
+    end
+    name = label(c.implementation)
     if q isa Vector{Int}
         c.accepted && println(io, "candidate ", join(map(v -> "%$v", q), " "), " from ", name, " replaces the generator's grouping", why)
         return

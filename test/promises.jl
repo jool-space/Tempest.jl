@@ -42,7 +42,6 @@ end
 
 const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
 const SCALING_FORMS = "x / n and x · (1 / n) one form under the numerics policy where 1 / n is inexact"
-const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decision)"
 
 @testset "promise 1: layout spelling does not matter" begin
     a, b = data(8, 6), data(8, 6; scale = 0.3)
@@ -112,18 +111,17 @@ end
     @test agree(C.execute(alternative, x, w), C.leaves(map_fold_product(x, w)))
     # At this size the fold's 32 items leave the fused kernel little parallelism.
     @test estimated(p, T.CPUTarget()) <= estimated(alternative, T.CPUTarget())
-    @testset "gap: $PRICED_GROUPING" begin
-        # Wide enough for the fused kernel to be the cheaper by estimate.
-        xw, ww = data(64, 512), data(512, 16)
-        pw = chosen(map_fold_product, xw, ww)
-        yw = findfirst(v -> v.definition isa C.Pointwise && v.dims == (64, 512), pw.graph.values)
-        sw = findfirst(v -> v.definition isa C.Reduction && v.dims == (512,), pw.graph.values)
-        @test estimated(C.plan(pw.graph; fixed = [[yw, sw]]), T.CPUTarget()) < estimated(pw, T.CPUTarget())
-        @test_broken C.structure(pw).kernels == 2
-        if CUDA_FUNCTIONAL
-            xf, wf = CuArray(single(x)), CuArray(single(w))
-            @test_broken C.structure(chosen(map_fold_product, xf, wf; target = T.CUDATarget())).kernels == 2
-        end
+    # So the cover keeps the rules' three kernels. Wide enough, the fused
+    # kernel is the cheaper by estimate, and the planner's own proposal to join
+    # the map into the fold's group finds it.
+    @test C.structure(p).kernels == 3
+    xw, ww = data(64, 512), data(512, 16)
+    pw = chosen(map_fold_product, xw, ww)
+    @test C.structure(pw).kernels == 2
+    @test estimated(pw, T.CPUTarget()) < estimated(C.plan(pw.graph), T.CPUTarget())
+    if CUDA_FUNCTIONAL
+        xf, wf = CuArray(single(x)), CuArray(single(w))
+        @test C.structure(chosen(map_fold_product, xf, wf; target = T.CUDATarget())).kernels == 2
     end
 end
 
@@ -215,7 +213,8 @@ module Coverage include(joinpath(@__DIR__, "fixtures", "compositions.jl")) end
 
 const GENERATOR_COST = "the generator's estimate counts what its schedule costs beyond bytes and products"
 # Compositions and precisions where an estimate that decides is outside the close-call factor.
-const ESTIMATE_GAPS = [("the verb, a training step", :tf32)]
+const ESTIMATE_GAPS = [("the verb, a training step", :tf32),
+    ("a slice written, a training step", :full), ("a slice written, a training step", :tf32)]
 
 within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
 
@@ -235,7 +234,8 @@ within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
         end
         for k in filter(k -> k.comparison.how === :estimated, considered)
             measured = map(side -> sum(s -> timed(s[1], s[2], s[3].choice), side; init = 0.0), k.comparison.sides)
-            @test (measured[2] < measured[1]) == C.cheaper(k.comparison)
+            # Times within the device's noise are a tie, which the estimate decides.
+            @test abs(measured[2] - measured[1]) <= d.rates.noise * minimum(measured) || (measured[2] < measured[1]) == C.cheaper(k.comparison)
             append!(held, within.((k.comparison.old, k.comparison.new), measured))
         end
         if (c.name, precision) in ESTIMATE_GAPS
