@@ -15,6 +15,31 @@ chosen(f, args...; target = T.CPUTarget()) = prepare(trace(f, args...), args...;
 # kernels, terms, storage and decisions.
 same_plan(f, g, args...) = sprint(explain, chosen(f, args...)) == sprint(explain, chosen(g, args...))
 
+# What a kernel's member computes at a point of its domain, with each address
+# the point stands for: the same whatever the naming of the domain's axes.
+at(t::IR.Load, x, p, g, D) = string("%", t.value, "@", IR.evaluate_index(IR.address(p.graph.values[t.value], t.index, D), x))
+at(t::IR.Stat, x, p, g, D) =
+    string("⟨%", t.value, "@", IR.evaluate_index(IR.address(p.graph.values[t.value], C.placement(p.graph, g, t.value), D), x), "⟩")
+at(t::IR.Lit, x, p, g, D) = repr(t.value)
+at(t::IR.Ix, x, p, g, D) = string(IR.evaluate_index(t.expr, x))
+at(t::IR.Apply, x, p, g, D) = string(t.f, "(", join((at(a, x, p, g, D) for a in t.args), ", "), ")")
+
+# A kernel's work whatever its domain's spelling: at each point, each member's
+# address and what it computes there. Small domains only; no recomputed folds
+# or gathers.
+function work(p::C.Plan, g)
+    D = IR.Domain(g.domain)
+    sort!(vec([join((string(m in g.reductions ? "fold " : "store ", at(IR.Stat(m), x, p, g, D), " = ", at(g.terms[m], x, p, g, D))
+                     for m in C.members(g) if haskey(g.terms, m)), "; ") for x in Iterators.product(map(n -> 0:(n - 1), g.domain)...)]))
+end
+
+"Plans alike up to a bijection of each kernel's domain that keeps every address."
+function same_work(f, h, args...)
+    p, q = chosen(f, args...), chosen(h, args...)
+    C.structure(p) == C.structure(q) && length(p.groups) == length(q.groups) &&
+        all(((g, k),) -> g.kind == k.kind && work(p, g) == work(q, k), zip(p.groups, q.groups))
+end
+
 const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
 const SCALING_FORMS = "x / n and x · (1 / n) one form under the numerics policy where 1 / n is inexact"
 const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decision)"
@@ -39,6 +64,12 @@ const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decisio
     @test agree(C.execute(chosen(transposed_product, a, b), a, b), C.leaves(transposed_product(a, b)))
     @test agree(C.execute(chosen(permuted_sum, a), a), C.leaves(permuted_sum(a)))
     # Reshapes around size-1 axes are checked in plan.jl, "axes of extent one".
+    # Spellings that differ in the order of a kernel's domain do the same work.
+    @test same_work(a -> sum(permutedims(a, (2, 1)); dims = 2), a -> permutedims(sum(a; dims = 1), (2, 1)), a)
+    @test same_work(a -> tanh.(reshape(a, 48)), a -> reshape(tanh.(a), 48), a)
+    @test !same_work(a -> sum(a; dims = 1), a -> sum(a; dims = 2), a)
+    # The two spellings do the same work at the same addresses; whether the
+    # promise is "the same plan" or "the same work" is open.
     @testset "gap: $CANONICAL_DOMAIN" begin
         @test_broken same_plan(a -> sum(permutedims(a, (2, 1)); dims = 2), a -> permutedims(sum(a; dims = 1), (2, 1)), a)
         @test_broken same_plan(a -> tanh.(reshape(a, 48)), a -> reshape(tanh.(a), 48), a)
@@ -48,7 +79,8 @@ const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decisio
     @test same_plan(a -> sum(a; dims = 1) ./ 8, a -> sum(a; dims = 1) .* (1 / 8), a)
     @test same_plan(a -> a ./ 4, a -> a .* 0.25, a)
     @testset "gap: $SCALING_FORMS" begin
-        # This rewrite changes rounding: a rewrite behind `permits_rewrites`, with a note `explain` names.
+        # This rewrite changes rounding: it belongs behind `permits_rewrites`,
+        # with a note that `explain` names.
         @test_broken same_plan(a -> sum(a; dims = 1) ./ 6, a -> sum(a; dims = 1) .* (1 / 6), a)
     end
 end
@@ -105,8 +137,9 @@ stack_layer(x, (w, b)) = tanh.(w * x .+ b)
 stack_loss(x, layers) = sum(abs2, foldl(stack_layer, layers; init = x))
 stack(L, dev; width = 64) =
     (Tuple((dev(single(data(width, width; scale = 0.1k))), dev(single(data(width; scale = 0.2k)))) for k in 1:L), dev(single(data(width, 16))))
-# The second run, once the Julia side has compiled.
-seconds(f) = (f(); t = time(); f(); time() - t)
+# The fastest of three runs after one that compiles the Julia side: the
+# tests run in parallel, and a timing shares the host.
+seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
 
 @testset "promise 6: identical layers cost the same each" begin
     distinct(p) = length(unique(C.canonical(p, g) for g in p.groups))
