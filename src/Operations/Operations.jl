@@ -8,6 +8,7 @@ using ..Tempest: @operation, contract, logsumexp, positions, axis_positions
 import ..Tempest: has_pullback, verb_pullback, scalar_partials
 
 export attention
+public attention_forward, attention_backward
 include("attention.jl")
 
 export dropout

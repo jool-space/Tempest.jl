@@ -134,10 +134,10 @@ index_tile(k, c::Context, e::Affine, indices) =
     foldl(e.terms; init = :($(ct.broadcast_to)($(ct.Tile)(Int32($(e.constant))), $(ntuple(_ -> 1, length(c.s.tiling)))))) do x, (atom, n)
         :($x .+ Int32($n) .* $(index_tile(k, c, atom, indices)))
     end
-index_tile(k, c::Context, a::Tempest.Compiler.Var, indices) = variable_tile(c, a.n, indices)
-index_tile(k, c::Context, a::Tempest.Compiler.Div, indices) = :(fld.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
-index_tile(k, c::Context, a::Tempest.Compiler.Mod, indices) = :(mod.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
-index_tile(k, c::Context, a::Tempest.Compiler.Indirect, indices) =
+index_tile(k, c::Context, a::Var, indices) = variable_tile(c, a.n, indices)
+index_tile(k, c::Context, a::Div, indices) = :(fld.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
+index_tile(k, c::Context, a::Mod, indices) = :(mod.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
+index_tile(k, c::Context, a::Indirect, indices) =
     :(convert($(ct.Tile){Int32}, $(load_tile(k, c, Load(a.value, a.index), indices))))
 
 # A load as a tile: a view of its buffer or, when its formula reads an index
@@ -148,7 +148,7 @@ function load_tile(k::TileKernel, c::Context, t::Load, indices)
     v = gathers(t) ? nothing : load_view(c, t.value, t.index)
     v === nothing || return load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
     shape = spanned_shape(c, t)
-    address = Tempest.Compiler.address(c.graph, t.value, t.index, Tempest.Compiler.Domain(c.g.domain))
+    address = Tempest.Compiler.address(c.graph, t.value, t.index, Domain(c.g.domain))
     flat = argument!(k, ArgSpec(t.value, 0, (Tempest.Compiler.storage_length(c.graph.values[t.value]),), (1,)))
     lanes = :($(ct.broadcast_to)($(index_tile(k, c, address, indices)), $shape) .+ Int32(1))
     axes = findall(>(1), shape)
@@ -156,16 +156,16 @@ function load_tile(k::TileKernel, c::Context, t::Load, indices)
     :($(ct.gather)($flat, $lanes; mask = $mask))
 end
 
-gathers(t::Load) = any(e -> !isempty(Tempest.Compiler.indirect_values(e)), t.index)
+gathers(t::Load) = any(e -> !isempty(indirect_values(e)), t.index)
 
 indirect_atoms(e::Affine) = [x for (a, _) in e.terms for x in indirect_atoms(a)]
-indirect_atoms(::Tempest.Compiler.Var) = Tempest.Compiler.Indirect[]
-indirect_atoms(a::Union{Tempest.Compiler.Div, Tempest.Compiler.Mod}) = indirect_atoms(a.e)
-indirect_atoms(a::Tempest.Compiler.Indirect) = [a]
+indirect_atoms(::Var) = Indirect[]
+indirect_atoms(a::Union{Div, Mod}) = indirect_atoms(a.e)
+indirect_atoms(a::Indirect) = [a]
 
 # A formula with divisions or remainders, such as a read that wraps around an
 # axis, which no strided view may express.
-wraps(t::Load) = any(e -> any(a -> a.first isa Union{Tempest.Compiler.Div, Tempest.Compiler.Mod}, e.terms), t.index)
+wraps(t::Load) = any(e -> any(a -> a.first isa Union{Div, Mod}, e.terms), t.index)
 
 # Whether the generator loads `t` element by element: its formula gathers, or
 # wraps and is no view.
@@ -186,13 +186,13 @@ block_scalar(c::Context, e::Affine, indices) =
     foldl(e.terms; init = :(Int32($(e.constant)))) do x, (atom, k)
         :($x + Int32($k) * $(block_scalar(c, atom, indices)))
     end
-function block_scalar(c::Context, a::Tempest.Compiler.Var, indices)
+function block_scalar(c::Context, a::Var, indices)
     i = findfirst(ax -> a.n in ax.axes, c.s.tiling)
     i === nothing && return :(Int32(0))
     decode(c, c.s.tiling[i], a.n, :($(indices[i]) - Int32(1)); tile = false)
 end
-block_scalar(c::Context, a::Tempest.Compiler.Div, indices) = :(fld($(block_scalar(c, a.e, indices)), Int32($(a.d))))
-block_scalar(c::Context, a::Tempest.Compiler.Mod, indices) = :(mod($(block_scalar(c, a.e, indices)), Int32($(a.d))))
+block_scalar(c::Context, a::Div, indices) = :(fld($(block_scalar(c, a.e, indices)), Int32($(a.d))))
+block_scalar(c::Context, a::Mod, indices) = :(mod($(block_scalar(c, a.e, indices)), Int32($(a.d))))
 
 offset_at(c::Context, v::View, indices) = v.dynamic === nothing ? nothing : :(Int32(1) + $(block_scalar(c, v.dynamic, indices)))
 
@@ -213,7 +213,7 @@ store_expr(sym, spans, ta, tb, ia, ib, value) = :($(ct.store)(
 # `indices` (one per tile axis). `names` maps terms already in scope (loads
 # hoisted out of a loop, reductions) to their symbols.
 function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indices...)
-    for t in Tempest.Compiler.subterms(roots; known = t -> haskey(names, t))
+    for t in subterms(roots; known = t -> haskey(names, t))
         if t isa Lit
             names[t] = t.value
             continue
@@ -228,15 +228,15 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
         name = gensym(:t)
         expr = if t isa Load
             load_tile(k, c, t, indices)
-        elseif t isa Tempest.Compiler.Recomputed
+        elseif t isa Recomputed
             emit_fold!(k, statements, c, t, indices)
         elseif t isa Ix
             x = index_tile(k, c, t.expr, indices)
-            T = Tempest.Compiler.term_eltype(t, c.graph)
+            T = term_eltype(t, c.graph)
             T === Int32 ? x : :(convert($(ct.Tile){$T}, $x))
         elseif t isa Apply
             args = map(a -> names[a], t.args)
-            t.f isa Tempest.Compiler.Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
+            t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
         else
             error("no tile lowering for $(typeof(t))")
         end
@@ -247,12 +247,12 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
 end
 
 fold_of(c::Context, r) = c.graph.values[r].definition.fold
-accumulator(c::Context, r) = Tempest.Compiler.fold_types(fold_of(c, r), Tempest.Compiler.term_eltype(c.g.terms[r], c.graph)).accumulator
+accumulator(c::Context, r) = fold_types(fold_of(c, r), term_eltype(c.g.terms[r], c.graph)).accumulator
 
 # Whether a fold's state and result are tiles.
 function tile_fold(f, T)
     types = try
-        Tempest.Compiler.fold_types(f, T)
+        fold_types(f, T)
     catch err
         err isa ArgumentError || rethrow()
         return false
@@ -268,35 +268,35 @@ struct Lift{I, F}
     f::F
 end
 Lift{I}(f::F) where {I, F} = Lift{I, F}(f)
-(l::Lift{I})(x...) where {I} = Tempest.Compiler.fold_lift(l.f, length(x) == 1 ? only(x) : x)[I]
+(l::Lift{I})(x...) where {I} = fold_lift(l.f, length(x) == 1 ? only(x) : x)[I]
 
 struct Combine{I, N, F}
     f::F
 end
 Combine{I, N}(f::F) where {I, N, F} = Combine{I, N, F}(f)
-(c::Combine{I, N})(x...) where {I, N} = Tempest.Compiler.fold_combine(c.f, ntuple(i -> x[i], Val(N)), ntuple(i -> x[N + i], Val(N)))[I]
+(c::Combine{I, N})(x...) where {I, N} = fold_combine(c.f, ntuple(i -> x[i], Val(N)), ntuple(i -> x[N + i], Val(N)))[I]
 
 struct Pairwise{F}
     f::F
 end
-(p::Pairwise)(a::Tuple, b::Tuple) = Tempest.Compiler.fold_combine(p.f, a, b)
-(p::Pairwise)(a, b) = only(Tempest.Compiler.fold_combine(p.f, (a,), (b,)))
+(p::Pairwise)(a::Tuple, b::Tuple) = fold_combine(p.f, a, b)
+(p::Pairwise)(a, b) = only(fold_combine(p.f, (a,), (b,)))
 
 struct Observe{F}
     f::F
 end
-(o::Observe)(s...) = Tempest.Compiler.fold_observe(o.f, s)
+(o::Observe)(s...) = fold_observe(o.f, s)
 
-state_symbols(r, f, A) = [Symbol(:acc_, r, :_, i) for i in eachindex(Tempest.Compiler.fold_init(f, A))]
+state_symbols(r, f, A) = [Symbol(:acc_, r, :_, i) for i in eachindex(fold_init(f, A))]
 
 # Accumulators `names` at the fold's identity, over tiles of `shape`.
-init_state!(st, names, f, A, shape) = foreach((x, init) -> push!(st, :($x = fill($init, $shape))), names, Tempest.Compiler.fold_init(f, A))
+init_state!(st, names, f, A, shape) = foreach((x, init) -> push!(st, :($x = fill($init, $shape))), names, fold_init(f, A))
 
 # Elements `x` (a tile, or one per component of a tuple element) lifted into
 # states, lanes outside `valid` at the fold's identity.
 function lift!(st, f, A, x, valid)
     xs = x isa Vector ? x : [x]
-    map(enumerate(Tempest.Compiler.fold_init(f, A))) do (i, init)
+    map(enumerate(fold_init(f, A))) do (i, init)
         name = gensym(:lift)
         lifted = :($(Lift{i}(f)).($(xs...)))
         push!(st, :($name = $(valid === nothing ? lifted : :(ifelse.($valid, $lifted, $init)))))
@@ -308,7 +308,7 @@ end
 # `valid` excepted.
 function combine!(st, f, A, acc, parts, valid = nothing)
     if valid !== nothing
-        parts = map(parts, Tempest.Compiler.fold_init(f, A)) do x, init
+        parts = map(parts, fold_init(f, A)) do x, init
             name = gensym(:part)
             push!(st, :($name = ifelse.($valid, $x, $init)))
             name
@@ -323,12 +323,12 @@ end
 accumulate_elements!(st, f, A, acc, x, valid) = combine!(st, f, A, acc, lift!(st, f, A, x, valid))
 
 # The accumulators folded along `dims`: a state, still unobserved. A fold
-# with a faster way to fold many states at once (`Tempest.Compiler.fold_reduce`) takes
+# with a faster way to fold many states at once (`fold_reduce`) takes
 # it.
 function reduce_state!(st, f, A, acc, dims)
     names = [gensym(:state) for _ in acc]
-    folder = Tempest.Compiler.fold_reduce(f)
-    init = Tempest.Compiler.fold_init(f, A)
+    folder = fold_reduce(f)
+    init = fold_init(f, A)
     expr = folder !== nothing ? :($folder(($(acc...),), $dims)) : length(acc) == 1 ?
         :((reduce($(Pairwise(f)), $(only(acc)); dims = $dims, init = $(only(init))),)) :
         :(mapreduce(identity, $(Pairwise(f)), $(acc...); dims = $dims, init = $init))
@@ -342,7 +342,7 @@ direct_state!(st, f, A, x, valid, dims) = reduce_state!(st, f, A, lift!(st, f, A
 function observe!(st, f, A, T, state)
     name = gensym(:stat)
     value = :($(Observe(f)).($(state...)))
-    R = Tempest.Compiler.fold_types(f, A).observed
+    R = fold_types(f, A).observed
     push!(st, :($name = $(R === T ? value : :(convert($(ct.Tile){$T}, $value)))))
     name
 end
@@ -441,7 +441,7 @@ function partial_spec!(c::Context, r, i, slots, workspaces)
     sizes = (Tuple(c.s.tiling[q].extent for q in kept_tiles_of(c, r))..., slots)
     strides = Tuple(prod(sizes[1:(d - 1)]; init = 1) for d in eachindex(sizes))
     key = partial_key(r, i)
-    workspaces[key] = Workspace(key, typeof(Tempest.Compiler.fold_init(fold_of(c, r), accumulator(c, r))[i]), prod(sizes))
+    workspaces[key] = Workspace(key, typeof(fold_init(fold_of(c, r), accumulator(c, r))[i]), prod(sizes))
     ArgSpec(key, 0, sizes, strides)
 end
 
@@ -466,7 +466,7 @@ function tile_states!(k, st, c::Context, rs, names, indices)
     valid = tile_mask!(st, c, indices)
     for r in rs
         f, A = fold_of(c, r), accumulator(c, r)
-        x = as_accumulator(st, names[c.g.terms[r]], A, Tempest.Compiler.term_eltype(c.g.terms[r], c.graph), tile(c))
+        x = as_accumulator(st, names[c.g.terms[r]], A, term_eltype(c.g.terms[r], c.graph), tile(c))
         states[r] = direct_state!(st, f, A, x, valid, Tuple(fold_tiles(c, r)))
     end
     states
@@ -508,7 +508,7 @@ store_outputs!(k, st, c, ms, names, indices...) = store_values!(k, st, c, ms, na
 # tiles, `muladd` on tensor cores. Returns the factors and their other axes,
 # or nothing.
 function bilinear_over(c::Context, f, t::Term, p)
-    f isa Tempest.Compiler.SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
+    f isa SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 || return nothing
     x, y = t.args
     sx, sy = term_spans(c, x), term_spans(c, y)
     (sx === nothing || sy === nothing) && return nothing
@@ -529,11 +529,11 @@ end
 # nothing if it reads reductions.
 function term_spans(c::Context, t::Term)
     spans = fill(false, length(c.s.tiling))
-    for s in Tempest.Compiler.subterms((t,))
+    for s in subterms((t,))
         s isa Stat && return nothing
-        if s isa Union{Ix, Tempest.Compiler.Recomputed} || s isa Load && elementwise(c, s)
+        if s isa Union{Ix, Recomputed} || s isa Load && elementwise(c, s)
             for (i, ax) in enumerate(c.s.tiling)
-                any(k -> Tempest.Compiler.mentions(s, k), ax.axes) && (spans[i] = true)
+                any(k -> mentions(s, k), ax.axes) && (spans[i] = true)
             end
         elseif s isa Load
             v = load_view(c, s.value, s.index)
@@ -547,9 +547,9 @@ end
 # A half-precision factor converted to Float32 enters the matrix product as
 # it is: tensor cores accumulate its products in Float32 exactly.
 function product_factor(c::Context, t::Term)
-    t isa Apply && t.f isa Tempest.Compiler.Cast{Float32} || return t
+    t isa Apply && t.f isa Cast{Float32} || return t
     inner = only(t.args)
-    Tempest.Compiler.term_eltype(inner, c.graph) <: Tempest.Compiler.HalfFloat ? inner : t
+    term_eltype(inner, c.graph) <: HalfFloat ? inner : t
 end
 
 # A tile whose lanes lie along tile axes `u` and `w` only, as a `(u, w)`
@@ -578,9 +578,9 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = sw
     E = c.s.tiling[p].extent
     if E % tk != 0 && !(fa isa Load && fb isa Load)
         push!(st, :($xa = ifelse.(reshape($(ct.arange)($tk), (1, $tk)) .<= Int32($E) - ($t - Int32(1)) * Int32($tk), $xa,
-            $(zero(Tempest.Compiler.term_eltype(fa, c.graph))))))
+            $(zero(term_eltype(fa, c.graph))))))
     end
-    single = Tempest.Compiler.term_eltype(fa, c.graph) === Float32
+    single = term_eltype(fa, c.graph) === Float32
     if c.s.precision === :tf32x3 && single
         # Each factor as a TF32 high part and a TF32 remainder; the product of
         # the remainders is below Float32 rounding and is dropped.
@@ -607,7 +607,7 @@ end
 # product of tiles; any other folds elementwise.
 const INNER_TILE = 128
 
-function fold_context(c::Context, t::Tempest.Compiler.Recomputed; lanes = INNER_TILE)
+function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE)
     base = length(c.g.domain)
     inner = [TileAxis([base + j], e, min(nextpow(2, e), lanes), true) for (j, e) in enumerate(t.extents)]
     s = c.s
@@ -616,27 +616,27 @@ function fold_context(c::Context, t::Tempest.Compiler.Recomputed; lanes = INNER_
     lanes == INNER_TILE || return e
     f = c.graph.values[t.value].definition.fold
     if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
-        return fold_context(c, t; lanes = product_step(s.precision, Tempest.Compiler.term_eltype(product_factor(e, t.body.args[1]), c.graph)))
+        return fold_context(c, t; lanes = product_step(s.precision, term_eltype(product_factor(e, t.body.args[1]), c.graph)))
     end
-    any(x -> x isa Tempest.Compiler.Recomputed, Tempest.Compiler.subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
+    any(x -> x isa Recomputed, subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
     fold_context(c, t; lanes = s.tiling[sweep_axis(s)].tile)
 end
 
 # The shape of a term's tile: the tile along each axis it spans, one elsewhere.
 spanned_shape(c::Context, t::Term) =
-    ntuple(q -> any(k -> Tempest.Compiler.mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
+    ntuple(q -> any(k -> mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
 
-function fold_expressible(c::Context, t::Tempest.Compiler.Recomputed)
+function fold_expressible(c::Context, t::Recomputed)
     val = c.graph.values[t.value]
-    tile_fold(val.definition.fold, Tempest.Compiler.term_eltype(t.body, c.graph)) && length(t.extents) == 1 || return false
+    tile_fold(val.definition.fold, term_eltype(t.body, c.graph)) && length(t.extents) == 1 || return false
     terms_expressible(fold_context(c, t), (t.body,))
 end
 
 # Whether the generator can lower every subterm of `roots`.
 function terms_expressible(c::Context, roots; stats = false)
-    for s in Tempest.Compiler.subterms(roots)
+    for s in subterms(roots)
         s isa Stat && !stats && return false
-        s isa Tempest.Compiler.Recomputed && !fold_expressible(c, s) && return false
+        s isa Recomputed && !fold_expressible(c, s) && return false
         s isa Ix && !positional(s) && return false
         s isa Apply && !tile_type(s.eltype) && return false
         s isa Lit && s.value isa Float64 && return false
@@ -646,12 +646,12 @@ function terms_expressible(c::Context, roots; stats = false)
 end
 
 # A recomputed fold at block indices `indices`, as a tile over the tiling.
-function emit_fold!(k, st, c::Context, t::Tempest.Compiler.Recomputed, indices)
+function emit_fold!(k, st, c::Context, t::Recomputed, indices)
     e = fold_context(c, t)
     n = length(c.s.tiling)
     p = n + 1
     f = c.graph.values[t.value].definition.fold
-    A = Tempest.Compiler.fold_types(f, Tempest.Compiler.term_eltype(t.body, c.graph)).accumulator
+    A = fold_types(f, term_eltype(t.body, c.graph)).accumulator
     T = c.graph.values[t.value].eltype
     tp, E = e.s.tiling[p].tile, e.s.tiling[p].extent
     steps = cld(E, tp)
@@ -662,18 +662,18 @@ function emit_fold!(k, st, c::Context, t::Tempest.Compiler.Recomputed, indices)
     shape = Base.setindex(spanned_shape(e, t.body), tp, p)
     # A fold that does not sum, in one step, folds the tile directly.
     direct = sums === nothing && steps == 1
-    acc = sums !== nothing ? sum_accumulators!(st, e, f, t.body, sums, p, gensym(:acc)) : [gensym(:acc) for _ in Tempest.Compiler.fold_init(f, A)]
+    acc = sums !== nothing ? sum_accumulators!(st, e, f, t.body, sums, p, gensym(:acc)) : [gensym(:acc) for _ in fold_init(f, A)]
     sums !== nothing || direct || init_state!(st, acc, f, A, shape)
     names = emit_tiles!(k, loop, e, unique(step_roots(e, f, t.body, sums)), Dict{Term, Any}(), indices..., at)
     valid = gensym(:valid)
-    if sums === nothing || f isa Tempest.Compiler.OnlineSoftmax
+    if sums === nothing || f isa OnlineSoftmax
         lanes = ntuple(q -> q == p ? tp : 1, p)
         push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
     end
     if sums !== nothing
         sum_step!(k, loop, e, f, t.body, sums, acc, names, valid, (indices..., at), p)
     else
-        x = as_accumulator(loop, names[t.body], A, Tempest.Compiler.term_eltype(t.body, c.graph), shape)
+        x = as_accumulator(loop, names[t.body], A, term_eltype(t.body, c.graph), shape)
         direct ? (acc = direct_state!(st, f, A, x, valid, p)) : accumulate_elements!(loop, f, A, acc, x, valid)
     end
     steps == 1 || push!(st, :(for $j in Int32(1):Int32($steps)

@@ -43,7 +43,7 @@ end
 function product_claim(target, p::Plan, g::Group)
     target isa CUDATarget && g.kind === :reduction || return nothing
     folds = [p.graph.values[r].definition.fold for r in g.reductions]
-    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{Tempest.Compiler.SumFold, Tempest.Compiler.OnlineSoftmax}, folds) || return nothing
+    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, OnlineSoftmax}, folds) || return nothing
     found = Tempest.Compiler.product_axes(p.graph, g)
     found === nothing && return nothing
     M, N, K, B = found
@@ -53,11 +53,11 @@ function product_claim(target, p::Plan, g::Group)
     factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
         first(Tempest.Compiler.product_factors(first(folds), g.terms[first(g.reductions)])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
-    recomputed = [s for r in g.reductions for s in Tempest.Compiler.subterms((g.terms[r],)) if s isa Tempest.Compiler.Recomputed]
+    recomputed = [s for r in g.reductions for s in subterms((g.terms[r],)) if s isa Recomputed]
     recomputing = !isempty(recomputed)
     # A recomputed fold that does not move along the summed axes is computed
     # once per block, before the sweep.
-    hoisted = any(s -> !any(a -> Tempest.Compiler.mentions(s, a), K), recomputed)
+    hoisted = any(s -> !any(a -> mentions(s, a), K), recomputed)
     # Summed axes the factors do not read as one strided axis are swept in
     # turn: the longest piece over which they do is tiled, every other piece
     # an index per step.
@@ -68,7 +68,7 @@ function product_claim(target, p::Plan, g::Group)
         Mt, Nt = collapsed ? (M, N) : ([longest(M)], [longest(N)])
         grid = collapsed ? (isempty(B) ? Vector{Int}[] : [B]) : [[a] for a in sort!([setdiff(M, Mt); setdiff(N, Nt); B])]
         mt, nt, kt = extent(Mt), extent(Nt), extent(Kt)
-        T = Tempest.Compiler.term_eltype(factor, p.graph)
+        T = term_eltype(factor, p.graph)
         tm, tn, tk = recomputing ? recomputing_tiles(target, T, mt, nt, kt) : product_tiles(target, T, mt, nt, kt)
         tiling = [TileAxis(Mt, mt, tm, false), TileAxis(Kt, kt, tk, true), TileAxis(Nt, nt, tn, false)]
         append!(tiling, [TileAxis(a, extent(a), 1, false) for a in grid])
@@ -78,7 +78,7 @@ function product_claim(target, p::Plan, g::Group)
         # launch; not when a fold is computed before the sweep, which every
         # split would repeat, nor for an online softmax.
         blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
-        sums = all(f -> f isa Tempest.Compiler.SumFold, folds)
+        sums = all(f -> f isa SumFold, folds)
         splits = blocks < SPLIT_KEPT_BLOCKS[1] && !hoisted && sums ? split_count(k, tk, blocks) : 1
         s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
         c = Context(p.graph, p.stored, g, s)
@@ -101,7 +101,7 @@ function expressible_over(c::Context)
     for m in Tempest.Compiler.members(g)
         val = graph.values[m]
         val.eltype <: TILE_TYPES || return false
-        m in g.reductions && !tile_fold(val.definition.fold, Tempest.Compiler.term_eltype(g.terms[m], graph)) && return false
+        m in g.reductions && !tile_fold(val.definition.fold, term_eltype(g.terms[m], graph)) && return false
         m in g.outputs && val.dims == g.domain && return false
         terms_expressible(c, (g.terms[m],); stats = true) || return false
         (c.stored[m] || m in g.outputs) && output_view(c, m) === nothing && return false

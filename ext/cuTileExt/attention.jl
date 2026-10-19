@@ -12,7 +12,7 @@
 # index, or extent one along an axis); positions are not available; each
 # distinct epilogue compiles its own kernel variant.
 
-struct cuTileAttention <: Tempest.Compiler.Implementation end
+struct cuTileAttention <: Implementation end
 
 const ATTENTION_TILE = 64
 
@@ -162,7 +162,7 @@ end
 # for today's composed form on cuBLAS. The kernels keep the full-precision
 # variant behind their `tf32` flag. A claim competes by cost with the
 # attention generated from the reference.
-function Tempest.Compiler.claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, inputs)
+function claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, inputs)
     target.precision === :tf32 || return false
     f in (Tempest.Operations.attention_forward, Tempest.Operations.attention_backward) || return false
     (qd, qt), (kd, kt), (vd, vt) = inputs[1], inputs[2], inputs[3]
@@ -172,22 +172,22 @@ function Tempest.Compiler.claims_call(::cuTileAttention, target::CUDATarget, f, 
     all(i -> i[2] === Float32, inputs)
 end
 
-Tempest.Compiler.epilogue_results(::cuTileAttention, ::typeof(Tempest.Operations.attention_forward), kwargs) = (1,)
+epilogue_results(::cuTileAttention, ::typeof(Tempest.Operations.attention_forward), kwargs) = (1,)
 
 # The launches' work: the forward kernel computes two products per query and
 # key, the backward a row term, then four products per key block and three
 # per query block; a causal mask halves them. Products run at the generator's
 # rate.
-function Tempest.Compiler.estimate(::cuTileAttention, claim, target, p::Plan, g::Group)
+function estimate(::cuTileAttention, claim, target, p::Plan, g::Group)
     _, d = call_parts(p, g)
     op = d.node.op
     (D, H, T, B), (_, KV, keys, _) = first(d.shapes[1]), first(d.shapes[2])
     product = 2.0 * D * T * keys * H * B / (op.kwargs.causal ? 2 : 1)
     rate, bytes = product_rate(target, Float32), Tempest.Compiler.group_bytes(p, g)
     blocks = cld(T, ATTENTION_TILE) * H * B
-    op.f === Tempest.Operations.attention_forward && return [Tempest.Compiler.Work(bytes; flops = 2product, rate, blocks)]
-    [Tempest.Compiler.Work(0.0; blocks), Tempest.Compiler.Work(bytes; flops = 4product, rate, blocks = cld(keys, ATTENTION_TILE) * KV * B),
-     Tempest.Compiler.Work(0.0; flops = 3product, rate, blocks)]
+    op.f === Tempest.Operations.attention_forward && return [Work(bytes; flops = 2product, rate, blocks)]
+    [Work(0.0; blocks), Work(bytes; flops = 4product, rate, blocks = cld(keys, ATTENTION_TILE) * KV * B),
+     Work(0.0; flops = 3product, rate, blocks)]
 end
 
 # The opaque results of the group, by result number, and the operands.
@@ -220,7 +220,7 @@ function epilogue_for(p, g, o, buffers, shape)
     slot = Dict{Int, Int}()
     names = Dict{Term, Any}()
     body = Any[]
-    for s in Tempest.Compiler.subterms((t,))
+    for s in subterms((t,))
         if s isa Lit
             names[s] = s.value
             continue
@@ -239,7 +239,7 @@ function epilogue_for(p, g, o, buffers, shape)
             :($(ct.load)(arrays[$j]; index = ($(index...),), shape = $tile))
         elseif s isa Apply
             args = map(a -> names[a], s.args)
-            s.f isa Tempest.Compiler.Cast ? :(convert($(ct.Tile){$(s.eltype)}, $(only(args)))) : :($(s.f).($(args...)))
+            s.f isa Cast ? :(convert($(ct.Tile){$(s.eltype)}, $(only(args)))) : :($(s.f).($(args...)))
         else
             error("no epilogue lowering for $(typeof(s))")
         end
@@ -263,7 +263,7 @@ end
 Base.show(io::IO, b::BuiltAttention) = print(io, "cuTile attention kernels for ", b.f,
     b.tf32 ? " (TF32)" : " (Float32)", b.epilogue ? ", with an epilogue on the output" : "")
 
-function Tempest.Compiler.build_call(::cuTileAttention, p::Plan, g::Group, buffers, target::CUDATarget)
+function build_call(::cuTileAttention, p::Plan, g::Group, buffers, target::CUDATarget)
     outs, d = call_parts(p, g)
     op = d.node.op
     (; causal, scale) = op.kwargs
