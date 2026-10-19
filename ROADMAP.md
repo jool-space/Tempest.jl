@@ -98,13 +98,18 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    planner grows each group from a frontier of its readers and is linear in
    identical layers, with every plan unchanged; a decision is made once per
    canonical group; a kernel is loaded or compiled once per content key in a
-   session. Remaining, in order: a trial re-plans only the region its
-   proposal touches (preparing still re-plans the whole program per
-   proposal); Tempest proposes joining a stored value into a reader's group,
-   which is Promise 3's test; and the other rule-made choices (storing a
-   fold the rules recompute, recomputing a map in its readers, declining an
-   epilogue) become proposals too. Gate: the Promise 3 and Promise 6 gaps in
-   test/promises.jl close, and one place decides what forms a kernel.
+   session; proposals alike in identical layers are priced once and taken
+   together, so the cover's trials do not grow with the layers; and Tempest
+   proposes joining a stored value into the kernel that reads it, one
+   proposal per edge between groups, which closes Promise 3's test (74 of
+   the suite's 1004 plans drop a kernel, none gains one). Remaining: the
+   other rule-made choices (storing a fold the rules recompute, recomputing
+   a map in its readers, declining an epilogue) become proposals too, and
+   the planner's own constants go with them; and the planner's dependency
+   check (`ancestors`, `depends`), which still grows faster than the layers
+   (about 1.0 ms per layer at 16 layers, 1.9 at 64, 3.7 at 128), so that
+   each whole-graph trial does too. Gate: one place decides what forms a
+   kernel, and preparing 64 layers costs the same per layer as 8.
 4. **Canonical forms.** Done: the operands of a commutative function are in
    one order at the index level; a fold a result reads through a permutation
    is stored in the result's order, so a transposed product costs no kernel;
@@ -157,9 +162,10 @@ is unfinished is not a reason to stop.
 
 **The scorecard:** the coverage suite and the spelling battery pass; the eager
 slice grows; generated programs agree with the interpreter; preparing costs
-the same per layer however many identical layers a program stacks; the GPT
-step matches the old Tempest's and holds up against torch at the same
-precision; one place decides what forms a kernel.
+the same per layer however many identical layers a program stacks (it does
+from 4 to 16; from 8 to 64 it grows by half, in the planner); the GPT step
+matches the old Tempest's and holds up against torch at the same precision;
+one place decides what forms a kernel.
 
 ## Open questions
 
