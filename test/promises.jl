@@ -1,0 +1,88 @@
+# The promises in DESIGN.md, as tests over plans. Promise 1 (layout spelling
+# does not matter) and Promise 3 (one rule decides fusion) are checked here on
+# the plan the cover chooses; the others are checked where their mechanism
+# lives (plan.jl, coverage.jl, runtime.jl, cache.jl). Each promise has cases
+# that hold and cases that do not yet: a case not met is `@test_broken` under
+# a testset that names what closes the gap, as the coverage suite does. A
+# closed gap fails here as an unexpected pass, and its case moves up.
+using Statistics
+
+# The plan the cover chooses for `f`, with every implementation the target
+# has and nothing measured.
+chosen(f, args...; target = T.CPUTarget()) = prepare(trace(f, args...), args...; target, measure = false).plan
+
+# Two programs get the same plan when `explain` prints them alike: the same
+# kernels, terms, storage and decisions.
+same_plan(f, g, args...) = sprint(explain, chosen(f, args...)) == sprint(explain, chosen(g, args...))
+
+const CANONICAL_OPERANDS = "operands of commutative primitives in one canonical order at the index level"
+const RESULT_FORMULAS = "a result written through its formula, so a permute of a stored value costs no kernel"
+const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
+const SCALING_FORMS = "sum / n and sum · (1 / n) one form under the numerics policy"
+const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decision)"
+const FIXED_GROUP_KIND = "a fixed set's group takes its kind from its folds, not from its first value (fixed_group)"
+
+@testset "promise 1: layout spelling does not matter" begin
+    a, b = data(8, 6), data(8, 6; scale = 0.3)
+    # Spellings that plan alike today.
+    @test same_plan(a -> sum(a; dims = 1), a -> reduce(+, a; dims = 1), a)
+    @test same_plan(a -> sum(abs2, a; dims = 1), a -> mapreduce(abs2, +, a; dims = 1), a)
+    @test same_plan(a -> sum(a[1:4, :]; dims = 1), a -> sum(view(a, 1:4, :); dims = 1), a)
+    @test same_plan(a -> mean(a; dims = 1), a -> sum(a; dims = 1) ./ 8, a)
+    # Reshapes around size-1 axes are checked in plan.jl, "axes of extent one".
+    @testset "gap: $CANONICAL_OPERANDS" begin
+        @test_broken same_plan((a, b) -> a .+ b, (a, b) -> b .+ a, a, b)
+        @test_broken same_plan(a -> a .* 2, a -> 2 .* a, a)
+        @test_broken same_plan((a, b) -> sum(a .* b; dims = 1), (a, b) -> sum(b .* a; dims = 1), a, b)
+    end
+    @testset "gap: $RESULT_FORMULAS" begin
+        # The transpose after the product plans as a kernel of its own.
+        @test_broken same_plan((a, b) -> (a' * b)', (a, b) -> b' * a, a, b)
+        @test_broken C.structure(chosen((a, b) -> (a' * b)', a, b)).kernels == 1
+    end
+    @testset "gap: $CANONICAL_DOMAIN" begin
+        @test_broken same_plan(a -> sum(permutedims(a, (2, 1)); dims = 2), a -> permutedims(sum(a; dims = 1), (2, 1)), a)
+        @test_broken same_plan(a -> tanh.(reshape(a, 48)), a -> reshape(tanh.(a), 48), a)
+    end
+    @testset "gap: $SCALING_FORMS" begin
+        @test_broken same_plan(a -> sum(a; dims = 1) ./ 8, a -> sum(a; dims = 1) .* (1 / 8), a)
+    end
+end
+
+# A map read by a fold after it and by a product after that. The planner
+# stores the map and gives it a kernel of its own, since a fold's group grows
+# only through values after the fold. Computing the map inside the fold's
+# kernel, which also writes it for the product, is one kernel and one pass
+# over the map fewer; the estimate prefers it, and the cover never sees it.
+map_fold_product(x, w) = (y = exp.(x); (sum(y; dims = 1), y * w))
+
+# The estimated time of a plan: the chosen option of each group.
+function estimated(p::C.Plan, target)
+    d = C.Decider(target, p.graph; measure = false)
+    sum(g -> C.decide(d, p, g).choice.estimate, filter(g -> C.chosen(p, g), p.groups); init = 0.0)
+end
+
+@testset "promise 3: one rule decides fusion" begin
+    x, w = data(64, 32), data(32, 16)
+    p = chosen(map_fold_product, x, w)
+    graph = p.graph
+    y = findfirst(v -> v.definition isa C.Pointwise && v.dims == (64, 32), graph.values)
+    s = findfirst(v -> v.definition isa C.Reduction && v.dims == (32,), graph.values)
+    # The alternative, as a proposal would fix it: the map and the fold in one group.
+    alternative = C.plan(graph; fixed = [[y, s]])
+    @test C.structure(alternative).kernels == 2
+    # The set's first value is the map, so the group is pointwise and its fold
+    # never runs.
+    @testset "gap: $FIXED_GROUP_KIND" begin
+        @test_broken first(alternative.groups).kind === :reduction
+        @test_broken agree(C.execute(alternative, x, w), C.leaves(map_fold_product(x, w)))
+    end
+    @testset "gap: $PRICED_GROUPING" begin
+        @test_broken estimated(p, T.CPUTarget()) <= estimated(alternative, T.CPUTarget())
+        @test_broken C.structure(p).kernels == 2
+        if CUDA_FUNCTIONAL
+            xf, wf = CuArray(single(x)), CuArray(single(w))
+            @test_broken C.structure(chosen(map_fold_product, xf, wf; target = T.CUDATarget())).kernels == 2
+        end
+    end
+end

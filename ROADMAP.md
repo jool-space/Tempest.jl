@@ -70,8 +70,9 @@ be and the one choice still open there.
 
 ## Next, in order, each closed by its gate
 
-1. The decision, as DESIGN.md states it. Gate: the Promise 1 and Promise 3
-   tests over plans pass, and one place decides what forms a kernel.
+1. The decision, as DESIGN.md states it. Gate: the gaps in test/promises.jl
+   close (each `@test_broken` there names what closes it), and one place
+   decides what forms a kernel.
 2. The language: operations as declared, folds with tuple states with the
    online softmax as one, size-1 axes out of domains, and gathers by runtime
    indices. Gate: the coverage suite passes as tests that fail, and the eager
