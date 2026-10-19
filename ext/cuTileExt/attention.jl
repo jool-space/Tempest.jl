@@ -1,18 +1,18 @@
 # Hand-written attention kernels (FlashAttention-2 style): an escape hatch at
-# the edge. They claim the attention verbs; the planner sees one opaque group
-# per call, whose boundary is storage. Scores are never materialized: the
-# forward pass keeps an online softmax per query tile and stores the
-# log-sum-exp; the backward pass recomputes the probabilities from it. dK and dV
-# accumulate per key block, dQ per query block, so no atomics are needed.
+# the edge. They are cuTile's kernels for the attention operations; the planner
+# sees one opaque group per call, whose boundary is storage. Scores are never
+# materialized: the forward pass keeps an online softmax per query tile and
+# stores the log-sum-exp; the backward pass recomputes the probabilities from
+# it. dK and dV accumulate per key block, dQ per query block, so no atomics are
+# needed.
 #
-# The forward kernel applies an epilogue to its output tile before storing it:
-# the pointwise terms the planner absorbed after the attention output, such as
-# a residual add, compiled into a callable that carries the arrays it reads.
-# Limits: pointwise work only; reads aligned with the output tile (the same
-# index, or extent one along an axis); positions are not available; each
-# distinct epilogue compiles its own kernel variant.
-
-struct cuTileAttention <: Implementation end
+# The forward kernel applies the term after its output to the output tile
+# before storing it: the pointwise work the planner absorbed after the
+# attention output, such as a residual add, compiled into a tile function that
+# carries the arrays it reads (see `epilogue_term`). Limits: pointwise work
+# only; reads aligned with the output tile (the same index, or extent one along
+# an axis); positions are not available; each distinct term compiles its own
+# kernel variant.
 
 const ATTENTION_TILE = 64
 
@@ -160,55 +160,72 @@ end
 # Claimed only under TF32: with full Float32 tile products the forward kernel
 # took 8.65 ms on GB10 at d=64, 12 heads, T=256, B=16, causal, against 2.13 ms
 # for today's composed form on cuBLAS. The kernels keep the full-precision
-# variant behind their `tf32` flag. A claim competes by cost with the
-# attention generated from the reference.
-function claims_call(::cuTileAttention, target::CUDATarget, f, kwargs, inputs)
-    target.precision === :tf32 || return false
-    f in (Tempest.Operations.attention_forward, Tempest.Operations.attention_backward) || return false
-    (qd, qt), (kd, kt), (vd, vt) = inputs[1], inputs[2], inputs[3]
-    qt === kt === vt === Float32 || return false
-    qd[1] in (16, 32, 64, 128) && vd[1] == qd[1] || return false
-    qd[3] % ATTENTION_TILE == 0 && kd[3] % ATTENTION_TILE == 0 || return false
-    all(i -> i[2] === Float32, inputs)
+# variant behind their `tf32` flag. Queries and keys come in whole tiles, and
+# the head dimension is one a tile product takes.
+tiled(target, q, k, v) = target.precision === :tf32 && size(q, 1) in (16, 32, 64, 128) && size(v, 1) == size(q, 1) &&
+    size(q, 3) % ATTENTION_TILE == 0 && size(k, 3) % ATTENTION_TILE == 0
+
+# The constants of the tile programs: the head dimension, the query and key
+# tiles, the mask, the query heads, the query heads per key/value head, and
+# TF32 products.
+constants(q, k, causal) =
+    map(ct.Constant, (size(q, 1), ATTENTION_TILE, ATTENTION_TILE, causal, size(q, 2), size(q, 2) ÷ size(k, 2), true))
+
+# The flops of a product over every query and key, which a causal mask halves.
+products(q, k, causal) = 2.0 * size(q, 1) * size(q, 3) * size(k, 3) * size(q, 2) * size(q, 4) / (causal ? 2 : 1)
+
+# The forward kernel computes two products per query and key, reads the
+# arguments and writes the output and the log-sum-exp.
+function forward(target::CUDATarget, q::Spec{Float32, 4}, k::Spec{Float32, 4}, v::Spec{Float32, 4}; causal, scale)
+    tiled(target, q, k, v) || return nothing
+    _, H, T, B = size(q)
+    grid = (cld(T, ATTENTION_TILE), H * B)
+    cost = Work(2bytes(q) + bytes(k) + bytes(v) + 4H * T * B; flops = 2products(q, k, causal), blocks = prod(grid))
+    fixed = constants(q, k, causal)
+    Kernel(; cost, epilogue = (o = pointwise,)) do (o, lse), (q, k, v), after
+        launch(attention_forward_kernel, grid, o, lse, q, k, v, after.o, Float32(scale), fixed...)
+    end
 end
 
-epilogue_results(::cuTileAttention, ::typeof(Tempest.Operations.attention_forward), kwargs) = (1,)
-
-# The launches' work: the forward kernel computes two products per query and
-# key, the backward a row term, then four products per key block and three
-# per query block; a causal mask halves them.
-function estimate(::cuTileAttention, claim, target, g::GroupView)
-    _, op = call_parts(g)
-    (D, H, T, B), (_, KV, keys, _) = op.shapes[1], op.shapes[2]
-    product = 2.0 * D * T * keys * H * B / (op.kwargs.causal ? 2 : 1)
-    bytes = g.bytes
-    blocks = cld(T, ATTENTION_TILE) * H * B
-    op.f === Tempest.Operations.attention_forward && return [Work(bytes; flops = 2product, blocks)]
-    [Work(0.0; blocks), Work(bytes; flops = 4product, blocks = cld(keys, ATTENTION_TILE) * KV * B),
-     Work(0.0; flops = 3product, blocks)]
-end
-
-# The results of the group's call, by result number, and the call.
-function call_parts(g)
-    outs = sort([v for v in g.outputs if g.values[v].call !== nothing]; by = v -> g.values[v].call.output)
-    outs, g.values[first(outs)].call
+# The backward kernels: a row term, then four products per key block, which
+# reads the arguments and writes dK and dV, and three per query block, which
+# writes dQ. A gradient nobody reads is computed and not stored.
+function backward(target::CUDATarget, q::Spec{Float32, 4}, k::Spec{Float32, 4}, v::Spec{Float32, 4}, o::Spec{Float32, 4},
+        lse::Spec{Float32, 4}, dout::Spec{Float32, 4}, dlse::Spec{Float32, 4}; causal, scale)
+    tiled(target, q, k, v) || return nothing
+    D, H, T, B = size(q)
+    grid, kv_grid = (cld(T, ATTENTION_TILE), H * B), (cld(size(k, 3), ATTENTION_TILE), size(k, 2) * B)
+    product = products(q, k, causal)
+    moved = sum(bytes, (q, k, v, o, lse, dout, dlse)) + bytes(q) + bytes(k) + bytes(v)
+    cost = [Work(0.0; blocks = prod(grid)), Work(moved; flops = 4product, blocks = prod(kv_grid)),
+        Work(0.0; flops = 3product, blocks = prod(grid))]
+    fixed = constants(q, k, causal)
+    Kernel(; cost, scratch = (Spec(Float32, 1, H, T, B),)) do (dq, dk, dv), (q, k, v, o, lse, dout, dlse), (delta,)
+        launch(attention_delta_kernel, grid, delta, o, dout, dlse, ct.Constant(D), ct.Constant(ATTENTION_TILE), ct.Constant(H))
+        launch(attention_dkdv_kernel, kv_grid, dk, dv, q, k, v, lse, delta, dout, Float32(scale), fixed...)
+        launch(attention_dq_kernel, grid, dq, q, k, v, lse, delta, dout, Float32(scale), fixed...)
+    end
 end
 
 tile_array(buffer, dims) = ct.TileArray(reshape(buffer, dims))
 
-# The epilogue of result `o`: its terms as a function of the output tile `y`,
-# the tile's index, and the arrays it loads, aligned with the tile.
-function epilogue_for(g, o, buffers, shape)
-    haskey(g.epilogues, o) || return NoEpilogue(), o
-    e = g.epilogues[o]
-    t = g.terms[e]
-    rank = length(shape)
-    # The group's domain is the result's axes wider than one; a load spans
-    # those it reads along.
-    result = g.values[o].call.dims
+# The term absorbed after result `r`, as a tile function of the output tile `y`
+# and its index that gives the tile stored in its place; one that leaves the
+# tile as it is where the group absorbed nothing after `r`. A load of the term
+# spans the tile along the axes it reads aligned with the result, and is one
+# wide along the others. It takes its extents from the tile, so the term holds
+# nothing of the kernel's tiling, and any tile program that stores tiles of the
+# result in its program shape can apply it.
+function Tempest.Compiler.epilogue_term(::CUDATarget, p, g, r, buffers)
+    haskey(g.epilogues, r) || return NoEpilogue()
+    graph = p.graph
+    t = g.terms[g.epilogues[r]]
+    # The group's domain is the result's axes wider than one.
+    result = graph.values[r].definition.node.dims
+    rank = length(result)
     wide = wide_axes(result)
     function spanned(s)
-        axes = aligned_axes(g.values[s.value].dims, s.index, g.domain)
+        axes = aligned_axes(graph.values[s.value].dims, s.index, g.domain)
         ntuple(k -> k in wide && findfirst(==(k), wide) in axes ? result[k] : 1, rank)
     end
     arrays = Any[]
@@ -230,8 +247,8 @@ function epilogue_for(g, o, buffers, shape)
                 length(arrays)
             end
             index = ntuple(k -> dims[k] == 1 ? :(Int32(1)) : :(index[$k]), rank)
-            tile = ntuple(k -> dims[k] == 1 ? 1 : shape[k], rank)
-            :($(ct.load)(arrays[$j]; index = ($(index...),), shape = $tile))
+            tile = ntuple(k -> dims[k] == 1 ? 1 : :(size(y, $k)), rank)
+            :($(ct.load)(arrays[$j]; index = ($(index...),), shape = ($(tile...),)))
         elseif s isa Apply
             args = map(a -> names[a], s.args)
             s.f isa Cast ? :(convert($(ct.Tile){$(s.eltype)}, $(only(args)))) : :($(s.f).($(args...)))
@@ -245,53 +262,5 @@ function epilogue_for(g, o, buffers, shape)
         $(body...)
         return $(names[t])
     end))
-    Epilogue(f, Tuple(arrays)), e
-end
-
-
-struct BuiltAttention
-    f::Any
-    epilogue::Bool
-    tf32::Bool
-end
-
-Base.show(io::IO, b::BuiltAttention) = print(io, "cuTile attention kernels for ", b.f,
-    b.tf32 ? " (TF32)" : " (Float32)", b.epilogue ? ", with an epilogue on the output" : "")
-
-function build_call(::cuTileAttention, target::CUDATarget, g::GroupView, buffers)
-    outs, op = call_parts(g)
-    (; causal, scale) = op.kwargs
-    tf32 = target.precision === :tf32
-    shapes = op.shapes
-    arrays = map((a, s) -> tile_array(buffers[a], s), op.arguments, shapes)
-    q, k = shapes[1], shapes[2]
-    D, H, T, B = q
-    KV, keys = k[2], k[3]
-    G = H ÷ KV
-    tile = ct.Constant(ATTENTION_TILE)
-    constants = (ct.Constant(D), tile, tile, ct.Constant(causal), ct.Constant(H), ct.Constant(G), ct.Constant(tf32))
-    grid = (cld(T, ATTENTION_TILE), H * B)
-    s = Float32(scale)
-    if op.f === Tempest.Operations.attention_forward
-        o, lse = outs
-        epilogue, target_o = epilogue_for(g, o, buffers, (D, 1, ATTENTION_TILE, 1))
-        lse_array = buffers[lse] === nothing ? nothing : tile_array(buffers[lse], (1, H, T, B))
-        args = (tile_array(buffers[target_o], (D, H, T, B)), lse_array, arrays..., epilogue, s, constants...)
-        return (tile_launch(attention_forward_kernel, args, grid), BuiltAttention(op.f, !(epilogue isa NoEpilogue), tf32))
-    end
-    qa, ka, va, oa, lsea, douta, dlsea = arrays
-    # The kernels write all three gradients; one nobody reads goes to scratch.
-    places = map(r -> something(buffers[r], CuArray{Float32}(undef, prod(g.values[r].dims))), outs)
-    dq, dk, dv = map((r, b) -> tile_array(b, g.values[r].call.dims), outs, places)
-    workspace = CuArray{Float32}(undef, H * T * B)
-    delta = tile_array(workspace, (1, H, T, B))
-    delta_args = (delta, oa, douta, dlsea, ct.Constant(D), tile, ct.Constant(H))
-    dkdv_args = (dk, dv, qa, ka, va, lsea, delta, douta, s, constants...)
-    dq_args = (dq, qa, ka, va, lsea, delta, douta, s, constants...)
-    kv_grid = (cld(keys, ATTENTION_TILE), KV * B)
-    kernels = ((attention_delta_kernel, delta_args, grid), (attention_dkdv_kernel, dkdv_args, kv_grid),
-        (attention_dq_kernel, dq_args, grid))
-    launches = Tempest.Compiler.concurrently(k -> tile_launch(k...), kernels, target)
-    launch = () -> (foreach(l -> l(), launches); workspace; places; nothing)
-    (launch, BuiltAttention(op.f, false, tf32))
+    Epilogue(f, Tuple(arrays))
 end

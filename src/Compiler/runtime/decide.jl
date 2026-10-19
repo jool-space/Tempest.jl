@@ -203,18 +203,6 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
         any(l -> l !== nothing && l.borrowed, lines))
 end
 
-"""
-A claim on a call's group made through `claims_call`; the implementation's
-`build_call` builds it. `absorbs` are the results it applies an epilogue after.
-"""
-struct CallClaim
-    f::Any
-    kwargs::NamedTuple
-    absorbs::Tuple{Vararg{Int}}
-end
-
-Base.show(io::IO, c::CallClaim) = print(io, "call of ", c.f, isempty(c.kwargs) ? "" : string(c.kwargs))
-
 "The call an opaque group computes, or nothing."
 function called(graph, g::Group)
     g.kind === :opaque || return nothing
@@ -228,12 +216,6 @@ chosen(p::Plan, g::Group) = g.kind !== :opaque || called(p.graph, g) !== nothing
 
 # The `Spec` of each argument of a call.
 call_specs(graph, operands, shapes) = map((o, (dims, _)) -> Spec(graph.values[o.value].eltype, dims), operands, shapes)
-
-# What `claims_call` and `epilogue_results` say, as the claim of a call.
-function call_claims(i::Implementation, target, op, specs)
-    claims_call(i, target, op.f, op.kwargs, map(s -> (size(s), eltype(s)), specs)) || return ()
-    (CallClaim(op.f, op.kwargs, Tuple(epilogue_results(i, op.f, op.kwargs))),)
-end
 
 # An implementation's claims on a group, and on a call's group its claims
 # through `call_claims`, those that apply every epilogue the group absorbed.
@@ -735,7 +717,6 @@ zeroed!(x) = (fill!(reinterpret(UInt8, x), 0x00); x)
 build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
     o.implementation === nothing ? build_floor(target, p, g, buffers) :
     o.claim isa KernelClaim ? build_kernel(target, p, g, o.claim, buffers) :
-    o.claim isa CallClaim ? build_call(o.implementation, target, group_view(p, g), buffers) :
     build_claim(o.implementation, o.claim, target, group_view(p, g), buffers)
 
 # Build a choice on the decider's buffers, once, to measure it: its key names

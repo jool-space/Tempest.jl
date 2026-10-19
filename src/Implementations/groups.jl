@@ -3,28 +3,12 @@
 # as data. The plan stays the compiler's: a view holds what claims, their
 # estimates and their builds read, and nothing an implementation could change.
 
-public GroupView, ValueView, CallResult, members, product_axes
-
-"""
-A result of a call that implementations claim (see `claims_call`): the
-operation `f` and its keywords, which of its results this is and the result's
-program shape, and the call's arguments, values read whole, with their program
-shapes.
-"""
-struct CallResult
-    f::Any
-    kwargs::NamedTuple
-    output::Int
-    dims::Tuple{Vararg{Int}}
-    arguments::Tuple{Vararg{Int}}
-    shapes::Tuple{Vararg{Tuple{Vararg{Int}}}}
-end
+public GroupView, ValueView, members, product_axes
 
 """
 What a view holds of a value: its element type and dims, whether it is a
 number rather than an array (stored as one element), and whether it is stored;
-for a fold, the fold and the axes of its domain it reduces; for a result of a
-call, the call.
+for a fold, the fold and the axes of its domain it reduces.
 """
 struct ValueView
     eltype::DataType
@@ -33,7 +17,6 @@ struct ValueView
     stored::Bool
     fold::Union{Nothing, Fold}
     reduced::Tuple{Vararg{Int}}
-    call::Union{Nothing, CallResult}
 end
 
 """

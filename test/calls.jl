@@ -304,7 +304,7 @@ if CUDA_FUNCTIONAL
         d = differentiate(p)
         ex = prepare(d, device((q, k, v, x))...; target)
         @test length(opaque_groups(ex)) in (1, 2)
-        @test occursin(r"call of attention_forward \(.*\): cuTileAttention's kernel", sprint(explain, ex))
+        @test occursin(r"call of attention_forward \(.*\): cuTile's kernel", sprint(explain, ex))
         # The log-sum-exp's cotangent, a constant, is generated too.
         @test !any(d -> d isa C.FloorKernels, ex.kernels)
         @test close(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v, x))); rtol)
@@ -317,23 +317,24 @@ if CUDA_FUNCTIONAL
             prepare(f, device((q, k, v))...; target)
             path = C.record_path(target)
             lines = readlines(path)
-            rewrite(t) = write(path, join((string(key, '\t', occursin("cuTileAttention", key) ? t : 1.0e-5) for (key, _) in split.(lines, '\t')), '\n') * '\n')
+            rewrite(t) = write(path, join((string(key, '\t', occursin("cuTile.forward", key) ? t : 1.0e-5) for (key, _) in split.(lines, '\t')), '\n') * '\n')
             for (t, claimed) in ((1.0e-7, true), (1.0e-3, false))
                 rewrite(t)
                 ex = prepare(p, device((q, k, v, x))...; target)
                 @test isempty(opaque_groups(ex)) != claimed
-                @test occursin(claimed ? "cuTileAttention's kernel with an epilogue replaces its reference expanded" :
-                    "its reference expanded is kept over cuTileAttention's kernel", sprint(explain, ex))
+                @test occursin(claimed ? "cuTile's kernel with an epilogue replaces its reference expanded" :
+                    "its reference expanded is kept over cuTile's kernel", sprint(explain, ex))
                 if claimed
                     @test length(only(opaque_groups(ex)).epilogues) == 1
-                    @test any(d -> d isa Base.get_extension(Tempest, :cuTileExt).BuiltAttention, ex.kernels)
+                    @test occursin("cuTile.forward, with an epilogue on o", sprint(explain, ex))
                 end
                 @test close(filter(!isnothing, C.leaves(outputs(execute!(ex)))), [interpret(p, q, k, v, x)]; rtol)
-                # The kernel leaves the log-sum-exp unwritten when nobody reads it.
+                # The kernel leaves the log-sum-exp unwritten when nobody reads
+                # it, and its body launches from a captured graph.
                 ex = prepare(f, device((q, k, v))...; target)
                 @test isempty(opaque_groups(ex)) != claimed
                 claimed && @test count(v -> ex.plan.stored[v], only(opaque_groups(ex)).outputs) == 1
-                @test close(filter(!isnothing, C.leaves(outputs(execute!(ex)))), [interpret(f, q, k, v)]; rtol)
+                @test close(filter(!isnothing, C.leaves(outputs(replay!(capture!(ex))))), [interpret(f, q, k, v)]; rtol)
             end
         end
     end

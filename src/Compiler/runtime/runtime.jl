@@ -490,7 +490,7 @@ function build_kernel(target, p::Plan, g::Group, c::KernelClaim, buffers)
     groups = Any[results, arguments]
     kernel.scratch === nothing || push!(groups, map(s -> dense(allocate(target, eltype(s), prod(size(s); init = 1)), size(s)), kernel.scratch))
     kernel.params === nothing || push!(groups, c.params)
-    term(n) = haskey(g.epilogues, outs[n]) ? epilogue_term(target, p, g, outs[n], buffers) : identity
+    term(n) = epilogue_term(target, p, g, outs[n], buffers)
     kernel.epilogue === nothing || push!(groups, after_terms(term, kernel.epilogue, op.structure))
     hasmethod(kernel.body, NTuple{length(groups), Any}) ||
         throw(ArgumentError("the body of $c does not take $(length(groups)) groups: results, arguments, then scratch, params and after where declared"))
@@ -541,8 +541,10 @@ end
 
 # The term absorbed after result `r`, as a function of the result's array
 # that gives the array stored in its place: the epilogue evaluated at each
-# element, reading the other arrays at the time it is called.
+# element, reading the other arrays at the time it is called; `identity` where
+# the group absorbed nothing after `r`.
 function epilogue_term(::CPUTarget, p::Plan, g::Group, r, buffers)
+    haskey(g.epilogues, r) || return identity
     graph = p.graph
     function term(y)
         arrays = Vector{Any}(undef, length(graph.values))

@@ -5,7 +5,7 @@
 # - its reference, the meaning in primitives: `f`'s method for the declared
 #   argument types run on traced arrays, or a method of `reference`. An opaque
 #   operation has none; it declares its results (`declared_results`) instead;
-# - its implementations, which claim calls of `f` (see `claims_call`), and an
+# - its implementations, which claim calls of `f` (see `call_claims`), and an
 #   optional derivative rule, `verb_pullback`. Without a rule, differentiation
 #   goes through the reference.
 #

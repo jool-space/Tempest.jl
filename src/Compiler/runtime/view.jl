@@ -31,9 +31,5 @@ function value_view(p::Plan, v)
     val = p.graph.values[v]
     d = val.definition
     fold, reduced = d isa Reduction ? (d.fold, d.reduced) : (nothing, ())
-    call = if d isa Opaque && d.node.op isa Call
-        op = d.node.op
-        CallResult(op.f, op.kwargs, op.output, d.node.dims, Tuple(o.value for o in d.operands), Tuple(first(s) for s in d.shapes))
-    end
-    ValueView(val.eltype, val.dims, val.scalar, p.stored[v], fold, reduced, call)
+    ValueView(val.eltype, val.dims, val.scalar, p.stored[v], fold, reduced)
 end

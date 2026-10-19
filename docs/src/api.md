@@ -75,7 +75,6 @@ Tempest.Implementations.Form
 Tempest.Implementations.pointwise
 Tempest.Implementations.GroupView
 Tempest.Implementations.ValueView
-Tempest.Implementations.CallResult
 Tempest.Implementations.members
 Tempest.Implementations.product_axes
 Tempest.Implementations.claims
@@ -86,9 +85,6 @@ Tempest.Implementations.candidates
 Tempest.Implementations.record_name
 Tempest.Implementations.recomputes_folds
 Tempest.Implementations.in_place
-Tempest.Implementations.claims_call
-Tempest.Implementations.epilogue_results
-Tempest.Implementations.build_call
 ```
 
 ## Tempest.Operations

@@ -10,9 +10,10 @@ module Implementations
 
 using Republic: @republic
 @republic republic=false inherit=:public using ..IR
+using ..IR: stored_reads
 
 public Implementation, Work, register!, claims, estimate, build_claim, candidates, record_name,
-    recomputes_folds, in_place, claims_call, epilogue_results, build_call, Spec, bytes, Kernel, Form, pointwise
+    recomputes_folds, in_place, Spec, bytes, Kernel, Form, pointwise
 
 include("groups.jl")
 
@@ -113,44 +114,6 @@ into the storage of a value they read only at the address they write it (see
 """
 in_place(::Implementation, claim) = false
 
-# Claims on calls by the three methods below predate the operation pairs of
-# `register!`, which are the interface for kernels of operations. They remain
-# for a kernel that states its products at a rate, until rates are Tempest's.
-
-"""
-    claims_call(implementation, target, f, kwargs, inputs) -> Bool
-
-Whether `implementation` realizes calls of the operation `f` with these
-keyword arguments on `target`; `inputs` holds the `(dims, eltype)` of each
-argument. A claimed call is one opaque group whose kernel computes all its
-results, estimated by `estimate` like any claim (the claim is a `CallClaim`).
-It replaces the call's reference only where it is cheaper than the reference
-expanded and fused into its neighbours; an opaque call runs only where it is
-claimed.
-"""
-claims_call(::Implementation, target, f, kwargs, inputs) = false
-
-"""
-    epilogue_results(implementation, f, kwargs) -> results
-
-The results of a claimed call over whose output tiles the implementation's
-kernel applies an epilogue: pointwise work after the result, absorbed by the
-planner when its reads align with the result's tile.
-"""
-epilogue_results(::Implementation, f, kwargs) = ()
-
-"""
-    build_call(implementation, target, group, buffers) -> (launch, description)
-
-Build the kernels of a claimed call: the group's opaque results, each written
-densely in its program shape (its `CallResult`'s `dims`) to its buffer or,
-where `group.epilogues` names a value, that value computed from the result's
-tile by the group's terms. Arguments are read densely in their program shapes
-(the `CallResult`'s `shapes`). A result whose buffer is `nothing` is read by
-nobody and may be left unwritten.
-"""
-function build_call end
-
 # Kernels of named operations: a package registers a function for an operation,
 # and Tempest asks it for a kernel at each call, with the call's arguments as
 # `Spec`s. The kernel's body takes groups of arrays, which Tempest builds when
@@ -175,8 +138,9 @@ Base.size(s::Spec) = s.dims
 Base.size(s::Spec, k) = s.dims[k]
 Base.eltype(::Spec{T}) where {T} = T
 
-"The bytes of an array of this spec."
+"The bytes of an array of this spec, or of a value as a view holds it."
 bytes(s::Spec) = sizeof(eltype(s)) * prod(s.dims; init = 1)
+bytes(v::ValueView) = sizeof(v.eltype) * prod(v.dims; init = 1)
 
 """
     Form
@@ -252,9 +216,9 @@ kernels(list::AbstractVector) = list
 
 The ways `implementation` can run the call `op` (a result's `Call`) with
 arguments `specs` on `target`: every kernel the package's functions for the
-operation return, or for any other implementation what `claims_call` says.
+operation return, and none for any other implementation.
 """
-function call_claims end
+call_claims(::Implementation, target, op, specs) = ()
 
 function call_claims(k::Kernels, target, op, specs)
     claims = KernelClaim[]
@@ -273,8 +237,15 @@ end
 launch_work(cost::Real) = Work(Float64(cost))
 launch_work(work::Work) = work
 
-estimate(::Kernels, c::KernelClaim, target, group) =
-    c.kernel.cost === nothing ? [Work(group.bytes)] : map(launch_work, vcat(c.kernel.cost))
+# A kernel's cost counts its own passes. The loads of the terms it absorbs are
+# charged to its first launch, which reads them where it stores the result.
+function estimate(::Kernels, c::KernelClaim, target, g)
+    c.kernel.cost === nothing && return [Work(g.bytes)]
+    launches = map(launch_work, vcat(c.kernel.cost))
+    absorbed = sum(bytes(g.values[v]) for e in values(g.epilogues) for v in stored_reads(g.terms[e]); init = 0.0)
+    w = first(launches)
+    [Work(w.bytes + absorbed, w.flops, w.factor, w.blocks); launches[2:end]]
+end
 
 record_name(::Kernels, c::KernelClaim) = string(c, isempty(c.kwargs) ? "" : string(c.kwargs), isempty(c.params) ? "" : string(", ", c.params))
 

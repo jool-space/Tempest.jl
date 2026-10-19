@@ -75,11 +75,12 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    a function of the target and the call's `Spec`s returning a `Kernel`,
    registered as `register!(Package, operation => function)`, and the toys
    in test/calls.jl are written in that form; docs/src/kernels.md is true and
-   its *Not built* list says what is not. Remaining: the forms beyond a
-   pointwise function (a scale, an add), a CUDA body that takes a form, the
-   parameter search, and the hand-written attention, which keeps the older
-   call-claim methods. Gate: the hand-written attention is written in the
-   page's form and nothing uses `claims_call`.
+   its *Not built* list says what is not; the hand-written attention is two
+   such kernels, and the older call-claim methods are gone. Remaining: the
+   forms beyond a pointwise function (a scale, an add), the parameter search,
+   and building a body's tile programs at preparation rather than at the
+   first execution, so that a kernel that fails to build is withdrawn. Gate:
+   that list empties.
 2. **Estimates and measurement.** Done: no extension states a rate. Tempest
    measures the device on first use (launch gap, bandwidth in and out of the
    cache) and fits one line, latency and rate, per package and class of

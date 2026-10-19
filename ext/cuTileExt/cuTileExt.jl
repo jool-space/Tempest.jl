@@ -471,7 +471,8 @@ include("build.jl")
 include("contract.jl")
 include("attention.jl")
 
-__init__() = register!(ct, Tempest.Compiler.cuTileGenerator(), cuTileAttention())
+__init__() = register!(ct, Tempest.Compiler.cuTileGenerator(),
+    Tempest.Operations.attention_forward => forward, Tempest.Operations.attention_backward => backward)
 
 include("precompile.jl")
 

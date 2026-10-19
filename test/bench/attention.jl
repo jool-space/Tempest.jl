@@ -44,6 +44,12 @@ function measure(name, p, args; target, check = true)
 end
 
 ext = Base.get_extension(Tempest, :cuTileExt)
+# The hand-written forward kernel without its form: the residual after it is a
+# kernel of its own.
+function bare(target, specs...; kwargs...)
+    kernel = ext.forward(target, specs...; kwargs...)
+    T.Kernel((results, arguments) -> kernel.body(results, arguments, (o = ext.NoEpilogue(),)); kernel.cost)
+end
 # Full precision: the hand-written kernels do not claim; the reference is
 # planned, and generated as one kernel.
 println("== full")
@@ -55,15 +61,15 @@ for precision in (:tf32,)
     println("== ", precision)
     measure("hand-written kernel, forward", trace(attend, q, k, v), (q, k, v); target)
     with_epilogue = measure("kernel + residual as an epilogue", trace(residual, q, k, v, x), (q, k, v, x); target)
-    @eval Tempest.Compiler.epilogue_results(::$(ext.cuTileAttention), ::typeof(Tempest.Operations.attention_forward), kwargs) = ()
+    T.register!(cuTile, C.cuTileGenerator(), Ops.attention_forward => bare, Ops.attention_backward => ext.backward)
     separate = measure("kernel, then a separate residual add", trace(residual, q, k, v, x), (q, k, v, x); target)
-    @eval Tempest.Compiler.epilogue_results(::$(ext.cuTileAttention), ::typeof(Tempest.Operations.attention_forward), kwargs) = (1,)
+    T.register!(cuTile, C.cuTileGenerator(), Ops.attention_forward => ext.forward, Ops.attention_backward => ext.backward)
     @printf("  epilogue saves %.1f us (%.0f%%)\n", separate - with_epilogue, 100 * (separate - with_epilogue) / separate)
     measure("training step (loss of attention + residual)", differentiate(trace(loss, q, k, v, x)), (q, k, v, x); target)
 end
 
 # The generated kernel in TF32, the hand-written forward kernel stepping aside.
-@eval Tempest.Compiler.claims_call(::$(ext.cuTileAttention), ::T.CUDATarget, ::typeof(Ops.attention_forward), kwargs, inputs) = false
+T.register!(cuTile, C.cuTileGenerator(), Ops.attention_backward => ext.backward)
 println("== tf32, generated")
 measure("generated, forward", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(precision = :tf32))
 measure("generated, forward, two passes", trace(attend, q, k, v), (q, k, v); target = T.CUDATarget(precision = :tf32, online = false))

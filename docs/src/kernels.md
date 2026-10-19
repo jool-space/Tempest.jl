@@ -6,9 +6,7 @@ operation's reference fused into its neighbours and against every other
 package's kernel, and runs the winner. The package never sees the plan.
 
 > This page describes the interface, and *Not built* at the end says what is
-> missing from it. The older protocol, a struct subtyping `Implementation`
-> with `claims_call`, `epilogue_results` and `build_call` methods, remains for
-> the hand-written attention.
+> missing from it.
 
 ## The operation
 
@@ -119,6 +117,8 @@ Tempest copies where a value is not stored that way.
 - the body. It runs on the target's stream once per execution, and neither
   synchronizes nor allocates. A result nobody reads arrives as `nothing` and
   may be left unwritten; the kernel above does not store `rstd` at inference.
+  A tile program the body launches compiles at the first execution, which
+  may take seconds, and a tile program that cannot compile fails there.
 
 **Declining.** A method that does not apply is no method. A method may also
 return `nothing`, for conditions the types do not express, such as a size the
@@ -150,10 +150,12 @@ the planner stores the result after that work rather than before it. A term
 the kernel has no form for stays outside, in a kernel of its own or in the
 next reader's. The terms arrive in the body's last group, `after`, in the
 structure of `epilogue`: for a pointwise function, a function to apply to the
-result, which is `identity` where the program has no work after that result.
-On the CPU it takes the result's array and returns the array to store; on CUDA
-it is a tile function of the output tile and its index. The body stores the
-result after it, in the array it was given.
+result, which leaves it as it is where the program has no work after that
+result. On the CPU it takes the result's array and returns the array to store.
+On CUDA it is a cuTile function of an output tile and the tile's index, called
+in the tile program, and returns the tile to store; its loads take their
+extents from the tile, so it serves any tiling of the result in its program
+shape. The body stores the result after it, in the array it was given.
 
 The same forms are what a library takes as coefficients and epilogues:
 cuBLAS's alpha and beta are the scale and the add, and its fused bias and GELU
@@ -184,18 +186,18 @@ changes how fast the program runs, never whether it runs.
 
 ## Not built
 
-- Products in cost. A kernel states bytes, and a `Work` may state flops and
-  the type of their factors. The hand-written attention keeps `claims_call`,
-  `epilogue_results` and `build_call` until it states its cost as a kernel
-  does.
+- Building at preparation. A body's tile programs compile at the first
+  execution, not when the program is prepared, so a kernel whose tile program
+  fails to compile is not withdrawn for the next option: it fails the first
+  execution.
 - Parameter search. Measurement and the record exist; the enumeration and
   its budget do not. A kernel runs with the first candidate of each
   parameter, and `explain` says so. The generator returns one schedule per
   group.
 - Forms. Only `pointwise` exists. Its term is a host function on the CPU and a
-  cuTile tile function on CUDA, which no body takes yet, so a CUDA kernel in
-  another language cannot take one. The scale and the add are not recognized,
-  and cuBLAS takes no epilogue.
+  cuTile tile function on CUDA, so a CUDA kernel in another language cannot
+  take one. The scale and the add are not recognized, and cuBLAS takes no
+  epilogue.
 - Layouts. A spec carries no layout, so a kernel cannot accept a strided
   argument, and a permuted argument is copied before the call even where the
   kernel could have read it in place. The spec should carry the layout, dense
