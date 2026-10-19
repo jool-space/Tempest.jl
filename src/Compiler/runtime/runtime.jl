@@ -49,83 +49,10 @@ end
 # Generated kernels live here.
 module Generated end
 
-"""
-An implementation realizes kernels. `claims(implementation, target, plan, group)`
-returns the ways it can realize a group (empty when it cannot), and
-`build_claim(implementation, claim, target, plan, group, buffers)` returns a launch and
-a description. A target's floor realizes any group.
-"""
-abstract type Implementation end
-
 "cuTile's generator; active when cuTile is loaded."
 struct cuTileGenerator <: Implementation end
 
-claims(::Implementation, target, plan, group) = ()
-function build_claim end
-
-"Whether `implementation` realizes groups that recompute folds where they read them, on `target`."
-recomputes_folds(::Implementation, target) = false
-
-"""
-    in_place(implementation, claim) -> Bool
-
-Whether the kernels of `claim` read every element that the outputs of one
-shape need before they write any of them, so that an output may be written
-into the storage of a value they read only at the address they write it (see
-`storage`). The floor's kernels do, and so do the generator's.
-"""
-in_place(::Implementation, claim) = false
 in_place(::cuTileGenerator, claim) = true
-
-"""
-    claims_call(implementation, target, f, kwargs, inputs) -> Bool
-
-Whether `implementation` realizes calls of the operation `f` with these
-keyword arguments on `target`; `inputs` holds the `(dims, eltype)` of each
-argument. A claimed call is one opaque group whose kernel computes all its
-results, estimated by `estimate` like any claim (the claim is a `CallClaim`).
-It replaces the call's reference only where it is cheaper than the reference
-expanded and fused into its neighbours; an opaque call runs only where it is
-claimed.
-"""
-claims_call(::Implementation, target, f, kwargs, inputs) = false
-
-"""
-    epilogue_results(implementation, f, kwargs) -> results
-
-The results of a claimed call over whose output tiles the implementation's
-kernel applies an epilogue: pointwise work after the result, absorbed by the
-planner when its reads align with the result's tile.
-"""
-epilogue_results(::Implementation, f, kwargs) = ()
-
-"""
-    build_call(implementation, plan, group, buffers, target) -> (launch, description)
-
-Build the kernels of a claimed call: the group's opaque results, each written
-densely in its program shape (its definition's `node.dims`) to its buffer or,
-where `group.epilogues` names a value, that value computed from the result's
-tile by the group's terms. Arguments are read densely in their program shapes
-(the definition's `shapes`). A result whose buffer is `nothing` is read by
-nobody and may be left unwritten.
-"""
-function build_call end
-
-# Implementations by the package that provides them, ordered by its name.
-const REGISTERED = Pair{Module, Vector{Implementation}}[]
-
-"""
-    register!(package::Module, implementations...)
-
-Make `implementations` available under `package`, replacing what it registered
-before; extensions call this when their packages load.
-"""
-function register!(package::Module, implementations::Implementation...)
-    filter!(p -> p.first !== package, REGISTERED)
-    isempty(implementations) || push!(REGISTERED, package => Implementation[implementations...])
-    sort!(REGISTERED; by = p -> string(nameof(p.first)))
-    nothing
-end
 
 "The packages a target names, or nothing for every registered one."
 packages(::Target) = nothing

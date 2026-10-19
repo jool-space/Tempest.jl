@@ -1,16 +1,27 @@
 """
 How a program becomes kernels: the program, index and plan levels, code
-generation, the kernel cache, prepared programs, and the interface kernel
-packages implement. Its exports are the levels beneath `compile`: `trace`,
-`differentiate` and `interpret` for programs, and `prepare`, `bind!`,
-`execute!`, `capture!`, `replay!` and `outputs` for prepared ones.
+generation, the kernel cache, and prepared programs. Its exports are the levels
+beneath `compile`: `trace`, `differentiate` and `interpret` for programs, and
+`prepare`, `bind!`, `execute!`, `capture!`, `replay!` and `outputs` for prepared
+ones. Its other public names are what implementations read of a plan (see
+`Tempest.Implementations`).
 """
 module Compiler
 
 using LinearAlgebra
 using BFloat16s: BFloat16
 
+# The protocol of implementations, which the cover calls.
+using ..Implementations: Implementations, REGISTERED
+import ..Implementations: Implementation, Work, register!, claims, estimate, build_claim, candidates,
+    record_name, recomputes_folds, in_place, claims_call, epilogue_results, build_call
+
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
+
+# What implementations read: a plan, its groups and their terms, and the
+# addresses of reads over a group's domain.
+public Plan, Group, Domain, Load, Apply, Recomputed, Cast, SumFold, members, subterms, group_bytes,
+    address, is_affine, coefficient, group_stride, placement, product_axes
 
 # The program level.
 include("program/program.jl")

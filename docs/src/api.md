@@ -55,6 +55,25 @@ Tempest.Compiler.replay!
 Tempest.Compiler.outputs
 ```
 
+## Tempest.Implementations
+
+```@docs
+Tempest.Implementations
+Tempest.Implementations.Implementation
+Tempest.Implementations.register!
+Tempest.Implementations.claims
+Tempest.Implementations.estimate
+Tempest.Implementations.Work
+Tempest.Implementations.build_claim
+Tempest.Implementations.candidates
+Tempest.Implementations.record_name
+Tempest.Implementations.recomputes_folds
+Tempest.Implementations.in_place
+Tempest.Implementations.claims_call
+Tempest.Implementations.epilogue_results
+Tempest.Implementations.build_call
+```
+
 ## Tempest.Operations
 
 ```@docs

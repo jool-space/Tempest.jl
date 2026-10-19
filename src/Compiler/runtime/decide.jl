@@ -10,16 +10,6 @@
 # the tuning record, and a measurement overrides the estimate only beyond the
 # device's noise margin, so the choice is deterministic given the record.
 
-"One launch's work: bytes moved, flops at the rate the launch reaches, and its blocks."
-struct Work
-    bytes::Float64
-    flops::Float64
-    rate::Float64
-    blocks::Float64
-end
-
-Work(bytes; flops = 0.0, rate = Inf, blocks = Inf) = Work(bytes, flops, rate, blocks)
-
 """
 A device's rates for estimates: memory bandwidth in bytes per second, seconds
 per launch in a captured graph, the blocks that fill the device, and the
@@ -48,22 +38,9 @@ numerics(target::CUDATarget) = target.online ? target.precision : Symbol(target.
 permits_rewrites(::Target) = true
 permits_rewrites(target::CUDATarget) = target.online
 
-"""
-    estimate(implementation, claim, target, plan, group) -> Vector{Work}
-
-The launches of a claim. By default one launch moving the group's bytes.
-"""
+# A claim's launches by default: one, moving the group's bytes. Typed by the
+# implementation alone, so that no implementation's method is ambiguous with it.
 estimate(::Implementation, claim, target, p, g) = [Work(group_bytes(p, g))]
-
-"""
-    candidates(implementation, target, plan) -> Vector
-
-What the implementation proposes in place of the generator's groups: sets of
-values to realize as one group each, grown from anchors in `plan` (a product)
-and accepted by the implementation, or `ClaimedCall`s of computations it
-recognizes as calls it claims. None by default.
-"""
-candidates(::Implementation, target, p) = Vector{Int}[]
 
 """
     grow(graph, anchor, accept) -> Vector{Int}
@@ -81,9 +58,6 @@ function grow(graph, anchor, accept)
         push!(set, next[k])
     end
 end
-
-"A claim's name in the tuning record, without value numbers."
-record_name(implementation::Implementation, claim) = string(nameof(typeof(implementation)), " ", claim)
 
 "Whether claims on `target` can be timed at preparation; `time_launch` times one."
 measurable(::Target) = false
@@ -430,7 +404,8 @@ function explain(io::IO, p::Plan, c::Considered)
     println(io, c.accepted ? string(claim, " replaces ", instead) : string(instead, " is kept over ", claim), why)
 end
 
-recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementations(target))
+# Whether any implementation the target uses recomputes folds where it reads them.
+any_recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementations(target))
 
 recomputed_in(g::Group; nested = true) =
     Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Recomputed)
@@ -444,7 +419,7 @@ recomputed_in(g::Group; nested = true) =
 generator_plan(d::Decider) = claimed_plan(d, d.graph)
 
 function claimed_plan(d::Decider, graph; fixed = Vector{Int}[], keep = Set{Int}())
-    recompute_folds = recomputes_folds(d.target)
+    recompute_folds = any_recomputes_folds(d.target)
     keep = Set{Int}(keep)
     while true
         p = plan(graph; fixed, recompute_folds, keep)
