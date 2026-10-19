@@ -27,5 +27,6 @@ explain(grad)            # each kernel: what it computes and stores, and what ru
 Without a GPU, the same code runs on the CPU with plain arrays.
 
 Tempest is being rebuilt from scratch, and its interface may still change.
-[DESIGN.md](DESIGN.md) is the design it follows. The tests run with
+[DESIGN.md](DESIGN.md) is the design it follows, and [ROADMAP.md](ROADMAP.md)
+says where the code stands against it. The tests run with
 `julia --project=test test/runtests.jl`.

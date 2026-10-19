@@ -1,12 +1,10 @@
 # Tempest design
 
-Written 16 October 2026, and revised the same day after an adversarial review.
-Revised on 17 October to lead with the contract, to separate operations from
-their implementations, and to gate on what Tempest can express rather than on
-time. This is the design Tempest is built toward, stated on its own terms
-rather than as a distance from the current code. It lives with the new code on the `next`
-branch. Tempest's architecture page (`docs/src/architecture.md` on `main`)
-describes today's code.
+The design Tempest is built toward, stated on its own terms. What people rely
+on is the contract and the promises; the sections after them say how Tempest
+keeps them, and may change. ROADMAP.md holds where the code stands against
+this design, what comes next, the open questions, and what Tempest took from
+other systems.
 
 ## The contract
 
@@ -72,16 +70,15 @@ What a user can rely on. Each one is checked by tests.
    outside this promise: it runs where an implementation claims it, and
    preparation fails, naming it, where none does.
 
-## Purpose
+## Purpose and scope
 
 Tempest turns ordinary Julia array code (a loss, a training step, a forward
 pass) into a prepared program that runs as fast as the hardware and the best
 available kernels allow, and that explains every decision it made. The user
-writes what to compute. Tempest decides how: which values are stored, which are
-fused, how each kernel is scheduled and which implementation runs it, choosing
-among generated tile programs, vendor libraries and the user's own kernels.
-
-It exists because no other system combines three things:
+writes what to compute. Tempest decides how: which values are stored, which
+are fused, how each kernel is scheduled and which implementation runs it,
+choosing among generated tile programs, vendor libraries and the user's own
+kernels. It exists because no other system combines three things:
 
 - **Julia functions are first class.** A pointwise function or a fold's
   operator is Julia code. Tempest reads it to plan (its derivative, its cost,
@@ -95,42 +92,29 @@ It exists because no other system combines three things:
 - **The whole step is prepared once,** with fixed storage, and replayed as one
   captured graph.
 
-## Scope
+Tempest is a foundation: the compiler at the base of jool-space, which builds
+new infrastructure for deep learning in Julia rather than extending today's
+frameworks. Layers, optimizers, data loading and models are packages built on
+it, not parts of it; libraries of operations such as NNlib sit beside it.
+Integration with today's frameworks is welcome where it comes nearly free, and
+does not shape the design.
 
-Tempest is a foundation. jool-space builds new infrastructure for deep
-learning in Julia rather than extending today's frameworks, and Tempest is the
-compiler at its base: it turns array programs written in plain Julia (a forward
-pass, a loss, a training step) into fused, explained, captured programs on one
-GPU.
+**The same code runs eagerly.** Every function Tempest adds (folds with custom
+operators, `logsumexp`, positions, verbs such as attention and dropout) has a
+method on plain arrays, on the CPU or a GPU, so one source runs untraced,
+array by array, and traced. The coverage goal is that slice: Julia array code
+that runs eagerly should trace, except control flow on array values. Existing
+array code traces as it is; only functions whose bodies cannot trace need a
+declaration (see Operations).
 
-- **What sits above it is separate.** Layers, optimizers, data loading and
-  models are packages built on Tempest, not parts of it. Libraries of
-  operations such as NNlib sit beside it. Integration with today's frameworks
-  is welcome where it comes nearly free, and does not shape the design.
-- **The same code runs eagerly.** Every function Tempest adds (folds with
-  custom operators, `logsumexp`, positions, verbs such as attention and
-  dropout) has a method on plain arrays, on the CPU or a GPU, so one source
-  runs untraced, array by array, and traced. The coverage goal is that slice:
-  Julia array code that runs eagerly should trace, except control flow on
-  array values. Existing array code traces as it is; only functions whose
-  bodies cannot trace need a declaration (see Operations).
-
-## Non-goals
-
-- A layer library, optimizers, data loading or a model zoo.
-- Another framework's operator list as a checklist. Coverage follows the array
-  code people write.
-- A code path per model or pattern. Every feature is formulas, folds and
-  scalar functions, or a claim at the edge.
-- Ambient numerics. There is no global or task-local math mode: the precision
-  a program computes in is written in the program, per operation, and printed
-  by `explain` (see Numerics).
-- Speed claims without their method. Every published number names the
-  hardware, the clocks, the precision, the harness and the baseline's
-  configuration, and can be reproduced from the repository.
-- Hardware in the core. Formulas, folds, scalar functions, the planner and the
-  generator's input are backend-neutral; vendor specifics live in
-  implementations and device defaults.
+**Not goals:** another framework's operator list as a checklist; a code path
+per model or pattern (every feature is formulas, folds and scalar functions,
+or a claim at the edge); ambient numerics (precision is written in the
+program, per operation, never a global or task-local mode); speed claims
+without their method (hardware, clocks, precision, harness and baseline, all
+reproducible from the repository); hardware in the core (formulas, folds,
+scalar functions, the planner and the generator's input are backend-neutral,
+and vendor specifics live in implementations and device defaults).
 
 ## The idea
 
@@ -167,31 +151,6 @@ hatch at the edge, never a new kind in the core. The core (formulas, folds,
 scalar functions, the planner and the generator) stays small enough to read in
 an afternoon; backends are realizations of it.
 
-## What makes it a leap
-
-Today a fused kernel exists only when one of several hand-written paths accepts
-a group, each path with its own gates, and a new kind of fused kernel means a
-new path. Here a kernel exists when a schedule in one language expresses it,
-reached from any spelling through one decision. That makes reachable:
-
-- products fused with their neighbours: a norm's scale or a rotary embedding
-  as prologue; an activation, a residual or a two-output backward as epilogue;
-- attention variants (masks, score modifications, grouped heads, sliding
-  windows) as bodies and formulas, not as new kernels;
-- convolutions, as contractions whose read formulas shift;
-- a user's kernel written as a schedule over index-level bodies, so it fuses
-  with its neighbours instead of being opaque;
-- derivatives, costs and canonical forms of the user's own scalar functions;
-- plans that are deterministic given a record of measurements, explained
-  decision by decision, and prepared again in seconds in a new process.
-
-Speed follows from these. Plans are checked by their structure on every change,
-and times serve as an alarm against regressions. Speed claims are measured
-against torch, eager and compiled, on the same model at the same precision.
-Once capture and launch overhead are gone, what
-separates two systems is which kernels they use, how they fuse and at what
-precision, and that compares like for like.
-
 ## Four levels
 
 ### 1. The program
@@ -218,30 +177,20 @@ vocabulary is small.
 
 Tracing, differentiation and functional updates work at this level.
 
-**Functional updates.** An array the traced code allocates (with `similar`,
-`copy`, `zero` or `fill`, or as the result of any operation on traced arrays)
-can be written: by `setindex!`, `.=` and the other in-place broadcasts,
-`copyto!`, `fill!`, `permutedims!` and `map!`, directly or through a view,
-reshape or transpose, which share the memory of the array they are made from
-as they do in Julia. Each write records the array's new contents; later reads
-see them, and reads before the write keep what they read. A write of part of
-an array, at integers and ranges, is a select, where a scatter of `true`
-lands, between the scatter of the values written and the old contents. At the
-index level such a scatter is a read of the values through a formula that
-wraps around their axes, which the select guards, so an update fuses with its
-readers and no version of the array is stored. The derivative masks the old
-contents and selects the values written. Three limits:
-
-- The contents of `similar` are zero until written, where Julia leaves them
-  undefined.
-- A write at positions an array of integers or a mask selects is not a
-  functional update yet.
-- A program never writes its inputs, nor anything sharing their memory, and an
-  operation's reference never writes its arguments. Such a write fails, saying
-  so: a program is a function of its inputs, and a write into one would change
-  the caller's array without the program stating it. Tracing never sees an
-  array allocated as `Array{T}(undef, dims)`, so code that writes traced values
-  into one does not trace.
+**Functional updates.** An array the traced code allocates can be written in
+place, by `setindex!`, in-place broadcasts, `copyto!`, `fill!` and the like,
+directly or through a view, reshape or transpose that shares its memory as in
+Julia. Each write records the array's new contents; later reads see them, and
+reads before the write keep what they read. A write of part of an array is a
+select between the values written and the old contents, which fuses with its
+readers, so no version of the array is stored; its derivative masks the old
+contents and selects the values written. Three limits: the contents of
+`similar` are zero until written, where Julia leaves them undefined; a write
+at positions an array of integers or a mask selects is not a functional update
+yet; and a program never writes its inputs, nor anything sharing their memory,
+and an operation's reference never writes its arguments. Such a write fails,
+saying so: a program is a function of its inputs, and a write into one would
+change the caller's array without the program stating it.
 
 Differentiation needs one pullback per primitive; a verb may bring its own. The
 backward graph is ordinary program code and is planned together with the
@@ -312,18 +261,7 @@ data:
 - per contract: its tile extents and whether its contracted axis is swept;
 - hints: occupancy, worker warps, CTAs per cluster.
 
-Two examples. RMSNorm over the columns of a 4096 × 4096 matrix, today's
-one-kernel schedule:
-
-```
-domain   i: 4096 (reduced), j: 4096
-axes     j → grid, tile 1;  i → tile 4096, resident
-values   x loaded, resident;  x² recomputed, ss = fold(+, i) in phase 1;
-         rstd recomputed, y recomputed and stored in phase 2
-hints    no occupancy hint at 4096 rows
-```
-
-A linear layer with bias and GELU:
+An example, a linear layer with bias and GELU:
 
 ```
 domain   m: M, n: N, k: K (contracted)
@@ -449,7 +387,7 @@ algorithms makes coverage worth having.
 ## Implementations
 
 Every implementation answers one question in one way: given a group of
-index-level values, can you realize it, and how? Each answer is a claim that
+index-level values, can you run it, and how? Each answer is a claim, which
 states
 
 - the group and its schedule;
@@ -461,7 +399,8 @@ states
   `measure`, for claims whose estimate cannot separate them from their rivals;
 - a build function that returns the launches.
 
-Regions, calls, proposals and groups are all claims. The roles:
+A claim on a named call, on a written-out pattern, or on a group the
+implementation itself proposed is the same kind of claim. The roles:
 
 - **cuTile is the generator.** It claims every group a sketch can schedule,
   with as many schedules as the search allows.
@@ -470,10 +409,9 @@ Regions, calls, proposals and groups are all claims. The roles:
   win, usually by measurement.
 - **The floor realizes any single value alone** with generic kernels. It
   covers what tile programs cannot express, such as
-  deterministic scatters and opaque bodies. Because the floor always exists, a
-  plan always exists; a claim whose build fails is removed and the cover is
-  recomputed. The floor makes every plan correct; it does not make coverage
-  worth having (see Meaning, algorithm, schedule).
+  deterministic scatters and opaque bodies. Because the floor claims every
+  group, a plan always exists. The floor makes every plan correct; it does not
+  make coverage worth having (see Meaning, algorithm, schedule).
 - **User kernels** arrive as implementations of operations or of groups (see
   Operations).
 
@@ -494,49 +432,50 @@ at preparation, printed by `explain`, and narrowed by naming them, as in
 plan without it. The floor is always included. Which implementation runs a
 kernel changes speed and summation order, never what the program computes.
 
-## The decision procedure
+## The decision
 
-One pass turns the index-level graph into a plan.
+One place decides what forms a kernel, and it decides by cost. Five words
+carry the whole of it.
 
-1. **Anchors and candidates.** Anchors are folds, contracts, calls, results,
-   and values that some reader must load from storage. For each anchor and
-   each applicable sketch, grow the largest group the sketch accepts, through
-   formulas, pointwise neighbours, and the contracts whose sketch has a prologue
-   or epilogue. A group may have several outputs. Candidates are cached by
-   canonical numbering, so identical layers share them. A claim on a call is a
-   candidate too: the values the call's reference expanded to, with the
-   epilogue the claimant applies, computed by the claimant's kernel.
-2. **Forms.** Claims that demand a form constrain the layouts of the values
-   they read and write. Constraints propagate through formulas, and where two
-   demands conflict a copy is inserted and charged. This runs before the cover.
-3. **Cover.** Greedy by estimated gain, with a queue ordered by time saved,
-   then size, then canonical id. A candidate is accepted when it overlaps no
-   accepted group and keeps the partition acyclic, and the neighbours of each
-   acceptance are estimated again. What no group takes goes to the floor. The
-   order is total and the result deterministic. An exact cover by integer
-   programming serves as a test oracle on small graphs.
-4. **Estimates and the clock.** The estimate is a roofline with launch
-   overhead, a parallelism term and read multiplicity (a streamed schedule
-   reads its inputs once per phase), with rates derived from the device.
-   Measured claims are compiled in parallel and timed as the minimum of several
-   alternating runs, and the times go into the tuning record.
-5. **Stored or recomputed.** A value with one reader is recomputed inside it.
-   A value with several readers is stored unless every reader's schedule can
-   recompute it (it holds the value's operands resident) and recomputing moves
-   fewer bytes than storing.
-6. **Storage.** Lifetimes over the kernel graph, slot reuse, and donation in
-   place where the write formula and the read formula of the aliased value
-   agree; staged otherwise.
+- **Plan.** Groups of index-level values that together cover the program.
+  Each group becomes one kernel.
+- **Claim.** One way an implementation can run one group, with an estimate
+  (see Implementations). The floor claims every group, so a plan always
+  exists.
+- **Proposal.** An alternative grouping: a set of values to run together, or a
+  call with the epilogues that follow it. Implementations propose, and so does
+  Tempest, for every choice its own rules would otherwise make alone: joining
+  a stored value into a reader's group, recomputing a value in each of its
+  readers, applying a rewrite such as the online softmax.
+- **Cover.** Chooses the proposals and claims that make the plan cheapest, by
+  estimate or, for a measured claim, by the record. Where two claims demand
+  conflicting forms, a copy is inserted and charged. The order is total and
+  the result deterministic.
+- **Build.** Turns the chosen claims into kernels. A claim whose build fails
+  is withdrawn and the cover runs again, so the plan reports what was built.
 
-This is greedy by estimated gain on purpose: XLA and Inductor both settled
-there. The leap is in what the candidates are (schedules over formulas,
-contracts included) and in what decides (time, with a record), not in the
-cover algorithm.
+What follows from these, rather than being decided somewhere else: a value
+with one reader is recomputed inside it; a value with several readers is
+stored unless the cover finds recomputing cheaper; stored values get lifetimes
+over the kernel graph, slot reuse, and donation in place where the write
+formula and the read formula of the aliased value agree.
 
-Re-running kernels to save memory, checkpointing, is a different mechanism
-from recomputing inside a kernel. It is a cut through the graph, priced by
-peak memory over a kernel order. It comes later as its own pass with a memory
-budget; until then `checkpoint(f)` marks a region to re-run.
+**The estimate** is a roofline with launch overhead, a parallelism term and
+read multiplicity (a streamed schedule reads its inputs once per phase), with
+rates derived from the device. Measured claims are compiled in parallel and
+timed as the minimum of several alternating runs, and the times go into the
+tuning record. A measurement overrides the estimate only beyond the device's
+noise margin.
+
+**One choice is open.** Two shapes satisfy the five words. In one, candidates
+are grown from anchors (folds, contracts, calls, results) by each applicable
+sketch and covered greedily by estimated gain, as XLA and Inductor do. In the
+other, Tempest's rules make a starting plan, and every rule-made choice is
+also a proposal, priced as the whole plan that results. The first prices every
+grouping the same way; the second keeps a plan that always exists and adds
+pricing to it. Whichever is chosen, no grouping may be settled by a rule the
+cover never prices. That is Promise 3, and its test is a program whose best
+grouping the rules alone would not find.
 
 The plan records, for each value, stored (with its layout) or recomputed; for
 each kernel, its group, schedule and forms, and whether its choice was
@@ -607,85 +546,15 @@ records for known devices can ship with the package.
   it traces is reported with every change, and it only grows.
 - **Time is an alarm, not a target.** A plan that becomes much slower than its
   recorded time fails a check. Speed claims are made separately, with their
-  method (see Non-goals).
-
-## Lessons taken and left
-
-| From | Take | Leave |
-| --- | --- | --- |
-| JAX | transformations over a small primitive set; functional state | an opaque backend with custom kernels bolted on |
-| PyTorch Inductor | values as index functions; indirect indexing; product templates with epilogues; foreach kernels; autotuning while compiling | a surface of two thousand operators; reduction strategies hard-coded rather than searched |
-| tinygrad | layout as index arithmetic; one store-or-recompute decision per value | storing every reduction that a later step broadcasts over |
-| Halide, TVM | the schedule as data, separate from the algorithm; sketch rules with a search over their parameters (MetaSchedule) | |
-| XLA | whole-program planning, buffer assignment, layout constraints propagated before fusion | fusion heuristics that are hard to inspect or steer |
-| Julia packages | Julia functions throughout; extension by dispatch | compile-time blowups; an MLIR boundary that custom kernels and their derivatives cannot cross |
+  method (see Purpose and scope).
 
 ## Not now
 
 Control flow on traced values, mutation of a program's inputs, writes at
-positions an array selects, ordered folds (scans and recurrences,
-whose combine is not commutative), ragged sizes, several devices, budgeted
-checkpointing, symbolic sizes beyond bounded ones, serving, and an MLIR core.
-An explicit plan leaves room for each later.
-
-## Open questions
-
-- How claims are written: as code over a group first, and as declarative
-  patterns once the common cases are known.
-- Whether differentiation and planning can derive attention's backward
-  schedule (store the log-sum-exp, recompute scores inside the consumer), or
-  whether it stays hand-chosen.
-- How many schedules to measure per claim, against compile time (1.6 to 4.3 s
-  per product configuration on GB10), and how wide each device's noise margin
-  is.
-- Whether cuDNN reads sliced operands, which decides whether packed QKV needs
-  copies.
-- What NNlib's `dropout` means under tracing. NNlib draws from a global random
-  number generator; Tempest takes an explicit seed.
-
-## How we get there
-
-Tempest is rebuilt from scratch on the branch `next`, as the package Tempest
-itself. The new code owns every level, from tracing to the runtime, and imports
-nothing from the code it replaces. That code is history and reading material.
-Where a piece of it proved itself (the fold algebra, the measured thresholds
-and workarounds in the cuTile schedules, cuDNN graph building, capture and state
-donation, device rates, the guard-rail cases), it is rewritten into this design
-deliberately. What it accreted is left behind: separate paths for calls,
-proposals, graph regions and scalar regions, six request kinds, and decisions
-about what forms a kernel made in five places. Comparisons with it, and with
-torch, run as separate processes against recorded numbers.
-
-- **Where it stands.** The program and index levels, the cuTile generator, the
-  generic kernels, the cover with cuBLAS as a rival, the tuning record, the
-  kernel cache, the generated attention forward pass and functional updates of
-  the arrays a program allocates are built. The first
-  gates measured time against today's Tempest and held (the 29 forward
-  guard-rail cases at 0.94 of today's time). From here the gates are about what
-  Tempest can express; time is an alarm.
-- **Next, in order, each closed by its gate:**
-  1. The language: operations as declared above, folds with tuple states with
-     the online softmax as one, size-1 axes out of domains, and gathers by
-     runtime indices. Gate: the coverage suite passes as tests that fail, and
-     the eager slice is measured.
-  2. Numerics in the program. Gate: TF32 programs agree with the interpreter
-     up to summation order, and no implementation reads a mode.
-  3. The runtime and the GPT step: storage reuse, donation, capture and
-     functional updates. Gate: the GPT training step matches the interpreter,
-     then reaches parity with today's Tempest.
-  4. Speed: schedule search measured into the tuning record, cuDNN as a rival,
-     a generated attention backward pass. Gate: measured against torch, eager
-     and compiled, at the same precision.
-  5. Bounded sizes and decode.
-- **Stopping rule.** Stop and report when a gate fails for a reason the design
-  cannot address: a composition in the coverage suite needs a new kind of node
-  or value in the core, or a special case for one pattern in the generator; or
-  the GPT step cannot match the interpreter. A gate not yet met because the
-  work is unfinished is not a reason to stop.
-- **The scorecard:** the coverage suite and the spelling battery pass; the
-  eager slice grows; generated programs agree with the interpreter; the GPT
-  step matches today's and holds up against torch at the same precision; one
-  place decides what forms a kernel.
-
-When `next` runs the GPT training step at parity with today's Tempest, it
-becomes `main`. Today's code, docs and reports stay in history.
+positions an array selects, ordered folds (scans and recurrences, whose
+combine is not commutative), ragged sizes, several devices, symbolic sizes
+beyond bounded ones, serving, and an MLIR core. Checkpointing, re-running
+kernels to save memory, is a cut through the graph priced by peak memory over
+a kernel order, and comes later as its own pass with a memory budget; until
+then `checkpoint(f)` marks a region to re-run. An explicit plan leaves room
+for each later.
