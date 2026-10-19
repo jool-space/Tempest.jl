@@ -275,7 +275,10 @@ function choose(d::Decider, p::Plan, g::Group, os)
     ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
         [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate)]
     length(ranks) == 1 && return (1, :estimated, get(d.record, best.key, nothing))
-    d.measure === :none || foreach(k -> measure!(d, p, g, os[k]), ranks)
+    if d.measure !== :none
+        build_unmeasured!(d, [(p, g, os[k]) for k in ranks])
+        foreach(k -> measure!(d, p, g, os[k]), ranks)
+    end
     times = [get(d.record, os[k].key, nothing) for k in ranks]
     any(isnothing, times) && return (1, :estimated, nothing)
     k = argmin(times)
@@ -311,6 +314,7 @@ function compare(d::Decider, b::Plan, a::Plan)
     ea = sum(x -> x[3].choice.estimate, da; init = 0.0)
     eb = sum(x -> x[3].choice.estimate, db; init = 0.0)
     if d.measure === :all || (d.measure === :close && close_call(ea, eb))
+        build_unmeasured!(d, [(p, g, x.choice) for (p, g, x) in [da; db]])
         foreach(((p, g, x),) -> measure!(d, p, g, x.choice), [da; db])
     end
     ta = [get(d.record, x[3].choice.key, nothing) for x in da]
@@ -746,17 +750,30 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers)
     build_floor(d.target, p, g, buffers)
 end
 
-function measure!(d::Decider, p::Plan, g::Group, o::Choice)
-    haskey(d.record, o.key) && return
-    # A claim that fails to build loses every comparison in this preparation;
-    # the record keeps only times.
-    launch = try
+# Build an option to measure it. A claim that fails to build loses every
+# comparison in this preparation; the record keeps only times.
+function build_option!(d::Decider, p::Plan, g::Group, o::Choice)
+    try
         first(build_choice!(d, p, g, o))
     catch err
         @debug "claim failed to build; it loses" o.implementation exception = err
         d.record[o.key] = Inf
-        return
+        nothing
     end
+end
+
+# Build the options with no time yet, `(plan, group, option)` each,
+# concurrently, so that their kernels compile side by side before they are
+# timed one at a time, alone on the device.
+function build_unmeasured!(d::Decider, options)
+    unmeasured = unique(x -> x[3].key, filter(x -> !haskey(d.record, x[3].key), options))
+    concurrently(((p, g, o),) -> build_option!(d, p, g, o), unmeasured, d.target)
+end
+
+function measure!(d::Decider, p::Plan, g::Group, o::Choice)
+    haskey(d.record, o.key) && return
+    launch = build_option!(d, p, g, o)
+    launch === nothing && return
     t = time_launch(d.target, launch)
     d.record[o.key] = t
     save_record(d.record_path, o.key, t)
