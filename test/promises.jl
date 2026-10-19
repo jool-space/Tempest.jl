@@ -15,7 +15,6 @@ chosen(f, args...; target = T.CPUTarget()) = prepare(trace(f, args...), args...;
 # kernels, terms, storage and decisions.
 same_plan(f, g, args...) = sprint(explain, chosen(f, args...)) == sprint(explain, chosen(g, args...))
 
-const RESULT_FORMULAS = "a result written through its formula, so a permute of a stored value costs no kernel"
 const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
 const SCALING_FORMS = "sum / n and sum · (1 / n) one form under the numerics policy"
 const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decision)"
@@ -30,12 +29,16 @@ const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decisio
     @test same_plan((a, b) -> a .+ b, (a, b) -> b .+ a, a, b)
     @test same_plan(a -> a .* 2, a -> 2 .* a, a)
     @test same_plan((a, b) -> sum(a .* b; dims = 1), (a, b) -> sum(b .* a; dims = 1), a, b)
+    # A fold a result reads through a permutation is stored in the result's
+    # order, so the transpose of a product costs no kernel of its own.
+    @test same_plan((a, b) -> (a' * b)', (a, b) -> b' * a, a, b)
+    @test C.structure(chosen((a, b) -> (a' * b)', a, b)).kernels == 1
+    # Stored in another order, a value is still the one the program computes.
+    transposed_product(a, b) = (a' * b)'
+    permuted_sum(x) = permutedims(sum(reshape(x, 2, 4, 6); dims = 2), (3, 1, 2))
+    @test agree(C.execute(chosen(transposed_product, a, b), a, b), C.leaves(transposed_product(a, b)))
+    @test agree(C.execute(chosen(permuted_sum, a), a), C.leaves(permuted_sum(a)))
     # Reshapes around size-1 axes are checked in plan.jl, "axes of extent one".
-    @testset "gap: $RESULT_FORMULAS" begin
-        # The transpose after the product plans as a kernel of its own.
-        @test_broken same_plan((a, b) -> (a' * b)', (a, b) -> b' * a, a, b)
-        @test_broken C.structure(chosen((a, b) -> (a' * b)', a, b)).kernels == 1
-    end
     @testset "gap: $CANONICAL_DOMAIN" begin
         @test_broken same_plan(a -> sum(permutedims(a, (2, 1)); dims = 2), a -> permutedims(sum(a; dims = 1), (2, 1)), a)
         @test_broken same_plan(a -> tanh.(reshape(a, 48)), a -> reshape(tanh.(a), 48), a)

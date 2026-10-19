@@ -570,10 +570,25 @@ aligned(graph, t, D) =
     all(s -> !(s isa Union{Ix, Recomputed}) && !(s isa Load && aligned_axes(graph.values[s.value].dims, s.index, D) === nothing), subterms((t,)))
 
 # Every result becomes a value read whole, so results are buffers: a result
-# that is a layout of a value, or a constant, gets a value of its own.
+# that is a layout of a value, or a constant, gets a value of its own. A fold
+# or pointwise value that only one result reads, through a permutation of its
+# axes, is stored in the result's order instead of copied: its domain is
+# permuted, and its id stays.
 function with_stored_results(graph::IndexGraph)
     values = copy(graph.values)
     results = copy(graph.results)
+    users = readers(graph)
+    called = Set(v for c in graph.calls for v in [c.values; [o.value for o in c.operands]; [o.value for o in c.reads]])
+    for (k, r) in enumerate(results)
+        r isa Read || continue
+        v = values[r.value]
+        p = permutation(r.index)
+        (p === nothing || issorted(p)) && continue
+        v.definition isa Union{Pointwise, Reduction} && !v.scalar || continue
+        isempty(users[r.value]) && !(r.value in called) && count(o -> o isa Read && o.value == r.value, results) == 1 || continue
+        values[r.value] = permuted(v, p)
+        results[k] = Read(r.value, identity_index(values[r.value].dims))
+    end
     for (k, r) in enumerate(results)
         dims = graph.result_dims[k]
         # A value read whole, or a reshape of it, presents its storage as it is.
@@ -583,6 +598,38 @@ function with_stored_results(graph::IndexGraph)
         results[k] = Read(length(values), wide_index(dims))
     end
     IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls, graph.rewrites)
+end
+
+# The axes an index reads a value at, when it is a permutation of the reader's
+# variables.
+function permutation(index)
+    p = Int[]
+    for e in index
+        e.constant == 0 && length(e.terms) == 1 && e.terms[1].first isa Var && e.terms[1].second == 1 || return nothing
+        push!(p, e.terms[1].first.n)
+    end
+    sort(p) == 1:length(p) ? p : nothing
+end
+
+# Value `v` stored with its axes permuted: `v′[x] = v[x[p[1]], …, x[p[n]]]`. A
+# fold permutes the kept axes of its iteration; its reduced axes stay.
+function permuted(v::Value, p)
+    dims = Tuple(v.dims[findfirst(==(j), p)] for j in eachindex(p))
+    d = v.definition
+    if d isa Pointwise
+        σ = Tuple(var(p[j]) for j in eachindex(p))
+        return Value(Pointwise(d.f, map(o -> through(o, σ, Domain(dims)), d.operands)), dims, v.eltype, v.scalar)
+    end
+    kept = Tuple(k for k in eachindex(d.iteration) if !(k in d.reduced))
+    iteration = collect(d.iteration)
+    σ = Vector{Affine}(map(var, 1:length(d.iteration)))
+    for (j, k) in enumerate(kept)
+        iteration[kept[p[j]]] = d.iteration[k]
+        σ[k] = var(kept[p[j]])
+    end
+    iteration = Tuple(iteration)
+    operand = through(d.operand, Tuple(σ), Domain(iteration))
+    Value(Reduction(d.fold, operand, iteration, d.reduced), dims, v.eltype, v.scalar)
 end
 
 # The values a group reads from storage, its own excepted.
