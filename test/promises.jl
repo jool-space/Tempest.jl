@@ -127,6 +127,35 @@ seconds(f) = (f(); t = time(); f(); time() - t)
     # The planner grows each group from the values that read it, so a layer
     # costs the same however many precede it.
     @test per_layer_plan(32) < 2 * per_layer_plan(8)
+    # Groups alike are decided once, however many layers repeat them.
+    function decided(L)
+        layers, x = stack(L, identity)
+        d = C.Decider(T.CPUTarget(), C.lower(differentiate(trace(stack_loss, x, layers))); measure = false)
+        C.decisions(d, first(C.cover(d)))
+        length(d.decided)
+    end
+    @test decided(32) == decided(8)
+    # A call's group names the call and what it reads: attention over 6 keys
+    # and over 9 are different groups.
+    function call_key(n)
+        q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, n, 2; scale = 0.2), data(4, 2, n, 2; scale = 0.1)
+        graph = C.lower(trace((q, k, v) -> Ops.attention(q, k, v), q, k, v))
+        p = C.plan(C.claimed(graph, [C.ClaimedCall(s, ()) for s in graph.calls]))
+        C.canonical(p, only(g for g in p.groups if g.kind === :opaque))
+    end
+    @test call_key(6) != call_key(9)
+    if CUDA_FUNCTIONAL
+        # Options rank alike in groups alike, so a rank chosen for one is the
+        # same choice in each.
+        layers, x = stack(8, CuArray)
+        d = C.Decider(T.CUDATarget(), C.lower(differentiate(trace(stack_loss, x, layers))); measure = false)
+        p = first(C.generator_plan(d))
+        ranked = Dict{String, Any}()
+        @test all(filter(g -> C.chosen(p, g), p.groups)) do g
+            os = [(o.key, o.estimate) for o in C.options(d, p, g)]
+            get!(ranked, C.canonical(p, g), os) == os
+        end
+    end
     @testset "gap: $LINEAR_PREPARE" begin
         if CUDA_FUNCTIONAL
             function per_layer_prepare(L)

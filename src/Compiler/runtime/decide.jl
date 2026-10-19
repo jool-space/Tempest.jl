@@ -112,19 +112,27 @@ mutable struct Decider
     record::Dict{String, Float64}
     record_path::Union{Nothing, String}
     buffers::Vector{Any}
-    built::Dict{Tuple{Any, String}, Any}
-    decided::Dict{Any, Decision}
+    built::Dict{String, Any}
+    # The choice for each group alike (by `canonical`): its rank among the
+    # options, how it was made, and the time measured; and each group's decision.
+    decided::Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}
+    instances::Dict{Any, Decision}
 end
 
 function Decider(target, graph; measure = true)
     path = record_path(target)
     Decider(target, graph, measure && measurable(target), rates(target), load_record(path), path,
-        Any[], Dict{Tuple{Any, String}, Any}(), Dict{Any, Decision}())
+        Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
 end
 
 # A group within one preparation: its kind, members, terms and what it stores.
 group_identity(p::Plan, g::Group) = (g.kind, g.domain, Tuple(g.reductions), Tuple(g.outputs),
     Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(p.stored[m] for m in members(g)))
+
+# An opaque value without a term, as its operation computes it: the
+# operation, its keywords, and the values it reads.
+computed(d::Opaque) = string(op_name(d.node.op), op_detail(d.node.op), d.node.op isa Call ? string(" ", d.node.op.kwargs) : "",
+    " of ", join(map(o -> "%$(o.value)", reads(d)), " "))
 
 # A group across programs: value numbers in order of appearance, with each
 # value's type and shape.
@@ -134,7 +142,7 @@ function canonical(p::Plan, g::Group)
     for m in members(g)
         v = p.graph.values[m]
         what = m in g.reductions ? string(fold_name(v.definition.fold), v.definition.reduced) : "value"
-        print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", get(g.terms, m, "opaque"))
+        print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", haskey(g.terms, m) ? g.terms[m] : computed(v.definition))
     end
     numbers = Dict{String, Int}()
     text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
@@ -213,21 +221,34 @@ end
 
 close_call(a, b) = max(a, b) <= ESTIMATE_ERROR * min(a, b)
 
-"Choose how a group runs: the cheapest estimate, unless measurements of the close calls disagree beyond the noise."
+"""
+Choose how a group runs: the cheapest estimate, unless measurements of the
+close calls disagree beyond the noise. Groups alike choose once, by rank among
+their options, which each group's own claims realize: a claim holds the ids of
+its group's values, so one taken from another group would build on its buffers.
+"""
 function decide(d::Decider, p::Plan, g::Group)
-    get!(d.decided, group_identity(p, g)) do
+    get!(d.instances, group_identity(p, g)) do
         os = options(d, p, g)
-        best = first(os)
-        length(os) == 1 && return Decision(best, os, :only, get(d.record, best.key, nothing))
-        contenders = [o for o in os if close_call(o.estimate, best.estimate)]
-        length(contenders) == 1 && return Decision(best, os, :estimated, get(d.record, best.key, nothing))
-        d.measure && foreach(o -> measure!(d, p, g, o), contenders)
-        times = [get(d.record, o.key, nothing) for o in contenders]
-        any(isnothing, times) && return Decision(best, os, :estimated, nothing)
-        k = argmin(times)
-        k = times[k] < (1 - d.rates.noise) * times[1] ? k : 1
-        Decision(contenders[k], os, :measured, times[k])
+        k, how, measured = get!(() -> choose(d, p, g, os), d.decided, canonical(p, g))
+        Decision(os[k], os, how, measured)
     end
+end
+
+# The rank of the choice among options `os`, sorted by estimate, so that the
+# close calls are the first; how it was made; and its measured time. A rank and
+# not a claim, because claims hold value ids.
+function choose(d::Decider, p::Plan, g::Group, os)
+    best = first(os)
+    length(os) == 1 && return (1, :only, get(d.record, best.key, nothing))
+    contenders = [o for o in os if close_call(o.estimate, best.estimate)]
+    length(contenders) == 1 && return (1, :estimated, get(d.record, best.key, nothing))
+    d.measure && foreach(o -> measure!(d, p, g, o), contenders)
+    times = [get(d.record, o.key, nothing) for o in contenders]
+    any(isnothing, times) && return (1, :estimated, nothing)
+    k = argmin(times)
+    k = times[k] < (1 - d.rates.noise) * times[1] ? k : 1
+    (k, :measured, times[k])
 end
 
 decisions(d::Decider, p::Plan) = [chosen(p, g) ? decide(d, p, g) : nothing for g in p.groups]
@@ -481,9 +502,10 @@ build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
     o.claim isa CallClaim ? build_call(o.implementation, target, group_view(p, g), buffers) :
     build_claim(o.implementation, o.claim, target, group_view(p, g), buffers)
 
-# Build a choice on the decider's buffers, once, to measure it.
+# Build a choice on the decider's buffers, once, to measure it: its key names
+# the group alike, so the first of them builds for all.
 build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =
-    get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, (group_identity(p, g), o.key))
+    get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, o.key)
 
 # A group's kernels: its choice, or the next claim when a build fails, and
 # the floor last; a call's group has no floor. Opaque work other than calls,
