@@ -90,9 +90,8 @@ end
 # Identical layers are identical groups, canonically, however many of them a
 # program stacks. Preparing should then cost the same per layer, and a cold
 # prepare should build one kernel per distinct group. Today the cover decides
-# every group instance anew and re-plans the whole program for each proposal,
-# and the planner is superlinear.
-const LINEAR_PREPARE = "the cover per canonical group, a trial re-planning only its region, a linear planner"
+# every group instance anew and re-plans the whole program for each proposal.
+const LINEAR_PREPARE = "the cover per canonical group, a trial re-planning only its region"
 
 stack_layer(x, (w, b)) = tanh.(w * x .+ b)
 stack_loss(x, layers) = sum(abs2, foldl(stack_layer, layers; init = x))
@@ -125,8 +124,10 @@ seconds(f) = (f(); t = time(); f(); time() - t)
         g = C.lower(differentiate(trace(stack_loss, x, layers)))
         seconds(() -> C.plan(g; recompute_folds = true)) / L
     end
+    # The planner grows each group from the values that read it, so a layer
+    # costs the same however many precede it.
+    @test per_layer_plan(32) < 2 * per_layer_plan(8)
     @testset "gap: $LINEAR_PREPARE" begin
-        @test_broken per_layer_plan(32) < 2 * per_layer_plan(8)
         if CUDA_FUNCTIONAL
             function per_layer_prepare(L)
                 layers, x = stack(L, CuArray)

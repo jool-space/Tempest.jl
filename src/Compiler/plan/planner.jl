@@ -175,8 +175,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
     any(m -> v in stored_reads(g.terms[m]), members(g)) && return false
-    candidate = Group(g.kind, g.domain, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase), copy(g.epilogues))
-    fold || push!(candidate.outputs, v)
+    candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase, g.epilogues)
     t = try
         fold ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
         value_term(graph, stored, candidate, v, index)
@@ -184,15 +183,14 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
         e isa OutsideGroup || rethrow()
         return false
     end
-    group = Set(members(g))
     reads = stored_reads(t)
-    depends(graph, deps, reads, group) && return false
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
+    isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads) || return false
+    group = Set(members(g))
+    depends(graph, deps, reads, group) && return false
     # Nor may what the group reads from other kernels depend on `v`.
     depends(graph, deps, filter(!in(group), shared), Set((v,))) && return false
-    connected = isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads)
-    connected || return false
     push!(fold ? g.reductions : g.outputs, v)
     g.terms[v] = t
     g.phase[v] = maximum(s -> g.phase[s], stats(t); init = 0) + (fold ? 1 : 0)
@@ -299,6 +297,26 @@ function recomputable(p::Plan, users, id, live, results, materialized)
     end
 end
 
+# Insert into the sorted `frontier` the stored values after `seed` that read
+# any of `from`, directly or through values a term computes in place: the
+# only values whose terms can reach a group grown from `from`.
+function reach!(frontier, followers, stored, from, seed)
+    pending, seen = collect(from), Set{Int}()
+    while !isempty(pending)
+        for w in followers[pop!(pending)]
+            w in seen && continue
+            push!(seen, w)
+            if !stored[w]
+                push!(pending, w)
+            elseif w > seed
+                k = searchsortedfirst(frontier, w)
+                get(frontier, k, 0) == w || insert!(frontier, k, w)
+            end
+        end
+    end
+    frontier
+end
+
 # The kernels, given what is stored.
 function group_values(graph, stored, live, results, running, fixed)
     values = graph.values
@@ -329,23 +347,37 @@ function group_values(graph, stored, live, results, running, fixed)
         push!(groups, fixed_group(graph, stored, deps, set))
         foreach(m -> owner[m] = length(groups), set)
     end
+    # Who reads each value, directly or through a gather: a group grows toward
+    # them, so it never scans the values that cannot reach it.
+    followers = [Int[] for _ in values]
+    for id in 1:n, o in operands(values[id].definition), r in read_values(o)
+        live[id] && push!(followers[r], id)
+    end
+    foreach(unique!, followers)
     for id in 1:n
         live[id] && owner[id] == 0 || continue
         d = values[id].definition
         d isa Reduction && stored[id] || continue
         g = Group(:reduction, d.iteration)
         try_add!(graph, stored, deps, g, id; fold = true)
+        frontier = reach!(Int[], followers, stored, [members(g); (r for m in members(g) for r in stored_reads(g.terms[m]))...], id)
+        # A pass visits the frontier in order; what a new member reaches above
+        # the cursor is visited in this pass, the rest in the next.
         changed = true
         while changed
             changed = false
-            for other in (id + 1):n
+            k = 1
+            while k <= length(frontier)
+                other = frontier[k]
+                k += 1
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
-                if od isa Reduction && od.iteration == g.domain && stored[other]
-                    changed |= try_add!(graph, stored, deps, g, other; fold = true)
-                elseif od isa Pointwise && stored[other]
-                    changed |= try_add!(graph, stored, deps, g, other; fold = false)
-                end
+                added = od isa Reduction ? od.iteration == g.domain && try_add!(graph, stored, deps, g, other; fold = true) :
+                    od isa Pointwise && try_add!(graph, stored, deps, g, other; fold = false)
+                added || continue
+                changed = true
+                reach!(frontier, followers, stored, [other; stored_reads(g.terms[other])], id)
+                k = searchsortedfirst(frontier, other) + 1
             end
         end
         push!(groups, g)
@@ -360,10 +392,14 @@ function group_values(graph, stored, live, results, running, fixed)
         d isa Pointwise || error("value %$id has no kernel")
         g = Group(:pointwise, values[id].dims)
         try_add!(graph, stored, deps, g, id; fold = false)
-        for other in (id + 1):n
-            live[other] && owner[other] == 0 && stored[other] || continue
-            values[other].definition isa Pointwise && values[other].dims == g.domain || continue
-            any(m -> m in up[other], members(g)) && try_add!(graph, stored, deps, g, other; fold = false)
+        frontier = reach!(Int[], followers, stored, [id], id)
+        k = 1
+        while k <= length(frontier)
+            other = frontier[k]
+            k += 1
+            live[other] && owner[other] == 0 && values[other].definition isa Pointwise && values[other].dims == g.domain || continue
+            any(m -> m in up[other], members(g)) && try_add!(graph, stored, deps, g, other; fold = false) || continue
+            reach!(frontier, followers, stored, [other], id)
         end
         push!(groups, g)
         foreach(m -> owner[m] = length(groups), members(g))
