@@ -110,7 +110,12 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    check (`ancestors`, `depends`), which still grows faster than the layers
    (about 1.0 ms per layer at 16 layers, 1.9 at 64, 3.7 at 128), so that
    each whole-graph trial does too. Gate: one place decides what forms a
-   kernel, and preparing 64 layers costs the same per layer as 8.
+   kernel, and preparing 64 layers costs the same per layer as 8. The floor
+   stays priced only where nothing else claims: offered on every group, its
+   estimate was wrong by up to 467 times (a serial sweep is not a roofline
+   quantity), it won 283 groups and 44 of them wrongly, and no fit of bytes
+   and flops repairs that. Pricing it needs rates of its own, or a
+   measurement whenever it is near the best claim.
 4. **Canonical forms.** Done: the operands of a commutative function are in
    one order at the index level; a fold a result reads through a permutation
    is stored in the result's order, so a transposed product costs no kernel;
