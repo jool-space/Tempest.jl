@@ -73,19 +73,22 @@ be and the one choice still open there.
 1. The decision, as DESIGN.md states it. Gate: the gaps in test/promises.jl
    close (each `@test_broken` there names what closes it), and one place
    decides what forms a kernel.
-2. The language: operations as declared, folds with tuple states with the
+2. The kernel author's interface, as docs/src/kernels.md states it. Gate:
+   that page is true, and the toy implementations in test/calls.jl are
+   written in its form.
+3. The language: operations as declared, folds with tuple states with the
    online softmax as one, size-1 axes out of domains, and gathers by runtime
    indices. Gate: the coverage suite passes as tests that fail, and the eager
    slice is measured.
-3. Numerics in the program. Gate: TF32 programs agree with the interpreter up
+4. Numerics in the program. Gate: TF32 programs agree with the interpreter up
    to summation order, and no implementation reads a mode.
-4. The runtime and the GPT step: storage reuse, donation, capture and
+5. The runtime and the GPT step: storage reuse, donation, capture and
    functional updates. Gate: the GPT training step matches the interpreter,
    then reaches parity with the old Tempest.
-5. Speed: schedule search measured into the tuning record, cuDNN as a rival, a
+6. Speed: schedule search measured into the tuning record, cuDNN as a rival, a
    generated attention backward pass. Gate: measured against torch, eager and
    compiled, at the same precision.
-6. Bounded sizes and decode.
+7. Bounded sizes and decode.
 
 **Stopping rule.** Stop and report when a gate fails for a reason the design
 cannot address: a composition in the coverage suite needs a new kind of node
