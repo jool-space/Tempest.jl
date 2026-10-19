@@ -49,8 +49,7 @@ and `phase` counts the folds each member waits for. `values` describes every
 value the group computes or reads, `placement` where it keeps each member (its
 index over the domain, or nothing), and `bytes` what it reads from storage and
 writes. `reference(target, buffers)` builds the group's reference kernels, the
-floor's (for a call, the call evaluated on the host), which every claim agrees
-with.
+floor's, which every claim agrees with.
 """
 struct GroupView
     kind::Symbol

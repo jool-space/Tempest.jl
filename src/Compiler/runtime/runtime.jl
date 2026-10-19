@@ -353,9 +353,8 @@ Record what `execute!` launches as one graph, for `replay!` to run, each
 replay `repetitions` executions of the program (for timing). Recording runs
 nothing. What varies between replays lives in device buffers: inputs bound by
 copy or by reference, scalars and seeds among them, are read where they are,
-so they need no new capture. Capturing again replaces the graph. A program
-with work on the host cannot be captured; on a target without graphs, a
-replay launches the kernels.
+so they need no new capture. Capturing again replaces the graph. On a target
+without graphs, a replay launches the kernels.
 
 ```julia
 ex = capture!(prepare(p, CuArray(x)))
@@ -365,8 +364,6 @@ replay!(ex)                     # the same graph, on the new values
 ```
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
-    k = findfirst(k -> k === :opaque, ex.kernels)
-    k === nothing || throw(ArgumentError("kernel $k runs on the host, so the program cannot be captured"))
     ex.captured === nothing || release(ex.target, ex.captured)
     ex.captured = nothing
     ex.captured = capture(ex.target, () -> foreach(_ -> run_once(ex), 1:repetitions), (ex.launches, ex.copies))
@@ -416,11 +413,10 @@ end
 
 explain(ex::Executable) = explain(stdout, ex)
 
-# What runs kernel `k`: an implementation, the floor, or the host.
+# What runs kernel `k`: an implementation or the floor.
 function runner(ex::Executable, k)
-    ex.kernels[k] === :opaque && return "on the host"
     d = ex.decisions[k]
-    d === nothing || d.choice.implementation === nothing ? "floor" : string(nameof(typeof(d.choice.implementation)))
+    d === nothing || d.choice.implementation === nothing ? "floor" : label(d.choice.implementation)
 end
 
 function Base.show(io::IO, ex::Executable)
@@ -445,6 +441,59 @@ arrays over its buffers, the same arrays every time, which each `execute!` or
 dimensions here, since it lives in a buffer too; `compile` returns numbers.
 """
 outputs(ex::Executable) = ex.outputs
+
+# A kernel of a named operation, built: its body and the groups it takes. The
+# launch holds them untyped, as `HostLaunch` does, so each body compiles once.
+struct KernelLaunch
+    body::Any
+    args::Tuple
+end
+
+(l::KernelLaunch)() = (l.body(l.args...); nothing)
+
+"What `explain` prints for a built kernel: its claim and the results it applies an epilogue after."
+struct BuiltKernel
+    claim::KernelClaim
+    epilogue::Vector{String}
+end
+
+Base.show(io::IO, b::BuiltKernel) = print(io, b.claim, isempty(b.claim.params) ? "" : string(", ", b.claim.params, ", the first candidates"),
+    isempty(b.epilogue) ? "" : string(", with an epilogue on ", join(b.epilogue, ", ")))
+
+# The array a buffer holds in these dims, unless nobody reads it.
+dense(buffer, dims) = buffer === nothing ? nothing : reshape(buffer, dims)
+
+# The terms of the forms a kernel names, in their structure, for the results of its call.
+after_terms(term, ::Nothing, results) = nothing
+after_terms(term, ::Form, result::Int) = term(result)
+after_terms(term, forms::Tuple, results) = ntuple(k -> after_terms(term, forms[k], results[k]), length(forms))
+after_terms(term, forms::NamedTuple, results) = map(k -> after_terms(term, forms[k], results[k]), NamedTuple{keys(forms)}(keys(forms)))
+
+"""
+Build a `KernelClaim`: the body takes groups of arrays on the target, in the
+program's shapes. The results come first, in the structure the operation
+returns, each written where the group stores it (in the place of the epilogue's
+value for a result with one); then the arguments, then the scratch the kernel
+declared, its parameters and the terms of its forms, where it declared them.
+"""
+function build_kernel(target, p::Plan, g::Group, c::KernelClaim, buffers)
+    graph, kernel = p.graph, c.kernel
+    outs = sort(filter(v -> graph.values[v].definition isa Opaque, g.outputs); by = v -> graph.values[v].definition.node.op.output)
+    d = graph.values[first(outs)].definition
+    op = d.node.op
+    results = rebuild(n -> dense(buffers[get(g.epilogues, outs[n], outs[n])], graph.values[outs[n]].definition.node.dims), op.structure)
+    arguments = map((o, (dims, _)) -> dense(buffers[o.value], dims), d.operands, d.shapes)
+    groups = Any[results, arguments]
+    kernel.scratch === nothing || push!(groups, map(s -> dense(allocate(target, eltype(s), prod(size(s); init = 1)), size(s)), kernel.scratch))
+    kernel.params === nothing || push!(groups, c.params)
+    term(n) = haskey(g.epilogues, outs[n]) ? epilogue_term(target, p, g, outs[n], buffers) : identity
+    kernel.epilogue === nothing || push!(groups, after_terms(term, kernel.epilogue, op.structure))
+    hasmethod(kernel.body, NTuple{length(groups), Any}) ||
+        throw(ArgumentError("the body of $c does not take $(length(groups)) groups: results, arguments, then scratch, params and after where declared"))
+    taken = sort([graph.values[r].definition.node.op.output for r in keys(g.epilogues)])
+    name(n) = op.structure isa NamedTuple ? string(findfirst(==(n), op.structure)) : string("result ", n)
+    (KernelLaunch(kernel.body, Tuple(groups)), BuiltKernel(c, map(name, taken)))
+end
 
 # The CPU target.
 allocate(::CPUTarget, T, n) = Vector{T}(undef, n)
@@ -486,23 +535,17 @@ function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
     (() -> foreach(l -> l(), launches), FloorKernels(ks))
 end
 
-# An implementation's claimed call may run on dense host copies, with its
-# epilogues.
-function opaque_launch(p, g, buffers)
+# The term absorbed after result `r`, as a function of the result's array
+# that gives the array stored in its place: the epilogue evaluated at each
+# element, reading the other arrays at the time it is called.
+function epilogue_term(::CPUTarget, p::Plan, g::Group, r, buffers)
     graph = p.graph
-    function launch()
+    function term(y)
         arrays = Vector{Any}(undef, length(graph.values))
         for (id, b) in enumerate(buffers)
-            b === nothing && continue
-            val = graph.values[id]
-            arrays[id] = val.scalar ? Array(b)[1] : reshape(Array(b), val.dims)
+            b === nothing || (arrays[id] = graph.values[id].scalar ? b[1] : reshape(b, graph.values[id].dims))
         end
-        run_group!(g, arrays, graph)
-        for v in g.outputs
-            p.stored[v] || continue
-            y = arrays[v]
-            copyto!(buffers[v], y isa Number ? [y] : vec(y))
-        end
+        results = Dict(r => reshape(y, opaque_dims(graph.values[r].definition)))
+        reshape(evaluate_epilogue(g, g.epilogues[r], arrays, results, graph), size(y))
     end
-    (launch, :opaque)
 end

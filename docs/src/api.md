@@ -68,6 +68,11 @@ Tempest.IR
 Tempest.Implementations
 Tempest.Implementations.Implementation
 Tempest.Implementations.register!
+Tempest.Implementations.Spec
+Tempest.Implementations.bytes
+Tempest.Implementations.Kernel
+Tempest.Implementations.Form
+Tempest.Implementations.pointwise
 Tempest.Implementations.GroupView
 Tempest.Implementations.ValueView
 Tempest.Implementations.CallResult

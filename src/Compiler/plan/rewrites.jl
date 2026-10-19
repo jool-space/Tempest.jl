@@ -100,7 +100,7 @@ through(x::Read, index, d::Domain) = Read(x.value, map(e -> substitute(e, index,
 through(x::Literal, index, d::Domain) = x
 through(x::IndexOperand{T}, index, d::Domain) where {T} = IndexOperand{T}(substitute(x.expr, index, d))
 
-pointwise(graph, o, f) = o isa Read && (d = graph.values[o.value].definition) isa Pointwise && d.f === f
+applies(graph, o, f) = o isa Read && (d = graph.values[o.value].definition) isa Pointwise && d.f === f
 
 "The operands of the pointwise value `o` reads, as read from the reader's domain."
 inner(graph, o::Read, d::Domain) = map(x -> through(x, o.index, d), graph.values[o.value].definition.operands)
@@ -112,7 +112,7 @@ mentions(::Literal, k) = false
 # The factors of the product `o` reads, through the products and quotients of
 # type `T` it reads: each an operand and its power, 1 or -1.
 function factors(graph, o, d::Domain, T = eltype_of(graph, o), power = 1)
-    if (pointwise(graph, o, *) || pointwise(graph, o, /)) && eltype_of(graph, o) === T
+    if (applies(graph, o, *) || applies(graph, o, /)) && eltype_of(graph, o) === T
         xs = inner(graph, o, d)
         if length(xs) == 2 && all(x -> x isa Literal || eltype_of(graph, x) === T, xs)
             quotient = graph.values[o.value].definition.f === (/)
@@ -158,9 +158,9 @@ function weighted(graph, r, F)
     T = graph.values[r].eltype
     fs = factors(graph, d.operand, domain, T)
     for (j, (o, power)) in enumerate(fs)
-        power == 1 && pointwise(graph, o, exp) && eltype_of(graph, o) === T || continue
+        power == 1 && applies(graph, o, exp) && eltype_of(graph, o) === T || continue
         x = only(inner(graph, o, domain))
-        pointwise(graph, x, -) || continue
+        applies(graph, x, -) || continue
         y, m = inner(graph, x, domain)
         m isa Read && m.value == F && eltype_of(graph, y) === T || continue
         index = aligned(graph, F, m.index, d.reduced, domain)

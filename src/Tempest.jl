@@ -23,10 +23,12 @@ include("Compiler/Compiler.jl")
 
 # What models are written with: the front door, and the functions programs
 # call beyond Base. What operations are written with: `@operation` and its rules.
+# What kernel packages are written with: `Spec`, `Kernel`, `pointwise` and `register!`.
 @republic using .Compiler: compile, Compiled, gradient, explain, CPUTarget, CUDATarget,
     contract, fold, logsumexp, positions, axis_positions, batched_mul,
     @operation, reference, declared_results, has_pullback, verb_pullback, scalar_partials
 @republic using .IR: GenericFold
+@republic using .Implementations: Spec, Kernel, Form, pointwise, bytes, register!
 
 include("Operations/Operations.jl")
 

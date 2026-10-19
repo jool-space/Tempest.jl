@@ -21,7 +21,8 @@ import ..IR: mentions
 
 # The protocol of implementations, which the cover calls and the generator implements.
 @republic republic=false inherit=:public import ..Implementations
-using ..Implementations: REGISTERED
+using ..Implementations: REGISTERED, Kernels, KernelClaim
+import ..Implementations: call_claims
 
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 

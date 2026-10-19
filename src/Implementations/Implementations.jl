@@ -12,7 +12,7 @@ using Republic: @republic
 @republic republic=false inherit=:public using ..IR
 
 public Implementation, Work, register!, claims, estimate, build_claim, candidates, record_name,
-    recomputes_folds, in_place, claims_call, epilogue_results, build_call
+    recomputes_folds, in_place, claims_call, epilogue_results, build_call, Spec, bytes, Kernel, Form, pointwise
 
 include("groups.jl")
 
@@ -38,14 +38,21 @@ Work(bytes; flops = 0.0, rate = Inf, blocks = Inf) = Work(bytes, flops, rate, bl
 const REGISTERED = Pair{Module, Vector{Implementation}}[]
 
 """
-    register!(package::Module, implementations...)
+    register!(package::Module, items...)
 
-Make `implementations` available under `package`, replacing what it registered
-before; extensions call this when their packages load.
+Make `items` available under `package`, replacing what it registered before;
+extensions call this when their packages load. An item is an `Implementation`
+or a pair `operation => function`, which registers `function` as a way to run
+the operation: it takes the target and the call's `Spec`s, with the call's
+keywords, and returns a `Kernel`, a vector of them, or `nothing` to decline.
+The package's pairs come before its implementations.
 """
-function register!(package::Module, implementations::Implementation...)
+function register!(package::Module, items::Union{Implementation, Pair}...)
     filter!(p -> p.first !== package, REGISTERED)
-    isempty(implementations) || push!(REGISTERED, package => Implementation[implementations...])
+    implementations = Implementation[i for i in items if i isa Implementation]
+    pairs = Pair{Any, Any}[p for p in items if p isa Pair]
+    isempty(pairs) || pushfirst!(implementations, Kernels(package, pairs))
+    isempty(implementations) || push!(REGISTERED, package => implementations)
     sort!(REGISTERED; by = p -> string(nameof(p.first)))
     nothing
 end
@@ -102,6 +109,10 @@ into the storage of a value they read only at the address they write it (see
 """
 in_place(::Implementation, claim) = false
 
+# Claims on calls by the three methods below predate the operation pairs of
+# `register!`, which are the interface for kernels of operations. They remain
+# for a kernel that states its products at a rate, until rates are Tempest's.
+
 """
     claims_call(implementation, target, f, kwargs, inputs) -> Bool
 
@@ -135,5 +146,131 @@ tile by the group's terms. Arguments are read densely in their program shapes
 nobody and may be left unwritten.
 """
 function build_call end
+
+# Kernels of named operations: a package registers a function for an operation,
+# and Tempest asks it for a kernel at each call, with the call's arguments as
+# `Spec`s. The kernel's body takes groups of arrays, which Tempest builds when
+# the program is prepared (see `build_kernel`).
+
+"""
+    Spec(T, dims...)
+
+An argument of a call as a kernel's function sees it, before any buffer exists:
+an element type and dimensions, with `size`, `eltype` and `bytes`. It carries
+no layout; a kernel reads its arguments and writes its results densely in
+their program shapes.
+"""
+struct Spec{T, N}
+    dims::NTuple{N, Int}
+end
+
+Spec(::Type{T}, dims::Integer...) where {T} = Spec{T, length(dims)}(Int.(dims))
+Spec(::Type{T}, dims::Tuple) where {T} = Spec(T, dims...)
+
+Base.size(s::Spec) = s.dims
+Base.size(s::Spec, k) = s.dims[k]
+Base.eltype(::Spec{T}) where {T} = T
+
+"The bytes of an array of this spec."
+bytes(s::Spec) = sizeof(eltype(s)) * prod(s.dims; init = 1)
+
+"""
+    Form
+
+A form of work after a result that a kernel may absorb. Only `pointwise` exists:
+a function applied to each element of the result before it is stored.
+"""
+struct Form
+    name::Symbol
+end
+
+const pointwise = Form(:pointwise)
+
+"""
+    Kernel(body; cost = nothing, scratch = nothing, params = nothing, epilogue = nothing)
+
+What a registered function returns for a call. When the program runs,
+`body(results, arguments[, scratch][, params][, after])` runs on the target's
+arrays, with the groups the kernel declares: `results` has the structure the
+operation returns, and a result nobody reads is `nothing`.
+
+`cost` is the bytes the kernel moves. Left out, it is the bytes its group reads
+and writes, in one launch; a number is one launch; a `Work` is one launch that
+states flops too; a vector of numbers and `Work`s has one entry per launch.
+`scratch` is a tuple of `Spec`s of workspace, and `params` a named tuple of
+candidate values, the first of each of which is used. `epilogue` names a `Form`
+per result it absorbs work after, in the structure of the results, and `after`
+holds the function to apply, in that structure.
+"""
+struct Kernel{F, C, S, P, E}
+    body::F
+    cost::C
+    scratch::S
+    params::P
+    epilogue::E
+end
+
+Kernel(body; cost = nothing, scratch = nothing, params = nothing, epilogue = nothing) = Kernel(body, cost, scratch, params, epilogue)
+
+# The implementation of a package's operation pairs.
+struct Kernels <: Implementation
+    package::Module
+    pairs::Vector{Pair{Any, Any}}
+end
+
+# A kernel a registered function returned for a call: which of its kernels,
+# the call's keywords, the first candidate of each parameter, and the results
+# it absorbs a form after, by number.
+struct KernelClaim
+    package::Module
+    registered::Any
+    index::Int
+    kernel::Kernel
+    kwargs::NamedTuple
+    params::NamedTuple
+    absorbs::Tuple{Vararg{Int}}
+end
+
+Base.show(io::IO, c::KernelClaim) = print(io, nameof(c.package), ".", nameof(c.registered), c.index > 1 ? "[$(c.index)]" : "")
+
+# The results, by number, that `epilogue` names a form after, in the structure `results` of the call's.
+absorbed(::Nothing, results) = ()
+absorbed(::Form, result::Int) = (result,)
+absorbed(epilogue::Union{Tuple, NamedTuple}, results) = Tuple(r for k in keys(epilogue) for r in absorbed(epilogue[k], results[k]))
+
+kernels(::Nothing) = ()
+kernels(kernel::Kernel) = (kernel,)
+kernels(list::AbstractVector) = list
+
+"""
+    call_claims(implementation, target, op, specs) -> claims
+
+The ways `implementation` can run the call `op` (a result's `Call`) with
+arguments `specs` on `target`: every kernel the package's functions for the
+operation return, or for any other implementation what `claims_call` says.
+"""
+function call_claims end
+
+function call_claims(k::Kernels, target, op, specs)
+    claims = KernelClaim[]
+    for (f, registered) in k.pairs
+        f === op.f || continue
+        # A method that does not apply is no method; `nothing` declines too.
+        hasmethod(registered, Tuple{typeof(target), map(typeof, specs)...}, keys(op.kwargs)) || continue
+        for (index, kernel) in enumerate(kernels(registered(target, specs...; op.kwargs...)))
+            params = kernel.params === nothing ? (;) : map(first, kernel.params)
+            push!(claims, KernelClaim(k.package, registered, index, kernel, op.kwargs, params, absorbed(kernel.epilogue, op.structure)))
+        end
+    end
+    claims
+end
+
+launch_work(cost::Real) = Work(Float64(cost))
+launch_work(work::Work) = work
+
+estimate(::Kernels, c::KernelClaim, target, group) =
+    c.kernel.cost === nothing ? [Work(group.bytes)] : map(launch_work, vcat(c.kernel.cost))
+
+record_name(::Kernels, c::KernelClaim) = string(c, isempty(c.kwargs) ? "" : string(c.kwargs), isempty(c.params) ? "" : string(", ", c.params))
 
 end

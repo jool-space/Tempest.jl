@@ -1,22 +1,45 @@
 # Operations: functions that keep their names under tracing. A call is
 # recorded per result and evaluated through its reference (an opaque one
 # through its own method); at the index level it is its reference expanded,
-# and an implementation's claim on it, one opaque group that may absorb the
+# and a package's kernel for it, one opaque group that may absorb the
 # pointwise work after a result as an epilogue, competes with that expansion
 # by cost.
 include("fixtures/programs.jl")
 
-# A claim on the CPU that realizes attention through its reference on the host.
-struct HostAttention <: C.Implementation end
-C.claims_call(::HostAttention, ::T.CPUTarget, f, kwargs, inputs) = f in (Ops.attention_forward, Ops.attention_backward)
-C.epilogue_results(::HostAttention, ::typeof(Ops.attention_forward), kwargs) = (1,)
-C.build_call(::HostAttention, target, g, buffers) = g.reference(target, buffers)
+# Write what the operation returns into the results the program reads.
+store!(results, values) = foreach((y, x) -> y === nothing || copyto!(y, x), results, values)
 
-# A claim on attention estimated far slower than its reference.
-struct SlowAttention <: C.Implementation end
-C.claims_call(::SlowAttention, ::T.CPUTarget, f, kwargs, inputs) = f === Ops.attention_forward
-C.estimate(::SlowAttention, claim, target, g) = [C.Work(1.0e12)]
-C.build_call(::SlowAttention, target, g, buffers) = g.reference(target, buffers)
+with_kernels(f, package, items...) = (T.register!(package, items...); try f() finally T.register!(package) end)
+
+# Attention on the CPU through its own method, absorbing the work after its output.
+module HostAttention
+using Tempest: CPUTarget, Spec, Kernel, pointwise
+using Tempest.Operations: attention_forward, attention_backward
+import ..store!
+
+forward(::CPUTarget, q::Spec, k::Spec, v::Spec; causal, scale) =
+    Kernel(; epilogue = (o = pointwise,)) do (o, lse), (q, k, v), after
+        y = attention_forward(q, k, v; causal, scale)
+        store!((o, lse), (after.o(y.o), y.lse))
+    end
+
+backward(::CPUTarget, q::Spec, k::Spec, v::Spec, o::Spec, lse::Spec, dout::Spec, dlse::Spec; causal, scale) =
+    Kernel() do (dq, dk, dv), (q, k, v, o, lse, dout, dlse)
+        store!((dq, dk, dv), attention_backward(q, k, v, o, lse, dout, dlse; causal, scale))
+    end
+end
+
+# Attention priced at far more bytes than its reference moves.
+module SlowAttention
+using Tempest: CPUTarget, Spec, Kernel
+using Tempest.Operations: attention_forward
+import ..store!
+
+forward(::CPUTarget, q::Spec, k::Spec, v::Spec; causal, scale) =
+    Kernel(; cost = 1.0e12) do (o, lse), (q, k, v)
+        store!((o, lse), attention_forward(q, k, v; causal, scale))
+    end
+end
 
 q, k, v = data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
 x = data(4, 4, 6, 2; scale = 0.5)
@@ -28,7 +51,6 @@ calls(p) = [n for n in p.nodes if n.op isa C.Call]
 opaque_groups(ex) = [g for g in ex.plan.groups if g.kind === :opaque]
 results(ex) = map(r -> ndims(r) == 0 ? r[] : r, filter(!isnothing, C.leaves(outputs(execute!(ex)))))
 gradients(p, args...) = filter(!isnothing, C.leaves(interpret(differentiate(p), args...)))
-with_implementations(f, implementations...) = (C.register!(@__MODULE__, implementations...); try f() finally C.register!(@__MODULE__) end)
 
 @testset "calls" begin
     p = trace(residual, q, k, v, x)
@@ -36,16 +58,15 @@ with_implementations(f, implementations...) = (C.register!(@__MODULE__, implemen
     @test interpret(p, q, k, v, x) ≈ residual(q, k, v, x)
     @test !any(v -> v.definition isa C.Opaque, C.lower(p).values)
 
-    with_implementations(HostAttention()) do
+    with_kernels(HostAttention, Ops.attention_forward => HostAttention.forward, Ops.attention_backward => HostAttention.backward) do
         ex = prepare(p, q, k, v, x)
         g = only(opaque_groups(ex))
         o = only(keys(g.epilogues))
         @test !ex.plan.stored[o] # the residual is written in the output's place
         @test agree(results(ex), [residual(q, k, v, x)])
         @test occursin("call of attention_forward (%", sprint(explain, ex))
-        @test occursin("HostAttention's claim with an epilogue replaces its reference expanded", sprint(explain, ex))
-        # Its kernel runs on host copies, so the program cannot be captured.
-        @test_throws r"runs on the host, so the program cannot be captured" capture!(ex)
+        @test occursin("HostAttention's kernel with an epilogue replaces its reference expanded", sprint(explain, ex))
+        @test occursin("kernel 1: HostAttention.forward, with an epilogue on o (estimated", sprint(explain, ex))
 
         # A result nobody reads is not stored.
         ex = prepare(trace((q, k, v) -> Ops.attention(q, k, v; causal = true), q, k, v), q, k, v)
@@ -57,7 +78,7 @@ with_implementations(f, implementations...) = (C.register!(@__MODULE__, implemen
         @test isempty(only(opaque_groups(ex)).epilogues)
         @test agree(results(ex), [permuted(q, k, v, y)])
 
-        # Training claims the backward operation too.
+        # Training runs the backward operation's kernel too.
         d = differentiate(p)
         @test length(calls(d)) == 5 # o, lse; dq, dk, dv
         ex = prepare(d, q, k, v, x)
@@ -67,12 +88,12 @@ with_implementations(f, implementations...) = (C.register!(@__MODULE__, implemen
         @test agree(results(ex), filter(!isnothing, C.leaves(interpret(d, q, k, v, x))))
     end
 
-    # A claim estimated slower than the reference fused into its neighbours
+    # A kernel estimated slower than the reference fused into its neighbours
     # loses to it, and `explain` says so.
-    with_implementations(SlowAttention()) do
+    with_kernels(SlowAttention, Ops.attention_forward => SlowAttention.forward) do
         ex = prepare(p, q, k, v, x)
         @test isempty(opaque_groups(ex))
-        @test occursin("its reference expanded is kept over SlowAttention's claim", sprint(explain, ex))
+        @test occursin("its reference expanded is kept over SlowAttention's kernel", sprint(explain, ex))
         @test agree(results(ex), [residual(q, k, v, x)])
     end
 end
@@ -119,11 +140,26 @@ end
 @operation running_sum(x::AbstractVector)
 T.declared_results(::typeof(running_sum), ((dims, T),)) = (dims, T)
 
-# A CPU implementation of it, which applies the work after it as an epilogue.
-struct HostRunningSum <: C.Implementation end
-C.claims_call(::HostRunningSum, ::T.CPUTarget, f, kwargs, inputs) = f === running_sum
-C.epilogue_results(::HostRunningSum, ::typeof(running_sum), kwargs) = (1,)
-C.build_call(::HostRunningSum, target, g, buffers) = g.reference(target, buffers)
+# A CPU kernel for it, which applies the work after it as an epilogue.
+module HostRunningSum
+using Tempest: CPUTarget, Spec, Kernel, pointwise
+import ..running_sum
+
+kernel(::CPUTarget, x::Spec{<:Any, 1}) =
+    Kernel(; epilogue = pointwise) do y, (x,), after
+        y .= after(running_sum(x))
+    end
+end
+
+# A kernel that cannot be built: its workspace does not fit.
+module Unbuildable
+using Tempest: CPUTarget, Spec, Kernel
+
+kernel(::CPUTarget, x::Spec{T, 1}) where {T} =
+    Kernel(; cost = 0, scratch = (Spec(T, typemax(Int)),)) do y, (x,), (workspace,)
+        error("never runs")
+    end
+end
 
 prefix(x) = running_sum(x .* 2) .+ 1
 prefix_loss(x) = sum(abs2, prefix(x))
@@ -133,18 +169,18 @@ prefix_loss(x) = sum(abs2, prefix(x))
     p = trace(prefix_loss, a)
     @test only(calls(p)).op.f === running_sum
     @test interpret(p, a) ≈ prefix_loss(a) # through its own method
-    # Without an implementation, preparation fails and names it; without a
+    # Without a kernel, preparation fails and names the operation; without a
     # rule, so does differentiation.
     @test occursin(r"no implementation on .*CPUTarget\(\) runs running_sum", message(() -> prepare(p, a)))
     @test occursin("running_sum is an opaque operation without a derivative rule", message(() -> differentiate(p)))
-    with_implementations(HostRunningSum()) do
+    with_kernels(HostRunningSum, running_sum => HostRunningSum.kernel) do
         ex = prepare(p, a)
         @test length(opaque_groups(ex)) == 1
         @test agree(results(ex), [prefix_loss(a)])
         # The + 1 is written in the result's place, which saves a kernel.
         ex = prepare(trace(prefix, a), a)
         @test length(only(opaque_groups(ex)).epilogues) == 1 && length(ex.kernels) == 2
-        @test occursin("HostRunningSum's claim with an epilogue replaces its claim without an epilogue", sprint(explain, ex))
+        @test occursin("HostRunningSum's kernel with an epilogue replaces its kernel without an epilogue", sprint(explain, ex))
         @test agree(results(ex), [prefix(a)])
     end
 end
@@ -159,7 +195,7 @@ T.verb_pullback(::typeof(running_sum), (x,), y, dy) = (sum(dy) .- running_sum(dy
     d = differentiate(trace(prefix_loss, a))
     g = 2 .* (cumsum(2 .* a) .+ 1)
     @test last(interpret(d, a)) ≈ 2 .* reverse(cumsum(reverse(g)))
-    with_implementations(HostRunningSum()) do
+    with_kernels(HostRunningSum, running_sum => HostRunningSum.kernel) do
         @test agree(results(prepare(d, a)), filter(!isnothing, C.leaves(interpret(d, a))))
     end
 end
@@ -193,13 +229,24 @@ const NNLIB = [
     end
 end
 
-# An implementation of NNlib's softmax that also claims a softmax written out
-# by hand: the exponential of a value less its log-sum-exp over the first axis.
-struct HostSoftmax <: C.Implementation end
-C.claims_call(::HostSoftmax, ::T.CPUTarget, f, kwargs, inputs) = f === NNlib.softmax && kwargs == (dims = 1,)
-C.estimate(::HostSoftmax, claim, target, g) = [C.Work(0.0)]
-C.build_call(::HostSoftmax, target, g, buffers) = g.reference(target, buffers)
-function C.candidates(::HostSoftmax, ::T.CPUTarget, p)
+# NNlib's softmax over the first axis as a kernel, and the same softmax
+# written out as a claim of the group protocol: the exponential of a value less
+# its log-sum-exp over the first axis.
+module HostSoftmax
+using Tempest: CPUTarget, Spec, Kernel
+import Tempest.Compiler as C
+using NNlib: softmax
+
+function kernel(::CPUTarget, x::Spec; dims)
+    dims == 1 || return nothing
+    Kernel(; cost = 0) do y, (x,)
+        copyto!(y, softmax(x; dims = 1))
+    end
+end
+
+struct WrittenOut <: C.Implementation end
+
+function C.candidates(::WrittenOut, ::CPUTarget, p)
     graph = p.graph
     found = []
     for (e, v) in enumerate(graph.values)
@@ -211,22 +258,26 @@ function C.candidates(::HostSoftmax, ::T.CPUTarget, p)
         x.index == C.identity_index(graph.values[x.value].dims) && graph.values[x.value].dims == v.dims || continue
         lse = graph.values[l.value].definition
         lse isa C.Reduction{C.LogSumExpFold} && lse.reduced == (1,) && lse.operand == x || continue
-        push!(found, C.ClaimedCall(C.call_site(graph, NNlib.softmax, (dims = 1,), [l.value, s, e], [x.value], [e]), ()))
+        push!(found, C.ClaimedCall(C.call_site(graph, softmax, (dims = 1,), [l.value, s, e], [x.value], [e]), ()))
     end
     found
+end
 end
 
 @testset "claims of computations written out" begin
     a = data(8, 6)
     named = x -> NNlib.softmax(x; dims = 1)
     written = x -> exp.(x .- T.logsumexp(x; dims = 1))
-    with_implementations(HostSoftmax()) do
+    with_kernels(HostSoftmax, NNlib.softmax => HostSoftmax.kernel, HostSoftmax.WrittenOut()) do
         for (f, instead) in ((named, "its reference expanded"), (written, "the computation as written"))
             ex = prepare(trace(f, a), a)
             @test length(opaque_groups(ex)) == 1
-            @test occursin("call of softmax (%", sprint(explain, ex)) && occursin("HostSoftmax's claim replaces $instead", sprint(explain, ex))
+            @test occursin("call of softmax (%", sprint(explain, ex)) && occursin("HostSoftmax's kernel replaces $instead", sprint(explain, ex))
             @test agree(results(ex), [f(a)])
         end
+        # The kernel declines the softmax over rows by returning nothing.
+        ex = prepare(trace(x -> NNlib.softmax(x; dims = 2), a), a)
+        @test isempty(opaque_groups(ex))
     end
 end
 
@@ -253,7 +304,7 @@ if CUDA_FUNCTIONAL
         d = differentiate(p)
         ex = prepare(d, device((q, k, v, x))...; target)
         @test length(opaque_groups(ex)) in (1, 2)
-        @test occursin(r"call of attention_forward \(.*\): cuTileAttention's claim", sprint(explain, ex))
+        @test occursin(r"call of attention_forward \(.*\): cuTileAttention's kernel", sprint(explain, ex))
         # The log-sum-exp's cotangent, a constant, is generated too.
         @test !any(d -> d isa C.FloorKernels, ex.kernels)
         @test close(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v, x))); rtol)
@@ -270,8 +321,8 @@ if CUDA_FUNCTIONAL
                 rewrite(t)
                 ex = prepare(p, device((q, k, v, x))...; target)
                 @test isempty(opaque_groups(ex)) != claimed
-                @test occursin(claimed ? "cuTileAttention's claim with an epilogue replaces its reference expanded" :
-                    "its reference expanded is kept over cuTileAttention's claim", sprint(explain, ex))
+                @test occursin(claimed ? "cuTileAttention's kernel with an epilogue replaces its reference expanded" :
+                    "its reference expanded is kept over cuTileAttention's kernel", sprint(explain, ex))
                 if claimed
                     @test length(only(opaque_groups(ex)).epilogues) == 1
                     @test any(d -> d isa Base.get_extension(Tempest, :cuTileExt).BuiltAttention, ex.kernels)
@@ -306,18 +357,22 @@ if CUDA_FUNCTIONAL
     end
 end
 
-# A claim that fails to build, met while measuring a close call, loses: it is
-# never timed, and preparation goes on without it.
-struct Unbuildable <: C.Implementation end
-C.estimate(::Unbuildable, claim, target, g) = [C.Work(1.0)]
-C.build_claim(::Unbuildable, claim, target, g, buffers) = error("this claim does not build")
-
-@testset "a claim that fails to build loses" begin
-    graph = C.lower(trace(x -> sum(abs2, x), data(8)))
-    planned = C.plan(graph)
-    d = C.Decider(T.CPUTarget(), graph)
-    g = only(planned.groups)
-    o = C.choice(d, planned, g, C.group_view(planned, g), Unbuildable(), nothing)
-    C.measure!(d, planned, g, o)
-    @test d.record[o.key] == Inf
+# A kernel that fails to build loses: preparation goes on with the next option,
+# and measuring a close call records it as never finishing.
+@testset "a kernel that fails to build loses" begin
+    a = data(12)
+    p = trace(prefix_loss, a)
+    with_kernels(HostRunningSum, running_sum => HostRunningSum.kernel) do
+        with_kernels(Unbuildable, running_sum => Unbuildable.kernel) do
+            ex = prepare(p, a)
+            @test agree(results(ex), [prefix_loss(a)])
+            graph = C.lower(p)
+            planned = C.plan(graph)
+            d = C.Decider(T.CPUTarget(), graph)
+            g = only(g for g in planned.groups if g.kind === :opaque)
+            o = only(x for x in C.options(d, planned, g) if occursin("Unbuildable", x.key))
+            C.measure!(d, planned, g, o)
+            @test d.record[o.key] == Inf
+        end
+    end
 end

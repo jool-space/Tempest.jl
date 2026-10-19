@@ -23,8 +23,8 @@ julia> c([1.0, 2.0, 3.0, 4.0])
 ```
 
 With `capture`, the program's launches are recorded once as one graph that
-each call replays, as `capture!` and `replay!` do, unless the program has work
-on the host. Results are the same either way.
+each call replays, as `capture!` and `replay!` do. Results are the same either
+way.
 
 For a step that updates its state where it is and replays without copies,
 use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
@@ -33,7 +33,7 @@ use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
 """
 function compile(f, @nospecialize(args...); target = default_target(args), measure::Bool = true, capture::Bool = true)
     ex = prepare(trace(f, args...), args...; target, measure)
-    capture && !any(k -> k === :opaque, ex.kernels) && capture!(ex)
+    capture && capture!(ex)
     Compiled(f, ex, signature(args))
 end
 

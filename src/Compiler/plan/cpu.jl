@@ -52,17 +52,20 @@ function run_opaque!(g::Group, buffers, graph)
         results[v] = d.node.scalar ? buffers[v] : reshape(buffers[v], opaque_dims(d))
     end
     for (o, e) in g.epilogues
-        val = graph.values[e]
-        if val.scalar
-            buffers[e] = evaluate_term(g.terms[e], (), nothing, buffers, results, graph)
-            continue
-        end
-        out = Array{val.eltype}(undef, val.dims)
-        for I in CartesianIndices(val.dims)
-            out[I] = evaluate_term(g.terms[e], Tuple(I) .- 1, I, buffers, results, graph)
-        end
-        buffers[e] = out
+        buffers[e] = evaluate_epilogue(g, e, buffers, results, graph)
     end
+end
+
+# The value `e` an opaque group's kernel writes in a result's place: its term
+# at each element of `e`, reading the results' tiles as `Stat`.
+function evaluate_epilogue(g::Group, e, buffers, results, graph)
+    val = graph.values[e]
+    val.scalar && return evaluate_term(g.terms[e], (), nothing, buffers, results, graph)
+    out = Array{val.eltype}(undef, val.dims)
+    for I in CartesianIndices(val.dims)
+        out[I] = evaluate_term(g.terms[e], Tuple(I) .- 1, I, buffers, results, graph)
+    end
+    out
 end
 
 function run_pointwise!(g::Group, buffers, graph)
