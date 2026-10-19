@@ -49,7 +49,8 @@ end
 # stores the map and gives it a kernel of its own, since a fold's group grows
 # only through values after the fold. Computing the map inside the fold's
 # kernel, which also writes it for the product, is one kernel and one pass
-# over the map fewer; the estimate prefers it, and the cover never sees it.
+# over the map fewer; where the map is wide enough the estimate prefers it,
+# and the cover never sees it.
 map_fold_product(x, w) = (y = exp.(x); (sum(y; dims = 1), y * w))
 
 # The estimated time of a plan: the chosen option of each group.
@@ -69,9 +70,16 @@ end
     @test C.structure(alternative).kernels == 2
     @test first(alternative.groups).kind === :reduction
     @test agree(C.execute(alternative, x, w), C.leaves(map_fold_product(x, w)))
+    # At this size the fold's 32 items leave the fused kernel little parallelism.
+    @test estimated(p, T.CPUTarget()) <= estimated(alternative, T.CPUTarget())
     @testset "gap: $PRICED_GROUPING" begin
-        @test_broken estimated(p, T.CPUTarget()) <= estimated(alternative, T.CPUTarget())
-        @test_broken C.structure(p).kernels == 2
+        # Wide enough for the fused kernel to be the cheaper by estimate.
+        xw, ww = data(64, 512), data(512, 16)
+        pw = chosen(map_fold_product, xw, ww)
+        yw = findfirst(v -> v.definition isa C.Pointwise && v.dims == (64, 512), pw.graph.values)
+        sw = findfirst(v -> v.definition isa C.Reduction && v.dims == (512,), pw.graph.values)
+        @test estimated(C.plan(pw.graph; fixed = [[yw, sw]]), T.CPUTarget()) < estimated(pw, T.CPUTarget())
+        @test_broken C.structure(pw).kernels == 2
         if CUDA_FUNCTIONAL
             xf, wf = CuArray(single(x)), CuArray(single(w))
             @test_broken C.structure(chosen(map_fold_product, xf, wf; target = T.CUDATarget())).kernels == 2
