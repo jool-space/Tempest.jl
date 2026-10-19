@@ -188,6 +188,7 @@ struct Form
     name::Symbol
 end
 
+"The form of a function applied to each element of a result before it is stored."
 const pointwise = Form(:pointwise)
 
 """
