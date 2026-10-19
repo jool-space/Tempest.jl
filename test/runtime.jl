@@ -147,12 +147,12 @@ end
 # product as free, so the cover takes it. A candidate over several domains
 # (the product and a sum over its result) does not form a group.
 struct HostProducts <: C.Implementation end
-lone_product(p, g) = g.kind === :reduction && all(in(g.reductions), C.members(g)) && C.product_axes(p.graph, g) !== nothing
+lone_product(g) = g.kind === :reduction && all(in(g.reductions), C.members(g)) && C.product_axes(g) !== nothing
 C.candidates(::HostProducts, ::T.CPUTarget, p) = [C.grow(p.graph, r, set -> length(set) <= 1)
-    for g in p.groups if g.kind === :reduction && C.product_axes(p.graph, g) !== nothing for r in g.reductions]
-C.claims(::HostProducts, ::T.CPUTarget, p, g) = lone_product(p, g) ? [:host] : []
-C.estimate(::HostProducts, claim, target, p, g) = [C.Work(0.0)]
-C.build_claim(::HostProducts, claim, target, p, g, buffers) = C.build_floor(target, p, g, buffers)
+    for g in map(g -> C.group_view(p, g), p.groups) if g.kind === :reduction && C.product_axes(g) !== nothing for r in g.reductions]
+C.claims(::HostProducts, ::T.CPUTarget, g) = lone_product(g) ? [:host] : []
+C.estimate(::HostProducts, claim, target, g) = [C.Work(0.0)]
+C.build_claim(::HostProducts, claim, target, g, buffers) = g.reference(target, buffers)
 
 @testset "candidates from implementations" begin
     a, b = data(6, 5; scale = 0.3), data(5, 4)
@@ -167,7 +167,8 @@ C.build_claim(::HostProducts, claim, target, p, g, buffers) = C.build_floor(targ
         @test occursin("from HostProducts replaces", sprint(explain, ex))
         # The product, the tanh and a sum over the result span two domains.
         graph = C.lower(trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b))
-        r = only(g.reductions[1] for g in C.plan(graph).groups if C.product_axes(graph, g) !== nothing)
+        planned = C.plan(graph)
+        r = only(g.reductions[1] for g in planned.groups if C.product_axes(C.group_view(planned, g)) !== nothing)
         @test_throws C.NotAGroup C.plan(graph; fixed = [C.grow(graph, r, set -> length(set) <= 3)])
     finally
         C.register!(@__MODULE__)
@@ -178,8 +179,8 @@ end
 # them and leaves the kernels to the floor.
 struct RecomputeOnTheFloor <: C.Implementation end
 C.recomputes_folds(::RecomputeOnTheFloor, target) = true
-C.claims(::RecomputeOnTheFloor, target, p, g) = isempty(C.recomputed_in(g)) ? () : (:floor,)
-C.build_claim(::RecomputeOnTheFloor, claim, target, p, g, buffers) = error("left to the floor")
+C.claims(::RecomputeOnTheFloor, target, g) = isempty(C.recomputed_in(g)) ? () : (:floor,)
+C.build_claim(::RecomputeOnTheFloor, claim, target, g, buffers) = error("left to the floor")
 
 function with_recomputing_floor(f)
     C.register!(@__MODULE__, RecomputeOnTheFloor())
@@ -215,8 +216,8 @@ end
 # over two axes, which it does not claim.
 struct RecomputesOverThree <: C.Implementation end
 C.recomputes_folds(::RecomputesOverThree, target) = true
-C.claims(::RecomputesOverThree, target, p, g) = isempty(C.recomputed_in(g)) || length(g.domain) >= 3 ? (:claim,) : ()
-C.estimate(::RecomputesOverThree, claim, target, p, g) = [C.Work(0.0; flops = isempty(C.recomputed_in(g)) ? 1.0e-6 : 1.0, rate = 1.0)]
+C.claims(::RecomputesOverThree, target, g) = isempty(C.recomputed_in(g)) || length(g.domain) >= 3 ? (:claim,) : ()
+C.estimate(::RecomputesOverThree, claim, target, g) = [C.Work(0.0; flops = isempty(C.recomputed_in(g)) ? 1.0e-6 : 1.0, rate = 1.0)]
 C.candidates(::RecomputesOverThree, target::T.CPUTarget, p) = [[v] for g in p.groups for v in C.recomputed_in(g)]
 
 @testset "a fold recomputed where nothing claims its reader stays stored" begin
@@ -231,7 +232,7 @@ C.candidates(::RecomputesOverThree, target::T.CPUTarget, p) = [[v] for g in p.gr
         d = C.Decider(T.CPUTarget(), C.lower(trace(f, x, w)); measure = false)
         p, considered = C.cover(d)
         @test any(c -> c.accepted, considered)
-        @test all(g -> !isempty(C.claims(RecomputesOverThree(), d.target, p, g)), p.groups)
+        @test all(g -> !isempty(C.claims(RecomputesOverThree(), d.target, C.group_view(p, g))), p.groups)
     finally
         C.register!(@__MODULE__)
     end

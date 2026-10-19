@@ -25,9 +25,9 @@ using ..Implementations: REGISTERED
 
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 
-# What implementations read of a plan, until a view of a group replaces it: the
-# plan and its groups.
-public Plan, Group, members, group_bytes, placement, product_axes
+# What proposals read, until a view of the graph replaces it: the plan, and the
+# view of each of its groups.
+public Plan, group_view
 
 # The program level.
 include("program/program.jl")
@@ -45,7 +45,6 @@ include("index/interpret.jl")
 # Plans: what is stored, and the kernels.
 include("plan/planner.jl")
 include("plan/rewrites.jl")
-include("plan/products.jl")
 include("plan/cpu.jl")
 include("plan/explain.jl")
 include("plan/storage.jl")
@@ -53,6 +52,7 @@ include("plan/storage.jl")
 # Code generation and prepared programs.
 include("codegen/scalar.jl")
 include("runtime/runtime.jl")
+include("runtime/view.jl")
 include("runtime/decide.jl")
 include("runtime/cache.jl")
 include("runtime/compile.jl")

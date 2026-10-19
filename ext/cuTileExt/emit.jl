@@ -86,9 +86,7 @@ end
 
 # Everything a kernel of a group needs to know while emitting.
 struct Context
-    graph::Any
-    stored::Vector{Bool}
-    g::Group
+    g::GroupView
     s::TileSchedule
 end
 
@@ -101,7 +99,7 @@ value_spec(c::Context, v::View) = spec(v, extent(c.s))
 # Tile axes of extent one per tile are bound by the grid (or a loop): one index
 # per block, so a load may depend on them through any formula.
 scalar_groups(c::Context) = Tuple(i for (i, ax) in enumerate(c.s.tiling) if ax.tile == 1)
-load_view(c::Context, v, index) = view_of(c.graph, v, index, c.g, groups(c)...; scalar = scalar_groups(c))
+load_view(c::Context, v, index) = view_of(c.g, v, index, groups(c)...; scalar = scalar_groups(c))
 
 # Positions. Domain variable `n` at the tile of block indices `indices`: the
 # lanes of its tile axis, their collapsed index decoded into the axes of the
@@ -148,8 +146,8 @@ function load_tile(k::TileKernel, c::Context, t::Load, indices)
     v = gathers(t) ? nothing : load_view(c, t.value, t.index)
     v === nothing || return load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
     shape = spanned_shape(c, t)
-    linear = address(c.graph.values[t.value], t.index, Domain(c.g.domain))
-    flat = argument!(k, ArgSpec(t.value, 0, (storage_length(c.graph.values[t.value]),), (1,)))
+    linear = address(c.g.values[t.value], t.index, Domain(c.g.domain))
+    flat = argument!(k, ArgSpec(t.value, 0, (storage_length(c.g.values[t.value]),), (1,)))
     lanes = :($(ct.broadcast_to)($(index_tile(k, c, linear, indices)), $shape) .+ Int32(1))
     axes = findall(>(1), shape)
     mask = isempty(axes) ? nothing : :($(ct.broadcast_to)($(inside(c, axes, indices)), $shape))
@@ -176,8 +174,8 @@ elementwise(c::Context, t::Load) = gathers(t) || wraps(t) && load_view(c, t.valu
 # address the buffer, and the indices are integers it loads in turn.
 function loadable(c::Context, t::Load; index = false)
     !gathers(t) && load_view(c, t.value, t.index) !== nothing && return true
-    (index || elementwise(c, t)) && storage_length(c.graph.values[t.value]) < typemax(Int32) || return false
-    all(a -> c.graph.values[a.value].eltype in (Int32, Int64) && loadable(c, Load(a.value, a.index); index = true),
+    (index || elementwise(c, t)) && storage_length(c.g.values[t.value]) < typemax(Int32) || return false
+    all(a -> c.g.values[a.value].eltype in (Int32, Int64) && loadable(c, Load(a.value, a.index); index = true),
         reduce(vcat, map(indirect_atoms, t.index)))
 end
 
@@ -232,7 +230,7 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
             emit_fold!(k, statements, c, t, indices)
         elseif t isa Ix
             x = index_tile(k, c, t.expr, indices)
-            T = term_eltype(t, c.graph)
+            T = term_eltype(t, c.g)
             T === Int32 ? x : :(convert($(ct.Tile){$T}, $x))
         elseif t isa Apply
             args = map(a -> names[a], t.args)
@@ -246,8 +244,8 @@ function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indice
     names
 end
 
-fold_of(c::Context, r) = c.graph.values[r].definition.fold
-accumulator(c::Context, r) = fold_types(fold_of(c, r), term_eltype(c.g.terms[r], c.graph)).accumulator
+fold_of(c::Context, r) = c.g.values[r].fold
+accumulator(c::Context, r) = fold_types(fold_of(c, r), term_eltype(c.g.terms[r], c.g)).accumulator
 
 # Whether a fold's state and result are tiles.
 function tile_fold(f, T)
@@ -390,8 +388,8 @@ end
 # Folds over the swept axes complete in a block (or by merging splits) before
 # what reads them, in phases; folds over other axes complete by merging
 # partial states.
-primary_folds(c::Context) = [r for r in c.g.reductions if Tempest.Compiler.primary(c.graph, c.g, r)]
-partial_folds(c::Context) = [r for r in c.g.reductions if !Tempest.Compiler.primary(c.graph, c.g, r)]
+primary_folds(c::Context) = [r for r in c.g.reductions if c.g.values[r].reduced == c.g.primary_axes]
+partial_folds(c::Context) = [r for r in c.g.reductions if c.g.values[r].reduced != c.g.primary_axes]
 
 function reduction_phases(c::Context)
     folds = primary_folds(c)
@@ -401,7 +399,7 @@ end
 
 "The tile axes fold `r` reduces, or nothing when its axes are not whole tile axes."
 function fold_tiles(c::Context, r)
-    S = Tempest.Compiler.fold_axes(c.graph, r)
+    S = c.g.values[r].reduced
     tiles = [i for (i, ax) in enumerate(c.s.tiling) if issubset(ax.axes, S)]
     covered = reduce(vcat, (c.s.tiling[i].axes for i in tiles); init = Int[])
     all(k -> k in covered || c.g.domain[k] == 1, S) ? tiles : nothing
@@ -415,9 +413,9 @@ fold_tile_shape(c::Context, r) = ntuple(i -> i in fold_tiles(c, r) ? 1 : tile(c)
 function fold_spec!(c::Context, r, workspaces)
     v = output_view(c, r)
     spec = value_spec(c, v)
-    c.stored[r] && return (v, spec)
+    c.g.values[r].stored && return (v, spec)
     key = (:fold, r)
-    workspaces[key] = Workspace(key, c.graph.values[r].eltype, storage_length(c.graph.values[r]))
+    workspaces[key] = Workspace(key, c.g.values[r].eltype, storage_length(c.g.values[r]))
     (v, ArgSpec(key, spec.offset, spec.sizes, spec.strides))
 end
 
@@ -466,7 +464,7 @@ function tile_states!(k, st, c::Context, rs, names, indices)
     valid = tile_mask!(st, c, indices)
     for r in rs
         f, A = fold_of(c, r), accumulator(c, r)
-        x = as_accumulator(st, names[c.g.terms[r]], A, term_eltype(c.g.terms[r], c.graph), tile(c))
+        x = as_accumulator(st, names[c.g.terms[r]], A, term_eltype(c.g.terms[r], c.g), tile(c))
         states[r] = direct_state!(st, f, A, x, valid, Tuple(fold_tiles(c, r)))
     end
     states
@@ -485,10 +483,10 @@ function slot_expr(indices, axes, counts)
     (:($expr + Int32(1)), stride)
 end
 
-statistic_outputs(c::Context) = [m for m in c.g.outputs if c.graph.values[m].dims != c.g.domain]
-full_outputs(c::Context) = [m for m in c.g.outputs if c.graph.values[m].dims == c.g.domain]
+statistic_outputs(c::Context) = [m for m in c.g.outputs if c.g.values[m].dims != c.g.domain]
+full_outputs(c::Context) = [m for m in c.g.outputs if c.g.values[m].dims == c.g.domain]
 
-output_view(c::Context, m) = view_of(c.graph, m, Tempest.Compiler.placement(c.graph, c.g, m), c.g, groups(c)...)
+output_view(c::Context, m) = view_of(c.g, m, c.g.placement[m], groups(c)...)
 
 # Store values the group computes (outputs, or reductions as `Stat`s) at the
 # tile of block indices `indices`.
@@ -549,7 +547,7 @@ end
 function product_factor(c::Context, t::Term)
     t isa Apply && t.f isa Cast{Float32} || return t
     inner = only(t.args)
-    term_eltype(inner, c.graph) <: HalfFloat ? inner : t
+    term_eltype(inner, c.g) <: HalfFloat ? inner : t
 end
 
 # A tile whose lanes lie along tile axes `u` and `w` only, as a `(u, w)`
@@ -578,9 +576,9 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = sw
     E = c.s.tiling[p].extent
     if E % tk != 0 && !(fa isa Load && fb isa Load)
         push!(st, :($xa = ifelse.(reshape($(ct.arange)($tk), (1, $tk)) .<= Int32($E) - ($t - Int32(1)) * Int32($tk), $xa,
-            $(zero(term_eltype(fa, c.graph))))))
+            $(zero(term_eltype(fa, c.g))))))
     end
-    single = term_eltype(fa, c.graph) === Float32
+    single = term_eltype(fa, c.g) === Float32
     if c.s.precision === :tf32x3 && single
         # Each factor as a TF32 high part and a TF32 remainder; the product of
         # the remainders is below Float32 rounding and is dropped.
@@ -611,12 +609,12 @@ function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE)
     base = length(c.g.domain)
     inner = [TileAxis([base + j], e, min(nextpow(2, e), lanes), true) for (j, e) in enumerate(t.extents)]
     s = c.s
-    e = Context(c.graph, c.stored, Group(c.g.kind, (c.g.domain..., t.extents...)),
+    e = Context(GroupView(c.g.kind, (c.g.domain..., t.extents...), c.g.values),
         TileSchedule(s.sketch, [s.tiling; inner], s.splits, s.occupancy, s.swizzle, s.precision))
     lanes == INNER_TILE || return e
-    f = c.graph.values[t.value].definition.fold
+    f = c.g.values[t.value].fold
     if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
-        return fold_context(c, t; lanes = product_step(s.precision, term_eltype(product_factor(e, t.body.args[1]), c.graph)))
+        return fold_context(c, t; lanes = product_step(s.precision, term_eltype(product_factor(e, t.body.args[1]), c.g)))
     end
     any(x -> x isa Recomputed, subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
     fold_context(c, t; lanes = s.tiling[sweep_axis(s)].tile)
@@ -627,8 +625,8 @@ spanned_shape(c::Context, t::Term) =
     ntuple(q -> any(k -> mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
 
 function fold_expressible(c::Context, t::Recomputed)
-    val = c.graph.values[t.value]
-    tile_fold(val.definition.fold, term_eltype(t.body, c.graph)) && length(t.extents) == 1 || return false
+    val = c.g.values[t.value]
+    tile_fold(val.fold, term_eltype(t.body, c.g)) && length(t.extents) == 1 || return false
     terms_expressible(fold_context(c, t), (t.body,))
 end
 
@@ -650,9 +648,9 @@ function emit_fold!(k, st, c::Context, t::Recomputed, indices)
     e = fold_context(c, t)
     n = length(c.s.tiling)
     p = n + 1
-    f = c.graph.values[t.value].definition.fold
-    A = fold_types(f, term_eltype(t.body, c.graph)).accumulator
-    T = c.graph.values[t.value].eltype
+    f = c.g.values[t.value].fold
+    A = fold_types(f, term_eltype(t.body, c.g)).accumulator
+    T = c.g.values[t.value].eltype
     tp, E = e.s.tiling[p].tile, e.s.tiling[p].extent
     steps = cld(E, tp)
     j = gensym(:j)
@@ -673,7 +671,7 @@ function emit_fold!(k, st, c::Context, t::Recomputed, indices)
     if sums !== nothing
         sum_step!(k, loop, e, f, t.body, sums, acc, names, valid, (indices..., at), p)
     else
-        x = as_accumulator(loop, names[t.body], A, term_eltype(t.body, c.graph), shape)
+        x = as_accumulator(loop, names[t.body], A, term_eltype(t.body, c.g), shape)
         direct ? (acc = direct_state!(st, f, A, x, valid, p)) : accumulate_elements!(loop, f, A, acc, x, valid)
     end
     steps == 1 || push!(st, :(for $j in Int32(1):Int32($steps)

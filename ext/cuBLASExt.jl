@@ -10,7 +10,7 @@ using Republic: @republic
 using Tempest: CUDATarget
 @republic republic=false inherit=:public using Tempest.IR
 @republic republic=false inherit=:public import Tempest.Implementations
-using Tempest.Compiler: Plan, Group, members, group_bytes, placement, product_axes
+using Tempest.Compiler: Plan, group_view
 
 struct cuBLASProducts <: Implementation end
 
@@ -45,8 +45,8 @@ compute_type(target::CUDATarget, T) =
 
 # Strides of value `v` read at `index` along each group of axes, and its offset;
 # nothing when the read is not a strided view over them.
-function strides(graph, v, index, g::Group, groups...)
-    e = address(graph.values[v], index, Domain(g.domain))
+function strides(g::GroupView, v, index, groups...)
+    e = address(g.values[v], index, Domain(g.domain))
     is_affine(e) || return nothing
     covered = reduce(vcat, groups; init = Int[])
     any(k -> g.domain[k] > 1 && coefficient(e, k) != 0 && !(k in covered), eachindex(g.domain)) && return nothing
@@ -72,33 +72,32 @@ end
 
 # A factor's load: the load itself, or a half-precision load converted to
 # Float32, whose products cuBLAS accumulates in Float32 exactly.
-factor_load(t::Load, graph) = t
-function factor_load(t::Apply, graph)
+factor_load(t::Load, g) = t
+function factor_load(t::Apply, g)
     t.f isa Cast{Float32} && only(t.args) isa Load || return nothing
     l = only(t.args)
-    graph.values[l.value].eltype <: HalfFloat ? l : nothing
+    g.values[l.value].eltype <: HalfFloat ? l : nothing
 end
-factor_load(t, graph) = nothing
+factor_load(t, g) = nothing
 
-function claims(::cuBLASProducts, target::CUDATarget, p::Plan, g::Group)
+function claims(::cuBLASProducts, target::CUDATarget, g::GroupView)
     g.kind === :reduction && length(g.reductions) == 1 && isempty(g.outputs) || return GemmClaim[]
-    graph = p.graph
     r = only(g.reductions)
-    p.stored[r] && graph.values[r].definition.fold isa SumFold || return GemmClaim[]
-    found = product_axes(graph, g)
+    g.values[r].stored && g.values[r].fold isa SumFold || return GemmClaim[]
+    found = product_axes(g)
     found === nothing && return GemmClaim[]
     M, N, K, B = found
-    x, y = map(f -> factor_load(f, graph), g.terms[r].args)
+    x, y = map(f -> factor_load(f, g), g.terms[r].args)
     (x === nothing || y === nothing) && return GemmClaim[]
-    T = graph.values[x.value].eltype
-    R = graph.values[r].eltype
-    T in FACTOR_TYPES && graph.values[y.value].eltype === T && (R === T || R === Float32) || return GemmClaim[]
+    T = g.values[x.value].eltype
+    R = g.values[r].eltype
+    T in FACTOR_TYPES && g.values[y.value].eltype === T && (R === T || R === Float32) || return GemmClaim[]
     extent(axes) = prod(k -> g.domain[k], axes; init = 1)
     m, n, k, batch = extent(M), extent(N), extent(K), extent(B)
     max(m, n, k, batch) < typemax(Int32) || return GemmClaim[]
-    sx = strides(graph, x.value, x.index, g, M, K, B)
-    sy = strides(graph, y.value, y.index, g, K, N, B)
-    sc = strides(graph, r, placement(graph, g, r), g, M, N, B)
+    sx = strides(g, x.value, x.index, M, K, B)
+    sy = strides(g, y.value, y.index, K, N, B)
+    sc = strides(g, r, g.placement[r], M, N, B)
     (sx === nothing || sy === nothing || sc === nothing) && return GemmClaim[]
     left, right = (x.value, sx[1], (sx[2], sx[3]), sx[4]), (y.value, sy[1], (sy[2], sy[3]), sy[4])
     out = (r, sc[1], (sc[2], sc[3]), sc[4])
@@ -132,8 +131,8 @@ function product_rate(target::CUDATarget, T)
     T === Float32 ? (compute_type(target, T) == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? r.tf32 : r.full) : r.half
 end
 
-estimate(::cuBLASProducts, c::GemmClaim, target, p::Plan, g::Group) =
-    [Work(group_bytes(p, g); flops = 2.0 * c.m * c.n * c.k * c.batch, rate = product_rate(target, c.factor))]
+estimate(::cuBLASProducts, c::GemmClaim, target, g::GroupView) =
+    [Work(g.bytes; flops = 2.0 * c.m * c.n * c.k * c.batch, rate = product_rate(target, c.factor))]
 
 record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transposes..., " ", c.m, "×", c.n, "×", c.k,
     c.batch > 1 ? " batch $(c.batch)" : "", " leading ", (c.a.leading, c.b.leading, c.c.leading), " ", c.factor, " to ", c.result)
@@ -142,14 +141,13 @@ record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transposes...,
 # so that its group is this claim's and the work after it a kernel of its own,
 # and each product fold it recomputes inside another's, stored by this claim.
 function candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
-    graph = p.graph
-    product(r, t) = graph.values[r].definition.fold isa SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
-        all(f -> factor_load(f, graph) !== nothing, t.args)
     found = Vector{Int}[]
-    for g in p.groups
+    for g in (group_view(p, group) for group in p.groups)
         g.kind === :reduction || continue
+        product(r, t) = g.values[r].fold isa SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
+            all(f -> factor_load(f, g) !== nothing, t.args)
         r = first(g.reductions)
-        length(members(g)) > 1 && product(r, g.terms[r]) && product_axes(graph, g) !== nothing && push!(found, [r])
+        length(members(g)) > 1 && product(r, g.terms[r]) && product_axes(g) !== nothing && push!(found, [r])
         roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
         for t in subterms(roots; nested = true)
             t isa Recomputed && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])
@@ -194,7 +192,7 @@ function Base.show(io::IO, b::BuiltProduct)
         b.compute == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : c.factor === Float32 ? "full precision" : "$(c.factor) accumulating in Float32")
 end
 
-function build_claim(::cuBLASProducts, c::GemmClaim, target, p::Plan, g::Group, buffers)
+function build_claim(::cuBLASProducts, c::GemmClaim, target, g::GroupView, buffers)
     lib = library()
     operand_pointer(o::Operand, T) = pointer(buffers[o.value]) + o.offset * sizeof(T)
     a, b, y = operand_pointer(c.a, c.factor), operand_pointer(c.b, c.factor), operand_pointer(c.c, c.result)

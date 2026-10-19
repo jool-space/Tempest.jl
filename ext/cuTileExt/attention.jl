@@ -178,42 +178,38 @@ epilogue_results(::cuTileAttention, ::typeof(Tempest.Operations.attention_forwar
 # key, the backward a row term, then four products per key block and three
 # per query block; a causal mask halves them. Products run at the generator's
 # rate.
-function estimate(::cuTileAttention, claim, target, p::Plan, g::Group)
-    _, d = call_parts(p, g)
-    op = d.node.op
-    (D, H, T, B), (_, KV, keys, _) = first(d.shapes[1]), first(d.shapes[2])
+function estimate(::cuTileAttention, claim, target, g::GroupView)
+    _, op = call_parts(g)
+    (D, H, T, B), (_, KV, keys, _) = op.shapes[1], op.shapes[2]
     product = 2.0 * D * T * keys * H * B / (op.kwargs.causal ? 2 : 1)
-    rate, bytes = product_rate(target, Float32), Tempest.Compiler.group_bytes(p, g)
+    rate, bytes = product_rate(target, Float32), g.bytes
     blocks = cld(T, ATTENTION_TILE) * H * B
     op.f === Tempest.Operations.attention_forward && return [Work(bytes; flops = 2product, rate, blocks)]
     [Work(0.0; blocks), Work(bytes; flops = 4product, rate, blocks = cld(keys, ATTENTION_TILE) * KV * B),
      Work(0.0; flops = 3product, rate, blocks)]
 end
 
-# The opaque results of the group, by result number, and the operands.
-function call_parts(p, g)
-    outs = sort([v for v in g.outputs if p.graph.values[v].definition isa Tempest.Compiler.Opaque];
-        by = v -> p.graph.values[v].definition.node.op.output)
-    d = p.graph.values[first(outs)].definition
-    outs, d
+# The results of the group's call, by result number, and the call.
+function call_parts(g)
+    outs = sort([v for v in g.outputs if g.values[v].call !== nothing]; by = v -> g.values[v].call.output)
+    outs, g.values[first(outs)].call
 end
 
 tile_array(buffer, dims) = ct.TileArray(reshape(buffer, dims))
 
 # The epilogue of result `o`: its terms as a function of the output tile `y`,
 # the tile's index, and the arrays it loads, aligned with the tile.
-function epilogue_for(p, g, o, buffers, shape)
+function epilogue_for(g, o, buffers, shape)
     haskey(g.epilogues, o) || return NoEpilogue(), o
     e = g.epilogues[o]
     t = g.terms[e]
-    graph = p.graph
     rank = length(shape)
     # The group's domain is the result's axes wider than one; a load spans
     # those it reads along.
-    result = graph.values[o].definition.node.dims
+    result = g.values[o].call.dims
     wide = wide_axes(result)
     function spanned(s)
-        axes = aligned_axes(graph.values[s.value].dims, s.index, g.domain)
+        axes = aligned_axes(g.values[s.value].dims, s.index, g.domain)
         ntuple(k -> k in wide && findfirst(==(k), wide) in axes ? result[k] : 1, rank)
     end
     arrays = Any[]
@@ -263,13 +259,12 @@ end
 Base.show(io::IO, b::BuiltAttention) = print(io, "cuTile attention kernels for ", b.f,
     b.tf32 ? " (TF32)" : " (Float32)", b.epilogue ? ", with an epilogue on the output" : "")
 
-function build_call(::cuTileAttention, p::Plan, g::Group, buffers, target::CUDATarget)
-    outs, d = call_parts(p, g)
-    op = d.node.op
+function build_call(::cuTileAttention, target::CUDATarget, g::GroupView, buffers)
+    outs, op = call_parts(g)
     (; causal, scale) = op.kwargs
     tf32 = target.precision === :tf32
-    shapes = map(first, d.shapes)
-    arrays = map((o, s) -> tile_array(buffers[o.value], s), d.operands, shapes)
+    shapes = op.shapes
+    arrays = map((a, s) -> tile_array(buffers[a], s), op.arguments, shapes)
     q, k = shapes[1], shapes[2]
     D, H, T, B = q
     KV, keys = k[2], k[3]
@@ -280,15 +275,15 @@ function build_call(::cuTileAttention, p::Plan, g::Group, buffers, target::CUDAT
     s = Float32(scale)
     if op.f === Tempest.Operations.attention_forward
         o, lse = outs
-        epilogue, target_o = epilogue_for(p, g, o, buffers, (D, 1, ATTENTION_TILE, 1))
+        epilogue, target_o = epilogue_for(g, o, buffers, (D, 1, ATTENTION_TILE, 1))
         lse_array = buffers[lse] === nothing ? nothing : tile_array(buffers[lse], (1, H, T, B))
         args = (tile_array(buffers[target_o], (D, H, T, B)), lse_array, arrays..., epilogue, s, constants...)
         return (tile_launch(attention_forward_kernel, args, grid), BuiltAttention(op.f, !(epilogue isa NoEpilogue), tf32))
     end
     qa, ka, va, oa, lsea, douta, dlsea = arrays
     # The kernels write all three gradients; one nobody reads goes to scratch.
-    places = map(r -> something(buffers[r], CuArray{Float32}(undef, prod(p.graph.values[r].dims))), outs)
-    dq, dk, dv = map((r, b) -> tile_array(b, p.graph.values[r].definition.node.dims), outs, places)
+    places = map(r -> something(buffers[r], CuArray{Float32}(undef, prod(g.values[r].dims))), outs)
+    dq, dk, dv = map((r, b) -> tile_array(b, g.values[r].call.dims), outs, places)
     workspace = CuArray{Float32}(undef, H * T * B)
     delta = tile_array(workspace, (1, H, T, B))
     delta_args = (delta, oa, douta, dlsea, ct.Constant(D), tile, ct.Constant(H))

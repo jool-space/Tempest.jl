@@ -38,10 +38,6 @@ numerics(target::CUDATarget) = target.online ? target.precision : Symbol(target.
 permits_rewrites(::Target) = true
 permits_rewrites(target::CUDATarget) = target.online
 
-# A claim's launches by default: one, moving the group's bytes. Typed by the
-# implementation alone, so that no implementation's method is ambiguous with it.
-estimate(::Implementation, claim, target, p, g) = [Work(group_bytes(p, g))]
-
 """
     grow(graph, anchor, accept) -> Vector{Int}
 
@@ -145,8 +141,8 @@ function canonical(p::Plan, g::Group)
     string(text, "; ", join(shapes, ", "))
 end
 
-function choice(d::Decider, p::Plan, g::Group, implementation, claim)
-    work = implementation === nothing ? floor_estimate(p, g) : estimate(implementation, claim, d.target, p, g)
+function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
+    work = implementation === nothing ? floor_estimate(p, g) : estimate(implementation, claim, d.target, view)
     name = implementation === nothing ? "floor" : record_name(implementation, claim)
     key = replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
     Choice(implementation, claim, seconds(work, d.rates), key)
@@ -179,8 +175,8 @@ call_inputs(graph, operands, shapes) = map((o, (dims, _)) -> (dims, graph.values
 
 # An implementation's claims on a group, and on a call's group its claim
 # through `claims_call`, when it applies every epilogue the group absorbed.
-function group_claims(i::Implementation, target, p::Plan, g::Group)
-    cs = claims(i, target, p, g)
+function group_claims(i::Implementation, target, p::Plan, g::Group, view = group_view(p, g))
+    cs = claims(i, target, view)
     op = called(p.graph, g)
     op === nothing && return cs
     d = p.graph.values[first(g.outputs)].definition
@@ -195,11 +191,12 @@ Every claim on a group, cheapest estimate first; the floor when none claims
 it, except for a call, which only implementations run.
 """
 function options(d::Decider, p::Plan, g::Group)
-    os = Choice[choice(d, p, g, i, c) for i in implementations(d.target) for c in group_claims(i, d.target, p, g)]
+    view = group_view(p, g)
+    os = Choice[choice(d, p, g, view, i, c) for i in implementations(d.target) for c in group_claims(i, d.target, p, g, view)]
     if isempty(os)
         op = called(p.graph, g)
         op === nothing || throw(ArgumentError("no implementation on $(d.target) runs $(op.f), an operation without a reference"))
-        push!(os, choice(d, p, g, nothing, nothing))
+        push!(os, choice(d, p, g, view, nothing, nothing))
     end
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
@@ -407,7 +404,7 @@ end
 # Whether any implementation the target uses recomputes folds where it reads them.
 any_recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementations(target))
 
-recomputed_in(g::Group; nested = true) =
+recomputed_in(g; nested = true) =
     Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Recomputed)
 
 # A plan of `graph`, folds recomputed where they are read when an
@@ -421,10 +418,10 @@ generator_plan(d::Decider) = claimed_plan(d, d.graph)
 function claimed_plan(d::Decider, graph; fixed = Vector{Int}[], keep = Set{Int}())
     recompute_folds = any_recomputes_folds(d.target)
     keep = Set{Int}(keep)
+    has_claim(view) = any(i -> !isempty(claims(i, d.target, view)), implementations(d.target))
     while true
         p = plan(graph; fixed, recompute_folds, keep)
-        unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) &&
-                     all(i -> isempty(claims(i, d.target, p, g)), implementations(d.target))]
+        unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) && !has_claim(group_view(p, g))]
         isempty(unclaimed) && return p, keep
         foreach(g -> union!(keep, recomputed_in(g; nested = false)), unclaimed)
     end
@@ -457,8 +454,8 @@ zeroed!(x) = (fill!(reinterpret(UInt8, x), 0x00); x)
 # Build a choice on `buffers`.
 build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
     o.implementation === nothing ? build_floor(target, p, g, buffers) :
-    o.claim isa CallClaim ? build_call(o.implementation, p, g, buffers, target) :
-    build_claim(o.implementation, o.claim, target, p, g, buffers)
+    o.claim isa CallClaim ? build_call(o.implementation, target, group_view(p, g), buffers) :
+    build_claim(o.implementation, o.claim, target, group_view(p, g), buffers)
 
 # Build a choice on the decider's buffers, once, to measure it.
 build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =

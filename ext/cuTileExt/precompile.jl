@@ -25,11 +25,11 @@ unbacked_tile_array(T, spec) = ct.TileArray(Ptr{T}(256), Int32.(spec.sizes), Int
     @compile_workload begin
         for (f, args) in losses, target in (CUDATarget(), CUDATarget(precision = :tf32))
             p = Tempest.Compiler.plan(Tempest.Compiler.lower(Tempest.Compiler.differentiate(Tempest.Compiler.trace(f, args...))))
-            for g in p.groups, claim in claims(Tempest.Compiler.cuTileGenerator(), target, p, g)
+            for g in map(g -> Tempest.Compiler.group_view(p, g), p.groups), claim in claims(Tempest.Compiler.cuTileGenerator(), target, g)
                 workspaces = Dict{Any, Workspace}()
-                for k in schedule_kernels(Context(p.graph, p.stored, g, claim.schedule), workspaces)
+                for k in schedule_kernels(Context(g, claim.schedule), workspaces)
                     arrays = map(k.args) do spec
-                        T = spec.buffer isa Int ? p.graph.values[spec.buffer].eltype : workspaces[spec.buffer].eltype
+                        T = spec.buffer isa Int ? g.values[spec.buffer].eltype : workspaces[spec.buffer].eltype
                         unbacked_tile_array(T, spec)
                     end
                     Tempest.Compiler.content_key("cuTile kernel", source(k), Tuple{map(Core.Typeof, arrays)...}, alias_groups(arrays))

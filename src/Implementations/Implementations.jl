@@ -4,12 +4,17 @@ plan as kernels: it claims the groups it can realize, estimates the launches of
 each claim, and builds them. It may also propose groups of its own and claim
 calls of operations. A package makes its implementations available with
 `register!` when it loads, and a target decides which of them it uses.
-Implementations read plans through the public names of `Tempest.Compiler`.
+Claims read a `GroupView` of the group, in the vocabulary of `Tempest.IR`.
 """
 module Implementations
 
+using Republic: @republic
+@republic republic=false inherit=:public using ..IR
+
 public Implementation, Work, register!, claims, estimate, build_claim, candidates, record_name,
     recomputes_folds, in_place, claims_call, epilogue_results, build_call
+
+include("groups.jl")
 
 """
 An implementation realizes groups of a plan as kernels. `claims` returns the
@@ -46,23 +51,23 @@ function register!(package::Module, implementations::Implementation...)
 end
 
 """
-    claims(implementation, target, plan, group) -> claims
+    claims(implementation, target, group) -> claims
 
-The ways `implementation` can realize `group` of `plan` on `target`, each a
-value of its own type that `estimate` and `build_claim` take; empty when it
+The ways `implementation` can realize `group`, a `GroupView`, on `target`, each
+a value of its own type that `estimate` and `build_claim` take; empty when it
 cannot, as by default.
 """
-claims(::Implementation, target, plan, group) = ()
+claims(::Implementation, target, group) = ()
 
 """
-    estimate(implementation, claim, target, plan, group) -> Vector{Work}
+    estimate(implementation, claim, target, group) -> Vector{Work}
 
 The launches of a claim. By default one launch moving the group's bytes.
 """
-function estimate end
+estimate(::Implementation, claim, target, group) = [Work(group.bytes)]
 
 """
-    build_claim(implementation, claim, target, plan, group, buffers) -> (launch, description)
+    build_claim(implementation, claim, target, group, buffers) -> (launch, description)
 
 Build a claim: `launch()` runs its kernels, and `description` says what they
 are. `buffers[v]` is the storage of value `v`, for each value the group reads
@@ -76,7 +81,8 @@ function build_claim end
 What the implementation proposes in place of the generator's groups: sets of
 values to realize as one group each, grown from anchors in `plan` (a product)
 and accepted by the implementation, or `Tempest.Compiler.ClaimedCall`s of
-computations it recognizes as calls it claims. None by default.
+computations it recognizes as calls it claims. None by default. Proposals read
+the compiler's plan, its groups through `Tempest.Compiler.group_view`.
 """
 candidates(::Implementation, target, plan) = Vector{Int}[]
 
@@ -119,13 +125,13 @@ planner when its reads align with the result's tile.
 epilogue_results(::Implementation, f, kwargs) = ()
 
 """
-    build_call(implementation, plan, group, buffers, target) -> (launch, description)
+    build_call(implementation, target, group, buffers) -> (launch, description)
 
 Build the kernels of a claimed call: the group's opaque results, each written
-densely in its program shape (its definition's `node.dims`) to its buffer or,
+densely in its program shape (its `CallResult`'s `dims`) to its buffer or,
 where `group.epilogues` names a value, that value computed from the result's
 tile by the group's terms. Arguments are read densely in their program shapes
-(the definition's `shapes`). A result whose buffer is `nothing` is read by
+(the `CallResult`'s `shapes`). A result whose buffer is `nothing` is read by
 nobody and may be left unwritten.
 """
 function build_call end

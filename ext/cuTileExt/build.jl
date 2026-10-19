@@ -146,7 +146,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
                 fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t))
             else
                 f, A = fold_of(c, r), accumulator(c, r)
-                x = as_accumulator(loop, scope[c.g.terms[r]], A, term_eltype(c.g.terms[r], c.graph), tile(c))
+                x = as_accumulator(loop, scope[c.g.terms[r]], A, term_eltype(c.g.terms[r], c.g), tile(c))
                 states[r] = direct_state!(loop, f, A, x, valid1, p)
             end
         end
@@ -157,11 +157,11 @@ function unsplit_kernel(c::Context, workspaces, slots)
         for r in phase
             f, A = fold_of(c, r), accumulator(c, r)
             state = haskey(states, r) ? states[r] : fold_state!(body, c, r, sums[r], accumulators[r])
-            stat = observe!(body, f, A, c.graph.values[r].eltype, state)
+            stat = observe!(body, f, A, c.g.values[r].eltype, state)
             names[Stat(r)] = stat
             statistics[Stat(r)] = stat
         end
-        stored = [r for r in phase if c.stored[r]]
+        stored = [r for r in phase if c.g.values[r].stored]
         store_values!(k, body, c, stored, names, at(one32)...)
     end
     scope = resident ? names : merge(Dict{Term, Any}(), statistics)
@@ -226,7 +226,7 @@ end
 # elementwise in their state.
 struct Weight end
 
-weight(c::Context, y) = Apply(Weight(), (y,), term_eltype(y, c.graph))
+weight(c::Context, y) = Apply(Weight(), (y,), term_eltype(y, c.g))
 
 function sweep_sums(c::Context, f, body, p)
     if f isa OnlineSoftmax
@@ -257,7 +257,7 @@ function sum_accumulators!(st, c::Context, f, body, sums, p, prefix)
         :(fill(0.0f0, ($(tile(c)[product[3]]), $(tile(c)[product[4]])))) for (term, product) in sums]
     if f isa OnlineSoftmax
         y = first(body.args)
-        pushfirst!(starts, :(fill($(term_eltype(y, c.graph)(-Inf)), $(Base.setindex(spanned_shape(c, y), 1, p)))))
+        pushfirst!(starts, :(fill($(term_eltype(y, c.g)(-Inf)), $(Base.setindex(spanned_shape(c, y), 1, p)))))
     end
     acc = [Symbol(prefix, :_, i) for i in eachindex(starts)]
     foreach((a, x) -> push!(st, :($a = $x)), acc, starts)
@@ -271,7 +271,7 @@ function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices,
     rise = nothing
     if f isa OnlineSoftmax
         y = first(body.args)
-        T = term_eltype(y, c.graph)
+        T = term_eltype(y, c.g)
         x = as_accumulator(st, scope[y], T, T, spanned_shape(c, y))
         m = first(acc)
         masked, top, shift, rise, w = gensym(:y), gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
@@ -315,7 +315,7 @@ end
 function fold_step!(k, st, c::Context, r, sums, acc, scope, valid, indices)
     f, A, term = fold_of(c, r), accumulator(c, r), c.g.terms[r]
     sums === nothing || return sum_step!(k, st, c, f, term, sums, acc, scope, valid, indices, sweep_axis(c.s))
-    x = as_accumulator(st, scope[term], A, term_eltype(term, c.graph), tile(c))
+    x = as_accumulator(st, scope[term], A, term_eltype(term, c.g), tile(c))
     accumulate_elements!(st, f, A, acc, x, valid)
 end
 
@@ -448,7 +448,7 @@ function merge_kernel(c::Context, rs, slots, workspaces)
             $(loop...)
         end))
         state = reduce_state!(st, f, A, acc, length(shape))
-        stat = observe!(st, f, A, c.graph.values[r].eltype, state)
+        stat = observe!(st, f, A, c.g.values[r].eltype, state)
         v, spec = fold_spec!(c, r, workspaces)
         full_tiles = ntuple(i -> i in kept ? tiles_m[findfirst(==(i), kept)] : 1, length(c.s.tiling))
         full_index = ntuple(i -> i in kept ? idx[findfirst(==(i), kept)] : :(Int32(1)), length(c.s.tiling))
@@ -488,8 +488,8 @@ function Base.show(io::IO, b::BuiltTiles)
     print(io, "cuTile ", b.schedule, ": ", join((string(k.name, " grid ", k.grid) for k in b.kernels), "; "))
 end
 
-function build_claim(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, p::Plan, g::Group, buffers)
-    c = Context(p.graph, p.stored, g, claim.schedule)
+function build_claim(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::GroupView, buffers)
+    c = Context(g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
     launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule, target)
 end

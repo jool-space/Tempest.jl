@@ -40,17 +40,17 @@ function recomputing_tiles(target, T, m, n, k)
     (min(tm, nextpow(2, m)), min(tn, nextpow(2, n)), min(tk, nextpow(2, k)))
 end
 
-function product_claim(target, p::Plan, g::Group)
+function product_claim(target, g::GroupView)
     target isa CUDATarget && g.kind === :reduction || return nothing
-    folds = [p.graph.values[r].definition.fold for r in g.reductions]
+    folds = [g.values[r].fold for r in g.reductions]
     all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, OnlineSoftmax}, folds) || return nothing
-    found = Tempest.Compiler.product_axes(p.graph, g)
+    found = product_axes(g)
     found === nothing && return nothing
     M, N, K, B = found
     extent(axes) = prod(k -> g.domain[k], axes; init = 1)
     m, n, k, b = extent(M), extent(N), extent(K), extent(B)
     max(m, n, k, b) < typemax(Int32) ÷ 2 || return nothing
-    factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
+    factor = product_factor(Context(g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
         first(product_factors(first(folds), g.terms[first(g.reductions)])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
     recomputed = [s for r in g.reductions for s in subterms((g.terms[r],)) if s isa Recomputed]
@@ -61,14 +61,14 @@ function product_claim(target, p::Plan, g::Group)
     # Summed axes the factors do not read as one strided axis are swept in
     # turn: the longest piece over which they do is tiled, every other piece
     # an index per step.
-    found, main = pieces(K, view_addresses(p.graph, p.stored, g), g.domain)
+    found, main = pieces(K, view_addresses(g), g.domain)
     summed = main == 0 || length(found) == 1 ? [(K, [])] : [(K, []), (found[main], found[1:end .!= main])]
     for collapsed in (true, false), (Kt, others) in summed
         collapsed && !isempty(others) && continue
         Mt, Nt = collapsed ? (M, N) : ([longest(M)], [longest(N)])
         grid = collapsed ? (isempty(B) ? Vector{Int}[] : [B]) : [[a] for a in sort!([setdiff(M, Mt); setdiff(N, Nt); B])]
         mt, nt, kt = extent(Mt), extent(Nt), extent(Kt)
-        T = term_eltype(factor, p.graph)
+        T = term_eltype(factor, g)
         tm, tn, tk = recomputing ? recomputing_tiles(target, T, mt, nt, kt) : product_tiles(target, T, mt, nt, kt)
         tiling = [TileAxis(Mt, mt, tm, false), TileAxis(Kt, kt, tk, true), TileAxis(Nt, nt, tn, false)]
         append!(tiling, [TileAxis(a, extent(a), 1, false) for a in grid])
@@ -81,7 +81,7 @@ function product_claim(target, p::Plan, g::Group)
         sums = all(f -> f isa SumFold, folds)
         splits = blocks < SPLIT_KEPT_BLOCKS[1] && !hoisted && sums ? split_count(k, tk, blocks) : 1
         s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
-        c = Context(p.graph, p.stored, g, s)
+        c = Context(g, s)
         all(r -> products_of(c, r), g.reductions) && expressible_over(c) && return Claim(s)
     end
     nothing
@@ -97,14 +97,14 @@ end
 # Every load a view over the tiling, every stored value too, and nothing the
 # generator cannot lower.
 function expressible_over(c::Context)
-    graph, g = c.graph, c.g
-    for m in Tempest.Compiler.members(g)
-        val = graph.values[m]
+    g = c.g
+    for m in members(g)
+        val = g.values[m]
         val.eltype <: TILE_TYPES || return false
-        m in g.reductions && !tile_fold(val.definition.fold, term_eltype(g.terms[m], graph)) && return false
+        m in g.reductions && !tile_fold(val.fold, term_eltype(g.terms[m], g)) && return false
         m in g.outputs && val.dims == g.domain && return false
         terms_expressible(c, (g.terms[m],); stats = true) || return false
-        (c.stored[m] || m in g.outputs) && output_view(c, m) === nothing && return false
+        (g.values[m].stored || m in g.outputs) && output_view(c, m) === nothing && return false
     end
     true
 end

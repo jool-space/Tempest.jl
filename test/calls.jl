@@ -10,13 +10,13 @@ include("fixtures/programs.jl")
 struct HostAttention <: C.Implementation end
 C.claims_call(::HostAttention, ::T.CPUTarget, f, kwargs, inputs) = f in (Ops.attention_forward, Ops.attention_backward)
 C.epilogue_results(::HostAttention, ::typeof(Ops.attention_forward), kwargs) = (1,)
-C.build_call(::HostAttention, p, g, buffers, target) = C.opaque_launch(p, g, buffers)
+C.build_call(::HostAttention, target, g, buffers) = g.reference(target, buffers)
 
 # A claim on attention estimated far slower than its reference.
 struct SlowAttention <: C.Implementation end
 C.claims_call(::SlowAttention, ::T.CPUTarget, f, kwargs, inputs) = f === Ops.attention_forward
-C.estimate(::SlowAttention, claim, target, p, g) = [C.Work(1.0e12)]
-C.build_call(::SlowAttention, p, g, buffers, target) = C.opaque_launch(p, g, buffers)
+C.estimate(::SlowAttention, claim, target, g) = [C.Work(1.0e12)]
+C.build_call(::SlowAttention, target, g, buffers) = g.reference(target, buffers)
 
 q, k, v = data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
 x = data(4, 4, 6, 2; scale = 0.5)
@@ -123,7 +123,7 @@ T.declared_results(::typeof(running_sum), ((dims, T),)) = (dims, T)
 struct HostRunningSum <: C.Implementation end
 C.claims_call(::HostRunningSum, ::T.CPUTarget, f, kwargs, inputs) = f === running_sum
 C.epilogue_results(::HostRunningSum, ::typeof(running_sum), kwargs) = (1,)
-C.build_call(::HostRunningSum, p, g, buffers, target) = C.opaque_launch(p, g, buffers)
+C.build_call(::HostRunningSum, target, g, buffers) = g.reference(target, buffers)
 
 prefix(x) = running_sum(x .* 2) .+ 1
 prefix_loss(x) = sum(abs2, prefix(x))
@@ -197,8 +197,8 @@ end
 # by hand: the exponential of a value less its log-sum-exp over the first axis.
 struct HostSoftmax <: C.Implementation end
 C.claims_call(::HostSoftmax, ::T.CPUTarget, f, kwargs, inputs) = f === NNlib.softmax && kwargs == (dims = 1,)
-C.estimate(::HostSoftmax, claim, target, p, g) = [C.Work(0.0)]
-C.build_call(::HostSoftmax, p, g, buffers, target) = C.opaque_launch(p, g, buffers)
+C.estimate(::HostSoftmax, claim, target, g) = [C.Work(0.0)]
+C.build_call(::HostSoftmax, target, g, buffers) = g.reference(target, buffers)
 function C.candidates(::HostSoftmax, ::T.CPUTarget, p)
     graph = p.graph
     found = []
@@ -309,15 +309,15 @@ end
 # A claim that fails to build, met while measuring a close call, loses: it is
 # never timed, and preparation goes on without it.
 struct Unbuildable <: C.Implementation end
-C.estimate(::Unbuildable, claim, target, p, g) = [C.Work(1.0)]
-C.build_claim(::Unbuildable, claim, target, p, g, buffers) = error("this claim does not build")
+C.estimate(::Unbuildable, claim, target, g) = [C.Work(1.0)]
+C.build_claim(::Unbuildable, claim, target, g, buffers) = error("this claim does not build")
 
 @testset "a claim that fails to build loses" begin
     graph = C.lower(trace(x -> sum(abs2, x), data(8)))
     planned = C.plan(graph)
     d = C.Decider(T.CPUTarget(), graph)
     g = only(planned.groups)
-    o = C.choice(d, planned, g, Unbuildable(), nothing)
+    o = C.choice(d, planned, g, C.group_view(planned, g), Unbuildable(), nothing)
     C.measure!(d, planned, g, o)
     @test d.record[o.key] == Inf
 end

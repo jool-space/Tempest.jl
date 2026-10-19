@@ -53,6 +53,7 @@ Tempest.Compiler.execute!
 Tempest.Compiler.capture!
 Tempest.Compiler.replay!
 Tempest.Compiler.outputs
+Tempest.Compiler.group_view
 ```
 
 ## Tempest.IR
@@ -67,6 +68,11 @@ Tempest.IR
 Tempest.Implementations
 Tempest.Implementations.Implementation
 Tempest.Implementations.register!
+Tempest.Implementations.GroupView
+Tempest.Implementations.ValueView
+Tempest.Implementations.CallResult
+Tempest.Implementations.members
+Tempest.Implementations.product_axes
 Tempest.Implementations.claims
 Tempest.Implementations.estimate
 Tempest.Implementations.Work
