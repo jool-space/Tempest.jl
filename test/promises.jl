@@ -16,7 +16,7 @@ chosen(f, args...; target = T.CPUTarget()) = prepare(trace(f, args...), args...;
 same_plan(f, g, args...) = sprint(explain, chosen(f, args...)) == sprint(explain, chosen(g, args...))
 
 const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
-const SCALING_FORMS = "sum / n and sum · (1 / n) one form under the numerics policy"
+const SCALING_FORMS = "x / n and x · (1 / n) one form under the numerics policy where 1 / n is inexact"
 const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decision)"
 
 @testset "promise 1: layout spelling does not matter" begin
@@ -43,8 +43,13 @@ const PRICED_GROUPING = "the cover prices every grouping (DESIGN.md, The decisio
         @test_broken same_plan(a -> sum(permutedims(a, (2, 1)); dims = 2), a -> permutedims(sum(a; dims = 1), (2, 1)), a)
         @test_broken same_plan(a -> tanh.(reshape(a, 48)), a -> reshape(tanh.(a), 48), a)
     end
+    # A quotient by a power of two is the product by its reciprocal, which
+    # rounds alike.
+    @test same_plan(a -> sum(a; dims = 1) ./ 8, a -> sum(a; dims = 1) .* (1 / 8), a)
+    @test same_plan(a -> a ./ 4, a -> a .* 0.25, a)
     @testset "gap: $SCALING_FORMS" begin
-        @test_broken same_plan(a -> sum(a; dims = 1) ./ 8, a -> sum(a; dims = 1) .* (1 / 8), a)
+        # This rewrite changes rounding: a rewrite behind `permits_rewrites`, with a note `explain` names.
+        @test_broken same_plan(a -> sum(a; dims = 1) ./ 6, a -> sum(a; dims = 1) .* (1 / 6), a)
     end
 end
 
@@ -177,7 +182,7 @@ module Coverage include(joinpath(@__DIR__, "fixtures", "compositions.jl")) end
 
 const GENERATOR_COST = "the generator's estimate counts what its schedule costs beyond bytes and products"
 # Compositions and precisions where an estimate that decides is outside the close-call factor.
-const ESTIMATE_GAPS = [("the verb, a training step", :tf32), ("linear, bias, GELU", :tf32)]
+const ESTIMATE_GAPS = [("the verb, a training step", :tf32)]
 
 within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
 

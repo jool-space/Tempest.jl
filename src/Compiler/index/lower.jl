@@ -198,6 +198,19 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
     value!(Reduction(SumFold(), Read(product.value, product.index), iteration, reduced), kept, n.eltype)
 end
 
+# A quotient by a constant whose reciprocal is exact in the result's type, a
+# power of two, is the product by that reciprocal, which rounds alike: so
+# `x / 8` and `x * 0.125` are one value.
+function map_definition(f, operands, T)
+    if f === (/) && T <: Union{Base.IEEEFloat, BFloat16} && length(operands) == 2 && operands[2] isa Literal && operands[2].value isa Real
+        c = T(operands[2].value)
+        r = inv(c)
+        c == operands[2].value && isfinite(r) && !iszero(r) && abs(significand(c)) == 1 && abs(significand(r)) == 1 &&
+            return Pointwise(*, (operands[1], Literal(r)))
+    end
+    Pointwise(f, operands)
+end
+
 """
     lower(program) -> IndexGraph
 
@@ -270,7 +283,7 @@ function lower(p::Program)
             # Filling out to a larger shape is a formula, as a layout is.
             fill_out(only(inputs), only(input_dims), d)
         elseif op isa Map
-            value!(Pointwise(op.f, map((a, dims) -> operand(a, dims, d), inputs, input_dims)), n)
+            value!(map_definition(op.f, map((a, dims) -> operand(a, dims, d), inputs, input_dims), n.eltype), n)
         elseif op isa Reduce
             parent = only(input_dims)
             value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
