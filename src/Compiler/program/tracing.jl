@@ -14,6 +14,8 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
+public contract, fold, logsumexp, positions, axis_positions, batched_mul
+
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
 reshape or a permutation, of `parent` and of the nodes `inputs` (a
@@ -171,11 +173,6 @@ function Base.literal_pow(::typeof(^), x::Traced, ::Val{p}) where {p}
     p == -1 && return inv(x)
     record_map(^, x, p)
 end
-
-"A conversion to `T`, as a primitive with its own derivative rule."
-struct Cast{T} end
-(::Cast{T})(x) where {T} = T(x)
-Base.show(io::IO, ::Cast{T}) where {T} = print(io, T)
 
 cast(::Type{T}, x::Traced) where {T} = node(x).eltype === T ? x : record_map(Cast{T}(), x)
 

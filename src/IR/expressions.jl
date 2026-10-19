@@ -3,6 +3,9 @@
 # equal expressions. Indices are zero-based. Everything here is immutable and
 # built from tuples, so `==` and `hash` are structural.
 
+public Affine, Var, Div, Mod, Indirect, Domain, isconstant, affine_range, coefficient, is_affine,
+    mentions, indirect_values
+
 abstract type Atom end
 
 "The `n`th variable of the enclosing domain."
@@ -283,6 +286,12 @@ mentions(e::Affine, n) = any(t -> mentions(t.first, n), e.terms)
 
 "True when `e` is `constant + Σ cₙ·xₙ` with no division, modulo or gather."
 is_affine(e::Affine) = all(t -> t.first isa Var, e.terms)
+
+"The values an expression gathers from."
+indirect_values(e::Affine) = reduce(vcat, (indirect_values(a) for (a, _) in e.terms); init = Int[])
+indirect_values(::Var) = Int[]
+indirect_values(a::Union{Div, Mod}) = indirect_values(a.e)
+indirect_values(a::Indirect) = [a.value; reduce(vcat, map(indirect_values, a.index); init = Int[])]
 
 function Base.show(io::IO, a::Affine)
     parts = String[]

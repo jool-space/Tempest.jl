@@ -1,7 +1,7 @@
 # Extensions are written against Tempest's public names, as packages of their
 # own would be: what they implement is `Tempest.Implementations`, and what they
-# read of a plan is public in `Tempest.Compiler`. An extension that still reaches
-# past them is a broken test until it is rewritten.
+# read is `Tempest.IR` and the plan names public in `Tempest.Compiler`. An
+# extension that still reaches past them is a broken test until it is rewritten.
 const ROOT = joinpath(@__DIR__, "..")
 const EXTENSIONS = sort!(map(n -> replace(n, r"\.jl$" => ""), readdir(joinpath(ROOT, "ext"))))
 const AGAINST_INTERFACES = ["cuBLASExt"]
@@ -70,7 +70,7 @@ function private_names(files)
 end
 
 @testset "public names are defined" begin
-    for m in (Tempest, T.Compiler, T.Implementations, T.Operations)
+    for m in (Tempest, T.IR, T.Compiler, T.Implementations, T.Operations)
         @test filter(n -> !isdefined(m, n), names(m)) == Symbol[]
     end
 end

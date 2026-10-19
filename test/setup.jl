@@ -4,6 +4,7 @@ using LinearAlgebra, BFloat16s
 import Tempest as T
 using Tempest.Compiler
 import Tempest.Compiler as C
+import Tempest.IR as IR
 import Tempest.Operations as Ops
 
 const CUDA_FUNCTIONAL = CUDACore.functional()

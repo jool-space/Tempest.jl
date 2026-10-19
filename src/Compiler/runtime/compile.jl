@@ -1,6 +1,8 @@
 # The front door: a function traced and prepared once, then called like the
 # function. `prepare` and `execute!` are the level beneath it.
 
+public compile, Compiled
+
 """
     compile(f, args...; target, measure = true, capture = true) -> Compiled
 

@@ -15,6 +15,8 @@
 # cost with the reference fused into its neighbours. An opaque call runs only
 # where an implementation claims it.
 
+public @operation, reference, declared_results, has_pullback, verb_pullback
+
 """
 One result of a call of `f` on the node's inputs. A call with several results
 has a node for each, consecutive, numbered by `output`; `instance` is the id of

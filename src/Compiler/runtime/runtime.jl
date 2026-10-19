@@ -1,5 +1,7 @@
 # Prepared programs: a plan with fixed buffers and a launch per kernel.
 
+public CPUTarget, CUDATarget
+
 abstract type Target end
 
 "Run on the CPU, through the same generated floor code CUDA runs."

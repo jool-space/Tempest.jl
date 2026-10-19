@@ -3,6 +3,8 @@
 # literals, index expressions, the kernel's own reductions and the folds it
 # recomputes.
 
+public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, mentions
+
 abstract type Term end
 
 "A stored value read at an index of the kernel's domain."
@@ -27,6 +29,11 @@ struct Apply <: Term
     args::Tuple{Vararg{Term}}
     eltype::DataType
 end
+
+"A conversion to `T`, as a primitive with its own derivative rule."
+struct Cast{T} end
+(::Cast{T})(x) where {T} = T(x)
+Base.show(io::IO, ::Cast{T}) where {T} = print(io, T)
 
 "A reduction of the kernel, at the kernel's current position along its kept axes."
 struct Stat <: Term

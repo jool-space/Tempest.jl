@@ -55,6 +55,12 @@ Tempest.Compiler.replay!
 Tempest.Compiler.outputs
 ```
 
+## Tempest.IR
+
+```@docs
+Tempest.IR
+```
+
 ## Tempest.Implementations
 
 ```@docs

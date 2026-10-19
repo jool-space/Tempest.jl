@@ -6,10 +6,11 @@ module cuBLASExt
 using CUDACore
 using cuBLAS
 using BFloat16s: BFloat16
+using Republic: @republic
 using Tempest: CUDATarget
-using Tempest.Compiler: Plan, Group, Domain, Load, Apply, Recomputed, Cast, SumFold, members, subterms, group_bytes,
-    address, is_affine, coefficient, group_stride, placement, product_axes
-import Tempest.Implementations: Implementation, Work, register!, claims, estimate, record_name, candidates, build_claim
+@republic republic=false inherit=:public using Tempest.IR
+@republic republic=false inherit=:public import Tempest.Implementations
+using Tempest.Compiler: Plan, Group, members, group_bytes, address, group_stride, placement, product_axes
 
 struct cuBLASProducts <: Implementation end
 
@@ -75,7 +76,7 @@ factor_load(t::Load, graph) = t
 function factor_load(t::Apply, graph)
     t.f isa Cast{Float32} && only(t.args) isa Load || return nothing
     l = only(t.args)
-    graph.values[l.value].eltype in (Float16, BFloat16) ? l : nothing
+    graph.values[l.value].eltype <: HalfFloat ? l : nothing
 end
 factor_load(t, graph) = nothing
 

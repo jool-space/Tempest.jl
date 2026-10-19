@@ -8,7 +8,7 @@ Implementations read plans through the public names of `Tempest.Compiler`.
 """
 module Implementations
 
-export Implementation, Work, register!, claims, estimate, build_claim, candidates, record_name,
+public Implementation, Work, register!, claims, estimate, build_claim, candidates, record_name,
     recomputes_folds, in_place, claims_call, epilogue_results, build_call
 
 """

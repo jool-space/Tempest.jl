@@ -2,6 +2,8 @@
 # ordinary Julia on handles: each records its nodes into the same tape, so the
 # backward graph is program code, planned together with the forward.
 
+public gradient, scalar_partials
+
 const Handle = Union{Traced, TracedArray}
 
 h(tape, id) = Traced(tape, id)

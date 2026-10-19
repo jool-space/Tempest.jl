@@ -5,6 +5,10 @@
 # associative and commutative up to rounding, and `fold_init` exact: it masks
 # padded lanes.
 
+public Fold, SumFold, MaxFold, MinFold, ProdFold, LogSumExpFold, OnlineSoftmax, GenericFold,
+    fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, fold_eltype,
+    fold_accumulator, lse_shift, HalfFloat
+
 abstract type Fold end
 
 function fold_init end

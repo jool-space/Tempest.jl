@@ -1,5 +1,7 @@
 # What a plan decided, in words: each kernel, what it computes and reads.
 
+public explain
+
 function describe_value(graph, v)
     val = graph.values[v]
     string("%", v, " ", val.eltype, val.scalar ? "" : string(val.dims))

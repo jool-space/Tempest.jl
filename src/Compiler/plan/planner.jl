@@ -116,10 +116,6 @@ operand_term(graph, stored, g, o::IndexOperand{T}, index, domain) where {T} =
     Ix{T}(substitute(o.expr, index, domain))
 
 # The values an operand reads: its own, and those its formulas gather from.
-indirect_values(e::Affine) = reduce(vcat, (indirect_values(a) for (a, _) in e.terms); init = Int[])
-indirect_values(::Var) = Int[]
-indirect_values(a::Union{Div, Mod}) = indirect_values(a.e)
-indirect_values(a::Indirect) = [a.value; reduce(vcat, map(indirect_values, a.index); init = Int[])]
 gathered_values(o::Read) = reduce(vcat, map(indirect_values, o.index); init = Int[])
 gathered_values(o::IndexOperand) = indirect_values(o.expr)
 gathered_values(o::Literal) = Int[]
