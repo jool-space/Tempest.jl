@@ -24,15 +24,19 @@ an implementation.
 """
 abstract type Implementation end
 
-"One launch's work: bytes moved, flops at the rate the launch reaches, and its blocks."
+"""
+One launch's work: bytes moved, flops of products whose factors are of type
+`factor`, and its blocks. Tempest prices the flops on the line its package
+reaches for products of that class (see `seconds`).
+"""
 struct Work
     bytes::Float64
     flops::Float64
-    rate::Float64
+    factor::DataType
     blocks::Float64
 end
 
-Work(bytes; flops = 0.0, rate = Inf, blocks = Inf) = Work(bytes, flops, rate, blocks)
+Work(bytes; flops = 0.0, factor = Float32, blocks = Inf) = Work(bytes, flops, factor, blocks)
 
 # Implementations by the package that provides them, ordered by its name.
 const REGISTERED = Pair{Module, Vector{Implementation}}[]

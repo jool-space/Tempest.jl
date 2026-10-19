@@ -1,7 +1,10 @@
 # Choosing how each group runs, and which groups there are: the cover.
 #
 # Every implementation's claims on a group are estimated, as launches with the
-# bytes they move, the flops they compute and the blocks they keep busy.
+# bytes they move, the flops they compute and the blocks they keep busy. The
+# device's rates are measured on first use, and each package's products are
+# priced on a line fitted to two reference products it runs, both kept in a
+# rates file beside the record.
 # Implementations also propose candidates of their own, sets of values grown
 # from anchors that they accept, and claim calls. A candidate replaces the
 # generator's groups, and a claimed call its reference expanded and fused into
@@ -11,24 +14,53 @@
 # device's noise margin, so the choice is deterministic given the record.
 
 """
-A device's rates for estimates: memory bandwidth in bytes per second, seconds
-per launch in a captured graph, the blocks that fill the device, and the
-relative margin within which two measurements tie.
+A device's rates for estimates: seconds per launch in a captured graph, bytes
+per second for a launch that moves at most `cache` bytes (which a replayed
+launch finds in the cache) and for one that moves more, the blocks that fill
+the device, and the relative margin within which two measurements tie.
 """
 struct Rates
-    bandwidth::Float64
     launch::Float64
+    cached::Float64
+    bandwidth::Float64
+    cache::Float64
     blocks::Int
     noise::Float64
 end
 
-seconds(w::Work, r::Rates) = r.launch + max(w.bytes / r.bandwidth, w.flops / w.rate) / min(1.0, w.blocks / r.blocks)
-seconds(ws::AbstractVector{Work}, r::Rates) = sum(w -> seconds(w, r), ws; init = 0.0)
+"""
+A package's products of one class: a launch of `flops` takes `latency + flops
+/ rate` seconds. A borrowed line is another package's, for a package that
+claims no reference product.
+"""
+struct Line
+    latency::Float64
+    rate::Float64
+    borrowed::Bool
+end
+
+seconds(w::Work, r::Rates, line) =
+    max(r.launch + w.bytes / (w.bytes <= r.cache ? r.cached : r.bandwidth) / min(1.0, w.blocks / r.blocks),
+        w.flops == 0 ? 0.0 : line.latency + w.flops / line.rate)
+
+"The class of products of `T` factors: a half type by name, Float32 by the target's precision."
+product_class(target::CUDATarget, T) = T <: HalfFloat ? nameof(T) : target.precision
+product_class(target, T) = nameof(T)
+
+"The name of the package that registered `implementation`."
+package_of(implementation) = nameof(first(m for (m, is) in REGISTERED if implementation in is))
+
+const NOISE = 0.05
+
+# The CPU has no product claims: its lines are one nominal line (see `line!`).
+rates(::CPUTarget) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE)
+
+"Measure the device's rates on `target` (see CUDAExt)."
+function calibrate end
 
 # Two estimates closer than this factor are a close call.
 const ESTIMATE_ERROR = 1.5
 
-rates(::CPUTarget) = Rates(2.0e10, 0.0, 1, 0.05)
 device_name(::CPUTarget) = "cpu"
 "The target's numerics, as part of the tuning record's key."
 numerics(::Target) = :default
@@ -87,6 +119,7 @@ struct Choice
     claim::Any
     estimate::Float64
     key::String
+    borrowed::Bool # priced on another package's line, which bounds a time only from below
 end
 
 "What was chosen for a group, how, and the time measured for it, if any."
@@ -107,8 +140,11 @@ end
 mutable struct Decider
     target::Any
     graph::IndexGraph
-    measure::Bool
+    measure::Symbol
     rates::Rates
+    calibration::Dict{String, Float64}
+    calibration_path::Union{Nothing, String}
+    lines::Dict{Tuple{Symbol, Symbol}, Line}
     record::Dict{String, Float64}
     record_path::Union{Nothing, String}
     buffers::Vector{Any}
@@ -119,11 +155,16 @@ mutable struct Decider
     instances::Dict{Any, Decision}
 end
 
-function Decider(target, graph; measure = true)
-    path = record_path(target)
-    Decider(target, graph, measure && measurable(target), rates(target), load_record(path), path,
+function Decider(target, graph; measure = :close)
+    path, calibration_path = record_path(target), rates_path(target)
+    calibration = load_record(calibration_path)
+    Decider(target, graph, measurable(target) ? level(measure) : :none, device_rates!(target, calibration, calibration_path),
+        calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), load_record(path), path,
         Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
 end
+
+level(measure::Bool) = measure ? :close : :none
+level(measure::Symbol) = measure
 
 # A group within one preparation: its kind, members, terms and what it stores.
 group_identity(p::Plan, g::Group) = (g.kind, g.domain, Tuple(g.reductions), Tuple(g.outputs),
@@ -157,7 +198,9 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
     work = implementation === nothing ? floor_estimate(p, g) : estimate(implementation, claim, d.target, view)
     name = implementation === nothing ? "floor" : record_name(implementation, claim)
     key = replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
-    Choice(implementation, claim, seconds(work, d.rates), key)
+    lines = [w.flops == 0 ? nothing : line!(d, package_of(implementation), w.factor) for w in work]
+    Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, l), work, lines); init = 0.0), key,
+        any(l -> l !== nothing && l.borrowed, lines))
 end
 
 """
@@ -235,20 +278,27 @@ function decide(d::Decider, p::Plan, g::Group)
     end
 end
 
-# The rank of the choice among options `os`, sorted by estimate, so that the
-# close calls are the first; how it was made; and its measured time. A rank and
-# not a claim, because claims hold value ids.
+# The rank of the choice among options `os`, sorted by estimate; how it was
+# made; and its measured time. A rank and not a claim, because claims hold
+# value ids.
 function choose(d::Decider, p::Plan, g::Group, os)
     best = first(os)
-    length(os) == 1 && return (1, :only, get(d.record, best.key, nothing))
-    contenders = [o for o in os if close_call(o.estimate, best.estimate)]
-    length(contenders) == 1 && return (1, :estimated, get(d.record, best.key, nothing))
-    d.measure && foreach(o -> measure!(d, p, g, o), contenders)
-    times = [get(d.record, o.key, nothing) for o in contenders]
+    if length(os) == 1
+        d.measure === :all && measure!(d, p, g, best)
+        return (1, :only, get(d.record, best.key, nothing))
+    end
+    # Every option under `:all`; otherwise those within the estimate's error of
+    # the best, and every option when the best rests on a borrowed line, which
+    # bounds a time only from below.
+    ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
+        [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate)]
+    length(ranks) == 1 && return (1, :estimated, get(d.record, best.key, nothing))
+    d.measure === :none || foreach(k -> measure!(d, p, g, os[k]), ranks)
+    times = [get(d.record, os[k].key, nothing) for k in ranks]
     any(isnothing, times) && return (1, :estimated, nothing)
     k = argmin(times)
     k = times[k] < (1 - d.rates.noise) * times[1] ? k : 1
-    (k, :measured, times[k])
+    (ranks[k], :measured, times[k])
 end
 
 decisions(d::Decider, p::Plan) = [chosen(p, g) ? decide(d, p, g) : nothing for g in p.groups]
@@ -256,12 +306,14 @@ decisions(d::Decider, p::Plan) = [chosen(p, g) ? decide(d, p, g) : nothing for g
 """
 How a plan compares with the one before it on the groups they do not share:
 the time of each side, measured when every one of those groups is and the
-sums differ beyond the noise, else estimated.
+sums differ beyond the noise, else estimated. `sides` holds each side's
+groups, with their plans and decisions, as `(old, new)`.
 """
 struct Comparison
     old::Float64
     new::Float64
     how::Symbol # :estimated or :measured
+    sides::Tuple{Vector, Vector}
 end
 
 cheaper(c::Comparison) = c.new < c.old
@@ -276,16 +328,16 @@ function compare(d::Decider, b::Plan, a::Plan)
     da, db = decided(only_a), decided(only_b)
     ea = sum(x -> x[3].choice.estimate, da; init = 0.0)
     eb = sum(x -> x[3].choice.estimate, db; init = 0.0)
-    if d.measure && close_call(ea, eb)
+    if d.measure === :all || (d.measure === :close && close_call(ea, eb))
         foreach(((p, g, x),) -> measure!(d, p, g, x.choice), [da; db])
     end
     ta = [get(d.record, x[3].choice.key, nothing) for x in da]
     tb = [get(d.record, x[3].choice.key, nothing) for x in db]
     if !any(isnothing, ta) && !any(isnothing, tb)
         ma, mb = sum(ta; init = 0.0), sum(tb; init = 0.0)
-        abs(ma - mb) > d.rates.noise * min(ma, mb) && return Comparison(ma, mb, :measured)
+        abs(ma - mb) > d.rates.noise * min(ma, mb) && return Comparison(ma, mb, :measured, (da, db))
     end
-    Comparison(ea, eb, :estimated)
+    Comparison(ea, eb, :estimated, (da, db))
 end
 
 """
@@ -545,6 +597,61 @@ function measure!(d::Decider, p::Plan, g::Group, o::Choice)
     save_record(d.record_path, o.key, t)
 end
 
+"""
+The line of `package` for products of `T` factors on the decider's target,
+fitted on first need and kept in the rates file. A package that claims no
+reference product borrows the class's fastest line.
+"""
+function line!(d::Decider, package, T)
+    class = product_class(d.target, T)
+    get!(d.lines, (package, class)) do
+        measurable(d.target) || return Line(0.0, 1.0e10, false)
+        key(p, what) = string(p, " ", class, " ", what)
+        own(p) = Line(d.calibration[key(p, "latency")], d.calibration[key(p, "rate")], false)
+        haskey(d.calibration, key(package, "rate")) || fit!(d, T)
+        haskey(d.calibration, key(package, "rate")) && return own(package)
+        fastest = argmax(l -> l.rate, [own(nameof(m)) for m in used_packages(d.target) if haskey(d.calibration, key(nameof(m), "rate"))])
+        Line(fastest.latency, fastest.rate, true)
+    end
+end
+
+const REFERENCE_SIZES = (256, 2048)
+
+"""
+Fit the line of every package on the decider's target that has none for
+products of `T` factors: the fastest of the package's claims on `a * b` at
+each reference size, timed as claims are, and the line through the two times.
+"""
+function fit!(d::Decider, T)
+    class = product_class(d.target, T)
+    unfitted = [m for m in used_packages(d.target) if !haskey(d.calibration, string(nameof(m), " ", class, " rate"))]
+    times = map(REFERENCE_SIZES) do n
+        graph = lower(trace(*, zeros(T, n, n), zeros(T, n, n)))
+        reference = Decider(d.target, graph; measure = :none)
+        p = plan(graph)
+        g = only(p.groups)
+        view = group_view(p, g)
+        fastest = Dict{Symbol, Float64}()
+        for (m, is) in REGISTERED, i in is, c in (m in unfitted ? claims(i, d.target, view) : ())
+            t = time_launch(d.target, first(build_claim(i, c, d.target, view, buffers!(reference, p, g))))
+            fastest[nameof(m)] = min(get(fastest, nameof(m), Inf), t)
+        end
+        fastest
+    end
+    small, large = 2.0 .* REFERENCE_SIZES .^ 3
+    for (package, t) in times[1]
+        rate = (large - small) / (times[2][package] - t)
+        keep!(d.calibration, d.calibration_path, string(package, " ", class, " latency"), t - small / rate)
+        keep!(d.calibration, d.calibration_path, string(package, " ", class, " rate"), rate)
+    end
+end
+
+"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors now, rather than on first need."
+function calibrate!(target)
+    d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none)
+    foreach(T -> foreach(m -> line!(d, nameof(m), T), used_packages(target)), (Float32, Float16, BFloat16))
+end
+
 ## The tuning record: measured seconds by claim, one file per device.
 
 using Scratch: @get_scratch!
@@ -568,10 +675,10 @@ function tuning_directory()
     dir === nothing ? TUNING[] : joinpath(dir, "tuning")
 end
 
-function record_path(target)
-    dir = tuning_directory()
-    dir === nothing ? nothing : joinpath(dir, replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * ".tsv")
-end
+device_file(target, suffix) = (dir = tuning_directory(); dir === nothing ? nothing :
+    joinpath(dir, replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * suffix))
+record_path(target) = device_file(target, ".tsv")
+rates_path(target) = device_file(target, ".rates.tsv")
 
 function load_record(path)
     record = Dict{String, Float64}()
@@ -587,4 +694,15 @@ function save_record(path, key, seconds)
     path === nothing && return
     mkpath(dirname(path))
     open(io -> println(io, key, '\t', seconds), path, "a")
+end
+
+keep!(calibration, path, key, value) = (calibration[key] = value; save_record(path, key, value))
+
+# The device's rates from its rates file, measured and kept there first when
+# the file has none. A target that cannot measure has fixed rates.
+function device_rates!(target, calibration, path)
+    measurable(target) || return rates(target)
+    haskey(calibration, "launch") || foreach(((k, v),) -> keep!(calibration, path, string(k), v), pairs(calibrate(target)))
+    c = calibration
+    Rates(c["launch"], c["cached"], c["bandwidth"], c["cache"], Int(c["blocks"]), NOISE)
 end

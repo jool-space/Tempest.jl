@@ -176,17 +176,16 @@ epilogue_results(::cuTileAttention, ::typeof(Tempest.Operations.attention_forwar
 
 # The launches' work: the forward kernel computes two products per query and
 # key, the backward a row term, then four products per key block and three
-# per query block; a causal mask halves them. Products run at the generator's
-# rate.
+# per query block; a causal mask halves them.
 function estimate(::cuTileAttention, claim, target, g::GroupView)
     _, op = call_parts(g)
     (D, H, T, B), (_, KV, keys, _) = op.shapes[1], op.shapes[2]
     product = 2.0 * D * T * keys * H * B / (op.kwargs.causal ? 2 : 1)
-    rate, bytes = product_rate(target, Float32), g.bytes
+    bytes = g.bytes
     blocks = cld(T, ATTENTION_TILE) * H * B
-    op.f === Tempest.Operations.attention_forward && return [Work(bytes; flops = 2product, rate, blocks)]
-    [Work(0.0; blocks), Work(bytes; flops = 4product, rate, blocks = cld(keys, ATTENTION_TILE) * KV * B),
-     Work(0.0; flops = 3product, rate, blocks)]
+    op.f === Tempest.Operations.attention_forward && return [Work(bytes; flops = 2product, blocks)]
+    [Work(0.0; blocks), Work(bytes; flops = 4product, blocks = cld(keys, ATTENTION_TILE) * KV * B),
+     Work(0.0; flops = 3product, blocks)]
 end
 
 # The results of the group's call, by result number, and the call.

@@ -4,11 +4,15 @@
 public compile, Compiled
 
 """
-    compile(f, args...; target, measure = true, capture = true) -> Compiled
+    compile(f, args...; target, measure = :close, capture = true) -> Compiled
 
 `f` traced on `args` and prepared, to be called like `f`: `compile(f, x)(y)`
 computes `f(y)` for any `y` alike `x` in structure, shapes and element types.
 It returns what `f` returns, in arrays of its own, with numbers as numbers.
+
+`measure` says which claims are timed when preparing, as for `prepare`:
+`:none` none, `:close` the options whose estimates are close, `:all` every
+option; `true` and `false` mean `:close` and `:none`.
 
 Which leaves of the arguments are inputs follows `trace`: arrays and numbers,
 also inside tuples, named tuples and immutable structs, except integers, which
@@ -31,7 +35,7 @@ use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
 `execute!` or `replay!`. `c.executable` is the prepared program, and
 `explain(c)` shows it.
 """
-function compile(f, @nospecialize(args...); target = default_target(args), measure::Bool = true, capture::Bool = true)
+function compile(f, @nospecialize(args...); target = default_target(args), measure = :close, capture::Bool = true)
     ex = prepare(trace(f, args...), args...; target, measure)
     capture && capture!(ex)
     Compiled(f, ex, signature(args))

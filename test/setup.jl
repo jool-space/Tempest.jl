@@ -11,6 +11,7 @@ const CUDA_FUNCTIONAL = CUDACore.functional()
 
 # Measurements the tests take stay out of the user's tuning record.
 ENV["TEMPEST_CACHE"] = mktempdir()
+CUDA_FUNCTIONAL && haskey(ENV, "TEMPEST_RATES") && (mkpath(C.tuning_directory()); cp(ENV["TEMPEST_RATES"], C.rates_path(T.CUDATarget())))
 
 # Reproducible arrays, in Float64 so that finite differences are accurate.
 data(dims...; scale = 1.0) = 2.0 .* sin.(scale .* reshape(Float64.(1:prod(dims)), dims...))

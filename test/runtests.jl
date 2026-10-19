@@ -14,6 +14,15 @@ CUDA_FUNCTIONAL || @warn "CUDA unavailable; GPU tests skipped"
 testsuite = find_tests(@__DIR__)
 filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/") && !startswith(name, "bench/"), testsuite)
 
+# The device's rates are measured here, once and alone: workers share the GPU
+# and would measure badly. Each copies the file into its own tuning directory.
+if CUDA_FUNCTIONAL
+    import cuBLAS, cuTile
+    ENV["TEMPEST_CACHE"] = mktempdir()
+    foreach(precision -> Tempest.Compiler.calibrate!(Tempest.CUDATarget(; precision)), (:full, :tf32, :tf32x3))
+    ENV["TEMPEST_RATES"] = Tempest.Compiler.rates_path(Tempest.CUDATarget())
+end
+
 # Every worker loads the same packages, so no test sees an extension that an
 # earlier test on its worker happened to load.
 const init_code = quote

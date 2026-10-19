@@ -111,12 +111,16 @@ end
 
 
 """
-    prepare(program, inputs...; target, measure = true, replaces = (), by_reference = ()) -> Executable
+    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = ()) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
 claims are timed when `measure` allows and the target can, and kept in the
-tuning record.
+tuning record. `measure = :none` times no claim but still uses the times in
+the record; `:close`, the default, times the options whose estimates are
+within the close-call factor of the best; `:all` times every option of every
+group and both sides of every comparison. `true` and `false` mean `:close` and
+`:none`.
 
 `replaces` declares state, as pairs `result => argument` of positions among the
 program's results and its arguments, alike in structure, shapes and types:
@@ -150,7 +154,7 @@ end
 For a function called on new arguments each time, `compile` does the binding
 and copying.
 """
-function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure::Bool = true,
+function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = :close,
         replaces = (), by_reference = ())
     graph = lower(program)
     permits_rewrites(target) && (graph = rewrite(graph))

@@ -217,7 +217,7 @@ end
 struct RecomputesOverThree <: C.Implementation end
 C.recomputes_folds(::RecomputesOverThree, target) = true
 C.claims(::RecomputesOverThree, target, g) = isempty(C.recomputed_in(g)) || length(g.domain) >= 3 ? (:claim,) : ()
-C.estimate(::RecomputesOverThree, claim, target, g) = [C.Work(0.0; flops = isempty(C.recomputed_in(g)) ? 1.0e-6 : 1.0, rate = 1.0)]
+C.estimate(::RecomputesOverThree, claim, target, g) = [C.Work(0.0; flops = isempty(C.recomputed_in(g)) ? 1.0e-6 : 1.0)]
 C.candidates(::RecomputesOverThree, target::T.CPUTarget, p) = [[v] for g in p.groups for v in C.recomputed_in(g)]
 
 @testset "a fold recomputed where nothing claims its reader stays stored" begin
@@ -321,22 +321,24 @@ if CUDA_FUNCTIONAL
             @test isapprox(Float32.(Array(only(C.leaves(outputs(execute!(ex)))))), Float32.(interpret(p, args...)); rtol)
         end
         # With work after the product, cuBLAS's candidate is the product
-        # alone, and the work after it a kernel of its own.
-        w = Float32.(data(96; scale = 0.3))
-        p = trace((a, b, w) -> tanh.(a * b .+ w), a, b, w)
-        ex = prepare(p, CuArray(a), CuArray(b), CuArray(w); target = T.CUDATarget(cuBLAS))
+        # alone, and the work after it a kernel of its own: at a size where
+        # the product by cuBLAS is cheaper than the fused reduction.
+        left, right = Float32.(data(256, 192; scale = 0.1)), Float32.(data(192, 224))
+        w = Float32.(data(256; scale = 0.3))
+        p = trace((a, b, w) -> tanh.(a * b .+ w), left, right, w)
+        ex = prepare(p, CuArray(left), CuArray(right), CuArray(w); target = T.CUDATarget(cuBLAS))
         @test length(built(ex)) == 1 && length(taken(ex)) == 1 && length(ex.kernels) == 2
-        @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, a, b, w); rtol = 1.0e-5)
+        @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, left, right, w); rtol = 1.0e-5)
         ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
         @test isempty(built(ex))
     end
     @testset "choosing between claims" begin
-        # Half-precision products cuBLAS and cuTile both claim, close by
-        # estimate: measured at preparation and kept in the tuning record.
+        # Half-precision products cuBLAS and cuTile both claim, every option
+        # measured at preparation and kept in the tuning record.
         a, b = Float16.(data(1024, 256; scale = 0.1)), Float16.(data(256, 1024))
         p = trace((a, b) -> a * b, a, b)
         target = T.CUDATarget()
-        prepared() = prepare(p, CuArray(a), CuArray(b); target)
+        prepared() = prepare(p, CuArray(a), CuArray(b); target, measure = :all)
         ex = prepared()
         x = only(ex.decisions)
         @test x.how === :measured && length(x.options) == 2

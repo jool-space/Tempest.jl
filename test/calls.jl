@@ -312,6 +312,7 @@ if CUDA_FUNCTIONAL
         # tuning record, one of this test's own, says is faster runs.
         f = trace((q, k, v) -> Ops.attention(q, k, v; causal = true), q, k, v)
         withenv("TEMPEST_CACHE" => mktempdir()) do
+            haskey(ENV, "TEMPEST_RATES") && (mkpath(C.tuning_directory()); cp(ENV["TEMPEST_RATES"], C.rates_path(target)))
             prepare(p, device((q, k, v, x))...; target)
             prepare(f, device((q, k, v))...; target)
             path = C.record_path(target)

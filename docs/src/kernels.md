@@ -8,7 +8,7 @@ package's kernel, and runs the winner. The package never sees the plan.
 > This page describes the interface, and *Not built* at the end says what is
 > missing from it. The older protocol, a struct subtyping `Implementation`
 > with `claims_call`, `epilogue_results` and `build_call` methods, remains for
-> a kernel that states products at a rate.
+> the hand-written attention.
 
 ## The operation
 
@@ -106,9 +106,10 @@ Tempest copies where a value is not stored that way.
   writes, which Tempest computes from the plan: that counts what an absorbed
   term reads and leaves out a result nobody stores. It is an estimate: it
   ranks kernels and says which are close, and close calls are measured (see
-  below). A kernel package states no time; the device's rates are Tempest's.
-  Until they are, a `Work` in place of a number states flops at a rate, for
-  a kernel whose products the bytes do not rank.
+  below). A kernel package states no time and no rate; the device's rates are
+  Tempest's. A `Work` in place of a number states the flops of the kernel's
+  products and the type of their factors, for a kernel whose products the
+  bytes do not rank.
 - `scratch`: specs of the workspace the kernel needs. Tempest allocates them
   when it builds the kernel, and they are the kernel's for the program's life.
 - `params`: named candidate values. Tempest passes the first candidate of
@@ -165,15 +166,17 @@ At each call of `rmsnorm_forward` in a program, Tempest has these options:
 every kernel each registered function returns for the target and the call's
 specs and keywords; the reference expanded and fused into its neighbours, as
 the generator compiles it; and the floor. It prices each by its cost through
-the device's rates. The rates are Tempest's: bandwidth, launch overhead and
-the product rate at each precision, measured on the device the first time it
-is used and kept in the tuning record. Options within a factor of 1.5 of the
-best are close calls: at `compile` with `measure = true`, the default, they
-are built and timed as the minimum of several alternating runs, the
-parameters of each kernel enumerated within a budget, and the times go into
-the tuning record, keyed by package, function, parameters, shapes, element
-types, keywords and device. A later process reads the record and measures
-nothing. `explain` prints the winner by package and function, with its
+the device's rates. The rates are Tempest's: bandwidth, launch overhead, and
+for each package and class of products a line, a latency and a rate, fitted
+to two reference products that the package runs. They are measured on the
+device the first time they are needed and kept in a rates file beside the
+tuning record. Options within a factor of 1.5 of the best are close calls:
+at `compile` with `measure = :close`, the default, they are built and timed
+as the minimum of several alternating runs, the parameters of each kernel
+enumerated within a budget, and the times go into the tuning record, keyed by
+package, function, parameters, shapes, element types, keywords and device.
+`measure = :all` times every option, and `:none` times none and uses the
+record. A later process reads the record and measures nothing. `explain` prints the winner by package and function, with its
 parameters and whether it was estimated or measured. A kernel whose build
 fails is withdrawn and the next option runs. The reference is always an
 option, so removing the package changes how fast the program runs, never
@@ -181,14 +184,10 @@ whether it runs.
 
 ## Not built
 
-- Products in cost. A kernel states bytes, and a `Work` may state flops at the
-  rate the kernel reaches. The hand-written attention keeps `claims_call`,
-  `epilogue_results` and `build_call` until Tempest counts products and
-  measures rates.
-- Measured rates. Today the product rates are two hand-entered tables in the
-  cuBLAS and cuTile extensions, with other devices scaled from one. A rate
-  that is wrong by more than the close-call factor decides without a
-  measurement.
+- Products in cost. A kernel states bytes, and a `Work` may state flops and
+  the type of their factors. The hand-written attention keeps `claims_call`,
+  `epilogue_results` and `build_call` until it states its cost as a kernel
+  does.
 - Parameter search. Measurement and the record exist; the enumeration and
   its budget do not. A kernel runs with the first candidate of each
   parameter, and `explain` says so. The generator returns one schedule per

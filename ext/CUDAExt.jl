@@ -19,25 +19,7 @@ end
 
 const THREADS = 256
 
-# Rates for estimates, measured on known devices: copy bandwidth, and the
-# launch gap in a captured graph. Other devices derive bandwidth from their
-# attributes.
-const DEVICE_BANDWIDTH = Dict("NVIDIA GB10" => 220.0e9)
-const LAUNCH_SECONDS = 1.0e-6
-const NOISE = 0.05
-
 Tempest.Compiler.device_name(::CUDATarget) = CUDACore.name(CUDACore.device())
-
-function Tempest.Compiler.rates(target::CUDATarget)
-    device = CUDACore.device()
-    attribute(a) = CUDACore.attribute(device, a)
-    sms = attribute(CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-    bandwidth = get(DEVICE_BANDWIDTH, CUDACore.name(device)) do
-        0.85 * 2.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE) *
-            attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8
-    end
-    Tempest.Compiler.Rates(bandwidth, LAUNCH_SECONDS, sms, NOISE)
-end
 
 Tempest.Compiler.measurable(::CUDATarget) = true
 
@@ -79,6 +61,22 @@ function Tempest.Compiler.time_launch(target::CUDATarget, launch; samples = 5, m
     t = minimum(_ -> CUDACore.@elapsed(Tempest.Compiler.replay(target, g)), 1:samples) / repetitions
     Tempest.Compiler.release(target, g)
     t
+end
+
+# Nothing, launched to time the gap between launches.
+blank() = nothing
+
+# The gap between launches of an empty kernel, copies of 4 MiB (found in the
+# cache when replayed) and 256 MiB (not), the cache's size and the
+# multiprocessors.
+function Tempest.Compiler.calibrate(target::CUDATarget)
+    device = CUDACore.device()
+    kernel = CUDACore.@cuda launch = false blank()
+    copying(n) = (a = CUDACore.zeros(UInt8, n); b = similar(a); 2n / Tempest.Compiler.time_launch(target, () -> copyto!(b, a)))
+    (launch = Tempest.Compiler.time_launch(target, () -> kernel(; threads = 1, blocks = 1)),
+     cached = copying(4 << 20), bandwidth = copying(256 << 20),
+     cache = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)),
+     blocks = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)))
 end
 
 Tempest.Compiler.build_floor(::CUDATarget, p::Plan, g::Group, buffers) = floor(p, g, buffers)

@@ -412,20 +412,6 @@ function claims(::Tempest.Compiler.cuTileGenerator, target::CUDATarget, g::Group
     [Claim(s)]
 end
 
-# Product rates the generator's schedules reach, measured on known devices
-# against cuBLAS (the scratchpad's rates.jl): full Float32 on CUDA cores, TF32
-# and half precision on tensor cores. Other devices scale GB10's by SM count.
-const PRODUCT_RATES = Dict("NVIDIA GB10" => (full = 2.6e12, tf32 = 25.0e12, half = 70.0e12))
-
-function product_rate(target::CUDATarget, T)
-    device = CUDACore.device()
-    r = get(PRODUCT_RATES, CUDACore.name(device)) do
-        scale = CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT) / 48
-        map(x -> scale * x, PRODUCT_RATES["NVIDIA GB10"])
-    end
-    T <: HalfFloat ? r.half : target.precision === :full ? r.full : target.precision === :tf32 ? r.tf32 : r.tf32 / 3
-end
-
 # The blocks of a schedule's first launch: one per kept tile (or chunk of
 # them) and split, and one per tile of a fully reduced domain.
 first_blocks(s::TileSchedule) = s.splits * prod(s.tiling; init = 1) do ax
@@ -451,9 +437,9 @@ function recomputed_flops(s::TileSchedule, g::GroupView)
     end
 end
 
-# A schedule's launches: the main kernel over its blocks, products (and the
-# folds it recomputes) at the generator's rate, and a merge of partial states
-# when blocks share a tile.
+# A schedule's launches: the main kernel over its blocks, with the flops of its
+# products and of the folds it recomputes, and a merge of partial states when
+# blocks share a tile.
 function estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
     blocks = first_blocks(s)
@@ -465,10 +451,9 @@ function estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::G
         r = first(g.reductions)
         t = first(product_factors(g.values[r].fold, g.terms[r]))
         factor = t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t
-        rate = product_rate(target, term_eltype(factor, g))
-        [Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions) + recomputed, rate, blocks)]
+        [Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions) + recomputed, factor = term_eltype(factor, g), blocks)]
     else
-        [Work(bytes; flops = recomputed, rate = product_rate(target, Float32), blocks)]
+        [Work(bytes; flops = recomputed, blocks)]
     end
     if s.splits > 1 || s.sketch === :full
         # Each of the blocks that share a kept tile writes a partial state of
