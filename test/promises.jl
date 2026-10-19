@@ -15,7 +15,6 @@ chosen(f, args...; target = T.CPUTarget()) = prepare(trace(f, args...), args...;
 # kernels, terms, storage and decisions.
 same_plan(f, g, args...) = sprint(explain, chosen(f, args...)) == sprint(explain, chosen(g, args...))
 
-const CANONICAL_OPERANDS = "operands of commutative primitives in one canonical order at the index level"
 const RESULT_FORMULAS = "a result written through its formula, so a permute of a stored value costs no kernel"
 const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
 const SCALING_FORMS = "sum / n and sum · (1 / n) one form under the numerics policy"
@@ -29,12 +28,10 @@ const FIXED_GROUP_KIND = "a fixed set's group takes its kind from its folds, not
     @test same_plan(a -> sum(abs2, a; dims = 1), a -> mapreduce(abs2, +, a; dims = 1), a)
     @test same_plan(a -> sum(a[1:4, :]; dims = 1), a -> sum(view(a, 1:4, :); dims = 1), a)
     @test same_plan(a -> mean(a; dims = 1), a -> sum(a; dims = 1) ./ 8, a)
+    @test same_plan((a, b) -> a .+ b, (a, b) -> b .+ a, a, b)
+    @test same_plan(a -> a .* 2, a -> 2 .* a, a)
+    @test same_plan((a, b) -> sum(a .* b; dims = 1), (a, b) -> sum(b .* a; dims = 1), a, b)
     # Reshapes around size-1 axes are checked in plan.jl, "axes of extent one".
-    @testset "gap: $CANONICAL_OPERANDS" begin
-        @test_broken same_plan((a, b) -> a .+ b, (a, b) -> b .+ a, a, b)
-        @test_broken same_plan(a -> a .* 2, a -> 2 .* a, a)
-        @test_broken same_plan((a, b) -> sum(a .* b; dims = 1), (a, b) -> sum(b .* a; dims = 1), a, b)
-    end
     @testset "gap: $RESULT_FORMULAS" begin
         # The transpose after the product plans as a kernel of its own.
         @test_broken same_plan((a, b) -> (a' * b)', (a, b) -> b' * a, a, b)

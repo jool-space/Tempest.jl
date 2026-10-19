@@ -34,11 +34,26 @@ struct ConstantArray{A} <: Definition
     data::A
 end
 
-"`f` applied to the operands at each index of the value's domain."
+"""
+`f` applied to the operands at each index of the value's domain. The operands of
+a commutative `f` are kept in one order, so that spelling does not change the value.
+"""
 struct Pointwise{F} <: Definition
     f::F
     operands::Tuple{Vararg{Operand}}
+    function Pointwise(f::F, operands) where {F}
+        commutative(f) && (operands = Tuple(sort(collect(Operand, operands); by = operand_key)))
+        new{F}(f, operands)
+    end
 end
+
+# Exact under IEEE arithmetic in either order, `min` and `max` included.
+commutative(f) = f in (+, *, min, max, &, |, xor, ==, !=)
+
+# A total order on operands by content: reads, then positions, then constants.
+operand_key(o::Read) = (0, o.value, map(affine_key, o.index))
+operand_key(o::IndexOperand) = (1, affine_key(o.expr))
+operand_key(o::Literal) = (2, string(nameof(typeof(o.value))), o.value)
 
 """
 A fold of `operand` over the `reduced` axes of `iteration`. The operand is read
