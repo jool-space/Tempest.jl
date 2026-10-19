@@ -420,15 +420,208 @@ struct Considered
 end
 
 """
+What a plan's neighbourhoods need, found once per plan: the values each
+group owns, where the planner forms each group (a fixed set's index, a fold's
+seed or a pointwise seed), the groups that read each value, and the values
+that read each.
+"""
+struct Around
+    owned::Vector{Vector{Int}}
+    places::Vector{Union{Nothing, Tuple{Symbol, Int}}}
+    reading::Vector{Vector{Int}}
+    followers::Vector{Vector{Int}}
+end
+
+function Around(p::Plan, sets)
+    owned = [Int[] for _ in p.groups]
+    for (v, k) in enumerate(p.owner)
+        k == 0 || push!(owned[k], v)
+    end
+    function place(j)
+        g = p.groups[j]
+        i = findfirst(s -> p.owner[first(s)] == j, sets)
+        i === nothing || return (:fixed, i)
+        g.kind === :reduction ? (:fold, first(g.reductions)) : g.kind === :pointwise ? (:pointwise, minimum(owned[j])) : nothing
+    end
+    reading = [Int[] for _ in p.graph.values]
+    for (j, g) in enumerate(p.groups), r in group_reads(p.graph, g)
+        push!(reading[r], j)
+    end
+    followers = [Int[] for _ in p.graph.values]
+    for (id, v) in enumerate(p.graph.values), o in operands(v.definition), r in read_values(o)
+        push!(followers[r], id)
+    end
+    Around(owned, map(place, eachindex(p.groups)), reading, followers)
+end
+
+# The groups of `p` that a change to value `v` could change: its own; those
+# that could grow into it, owning or reading what it loads; and those that
+# read it, directly or through values not stored.
+function neighbours(p::Plan, a::Around, v)
+    v > length(p.owner) && return Int[]
+    found = p.owner[v] == 0 ? Int[] : [p.owner[v]]
+    pending, seen = [v], Set{Int}()
+    while !isempty(pending)
+        for o in operands(p.graph.values[pop!(pending)].definition), r in read_values(o)
+            r in seen && continue
+            push!(seen, r)
+            if p.stored[r] || p.owner[r] != 0
+                p.owner[r] == 0 || push!(found, p.owner[r])
+                append!(found, a.reading[r])
+            else
+                push!(pending, r)
+            end
+        end
+    end
+    pending, seen = [v], Set{Int}()
+    while !isempty(pending)
+        for w in a.followers[pop!(pending)]
+            w in seen && continue
+            push!(seen, w)
+            p.owner[w] == 0 || push!(found, p.owner[w])
+            p.stored[w] || push!(pending, w)
+        end
+    end
+    found
+end
+
+"The values a proposal fixes as one group, or nothing for a call."
+fixes(q::Vector{Int}) = q
+fixes(q::ClaimedCall) = nothing
+
+"The values a proposal touches."
+touches(q) = q isa ClaimedCall ? [q.site.values; [r.value for r in q.site.reads]] : fixes(q)
+
+"""
+A proposal's place in a plan, by what it touches: the groups around its
+values, in the order the planner forms them, and its values among them,
+numbered as `canonical` numbers one group's. Proposals with one key in the
+generator's plan are the same edit in identical layers.
+"""
+function proposal_key(p::Plan, a::Around, q)
+    around = Set{Int}()
+    foreach(v -> union!(around, neighbours(p, a, v)), touches(q))
+    io = IOBuffer()
+    for j in sort!(collect(around); by = j -> something(a.places[j], (:opaque, minimum(a.owned[j]))))
+        g = p.groups[j]
+        print(io, "| ", g.kind, " ", g.domain)
+        for m in members(g)
+            v = p.graph.values[m]
+            what = m in g.reductions ? string(fold_name(v.definition.fold), v.definition.reduced) : "value"
+            print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", haskey(g.terms, m) ? g.terms[m] : computed(v.definition))
+        end
+    end
+    q isa ClaimedCall && print(io, " || call of ", first(q.site.results).op.f, " ", first(q.site.results).op.kwargs, " absorbing ", q.epilogues)
+    print(io, " || ", join(map(v -> "%$v", touches(q)), " "))
+    numbers = Dict{String, Int}()
+    text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
+    shapes = map(sort!(collect(numbers); by = last)) do (s, k)
+        v = parse(Int, s[2:end])
+        string("%", k, " ", p.graph.values[v].eltype, p.graph.values[v].dims, p.stored[v] ? " stored" : "")
+    end
+    string(text, "; ", join(shapes, ", "))
+end
+
+"""
     cover(decider) -> (plan, considered)
 
-The generator's groups, with the candidates implementations propose and the
-calls they claim accepted greedily: by estimated gain over the generator's
-plan, then by their values, each when its proposer claims the group it forms
-and the plan with it is cheaper than without. Every proposal compared is
-returned, taken or not.
+The generator's groups, with the proposals implementations make and the
+calls they claim accepted greedily by estimated gain over the generator's
+plan, then by their values, each when its proposer claims the group it
+forms. Proposals alike in the generator's plan (`proposal_key`) are one edit
+in identical layers: priced once, and taken together. A proposal is priced
+again in the current plan when an edit taken already changed a group around
+it. Each trial plans the whole graph, and is compared with the plan it
+changes on the groups that differ. Every proposal compared is returned, taken
+or not.
 """
 function cover(d::Decider)
+    base, keep = generator_plan(d)
+    proposals = Tuple{Any, Implementation}[]
+    for i in implementations(d.target), q in [call_proposals(d, i); candidates(i, d.target, base)]
+        any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
+    end
+    arounds = IdDict{Plan, Around}()
+    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if !(x isa ClaimedCall)]), arounds, p)
+    function trial(current, taken, qs)
+        all = Any[taken; qs]
+        sets = Vector{Int}[fixes(x) for x in all if !(x isa ClaimedCall)]
+        calls = ClaimedCall[x for x in all if x isa ClaimedCall]
+        # A value belongs to one proposal.
+        allunique(Iterators.flatten([sets; [c.site.values for c in calls]])) || return nothing
+        try
+            first(claimed_plan(d, claimed(d.graph, calls); fixed = sets, keep))
+        catch e
+            e isa NotAGroup || rethrow()
+            nothing
+        end
+    end
+    # A proposal's comparison with the plan it is priced in, and the
+    # implementation that claims its group: by key, once.
+    priced = Dict{String, Any}()
+    price(current, taken, q, i, key) = get!(priced, key) do
+        p = trial(current, taken, Any[q])
+        p === nothing && return nothing
+        j = claimant(d, p, q, i)
+        j === nothing && return nothing
+        (compare(d, p, current), j)
+    end
+    a = around(base, Any[])
+    ranked = Tuple{Float64, Any, Implementation, String}[]
+    for (q, i) in proposals
+        k = proposal_key(base, a, q)
+        x = price(base, Any[], q, i, k)
+        x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
+    end
+    order(q) = q isa ClaimedCall ? (1, [minimum(q.site.values); q.epilogues...]) : (0, fixes(q))
+    sort!(ranked; by = r -> (-r[1], order(r[2])))
+    near(q) = Set(j for v in touches(q) for j in neighbours(base, a, v))
+    current, considered, taken, done = base, Considered[], Any[], Set{Int}()
+    kept = Set(group_identity(base, g) for g in base.groups)
+    for (n, (_, _, _, k)) in enumerate(ranked)
+        n in done && continue
+        class = [m for m in n:length(ranked) if !(m in done) && ranked[m][4] == k]
+        union!(done, class)
+        # Those around which an edit taken already changed a group are priced
+        # again in the current plan, by the first of them; the rest keep
+        # their price.
+        moved(m) = any(j -> !(group_identity(base, base.groups[j]) in kept), near(ranked[m][2]))
+        taking = Considered[]
+        for part in (filter(!moved, class), filter(moved, class))
+            isempty(part) && continue
+            _, q, i, key = ranked[first(part)]
+            x = moved(first(part)) ? price(current, taken, q, i, proposal_key(current, around(current, taken), q)) : priced[key]
+            x === nothing && continue
+            c, j = x
+            cs = [Considered(ranked[m][2], j, c, cheaper(c)) for m in part]
+            cheaper(c) ? append!(taking, cs) : append!(considered, cs)
+        end
+        isempty(taking) && continue
+        p = trial(current, taken, Any[c.proposal for c in taking])
+        if p === nothing
+            # Proposals alike that share values are taken one at a time, each
+            # compared with the plan as it then is; one that no longer forms
+            # a group is not compared.
+            for t in taking
+                p = trial(current, taken, Any[t.proposal])
+                p === nothing && continue
+                c = compare(d, p, current)
+                push!(considered, Considered(t.proposal, t.implementation, c, cheaper(c)))
+                cheaper(c) && (current = p; push!(taken, t.proposal))
+            end
+        else
+            current = p
+            append!(considered, taking)
+            append!(taken, [c.proposal for c in taking])
+        end
+        kept = Set(group_identity(current, g) for g in current.groups)
+    end
+    current, considered
+end
+
+# The cover as it was, each proposal priced and taken alone: the oracle of
+# the cover's classes for one commit (test/regions.jl).
+function whole_cover(d::Decider)
     base, keep = generator_plan(d)
     proposals = Tuple{Any, Implementation}[]
     for i in implementations(d.target), q in [call_proposals(d, i); candidates(i, d.target, base)]
@@ -706,3 +899,4 @@ function device_rates!(target, calibration, path)
     c = calibration
     Rates(c["launch"], c["cached"], c["bandwidth"], c["cache"], Int(c["blocks"]), NOISE)
 end
+
