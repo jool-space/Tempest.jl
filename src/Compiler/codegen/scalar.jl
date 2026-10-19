@@ -19,7 +19,14 @@ struct EmitContext
     slots::Vector{Int}
     vars::Vector{Symbol}
     domain::Domain
+    stats::Dict{Int, Symbol} # the variable of each reduction's result, named when first used
 end
+
+EmitContext(graph, slots, vars, domain) = EmitContext(graph, slots, vars, domain, Dict{Int, Symbol}())
+
+# Variables are generated names, numbered by position when the kernel is keyed,
+# so that identical groups generate identical kernels whatever their value ids.
+stat_name(c::EmitContext, r) = get!(() -> gensym(:stat), c.stats, r)
 
 buffer(c::EmitContext, v) = :(buffers[$(findfirst(==(v), c.slots))])
 
@@ -39,7 +46,7 @@ term_expr(t::Load, names, c) =
     :(@inbounds $(buffer(c, t.value))[$(affine_expr(address(c.graph.values[t.value], t.index, c.domain), c)) + 1])
 term_expr(t::Lit, names, c) = t.value
 term_expr(t::Ix{T}, names, c) where {T} = :($T($(affine_expr(t.expr, c))))
-term_expr(t::Stat, names, c) = Symbol(:stat_, t.value)
+term_expr(t::Stat, names, c) = stat_name(c, t.value)
 term_expr(t::Apply, names, c) = :(convert($(t.eltype), $(t.f)($(map(a -> names[a], t.args)...))))
 
 # A recomputed fold: a loop over its reduced axes, the variables after the
@@ -52,7 +59,7 @@ function term_expr(t::Recomputed, names, c)
     inner = base .+ (1:length(t.extents))
     vars = [c.vars; [gensym(:i) for _ in inner]]
     extents = (c.domain.extents..., t.extents...)
-    nested = EmitContext(c.graph, c.slots, vars, Domain(extents))
+    nested = EmitContext(c.graph, c.slots, vars, Domain(extents), c.stats)
     state, j = gensym(:state), gensym(:j)
     loop = Expr(:block)
     delinearize_expr(loop.args, j, inner, extents, vars)
@@ -128,7 +135,7 @@ function scalar_kernel(graph, stored, g::Group, slots)
         for r in phase_reductions
             fold = graph.values[r].definition.fold
             A = fold_types(fold, term_eltype(g.terms[r], graph)).accumulator
-            states[r] = Symbol(:state_, r)
+            states[r] = gensym(:state)
             push!(s, :($(states[r]) = $fold_init($fold, $A)))
         end
         delinearize_expr(loop.args, :sweep, reduced, D, vars)
@@ -143,13 +150,13 @@ function scalar_kernel(graph, stored, g::Group, slots)
         end))
         for r in phase_reductions
             val = graph.values[r]
-            push!(s, :($(Symbol(:stat_, r)) = convert($(val.eltype), $fold_observe($(val.definition.fold), $(states[r])))))
+            push!(s, :($(stat_name(c, r)) = convert($(val.eltype), $fold_observe($(val.definition.fold), $(states[r])))))
         end
     end
     # Reductions other kernels read, and outputs shaped like a reduction, once.
     foreach(k -> push!(s, :($(vars[k]) = 0)), reduced)
     for r in folds
-        stored[r] && push!(s, store_expr(c, r, placement(graph, g, r), Symbol(:stat_, r)))
+        stored[r] && push!(s, store_expr(c, r, placement(graph, g, r), stat_name(c, r)))
     end
     statistic_outputs = [m for m in g.outputs if graph.values[m].dims != D && !(m in g.reductions)]
     names = emit_terms!(s, [g.terms[m] for m in statistic_outputs], c)

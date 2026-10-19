@@ -144,6 +144,15 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         C.plan(C.lower(differentiate(trace(stack_loss, x, layers))); recompute_folds = true)
     end
     @test distinct(planned(32)) == distinct(planned(8))
+    # Two groups alike generate the same floor kernels, so each has one content
+    # key and the kernel is built once.
+    layered = planned(8)
+    floor_keys(g) = [C.content_key("floor", k.body) for k in C.scalar_kernels(layered.graph, layered.stored, g, C.kernel_slots(layered, g))]
+    alike = Dict{String, Vector{Any}}()
+    foreach(g -> push!(get!(alike, C.canonical(layered, g), []), g), layered.groups)
+    repeated = filter(gs -> length(gs) > 1, collect(values(alike)))
+    @test !isempty(repeated)
+    @test all(gs -> floor_keys(gs[1]) == floor_keys(gs[2]), repeated)
     if CUDA_FUNCTIONAL
         # A kernel is loaded or compiled once per key, however many groups
         # share it: a cold prepare builds at most one per distinct group.
