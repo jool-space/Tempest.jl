@@ -167,8 +167,21 @@ level(measure::Bool) = measure ? :close : :none
 level(measure::Symbol) = measure
 
 # A group within one preparation: its kind, members, terms and what it stores.
-group_identity(p::Plan, g::Group) = (g.kind, g.domain, Tuple(g.reductions), Tuple(g.outputs),
-    Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(p.stored[m] for m in members(g)))
+# One concrete type, so that the sets and tables of identities compile once.
+struct GroupIdentity
+    kind::Symbol
+    domain::Tuple{Vararg{Int}}
+    reductions::Vector{Int}
+    outputs::Vector{Int}
+    terms::Vector{Any}
+    stored::Vector{Bool}
+end
+
+Base.:(==)(a::GroupIdentity, b::GroupIdentity) = all(f -> getfield(a, f) == getfield(b, f), fieldnames(GroupIdentity))
+Base.hash(i::GroupIdentity, h::UInt) = foldl((h, f) -> hash(getfield(i, f), h), fieldnames(GroupIdentity); init = h)
+
+group_identity(p::Plan, g::Group) = GroupIdentity(g.kind, g.domain, copy(g.reductions), copy(g.outputs),
+    Any[get(g.terms, m, nothing) for m in members(g)], Bool[p.stored[m] for m in members(g)])
 
 # An opaque value without a term, as its operation computes it: the
 # operation, its keywords, and the values it reads.
