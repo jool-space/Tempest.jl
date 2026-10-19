@@ -167,3 +167,40 @@ seconds(f) = (f(); t = time(); f(); time() - t)
         end
     end
 end
+
+# The coverage suite's compositions, in a module of their own: their names
+# clash with this file's.
+module Coverage include(joinpath(@__DIR__, "fixtures", "compositions.jl")) end
+
+const GENERATOR_COST = "the generator's estimate counts what its schedule costs beyond bytes and products"
+# Compositions and precisions where an estimate that decides is outside the close-call factor.
+const ESTIMATE_GAPS = [("the verb, a training step", :tf32), ("linear, bias, GELU", :tf32)]
+
+within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
+
+# Every option of a group chosen by estimate among several, and each side of
+# a comparison made by estimate, is within the close-call factor of its
+# measurement, and each such comparison stands when measured.
+@testset "estimates that decide are within the close-call factor, or measured" begin
+    @test !hasfield(Tempest.Implementations.Work, :rate)
+    CUDA_FUNCTIONAL && @testset "$(c.name), $precision" for precision in (:full, :tf32), c in Coverage.COMPOSITIONS
+        d = C.Decider(T.CUDATarget(; precision), C.rewrite(C.lower(c.program)); measure = :close)
+        p, considered = C.cover(d)
+        timed(q, g, o) = (C.measure!(d, q, g, o); d.record[o.key])
+        held = Bool[]
+        for g in filter(g -> C.chosen(p, g), p.groups)
+            x = C.decide(d, p, g)
+            x.how === :estimated && append!(held, [within(o.estimate, timed(p, g, o)) for o in x.options])
+        end
+        for k in filter(k -> k.comparison.how === :estimated, considered)
+            measured = map(side -> sum(s -> timed(s[1], s[2], s[3].choice), side; init = 0.0), k.comparison.sides)
+            @test (measured[2] < measured[1]) == C.cheaper(k.comparison)
+            append!(held, within.((k.comparison.old, k.comparison.new), measured))
+        end
+        if (c.name, precision) in ESTIMATE_GAPS
+            @testset "gap: $GENERATOR_COST" begin @test_broken all(held) end
+        else
+            @test all(held)
+        end
+    end
+end

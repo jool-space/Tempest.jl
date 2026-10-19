@@ -176,11 +176,11 @@ as the minimum of several alternating runs, the parameters of each kernel
 enumerated within a budget, and the times go into the tuning record, keyed by
 package, function, parameters, shapes, element types, keywords and device.
 `measure = :all` times every option, and `:none` times none and uses the
-record. A later process reads the record and measures nothing. `explain` prints the winner by package and function, with its
-parameters and whether it was estimated or measured. A kernel whose build
-fails is withdrawn and the next option runs. The reference is always an
-option, so removing the package changes how fast the program runs, never
-whether it runs.
+record. A later process reads the record and measures nothing. `explain`
+prints the winner by package and function, with its parameters and whether it
+was estimated or measured. A kernel whose build fails is withdrawn and the
+next option runs. The reference is always an option, so removing the package
+changes how fast the program runs, never whether it runs.
 
 ## Not built
 
