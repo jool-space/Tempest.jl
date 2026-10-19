@@ -467,15 +467,18 @@ timed as the minimum of several alternating runs, and the times go into the
 tuning record. A measurement overrides the estimate only beyond the device's
 noise margin.
 
-**One choice is open.** Two shapes satisfy the five words. In one, candidates
-are grown from anchors (folds, contracts, calls, results) by each applicable
-sketch and covered greedily by estimated gain, as XLA and Inductor do. In the
-other, Tempest's rules make a starting plan, and every rule-made choice is
-also a proposal, priced as the whole plan that results. The first prices every
-grouping the same way; the second keeps a plan that always exists and adds
-pricing to it. Whichever is chosen, no grouping may be settled by a rule the
-cover never prices. That is Promise 3, and its test is a program whose best
-grouping the rules alone would not find.
+**The shape.** Tempest's rules make a starting plan, and every rule-made
+choice is also a proposal: an edit to the current plan that dissolves the
+groups owning its values, forms its group, and regroups what is left with
+every other group frozen. The estimate is a sum over groups, so an edit is
+priced on the groups it changes, and edits are taken greedily by gain. The
+other shape, candidates grown from anchors (folds, contracts, calls, results)
+by each applicable sketch and covered greedily by estimated gain as XLA and
+Inductor do, prices every grouping the same way, but it would make the
+generator a proposer and move every plan at once; this one keeps a plan that
+always exists and adds pricing to it. Either way, no grouping may be settled
+by a rule the cover never prices. That is Promise 3, and its test is a
+program whose best grouping the rules alone would not find.
 
 The plan records, for each value, stored (with its layout) or recomputed; for
 each kernel, its group, schedule and forms, and whether its choice was
