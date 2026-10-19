@@ -5,11 +5,10 @@ kernel at each call of the operation, prices that kernel against the
 operation's reference fused into its neighbours and against every other
 package's kernel, and runs the winner. The package never sees the plan.
 
-> This page describes the interface as it should be. Today the same work is
-> done by a struct with `claims_call`, `estimate` and `build_call` methods in
-> `Tempest.Implementations`. The seams this page shows exist in both. The
-> names and shapes here are the target, and *Not built* at the end says what
-> is missing.
+> This page describes the interface, and *Not built* at the end says what is
+> missing from it. The older protocol, a struct subtyping `Implementation`
+> with `claims_call`, `epilogue_results` and `build_call` methods, remains for
+> a kernel that states products at a rate.
 
 ## The operation
 
@@ -64,7 +63,7 @@ function forward(::CUDATarget, x::Spec{Float32, 2}, w::Spec{Float32, 1}; eps, of
     M, N = size(x)
     # Two reads of x and one write of y: more than the one pass Tempest assumes.
     Kernel(; cost = 3bytes(x), params = (TILE_M = (128, 256, 512),)) do (y, rstd), (x, w), (; TILE_M)
-        @cutile blocks=N rms_norm_fwd(x, w, y, rstd, Float32(offset), Float32(eps), Constant(TILE_M))
+        launch(rms_norm_fwd, N, x, w, y, rstd, Float32(offset), Float32(eps), Constant(TILE_M))
     end
 end
 
@@ -74,9 +73,9 @@ function backward(::CUDATarget, x::Spec{Float32, 2}, w::Spec{Float32, 1}, rstd::
     groups = 64
     Kernel(; cost = [4bytes(x), 4M * groups],
             scratch = (Spec(Float32, M, groups), Spec(Int, groups))) do (dx, dw), (x, w, rstd, dy, drstd), (partial, locks)
-        @cutile blocks=N rms_norm_bwd_dx_partial_dw(dx, dy, fill!(partial, 0), x, w, vec(rstd), vec(drstd),
+        launch(rms_norm_bwd_dx_partial_dw, N, dx, dy, fill!(partial, 0), x, w, vec(rstd), vec(drstd),
             fill!(locks, 0), Constant(Float32(offset)), Constant(groups), Constant(256))
-        @cutile blocks=cld(M, 64) rms_norm_bwd_dw(partial, dw, Constant(64), Constant(64))
+        launch(rms_norm_bwd_dw, cld(M, 64), partial, dw, Constant(64), Constant(64))
     end
 end
 
@@ -89,10 +88,11 @@ end
 
 **Two moments.** A method runs when Tempest prices a call, before any buffer
 exists: its arguments are `Spec`s. The kernel's body runs when the program
-runs: its arguments are the target's arrays. The body receives the results
-first, then the arguments, then scratch and parameters where the kernel
-declared them. The arguments shadow the specs of the same names on purpose,
-so the seam is visible where it is.
+runs: its arguments are the target's arrays, reshaped to the program's shapes,
+host `Vector`s on the CPU and `CuArray`s on CUDA. The body receives the
+results first, then the arguments, then scratch, parameters and the forms it
+absorbs where the kernel declared them. The arguments shadow the specs of the
+same names on purpose, so the seam is visible where it is.
 
 **`Spec{T, N}`** is an element type and dimensions: `size`, `eltype` and
 `bytes`, nothing else. There is no layout in it. A kernel reads its arguments
@@ -101,15 +101,18 @@ Tempest copies where a value is not stored that way.
 
 **`Kernel`** carries what Tempest needs to choose and run it:
 
-- `cost`: bytes moved, one number per launch. Leave it out for one launch
-  that reads its arguments and writes its results once, which Tempest
-  computes from the specs. It is an estimate: it ranks kernels and says which
-  are close, and close calls are measured (see below). A kernel package never
-  states a rate or a time; those are the device's, and Tempest measures them.
+- `cost`: bytes moved, a number for one launch or a vector with a number for
+  each. Leave it out for one launch that moves the bytes its group reads and
+  writes, which Tempest computes from the plan: that counts what an absorbed
+  term reads and leaves out a result nobody stores. It is an estimate: it
+  ranks kernels and says which are close, and close calls are measured (see
+  below). A kernel package states no time; the device's rates are Tempest's.
+  Until they are, a `Work` in place of a number states flops at a rate, for
+  a kernel whose products the bytes do not rank.
 - `scratch`: specs of the workspace the kernel needs. Tempest allocates them
   when it builds the kernel, and they are the kernel's for the program's life.
-- `params`: named candidate values. Tempest picks one set and passes it to the
-  body.
+- `params`: named candidate values. Tempest passes the first candidate of
+  each to the body.
 - `epilogue`: per result, the forms of work after it that the kernel absorbs
   (see *Forms*).
 - the body. It runs on the target's stream once per execution, and neither
@@ -144,10 +147,17 @@ A kernel that names a form on a result receives the matching terms when the
 program has them: the scalar, the array to add, or the function to apply, and
 the planner stores the result after that work rather than before it. A term
 the kernel has no form for stays outside, in a kernel of its own or in the
-next reader's. The same forms are what a library takes as coefficients and
-epilogues: cuBLAS's alpha and beta are the scale and the add, and its fused
-bias and GELU are pointwise functions. A gradient accumulated across uses of a
-weight is an add on the backward kernel that produces one contribution.
+next reader's. The terms arrive in the body's last group, `after`, in the
+structure of `epilogue`: for a pointwise function, a function to apply to the
+result, which is `identity` where the program has no work after that result.
+On the CPU it takes the result's array and returns the array to store; on CUDA
+it is a tile function of the output tile and its index. The body stores the
+result after it, in the array it was given.
+
+The same forms are what a library takes as coefficients and epilogues:
+cuBLAS's alpha and beta are the scale and the add, and its fused bias and GELU
+are pointwise functions. A gradient accumulated across uses of a weight is an
+add on the backward kernel that produces one contribution.
 
 ## What Tempest does with it
 
@@ -171,21 +181,22 @@ whether it runs.
 
 ## Not built
 
-- `Spec`, `Kernel`, `params`, `scratch`, `epilogue`, and operation pairs in
-  `register!`. Today a kernel is a struct subtyping `Implementation` with
-  `claims_call`, `epilogue_results`, `estimate` and `build_call` methods,
-  registered as `register!(Module, struct)`, and its cost is a `Work` of
-  bytes, flops and blocks.
+- Products in cost. A kernel states bytes, and a `Work` may state flops at the
+  rate the kernel reaches. The hand-written attention keeps `claims_call`,
+  `epilogue_results` and `build_call` until Tempest counts products and
+  measures rates.
 - Measured rates. Today the product rates are two hand-entered tables in the
   cuBLAS and cuTile extensions, with other devices scaled from one. A rate
   that is wrong by more than the close-call factor decides without a
   measurement.
 - Parameter search. Measurement and the record exist; the enumeration and
-  its budget do not. The generator returns one schedule per group.
-- Forms. Today a kernel may absorb a pointwise function after a result when
-  it reads at the result's own index, as the hand-written attention does; the
-  scale and the add are not recognized, and cuBLAS takes no epilogue at all.
-  How the body receives a matched term is open.
+  its budget do not. A kernel runs with the first candidate of each
+  parameter, and `explain` says so. The generator returns one schedule per
+  group.
+- Forms. Only `pointwise` exists. Its term is a host function on the CPU and a
+  cuTile tile function on CUDA, which no body takes yet, so a CUDA kernel in
+  another language cannot take one. The scale and the add are not recognized,
+  and cuBLAS takes no epilogue.
 - Layouts. A spec carries no layout, so a kernel cannot accept a strided
   argument, and a permuted argument is copied before the call even where the
   kernel could have read it in place. The spec should carry the layout, dense
@@ -194,6 +205,9 @@ whether it runs.
   the consumer accepts rather than copy.
 - Prologues. A kernel cannot take work before its arguments. The generated
   path can.
+- Written-out patterns. A package recognizes a computation spelled in
+  primitives with `candidates` on an `Implementation` registered beside its
+  pairs.
 - Group claims. The generator and cuBLAS's recognition of products claim
   groups of index-level values through a `GroupView`, and keep the
   `Implementation` struct. This page is for kernels of named operations.
