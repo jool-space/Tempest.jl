@@ -55,49 +55,67 @@ for like.
 
 Built: the program and index levels, the cuTile generator, the generic
 kernels, a cover with cuBLAS as a rival, the tuning record, the kernel cache,
-the generated attention forward pass, and functional updates of the arrays a
-program allocates. The first gates measured time against the old Tempest and
-held (the 29 forward guard-rail cases at 0.94 of its time). From here the
-gates are about what Tempest can express; time is an alarm.
+the generated attention forward pass, functional updates of the arrays a
+program allocates, the kernel author's interface for named operations, rates
+measured on the device, a planner linear in identical layers, and decisions
+made once per canonical group. The first gates measured time against the old
+Tempest and held (the 29 forward guard-rail cases at 0.94 of its time). From
+here the gates are about what Tempest can express; time is an alarm.
 
-Not yet as designed: the six fronts below, found on 19 October by reading the
-code against DESIGN.md and by probing plans. None of them is a kernel being
-slow. Each is a decision made in the wrong place, by the wrong rule, or
-stated in the wrong vocabulary. test/promises.jl records what each front
-owes as `@test_broken`, under a testset naming what closes it.
+Not yet as designed: what remains of the six fronts below, found on 19
+October by reading the code against DESIGN.md and by probing plans, and
+worked the same day in the order given. None of them is a kernel being slow.
+Each is a decision made in the wrong place, by the wrong rule, or stated in
+the wrong vocabulary. test/promises.jl records what each front still owes as
+`@test_broken`, under a testset naming what closes it.
 
 ## Next: the fronts, in order, each closed by its gate
 
-1. **The kernel author's interface.** A kernel is a struct with five trait
-   methods, results are integers, buffers are reached by value id, and a verb
-   author and a generator author share one protocol. Target: the interface
-   docs/src/kernels.md describes. Gate: that page is true, and the toy
-   implementations in test/calls.jl are written in its form.
-2. **Estimates and measurement.** Product rates are two hand-typed tables, in
-   the cuBLAS and cuTile extensions, and an estimate wrong by more than the
-   close-call factor decides without a measurement; the generator's product
-   estimate was five times cuBLAS's where the two had measured alike. Target:
-   rates measured by Tempest on first use of a device and kept in the tuning
-   record; measure levels none, close and all; parameter search within a
-   budget. Gate: no rate in any extension, and for every claim the coverage
-   suite exercises, the estimate is within the close-call factor of its
-   measurement or the claim was measured. Cheap, and it fixes the judge the
-   other fronts are judged by.
-3. **The decision, and compile time.** Rules decide groups and the cover
-   prices only what implementations propose, so Promise 3 does not hold; the
-   layer has two ways to claim, two to propose, two builds, a floor that is
-   only sometimes an option, and building outside the cover. Decisions are
-   cached per group instance, each proposal re-plans the whole program, the
-   planner is superlinear, and every instance of a kernel is loaded or
-   compiled on its own: preparing 32 identical layers took 29 s where 8 took
-   0.4. Target: DESIGN.md, *The decision*, decided per canonical group, a
-   trial re-planning only the region its proposal touches, a linear planner,
-   and one build per distinct group. Gate: the Promise 3 and Promise 6 gaps
-   in test/promises.jl close, and one place decides what forms a kernel.
-4. **Canonical forms.** Commutative operands, a domain's axis order, a reshape
-   to a vector, a transpose after a product, and the two scaling forms of a
-   mean all plan differently. Language-level work, independent of the rest.
-   Gate: the Promise 1 gaps close.
+1. **The kernel author's interface.** Done for named operations: a kernel is
+   a function of the target and the call's `Spec`s returning a `Kernel`,
+   registered as `register!(Package, operation => function)`, and the toys
+   in test/calls.jl are written in that form; docs/src/kernels.md is true and
+   its *Not built* list says what is not. Remaining: the forms beyond a
+   pointwise function (a scale, an add), a CUDA body that takes a form, the
+   parameter search, and the hand-written attention, which keeps the older
+   call-claim methods. Gate: the hand-written attention is written in the
+   page's form and nothing uses `claims_call`.
+2. **Estimates and measurement.** Done: no extension states a rate. Tempest
+   measures the device on first use (launch gap, bandwidth in and out of the
+   cache) and fits one line, latency and rate, per package and class of
+   products from two reference products the package runs, kept in a rates
+   file beside the record; `measure` takes `:none`, `:close` or `:all`; and
+   a test checks, for every composition in the coverage suite, that each
+   estimate that decides is within the close-call factor of its measurement.
+   Remaining: at TF32 the generator's estimate for the verb's training step
+   is outside the factor, because its cost beyond bytes and products is not
+   counted (the GENERATOR_COST gap); and the parameter search within a
+   budget. Gate: that gap closes.
+3. **The decision, and compile time.** The shape is settled: the rules make
+   the starting plan, every rule-made choice is also a proposal, and a
+   proposal is an edit priced on the groups it changes (DESIGN.md, *The
+   decision*). Done: a fixed set's group takes its kind from its folds; the
+   planner grows each group from a frontier of its readers and is linear in
+   identical layers, with every plan unchanged; a decision is made once per
+   canonical group; a kernel is loaded or compiled once per content key in a
+   session. Remaining, in order: a trial re-plans only the region its
+   proposal touches (preparing still re-plans the whole program per
+   proposal); Tempest proposes joining a stored value into a reader's group,
+   which is Promise 3's test; and the other rule-made choices (storing a
+   fold the rules recompute, recomputing a map in its readers, declining an
+   epilogue) become proposals too. Gate: the Promise 3 and Promise 6 gaps in
+   test/promises.jl close, and one place decides what forms a kernel.
+4. **Canonical forms.** Done: the operands of a commutative function are in
+   one order at the index level; a fold a result reads through a permutation
+   is stored in the result's order, so a transposed product costs no kernel;
+   a quotient by a power of two is the product by its reciprocal. Remaining:
+   `x / n` against `x * (1 / n)` where the reciprocal is inexact, a rewrite
+   behind the numerics policy; and a group's domain order, where two
+   spellings do the same work at the same addresses but print differently.
+   The generators read the domain's order, so canonicalizing it would move
+   schedules for no gain in time; the open question below is whether the
+   promise is the same plan or the same work. Gate: the Promise 1 gaps close
+   or the promise is restated.
 5. **Forms and layouts.** A call reads dense copies and absorbs only a
    pointwise function aligned with its output. Target: the spec carries a
    layout and a kernel accepts or declines on it; an intermediate is written
@@ -111,12 +129,11 @@ owes as `@test_broken`, under a testset naming what closes it.
    in a broadcast become positions and `axis_positions` goes; an Einops
    extension of one method; the language (tracing, the interpreter,
    differentiation, operations, updates) in a module of its own, out of
-   Compiler; numerics out of the target and into the program; and the home
-   page carrying the contract and the promises as what a user relies on.
+   Compiler; and numerics out of the target and into the program. Done: the
+   home page carries the contract and the promises as what a user relies on.
    Gate: the attention tests unchanged without `axis_positions`; TF32
    programs agree with the interpreter up to summation order and no
-   implementation reads a mode; the home page states the contract and the
-   promises.
+   implementation reads a mode.
 
 Then, as before:
 
@@ -146,9 +163,12 @@ precision; one place decides what forms a kernel.
 
 ## Open questions
 
-- Which shape the decision takes: candidates grown from anchors and covered
-  greedily by gain, or a rule-made starting plan with every rule-made choice
-  also offered as a proposal and priced. See DESIGN.md, *The decision*.
+- Whether Promise 1 means the same plan or the same work. Two spellings that
+  differ in the order of a kernel's domain (a sum over the transpose against
+  the transpose of a sum; a map over a reshaped vector against a reshape of
+  the map) do the same work at the same addresses, and `explain` prints them
+  differently; test/promises.jl judges both with a helper that compares
+  kernels up to the naming of their index points, beside the open gap.
 - How claims are written: as code over a group first, and as declarative
   patterns once the common cases are known.
 - Whether differentiation and planning can derive attention's backward
