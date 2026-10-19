@@ -70,6 +70,31 @@ function put_entry(key, entry, binary)
     nothing
 end
 
+# Within a session a key is resolved once. Programs stack identical layers, whose
+# groups build their kernels at the same time and so have the same key in flight
+# together: the first caller loads or compiles it, and the others wait for that
+# task, or get its result after, instead of loading or compiling again.
+const RESOLVED_KERNELS = Dict{String, Task}()
+const RESOLVED_LOCK = ReentrantLock()
+
+"""
+    cached_kernel(compile, key) -> (entry, binary)
+
+The kernel under `key`: from the object cache, or compiled by `compile()`, which
+returns `(entry, binary)` and stores it, when the cache has none. This happens
+once per key in a session, so that callers in flight together wait for the
+first. The compilation runs `elsewhere`, and a failure fails every caller.
+"""
+function cached_kernel(compile, key)
+    task = @lock RESOLVED_LOCK get!(RESOLVED_KERNELS, key) do
+        @async begin
+            found = load_kernel(key)
+            found === nothing ? elsewhere(compile) : found
+        end
+    end
+    fetch_result(task)
+end
+
 # Generated functions, by type, with the source that defined them: in a key a
 # generated function is its source, since its name differs between sessions.
 const GENERATED_SOURCES = IdDict{Any, Expr}()

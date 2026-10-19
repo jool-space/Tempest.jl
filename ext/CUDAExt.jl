@@ -100,30 +100,26 @@ function floor(p::Plan, g::Group, buffers)
 end
 
 # A floor kernel and its exception slot, from the kernel cache or compiled and
-# kept. Kernels that refer to Julia values in the session (relocations) are
-# compiled every time.
+# kept. A kernel that refers to Julia values in the session (relocations) is
+# compiled once a session and kept out of the cache.
 function floor_function(@nospecialize(f), @nospecialize(args), n)
     Base.issingletontype(typeof(f)) || error("a floor kernel captures values, which its launch does not pass")
     tt = Tuple{typeof(args), typeof(n)}
     device = CUDACore.device()
     key = Tempest.Compiler.content_key("CUDA kernel", f, tt, CUDACore.capability(device), CUDACore.GPUCompiler,
         CUDACore.CUDA_Compiler_jll, Base.libllvm_version)
-    found = Tempest.Compiler.load_kernel(key)
-    if found !== nothing
-        entry, image = found
-        fun = CUDACore.link_kernel(image, entry, CUDACore.GPUCompiler.Relocations())
-        return fun, CUDACore.create_exceptions!(fun.mod)
-    end
-    compiled = Tempest.Compiler.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
-        job = CUDACore.CompilerJob(CUDACore.methodinstance(typeof(f), tt), CUDACore.compiler_config(device))
-        Base.@lock CUDACore.cufunction_lock CUDACore.compile_or_lookup(job)
-    end)
-    if isempty(compiled.relocations.records)
-        Tempest.Compiler.store_kernel(key, compiled.entry, compiled.image)
-    else
+    entry, binary = Tempest.Compiler.cached_kernel(key) do
+        compiled = Base.invokelatest(f, tt) do f, tt
+            job = CUDACore.CompilerJob(CUDACore.methodinstance(typeof(f), tt), CUDACore.compiler_config(device))
+            Base.@lock CUDACore.cufunction_lock CUDACore.compile_or_lookup(job)
+        end
+        isempty(compiled.relocations.records) && return Tempest.Compiler.store_kernel(key, compiled.entry, compiled.image)
         Threads.atomic_add!(Tempest.Compiler.CACHE_COUNTS.compiled, 1)
+        compiled.entry, compiled
     end
-    fun = CUDACore.link_kernel(compiled.image, compiled.entry, compiled.relocations)
+    # A kernel with relocations is the compiled kernel itself, and not an image.
+    image, relocations = binary isa Vector{UInt8} ? (binary, CUDACore.GPUCompiler.Relocations()) : (binary.image, binary.relocations)
+    fun = CUDACore.link_kernel(image, entry, relocations)
     fun, CUDACore.create_exceptions!(fun.mod)
 end
 

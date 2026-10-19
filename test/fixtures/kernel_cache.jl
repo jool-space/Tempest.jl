@@ -1,8 +1,10 @@
 # The kernel cache from an empty store: cache.jl runs this in a child process
 # with `JULIA_OBJCACHE_PATH` naming a fresh directory, since a process opens its
 # object cache once. Each program compiles its kernels when first prepared and
-# loads them all when prepared again, with the same results. The second pass
-# reads what the first wrote, which the store before Julia 1.14 commits at once.
+# loads them all when prepared again, with the same results. Prepared again in
+# the same session it loads nothing, since the session keeps what it resolved;
+# the last pass forgets that and reads what the first wrote (the store before
+# Julia 1.14 commits at once).
 using Tempest, Test, NNlib, CUDACore
 import cuBLAS, cuTile
 include(joinpath(@__DIR__, "..", "setup.jl"))
@@ -20,17 +22,19 @@ programs = [
     ("the floor", trace(x -> T.fold(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),
 ]
 @testset "$name" for (name, p, args, target) in programs
-    results = map(1:2) do pass
+    results = map(1:3) do pass
+        pass == 3 && @lock C.RESOLVED_LOCK empty!(C.RESOLVED_KERNELS)
         before = C.cache_counts()
         ex = prepare(p, map(CuArray, args)...; target)
         after = C.cache_counts()
         (after.loaded - before.loaded, after.compiled - before.compiled,
             map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex))))), ex.kernels)
     end
-    (loaded, compiled, first, kernels), (reloaded, recompiled, second, _) = results
+    (loaded, compiled, first, kernels), (resident, _, middle, _), (reloaded, recompiled, second, _) = results
     # The first pass may also compile the side of a close call it measures and
     # does not keep.
     @test compiled > 0 && recompiled == 0 && 0 < reloaded <= loaded + compiled
+    @test resident == 0 && isequal(first, middle)
     @test isequal(first, second)
     @test all(isapprox.(first, filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-2))
     name == "the floor" && @test all(d -> d isa C.FloorKernels, kernels)

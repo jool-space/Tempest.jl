@@ -20,20 +20,21 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     arch = ct.device_sm_arch()
     key = Tempest.Compiler.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
         ct.tileiras_version(), ct.bytecode_version(), ENTRY)
-    found = Tempest.Compiler.load_kernel(key)
-    entry, cubin = found !== nothing ? found : Tempest.Compiler.elsewhere(() -> Base.invokelatest(f, tt) do f, tt
-        argtypes, constants = ct.unwrap_argtypes(f, tt)
-        job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
-            name = ENTRY, alias_groups = groups)
-        cubin = try
-            ct.invoke_frozen(ct.compile_or_lookup, job).cubin
-        catch err
-            # A kernel cuTile cannot express fails the same way next time.
-            err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(key, sprint(showerror, err))
-            rethrow()
+    entry, cubin = Tempest.Compiler.cached_kernel(key) do
+        Base.invokelatest(f, tt) do f, tt
+            argtypes, constants = ct.unwrap_argtypes(f, tt)
+            job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
+                name = ENTRY, alias_groups = groups)
+            cubin = try
+                ct.invoke_frozen(ct.compile_or_lookup, job).cubin
+            catch err
+                # A kernel cuTile cannot express fails the same way next time.
+                err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(key, sprint(showerror, err))
+                rethrow()
+            end
+            Tempest.Compiler.store_kernel(key, ENTRY, cubin)
         end
-        Tempest.Compiler.store_kernel(key, ENTRY, cubin)
-    end)
+    end
     CuFunction(CuModule(cubin), entry)
 end
 

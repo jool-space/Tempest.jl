@@ -88,11 +88,8 @@ end
 # program stacks. Preparing should then cost the same per layer, and a cold
 # prepare should build one kernel per distinct group. Today the cover decides
 # every group instance anew and re-plans the whole program for each proposal,
-# the planner is superlinear, and every instance of a kernel is loaded or
-# compiled on its own, so identical kernels that miss the cache together all
-# compile.
+# and the planner is superlinear.
 const LINEAR_PREPARE = "the cover per canonical group, a trial re-planning only its region, a linear planner"
-const DEDUPLICATED_BUILDS = "builds deduplicated by content key within a prepare"
 
 stack_layer(x, (w, b)) = tanh.(w * x .+ b)
 stack_loss(x, layers) = sum(abs2, foldl(stack_layer, layers; init = x))
@@ -108,6 +105,18 @@ seconds(f) = (f(); t = time(); f(); time() - t)
         C.plan(C.lower(differentiate(trace(stack_loss, x, layers))); recompute_folds = true)
     end
     @test distinct(planned(32)) == distinct(planned(8))
+    if CUDA_FUNCTIONAL
+        # A kernel is loaded or compiled once per key, however many groups
+        # share it: a cold prepare builds at most one per distinct group.
+        layers, x = stack(8, CuArray)
+        p = differentiate(trace(stack_loss, x, layers))
+        before = C.cache_counts()
+        ex = prepare(p, x, layers; target = T.CUDATarget(), measure = false)
+        after = C.cache_counts()
+        built = (after.compiled - before.compiled) + (after.loaded - before.loaded)
+        @test built > 0
+        @test built <= distinct(ex.plan)
+    end
     function per_layer_plan(L)
         layers, x = stack(L, identity)
         g = C.lower(differentiate(trace(stack_loss, x, layers)))
@@ -122,20 +131,6 @@ seconds(f) = (f(); t = time(); f(); time() - t)
                 seconds(() -> prepare(p, x, layers; target = T.CUDATarget(), measure = false)) / L
             end
             @test_broken per_layer_prepare(16) < 2 * per_layer_prepare(4)
-        end
-    end
-    if CUDA_FUNCTIONAL
-        @testset "gap: $DEDUPLICATED_BUILDS" begin
-            # Every instance of a generated kernel is loaded or compiled on
-            # its own: once per instance, where once per distinct group would do.
-            layers, x = stack(8, CuArray)
-            p = differentiate(trace(stack_loss, x, layers))
-            before = C.cache_counts()
-            ex = prepare(p, x, layers; target = T.CUDATarget(), measure = false)
-            after = C.cache_counts()
-            built = (after.compiled - before.compiled) + (after.loaded - before.loaded)
-            @test built > 0
-            @test_broken built <= distinct(ex.plan)
         end
     end
 end
