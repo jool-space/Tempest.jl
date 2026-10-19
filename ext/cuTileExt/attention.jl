@@ -211,9 +211,9 @@ function epilogue_for(p, g, o, buffers, shape)
     # The group's domain is the result's axes wider than one; a load spans
     # those it reads along.
     result = graph.values[o].definition.node.dims
-    wide = Tempest.Compiler.wide_axes(result)
+    wide = wide_axes(result)
     function spanned(s)
-        axes = Tempest.Compiler.aligned_axes(graph, s, g.domain)
+        axes = aligned_axes(graph.values[s.value].dims, s.index, g.domain)
         ntuple(k -> k in wide && findfirst(==(k), wide) in axes ? result[k] : 1, rank)
     end
     arrays = Any[]

@@ -14,26 +14,6 @@ end
 
 index_vars(n) = [Symbol(:i, k) for k in 1:n]
 
-function dense_strides(dims)
-    s = 1
-    map(dims) do n
-        stride = s
-        s *= n
-        stride
-    end
-end
-
-# The linear position of `index` in the dense storage of value `v`.
-function address(graph, v, index, d::Domain)
-    val = graph.values[v]
-    (val.scalar || isempty(val.dims)) && return constant(0)
-    total = constant(0)
-    for (e, s) in zip(index, dense_strides(val.dims))
-        total = add(total, scale(e, s), d)
-    end
-    total
-end
-
 struct EmitContext
     graph::IndexGraph
     slots::Vector{Int}
@@ -53,10 +33,10 @@ atom_expr(a::Var, c) = c.vars[a.n]
 atom_expr(a::Div, c) = :(fld($(affine_expr(a.e, c)), $(a.d)))
 atom_expr(a::Mod, c) = :(mod($(affine_expr(a.e, c)), $(a.d)))
 atom_expr(a::Indirect, c) =
-    :(Int(@inbounds $(buffer(c, a.value))[$(affine_expr(address(c.graph, a.value, a.index, c.domain), c)) + 1]))
+    :(Int(@inbounds $(buffer(c, a.value))[$(affine_expr(address(c.graph.values[a.value], a.index, c.domain), c)) + 1]))
 
 term_expr(t::Load, names, c) =
-    :(@inbounds $(buffer(c, t.value))[$(affine_expr(address(c.graph, t.value, t.index, c.domain), c)) + 1])
+    :(@inbounds $(buffer(c, t.value))[$(affine_expr(address(c.graph.values[t.value], t.index, c.domain), c)) + 1])
 term_expr(t::Lit, names, c) = t.value
 term_expr(t::Ix{T}, names, c) where {T} = :($T($(affine_expr(t.expr, c))))
 term_expr(t::Stat, names, c) = Symbol(:stat_, t.value)
@@ -118,7 +98,7 @@ function delinearize_expr(statements, lin, axes, extents, vars)
 end
 
 store_expr(c, v, index, value) =
-    :(@inbounds $(buffer(c, v))[$(affine_expr(address(c.graph, v, index, c.domain), c)) + 1] = $value)
+    :(@inbounds $(buffer(c, v))[$(affine_expr(address(c.graph.values[v], index, c.domain), c)) + 1] = $value)
 
 function scalar_kernel(graph, stored, g::Group, slots)
     D = g.domain

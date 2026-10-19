@@ -26,8 +26,8 @@ using ..Implementations: REGISTERED
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 
 # What implementations read of a plan, until a view of a group replaces it: the
-# plan and its groups, and the addresses of reads over a group's domain.
-public Plan, Group, members, group_bytes, address, group_stride, placement, product_axes
+# plan and its groups.
+public Plan, Group, members, group_bytes, placement, product_axes
 
 # The program level.
 include("program/program.jl")

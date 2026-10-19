@@ -529,27 +529,7 @@ function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
 end
 
 aligned(graph, t, D) =
-    all(s -> !(s isa Union{Ix, Recomputed}) && !(s isa Load && aligned_axes(graph, s, D) === nothing), subterms((t,)))
-
-"""
-    aligned_axes(graph, load, domain) -> axes or nothing
-
-The axes of `domain` along which a load reads, one per axis of the loaded
-value, when each axis of the value is read at one variable of the domain of
-the same extent, in the domain's order: the value is the domain's tile with
-the other axes broadcast.
-"""
-function aligned_axes(graph, s::Load, D)
-    dims = graph.values[s.value].dims
-    axes = Int[]
-    for (k, e) in enumerate(s.index)
-        e.constant == 0 && length(e.terms) == 1 && e.terms[1].first isa Var && e.terms[1].second == 1 || return nothing
-        n = e.terms[1].first.n
-        D[n] == dims[k] && (isempty(axes) || n > last(axes)) || return nothing
-        push!(axes, n)
-    end
-    axes
-end
+    all(s -> !(s isa Union{Ix, Recomputed}) && !(s isa Load && aligned_axes(graph.values[s.value].dims, s.index, D) === nothing), subterms((t,)))
 
 # Every result becomes a value read whole, so results are buffers: a result
 # that is a layout of a value, or a constant, gets a value of its own.

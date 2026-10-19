@@ -26,7 +26,6 @@ identity_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(d
 # A value ranges over the axes of its node wider than one, so programs that
 # differ by axes of extent one have the same values; the node reads its value
 # at the variables of those axes.
-wide_axes(dims) = Tuple(k for k in eachindex(dims) if dims[k] != 1)
 wide_index(dims) = map(var, wide_axes(dims))
 
 # Expressions over a shape as expressions over its axes `keep`: each kept axis

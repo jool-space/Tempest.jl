@@ -51,7 +51,7 @@ function product_claim(target, p::Plan, g::Group)
     m, n, k, b = extent(M), extent(N), extent(K), extent(B)
     max(m, n, k, b) < typemax(Int32) ÷ 2 || return nothing
     factor = product_factor(Context(p.graph, p.stored, g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
-        first(Tempest.Compiler.product_factors(first(folds), g.terms[first(g.reductions)])))
+        first(product_factors(first(folds), g.terms[first(g.reductions)])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
     recomputed = [s for r in g.reductions for s in subterms((g.terms[r],)) if s isa Recomputed]
     recomputing = !isempty(recomputed)

@@ -3,7 +3,8 @@
 # literals, index expressions, the kernel's own reductions and the folds it
 # recomputes.
 
-public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, mentions
+public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, mentions,
+    product_factors
 
 abstract type Term end
 
@@ -78,6 +79,20 @@ function subterms(roots; nested = false, known = t -> false)
 end
 
 loads(t::Term) = [s for s in subterms((t,); nested = true) if s isa Load]
+
+"""
+    product_factors(fold, term) -> (x, y) or nothing
+
+The two factors whose products a fold of `term` sums: those of a sum of a
+product; for an online softmax of `(y, g...)`, the first `g` that is not a
+constant, and `y`, whose `exp(y - m)` weighs it.
+"""
+product_factors(::SumFold, t) = t isa Apply && t.f === (*) && length(t.args) == 2 ? t.args : nothing
+function product_factors(::OnlineSoftmax, t)
+    i = findnext(a -> !(a isa Lit), t.args, 2)
+    i === nothing ? nothing : (t.args[i], t.args[1])
+end
+product_factors(::Recomputed, t) = nothing
 
 "The values a term reads from storage: those it loads, and those its formulas gather from."
 function stored_reads(t::Term)

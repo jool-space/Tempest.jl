@@ -148,9 +148,9 @@ function load_tile(k::TileKernel, c::Context, t::Load, indices)
     v = gathers(t) ? nothing : load_view(c, t.value, t.index)
     v === nothing || return load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
     shape = spanned_shape(c, t)
-    address = Tempest.Compiler.address(c.graph, t.value, t.index, Domain(c.g.domain))
-    flat = argument!(k, ArgSpec(t.value, 0, (Tempest.Compiler.storage_length(c.graph.values[t.value]),), (1,)))
-    lanes = :($(ct.broadcast_to)($(index_tile(k, c, address, indices)), $shape) .+ Int32(1))
+    linear = address(c.graph.values[t.value], t.index, Domain(c.g.domain))
+    flat = argument!(k, ArgSpec(t.value, 0, (storage_length(c.graph.values[t.value]),), (1,)))
+    lanes = :($(ct.broadcast_to)($(index_tile(k, c, linear, indices)), $shape) .+ Int32(1))
     axes = findall(>(1), shape)
     mask = isempty(axes) ? nothing : :($(ct.broadcast_to)($(inside(c, axes, indices)), $shape))
     :($(ct.gather)($flat, $lanes; mask = $mask))
@@ -176,7 +176,7 @@ elementwise(c::Context, t::Load) = gathers(t) || wraps(t) && load_view(c, t.valu
 # address the buffer, and the indices are integers it loads in turn.
 function loadable(c::Context, t::Load; index = false)
     !gathers(t) && load_view(c, t.value, t.index) !== nothing && return true
-    (index || elementwise(c, t)) && Tempest.Compiler.storage_length(c.graph.values[t.value]) < typemax(Int32) || return false
+    (index || elementwise(c, t)) && storage_length(c.graph.values[t.value]) < typemax(Int32) || return false
     all(a -> c.graph.values[a.value].eltype in (Int32, Int64) && loadable(c, Load(a.value, a.index); index = true),
         reduce(vcat, map(indirect_atoms, t.index)))
 end
@@ -417,7 +417,7 @@ function fold_spec!(c::Context, r, workspaces)
     spec = value_spec(c, v)
     c.stored[r] && return (v, spec)
     key = (:fold, r)
-    workspaces[key] = Workspace(key, c.graph.values[r].eltype, Tempest.Compiler.storage_length(c.graph.values[r]))
+    workspaces[key] = Workspace(key, c.graph.values[r].eltype, storage_length(c.graph.values[r]))
     (v, ArgSpec(key, spec.offset, spec.sizes, spec.strides))
 end
 

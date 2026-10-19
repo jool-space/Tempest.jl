@@ -172,11 +172,11 @@ View(value, offset, strides, spans) = View(value, offset, strides, spans, nothin
 # address over such a group that does not chain.
 function view_of(graph, v, index, g, groups...; scalar = ())
     domain = Domain(g.domain)
-    e = Tempest.Compiler.address(graph, v, index, domain)
+    e = address(graph.values[v], index, domain)
     rest = [t for t in e.terms if !(t.first isa Var)]
     e = Affine(e.constant, Tuple(t for t in e.terms if t.first isa Var))
     for i in scalar
-        s = Tempest.Compiler.group_stride(e, groups[i], g.domain)
+        s = group_stride(e, groups[i], g.domain)
         s !== nothing && s >= 0 && continue
         append!(rest, [t for t in e.terms if t.first.n in groups[i]])
         e = Affine(e.constant, Tuple(t for t in e.terms if !(t.first.n in groups[i])))
@@ -195,7 +195,7 @@ function view_of(graph, v, index, g, groups...; scalar = ())
     for k in 1:length(g.domain)
         g.domain[k] > 1 && coefficient(e, k) != 0 && !any(grp -> k in grp, groups) && return nothing
     end
-    strides = map(grp -> Tempest.Compiler.group_stride(e, grp, g.domain), groups)
+    strides = map(grp -> group_stride(e, grp, g.domain), groups)
     any(s -> s === nothing || s < 0, strides) && return nothing
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach)
 end
@@ -266,7 +266,7 @@ function view_addresses(graph, stored, g::Group)
     found = Affine[]
     function visit(t, extents)
         if t isa Load
-            gathers(t) || push!(found, Tempest.Compiler.address(graph, t.value, t.index, Domain(extents)))
+            gathers(t) || push!(found, address(graph.values[t.value], t.index, Domain(extents)))
         elseif t isa Apply
             foreach(a -> visit(a, extents), t.args)
         elseif t isa Recomputed
@@ -275,7 +275,7 @@ function view_addresses(graph, stored, g::Group)
     end
     for m in Tempest.Compiler.members(g)
         visit(g.terms[m], g.domain)
-        stored[m] && push!(found, Tempest.Compiler.address(graph, m, Tempest.Compiler.placement(graph, g, m), Domain(g.domain)))
+        stored[m] && push!(found, address(graph.values[m], Tempest.Compiler.placement(graph, g, m), Domain(g.domain)))
     end
     found
 end
@@ -464,7 +464,7 @@ function estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, p::P
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
         r = first(g.reductions)
-        t = first(Tempest.Compiler.product_factors(p.graph.values[r].definition.fold, g.terms[r]))
+        t = first(product_factors(p.graph.values[r].definition.fold, g.terms[r]))
         factor = t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t
         rate = product_rate(target, term_eltype(factor, p.graph))
         [Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions) + recomputed, rate, blocks)]

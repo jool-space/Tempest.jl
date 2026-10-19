@@ -109,7 +109,6 @@ mutable struct Executable{T <: Target}
     captured::Any
 end
 
-storage_length(v::Value) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
 
 """
     prepare(program, inputs...; target, measure = true, replaces = (), by_reference = ()) -> Executable

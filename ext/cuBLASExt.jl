@@ -10,7 +10,7 @@ using Republic: @republic
 using Tempest: CUDATarget
 @republic republic=false inherit=:public using Tempest.IR
 @republic republic=false inherit=:public import Tempest.Implementations
-using Tempest.Compiler: Plan, Group, members, group_bytes, address, group_stride, placement, product_axes
+using Tempest.Compiler: Plan, Group, members, group_bytes, placement, product_axes
 
 struct cuBLASProducts <: Implementation end
 
@@ -46,7 +46,7 @@ compute_type(target::CUDATarget, T) =
 # Strides of value `v` read at `index` along each group of axes, and its offset;
 # nothing when the read is not a strided view over them.
 function strides(graph, v, index, g::Group, groups...)
-    e = address(graph, v, index, Domain(g.domain))
+    e = address(graph.values[v], index, Domain(g.domain))
     is_affine(e) || return nothing
     covered = reduce(vcat, groups; init = Int[])
     any(k -> g.domain[k] > 1 && coefficient(e, k) != 0 && !(k in covered), eachindex(g.domain)) && return nothing
