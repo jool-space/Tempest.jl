@@ -164,6 +164,20 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         built = (after.compiled - before.compiled) + (after.loaded - before.loaded)
         @test built > 0
         @test built <= distinct(ex.plan)
+        # A fold's state is named by its place in the group, so layers alike
+        # share kernels however their values are numbered: the stack of 8
+        # builds none that the stack of 4 has not.
+        function built_by(L)
+            layers, x = stack(L, CuArray)
+            p = differentiate(trace(stack_loss, x, layers))
+            before = C.cache_counts()
+            prepare(p, x, layers; target = T.CUDATarget(cuTile), measure = false)
+            after = C.cache_counts()
+            (compiled = after.compiled - before.compiled, loaded = after.loaded - before.loaded)
+        end
+        four = built_by(4)
+        @test four.compiled + four.loaded > 0
+        @test built_by(8) == (compiled = 0, loaded = 0)
     end
     function per_layer_plan(L)
         layers, x = stack(L, identity)

@@ -304,10 +304,13 @@ sum_state(c::Context, sums, acc) = Any[acc[1:(end - length(sums))];
 # their state's.
 fold_sums(c::Context, r) = sweep_sums(c, fold_of(c, r), c.g.terms[r], sweep_axis(c.s))
 
+# A fold's state is named by its place among the group's reductions, not by its
+# value: value numbers differ between groups that are alike, and a name that
+# held one would give each such group a kernel of its own.
 function fold_accumulators!(st, c::Context, r, sums)
-    f, A = fold_of(c, r), accumulator(c, r)
-    sums === nothing || return sum_accumulators!(st, c, f, c.g.terms[r], sums, sweep_axis(c.s), Symbol(:acc_, r))
-    acc = state_symbols(r, f, A)
+    f, A, place = fold_of(c, r), accumulator(c, r), findfirst(==(r), c.g.reductions)
+    sums === nothing || return sum_accumulators!(st, c, f, c.g.terms[r], sums, sweep_axis(c.s), Symbol(:acc_, place))
+    acc = state_symbols(place, f, A)
     init_state!(st, acc, f, A, tile(c))
     acc
 end
@@ -431,7 +434,7 @@ function merge_kernel(c::Context, rs, slots, workspaces)
     lanes = (map(_ -> 1, tiles_m)..., width)
     for r in rs
         f, A = fold_of(c, r), accumulator(c, r)
-        acc = state_symbols(r, f, A)
+        acc = state_symbols(findfirst(==(r), c.g.reductions), f, A)
         init_state!(st, acc, f, A, shape)
         t = gensym(:t)
         loop = Any[]
