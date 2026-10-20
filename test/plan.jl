@@ -82,6 +82,26 @@ end
     planned = recomputing(graph)
     @test agree(C.execute(planned, q, k, v), [interpret(trace(by_maximum, q, k, v), q, k, v)])
     @test occursin("online softmax", sprint(explain, planned))
+    # In half precision the products convert their factors to Float32, and the
+    # rewrite reads the exponential through its conversion: the same one fold,
+    # its scores in BFloat16 and its weights and sums in Float32, rounded to
+    # BFloat16 once at the end.
+    function half(q, k, v)
+        s = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* BFloat16(0.125)
+        s = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, typemin(BFloat16))
+        weigh(v, exp.(s .- T.logsumexp(s; dims = 1)))
+    end
+    qh, kh, vh = map(x -> BFloat16.(single(x)), (q, k, v))
+    h = C.rewrite(C.lower(trace(half, qh, kh, vh)))
+    fold = h.values[only(only(groups(half, qh, kh, vh)).reductions)].definition
+    @test fold.fold == IR.ShiftedSum(IR.Sums(/))
+    @test h.values[fold.operand.value].eltype == Tuple{BFloat16, Float32, Float32}
+    @test IR.fold_types(fold.fold, Tuple{BFloat16, Float32, Float32}).result == BFloat16
+    @test agree(C.execute(recomputing(h), qh, kh, vh), [interpret(trace(half, qh, kh, vh), qh, kh, vh)]; rtol = 1.0e-2)
+    # Scores scaled by a Float32 are Float32, and the product of the values
+    # in BFloat16 with the weights is one too: the same fold, with the values
+    # converted where they are read.
+    @test length(C.rewrite(C.lower(trace((q, k, v) -> Ops.attention(q, k, v; causal = true), qh, kh, vh))).rewrites) == 1
 end
 
 # A map read by a fold and by a later map over its domain is recomputed in

@@ -103,12 +103,18 @@ mentions(o::Read, k) = any(e -> mentions(e, k), o.index)
 mentions(o::IndexOperand, k) = mentions(o.expr, k)
 mentions(::Literal, k) = false
 
+# Whether elements of `S` convert to `T` exactly, so that a product in `T` of
+# a factor of `S` is the product of the factor converted.
+exact(S, T) = S === T || S <: HalfFloat && T === Float32 || S <: Union{HalfFloat, Float32} && T === Float64
+
 # The factors of the product `o` reads, through the products and quotients of
-# type `T` it reads: each an operand and its power, 1 or -1.
+# type `T` it reads: each an operand and its power, 1 or -1. A factor may be
+# of a type that converts to `T` exactly, as a half-precision factor of a
+# Float32 product is.
 function factors(graph, o, d::Domain, T = eltype_of(graph, o), power = 1)
     if (applies(graph, o, *) || applies(graph, o, /)) && eltype_of(graph, o) === T
         xs = inner(graph, o, d)
-        if length(xs) == 2 && all(x -> x isa Literal || eltype_of(graph, x) === T, xs)
+        if length(xs) == 2 && all(x -> x isa Literal || exact(eltype_of(graph, x), T), xs)
             quotient = graph.values[o.value].definition.f === (/)
             return [factors(graph, xs[1], d, T, power); factors(graph, xs[2], d, T, quotient ? -power : power)]
         end
@@ -145,18 +151,23 @@ function aligned(graph, F, index, axes, d::Domain)
 end
 
 # A sum whose factors include `exp(y - F)`, where `F` folds `y` over the summed
-# axes: `y` and the other factors, or nothing.
+# axes: `y` and the other factors, or nothing. The factors are those of the
+# sum's operand, in its type: a product of half-precision factors converted
+# to Float32 (see `contraction!`), among which the exponential is read
+# through its conversion.
 function weighted(graph, r, F)
     d = graph.values[r].definition
     domain = Domain(d.iteration)
-    T = graph.values[r].eltype
+    T = eltype_of(graph, d.operand)
     fs = factors(graph, d.operand, domain, T)
     for (j, (o, power)) in enumerate(fs)
-        power == 1 && applies(graph, o, exp) && eltype_of(graph, o) === T || continue
-        x = only(inner(graph, o, domain))
+        power == 1 || continue
+        e = applies(graph, o, Cast{T}()) ? only(inner(graph, o, domain)) : o
+        applies(graph, e, exp) || continue
+        x = only(inner(graph, e, domain))
         applies(graph, x, -) || continue
         y, m = inner(graph, x, domain)
-        m isa Read && m.value == F && eltype_of(graph, y) === T || continue
+        m isa Read && m.value == F && eltype_of(graph, y) === eltype_of(graph, e) === graph.values[F].eltype || continue
         index = aligned(graph, F, m.index, d.reduced, domain)
         (index === nothing || through(graph.values[F].definition.operand, index, domain) != y) && continue
         return y, fs[1:end .!= j]
@@ -174,7 +185,7 @@ function online_softmaxes(graph::IndexGraph)
     F = 1
     while F <= length(graph.values)
         v = graph.values[F]
-        frame = v.definition isa Union{Reduction{MaxFold}, Reduction{ShiftedSum{LogSumExp}}} && !(v.eltype <: HalfFloat)
+        frame = v.definition isa Union{Reduction{MaxFold}, Reduction{ShiftedSum{LogSumExp}}}
         sums = frame ? [r for (r, w) in enumerate(graph.values) if w.definition isa Reduction{SumFold} && weighted(graph, r, F) !== nothing] : Int[]
         if !isempty(sums)
             rewritten, ids = rebuild(graph) do b, r
@@ -195,10 +206,13 @@ function online!(b::Builder, graph, r, F)
     d = v.definition
     y, rest = weighted(graph, r, F)
     along = [any(k -> mentions(o, k), d.reduced) for (o, _) in rest]
-    g = product!(b, new_factors(b, rest[along]), d.iteration, v.eltype)
+    # The weights and the sums are of the summed product's type; `y` keeps its
+    # own, and the fold accumulates as its element's types say.
+    G = eltype_of(graph, d.operand)
+    g = product!(b, new_factors(b, rest[along]), d.iteration, G)
     lse = graph.values[F].definition.fold isa ShiftedSum
-    elements = lse ? (remap(y, b.ids), g, Literal(one(v.eltype))) : (remap(y, b.ids), g)
-    E = Tuple{map(_ -> v.eltype, elements)...}
+    elements = lse ? (remap(y, b.ids), g, Literal(one(G))) : (remap(y, b.ids), g)
+    E = Tuple{eltype_of(graph, y), map(_ -> G, Base.tail(elements))...}
     t = add!(b, Pointwise(tuple, elements), d.iteration, E)
     fold = ShiftedSum(Sums(lse ? (/) : identity))
     id = add!(b, Reduction(fold, Read(t, identity_index(d.iteration)), d.iteration, d.reduced), v.dims, v.eltype, v.scalar)

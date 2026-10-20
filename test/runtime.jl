@@ -603,6 +603,14 @@ if CUDA_FUNCTIONAL
             @test occursin("online softmax", string(only(ex.kernels)))
             @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v)]; rtol = precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
+        # In half precision the rewrite reads the exponential through the
+        # product's conversion to Float32: one kernel, online, the weights
+        # rounded to BFloat16 for the tensor cores.
+        qh, kh, vh = map(x -> BFloat16.(single(x)), (data(16, 2, 70, 2; scale = 0.1), data(16, 2, 70, 2; scale = 0.2), data(16, 2, 70, 2; scale = 0.3)))
+        p = trace((q, k, v) -> Ops.attention(q, k, v; causal = true), qh, kh, vh)
+        ex = prepare(p, map(CuArray, (qh, kh, vh))...; target = T.CUDATarget(cuTile))
+        @test occursin("online softmax", string(only(ex.kernels)))
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, qh, kh, vh)]; rtol = 1.0e-2)
         # The reference's gradient: every product generated, also those that
         # sum over key heads shared by one query head each.
         q, k, v = single(data(16, 2, 70, 2; scale = 0.1)), single(data(16, 2, 70, 2; scale = 0.2)), single(data(16, 2, 70, 2; scale = 0.3))

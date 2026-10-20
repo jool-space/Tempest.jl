@@ -578,7 +578,16 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = sw
         push!(st, :($xa = ifelse.(reshape($(ct.arange)($tk), (1, $tk)) .<= Int32($E) - ($t - Int32(1)) * Int32($tk), $xa,
             $(zero(term_eltype(fa, c.g))))))
     end
-    single = term_eltype(fa, c.g) === Float32
+    Ta, Tb = term_eltype(fa, c.g), term_eltype(fb, c.g)
+    if Ta !== Tb
+        # A half-precision factor meets one computed in Float32, a softmax's
+        # weight: the computed one rounds to the half type, and the product
+        # runs on the half tensor cores, as attention in half precision does.
+        H = Ta <: HalfFloat ? Ta : Tb
+        Ta === H || push!(st, :($xa = convert($(ct.Tile){$H}, $xa)))
+        Tb === H || push!(st, :($xb = convert($(ct.Tile){$H}, $xb)))
+    end
+    single = Ta === Float32 && Tb === Float32
     if c.s.precision === :tf32x3 && single
         # Each factor as a TF32 high part and a TF32 remainder; the product of
         # the remainders is below Float32 rounding and is dropped.
