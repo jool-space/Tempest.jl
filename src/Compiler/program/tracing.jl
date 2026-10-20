@@ -327,7 +327,7 @@ Base.prod(f, x::TracedArray; dims = :) = prod(f.(x); dims)
 
 `log.(sum(exp.(x); dims))`, computed stably in one pass.
 """
-logsumexp(x::AbstractArray; dims = :) = fold(LogSumExpFold(), x; dims)
+logsumexp(x::AbstractArray; dims = :) = fold(ShiftedSum(LogSumExp()), x; dims)
 
 builtin_fold(::Union{typeof(+), typeof(Base.add_sum)}) = SumFold()
 builtin_fold(::Union{typeof(*), typeof(Base.mul_prod)}) = ProdFold()

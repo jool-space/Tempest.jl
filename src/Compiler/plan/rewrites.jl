@@ -1,19 +1,20 @@
 # Algorithms as rewrites of folds, applied to the index-level graph before
 # planning where the target's numerics permit them, since they change
-# rounding. A sum weighted by `exp(y - m)`, where `m` is the maximum or the
-# logsumexp of `y` over the summed axes, becomes an online softmax: one fold
-# that keeps the running maximum and rescales its sums as the maximum grows,
-# so that `m` is never computed in a pass of its own. Its factors constant
-# along the sum leave it, as the softmax's denominator does: Σ v·e/l is
-# (Σ v·e)/l. A quotient of two online softmaxes with the same maximum becomes
-# one. So the two spellings of a softmax, `exp(s - logsumexp(s))` and
-# `exp(s - maximum(s)) / sum(exp(s - maximum(s)))`, weighted and summed, reach
-# the same fold.
+# rounding. There is one fact here: `exp` turns a difference into a ratio, so
+# a sum of `g · exp(y - m)` can be accumulated against a running maximum and
+# rescaled as the maximum grows. A sum weighted by `exp(y - m)`, where `m` is
+# the maximum or the logsumexp of `y` over the summed axes, becomes the
+# shifted-sum fold, so that `m` is never computed in a pass of its own (the
+# online softmax). Its factors constant along the sum leave it, as the
+# softmax's denominator does: Σ v·e/l is (Σ v·e)/l. A quotient of two such
+# folds with the same maximum becomes one. So the two spellings of a softmax,
+# `exp(s - logsumexp(s))` and `exp(s - maximum(s)) / sum(exp(s - maximum(s)))`,
+# weighted and summed, reach the same fold.
 
 """
     rewrite(graph) -> IndexGraph
 
-The graph with its sums weighted by a softmax made online softmax folds. The
+The graph with its sums weighted by a softmax made shifted-sum folds. The
 graph's `rewrites` notes each, and `explain` prints them.
 """
 rewrite(graph::IndexGraph) = compact(merge_softmaxes(online_softmaxes(graph)))
@@ -164,16 +165,16 @@ function weighted(graph, r, F)
 end
 
 # Σ c·g·exp(y - m) over the axes `m` reduces, `c` constant along them, is `c`
-# times an online softmax of `(y, g)` for `m` the maximum of `y`; for `m` the
+# times the shifted sum of `(y, g)` for `m` the maximum of `y`; for `m` the
 # logsumexp of `y`, `exp(y - m)` is `exp(y - max) / Σ exp(y - max)`, so the
-# online softmax is one of `(y, g, 1)` that divides. Done for a maximum or a
+# shifted sum is one of `(y, g, 1)` that divides. Done for a maximum or a
 # logsumexp when every sum it weighs can be, so that nothing else reads it and
 # its pass disappears.
 function online_softmaxes(graph::IndexGraph)
     F = 1
     while F <= length(graph.values)
         v = graph.values[F]
-        frame = v.definition isa Reduction{<:Union{MaxFold, LogSumExpFold}} && !(v.eltype <: HalfFloat)
+        frame = v.definition isa Union{Reduction{MaxFold}, Reduction{ShiftedSum{LogSumExp}}} && !(v.eltype <: HalfFloat)
         sums = frame ? [r for (r, w) in enumerate(graph.values) if w.definition isa Reduction{SumFold} && weighted(graph, r, F) !== nothing] : Int[]
         if !isempty(sums)
             rewritten, ids = rebuild(graph) do b, r
@@ -195,11 +196,11 @@ function online!(b::Builder, graph, r, F)
     y, rest = weighted(graph, r, F)
     along = [any(k -> mentions(o, k), d.reduced) for (o, _) in rest]
     g = product!(b, new_factors(b, rest[along]), d.iteration, v.eltype)
-    lse = graph.values[F].definition.fold isa LogSumExpFold
+    lse = graph.values[F].definition.fold isa ShiftedSum
     elements = lse ? (remap(y, b.ids), g, Literal(one(v.eltype))) : (remap(y, b.ids), g)
     E = Tuple{map(_ -> v.eltype, elements)...}
     t = add!(b, Pointwise(tuple, elements), d.iteration, E)
-    fold = OnlineSoftmax(lse ? (/) : identity)
+    fold = ShiftedSum(Sums(lse ? (/) : identity))
     id = add!(b, Reduction(fold, Read(t, identity_index(d.iteration)), d.iteration, d.reduced), v.dims, v.eltype, v.scalar)
     push!(b.rewrites, id => string("online softmax: a sum weighted by exp(y - m), m the ", lse ? "logsumexp" : "maximum", " of y"))
     all(along) && return id
@@ -210,16 +211,16 @@ function online!(b::Builder, graph, r, F)
     product!(b, [(Read(id, identity_index(v.dims)), 1); scale], v.dims, v.eltype, v.scalar).value
 end
 
-# The online softmax of `(y, g...)` that `o` reads at the identity of a domain
+# The shifted sum of `(y, g...)` that `o` reads at the identity of a domain
 # of `dims`, observing its one sum; or nothing.
 function plain_softmax(graph, o)
-    o isa Read && graph.values[o.value].definition isa Reduction{OnlineSoftmax{typeof(identity)}} || return nothing
+    o isa Read && graph.values[o.value].definition isa Reduction{ShiftedSum{Sums{typeof(identity)}}} || return nothing
     o.index == identity_index(graph.values[o.value].dims) ? graph.values[o.value].definition : nothing
 end
 
-# `f(a, b)` of two online softmaxes, each observing its one sum, whose
-# maximum is of the same `y` over the same axes: one online softmax observing
-# `f` of both sums.
+# `f(a, b)` of two shifted sums, each observing its one sum, whose maximum is
+# of the same `y` over the same axes: one shifted sum observing `f` of both
+# sums.
 function merge_softmaxes(graph::IndexGraph)
     first(rebuild(graph) do b, id
         v = graph.values[id]
@@ -229,7 +230,7 @@ function merge_softmaxes(graph::IndexGraph)
         A = plain_softmax(graph, a)
         A !== nothing && l isa Read && l.value != a.value && graph.values[a.value].dims == v.dims || return nothing
         L = graph.values[l.value].definition
-        L isa Reduction{OnlineSoftmax{typeof(identity)}} || return nothing
+        L isa Reduction{ShiftedSum{Sums{typeof(identity)}}} || return nothing
         # `l` as read over the iteration of `A`, whose kept axes are `v`'s.
         domain = Domain(A.iteration)
         whole = identity_index(A.iteration)
@@ -240,7 +241,7 @@ function merge_softmaxes(graph::IndexGraph)
         ya == yl || return nothing
         elements = map(o -> remap(o, b.ids), (ya, ga, gl))
         t = add!(b, Pointwise(tuple, elements), A.iteration, Tuple{map(o -> eltype_of(graph, o), (ya, ga, gl))...})
-        new = add!(b, Reduction(OnlineSoftmax(d.f), Read(t, identity_index(A.iteration)), A.iteration, A.reduced), v.dims, v.eltype, v.scalar)
+        new = add!(b, Reduction(ShiftedSum(Sums(d.f)), Read(t, identity_index(A.iteration)), A.iteration, A.reduced), v.dims, v.eltype, v.scalar)
         push!(b.rewrites, new => "online softmax: $(d.f) of two sharing their maximum")
         new
     end)

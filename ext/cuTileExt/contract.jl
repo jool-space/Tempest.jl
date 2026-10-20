@@ -43,7 +43,7 @@ end
 function product_claim(target, g::GroupView)
     target isa CUDATarget && g.kind === :reduction || return nothing
     folds = [g.values[r].fold for r in g.reductions]
-    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, OnlineSoftmax}, folds) || return nothing
+    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, ShiftedSum}, folds) || return nothing
     found = product_axes(g)
     found === nothing && return nothing
     M, N, K, B = found
@@ -76,7 +76,7 @@ function product_claim(target, g::GroupView)
         # A grid of few output tiles leaves the device idle: split the summed
         # axis among blocks (split-K), merging the partial sums in a second
         # launch; not when a fold is computed before the sweep, which every
-        # split would repeat, nor for an online softmax.
+        # split would repeat, nor for a shifted sum.
         blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
         sums = all(f -> f isa SumFold, folds)
         splits = blocks < SPLIT_KEPT_BLOCKS[1] && !hoisted && sums ? split_count(k, tk, blocks) : 1
@@ -88,7 +88,7 @@ function product_claim(target, g::GroupView)
 end
 
 # Whether a fold accumulates as products of tiles: a sum of a bilinear
-# product, or an online softmax whose sums are, but for sums of its weights.
+# product, or a shifted sum whose sums are, but for sums of its weights.
 function products_of(c::Context, r)
     sums = fold_sums(c, r)
     sums !== nothing && any(s -> s[2] !== nothing, sums) && all(((term, product),) -> product !== nothing || term.f isa Weight, sums)

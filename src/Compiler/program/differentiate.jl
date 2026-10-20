@@ -104,7 +104,10 @@ function pullback(op::Reduce, n, id, g, tape)
 end
 
 fold_pullback(::SumFold, x, y, g, axes, full, tape) = g
-fold_pullback(::LogSumExpFold, x, y, g, axes, full, tape) = g * exp(x - y)
+function fold_pullback(f::ShiftedSum, x, y, g, axes, full, tape)
+    f.observe isa LogSumExp || throw(ArgumentError("no derivative rule for a shifted sum observed by $(f.observe)"))
+    g * exp(x - y)
+end
 
 # Tied extrema share the cotangent equally.
 function fold_pullback(::Union{MaxFold, MinFold}, x, y, g, axes, full, tape)

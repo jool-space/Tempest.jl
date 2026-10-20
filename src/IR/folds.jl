@@ -5,7 +5,7 @@
 # associative and commutative up to rounding, and `fold_init` exact: it masks
 # padded lanes.
 
-public Fold, SumFold, MaxFold, MinFold, ProdFold, LogSumExpFold, OnlineSoftmax, GenericFold,
+public Fold, SumFold, MaxFold, MinFold, ProdFold, ShiftedSum, LogSumExp, Sums, GenericFold,
     fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, fold_eltype,
     fold_accumulator, lse_shift, HalfFloat
 
@@ -23,7 +23,8 @@ fold_name(f::Fold) = Symbol(lowercase(string(nameof(typeof(f)))))
 
 The type a fold over elements of type `T` accumulates in. Elements convert to it
 before `fold_lift`, and the observed value rounds once to `fold_eltype(f, T)`.
-Sums, products and logsumexps of half-precision elements accumulate in Float32.
+Sums, products and shifted sums of half-precision elements accumulate in
+Float32, a tuple element component by component.
 """
 fold_accumulator(::Fold, T) = T
 
@@ -37,8 +38,9 @@ function fold_types(f::Fold, T)
         throw(ArgumentError("fold $f: lift and combine must keep the state type $S"))
     R = Base.promote_op(s -> fold_observe(f, s), S)
     isconcretetype(R) || throw(ArgumentError("fold $f: observe must infer a concrete type, got $R"))
-    # A half-precision fold rounds its result back to the element type.
-    (; state = S, accumulator = A, observed = R, result = A === T ? R : T)
+    # A half-precision fold rounds its result back to the element type; a
+    # tuple element's, to the type of its first component.
+    (; state = S, accumulator = A, observed = R, result = A === T ? R : T <: Tuple ? fieldtype(T, 1) : T)
 end
 
 fold_eltype(f::Fold, T) = fold_types(f, T).result
@@ -69,18 +71,44 @@ fold_combine(::ProdFold, a, b) = (a[1] * b[1],)
 fold_observe(::ProdFold, s) = s[1]
 
 """
-`log(sum(exp, x))` in one pass. The state is the running maximum and the sum of
-exponentials shifted by it. Exponentials are shifted by zero when the maximum is
-infinite, so an empty or all `-Inf` slice gives `-Inf`, and a `+Inf` element
-`+Inf`.
+    ShiftedSum(observe)
+
+The fold whose state is a running maximum and sums relative to it. An element
+is `(y, g...)`, or a number `y`, which is `(y, 1)`. The state is `m`, the
+maximum of `y` so far, and one sum of `g · exp(y - m)` for each `g`. Combining
+two states moves both sums to the larger maximum, scaling each by
+`exp(m_old - m_new)`: the softmax's exponentials are summed in one pass, shifted
+by a maximum known only at the end. The result is `observe(m, sums...)`.
+Exponentials are shifted by zero when the maximum is infinite, so an empty or
+all `-Inf` slice sums to zero, and a `+Inf` element to `+Inf`.
+
+`logsumexp` is this fold observed as `m + log(sum)` (`LogSumExp`); a sum
+weighted by a softmax becomes it by rewrite, observed as its sums (`Sums`; see
+`rewrite`).
 """
-struct LogSumExpFold <: Fold end
-fold_name(::LogSumExpFold) = :logsumexp
-fold_init(::LogSumExpFold, T) = (T(-Inf), zero(T))
-fold_lift(::LogSumExpFold, x) = (x, one(x))
+struct ShiftedSum{F} <: Fold
+    observe::F
+end
+
+"The log-sum-exp from the maximum and the sum of exponentials relative to it."
+struct LogSumExp end
+(::LogSumExp)(m, s) = lse_shift(m) + log(s)
+
+"`f` of the sums, the maximum dropped: `Sums(identity)` observes one sum, `Sums(/)` the quotient of two."
+struct Sums{F}
+    f::F
+end
+(o::Sums)(m, sums...) = o.f(sums...)
+
+fold_name(f::ShiftedSum) = f.observe isa LogSumExp ? :logsumexp : Symbol("shifted sum")
+fold_init(::ShiftedSum, ::Type{T}) where {T <: Number} = (T(-Inf), zero(T))
+fold_init(::ShiftedSum, ::Type{E}) where {E <: Tuple} =
+    ntuple(i -> i == 1 ? fieldtype(E, 1)(-Inf) : zero(fieldtype(E, i)), Val(fieldcount(E)))
+fold_lift(::ShiftedSum, y::Number) = (y, one(y))
+fold_lift(::ShiftedSum, e::Tuple) = e
+fold_combine(::ShiftedSum, a, b) = shifted_combine(a, b)
+fold_observe(f::ShiftedSum, s) = f.observe(s...)
 lse_shift(m) = ifelse(isfinite(m), m, zero(m))
-fold_combine(::LogSumExpFold, a, b) = shifted_combine(a, b)
-fold_observe(::LogSumExpFold, s) = lse_shift(s[1]) + log(s[2])
 
 # States of a running maximum and sums relative to it: combining moves both
 # sums to the larger maximum.
@@ -97,11 +125,11 @@ end
 How to fold arrays of states along some of their axes at once, when `f` has a
 faster way than combining them in pairs: a function of the state's components,
 one array each, and the axes, that returns the folded components.
-Implementations call it on their own arrays, such as tiles. Logsumexp takes the
-maximum first, so that each element needs one exponential.
+Implementations call it on their own arrays, such as tiles. A shifted sum
+takes the maximum first, so that each element needs one exponential.
 """
 fold_reduce(::Fold) = nothing
-fold_reduce(::LogSumExpFold) = shifted_sums
+fold_reduce(::ShiftedSum) = shifted_sums
 
 function shifted_sums(states, dims)
     m = first(states)
@@ -109,28 +137,6 @@ function shifted_sums(states, dims)
     shift = lse_shift.(top)
     (top, map(s -> sum(s .* exp.(m .- shift); dims), Base.tail(states))...)
 end
-
-"""
-    OnlineSoftmax(f)
-
-Sums of `g · exp(y - m)` over the reduced axes, one for each `g` of an element
-`(y, g...)`, where `m` is the maximum of `y` over the same axes: the online
-softmax, as one fold. The state is the running maximum and the sums relative to
-it; combining moves the sums to the larger maximum, scaling each by
-`exp(m_old - m_new)`. The result is `f` of the sums. Logsumexp is this fold of
-`(y, 1)`, observed as `m + log(sum)`. Plans rewrite sums weighted by `exp(y - m)`
-into it (see `rewrite`).
-"""
-struct OnlineSoftmax{F} <: Fold
-    f::F
-end
-fold_name(::OnlineSoftmax) = Symbol("online softmax")
-fold_init(::OnlineSoftmax, ::Type{E}) where {E <: Tuple} =
-    ntuple(i -> i == 1 ? fieldtype(E, 1)(-Inf) : zero(fieldtype(E, i)), Val(fieldcount(E)))
-fold_lift(::OnlineSoftmax, e) = e
-fold_combine(::OnlineSoftmax, a, b) = shifted_combine(a, b)
-fold_observe(f::OnlineSoftmax, s) = f.f(Base.tail(s)...)
-fold_reduce(::OnlineSoftmax) = shifted_sums
 
 """
     GenericFold(; init, combine, lift = tuple, observe = only, pullback = nothing)
@@ -155,7 +161,9 @@ fold_combine(f::GenericFold, a, b) = f.combine(a, b)
 fold_observe(f::GenericFold, s) = f.observe(s)
 
 const HalfFloat = Union{Float16, BFloat16}
-fold_accumulator(::Union{SumFold, ProdFold, LogSumExpFold}, ::Type{<:HalfFloat}) = Float32
+fold_accumulator(::Union{SumFold, ProdFold, ShiftedSum}, ::Type{<:HalfFloat}) = Float32
+fold_accumulator(::ShiftedSum, ::Type{E}) where {E <: Tuple} =
+    any(S -> S <: HalfFloat, fieldtypes(E)) ? Tuple{map(S -> S <: HalfFloat ? Float32 : S, fieldtypes(E))...} : E
 
 # Reference evaluation, through Base's reductions. Sums keep Base's pairwise
 # order; elements convert to the accumulator and the result rounds once.

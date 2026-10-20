@@ -54,7 +54,7 @@ end
 
 # Rewrites of sums, which change rounding: rewritten programs plan and compute
 # what they computed, and the two spellings of a softmax weighting a sum plan
-# alike, one online softmax recomputing the scores in the kernel of the sum.
+# alike, one shifted sum recomputing the scores in the kernel of the sum.
 scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.125
 causal(s) = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf)
 weigh(v, p) = T.contract(v, p, (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
@@ -77,7 +77,7 @@ end
     a, b = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v))
     @test a.terms == b.terms
     graph = C.rewrite(C.lower(trace(by_maximum, q, k, v)))
-    @test graph.values[only(b.reductions)].definition.fold == C.OnlineSoftmax(/)
+    @test graph.values[only(b.reductions)].definition.fold == IR.ShiftedSum(IR.Sums(/))
     @test length(C.recomputed_in(b)) == 1
     planned = recomputing(graph)
     @test agree(C.execute(planned, q, k, v), [interpret(trace(by_maximum, q, k, v), q, k, v)])

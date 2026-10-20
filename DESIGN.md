@@ -152,7 +152,7 @@ vocabulary is small.
 - `map(f, xs...)`: a Julia callable applied elementwise (see *Scalar
   functions* below).
 - `fold(op, x, axes)`: an associative Julia operator with its identity and
-  accumulator type. A fold's state may be a tuple, as in the online softmax's
+  accumulator type. A fold's state may be a tuple, as in the shifted sum's
   running maximum, sum and accumulator.
 - `contract(a, b, axes)`: a product over named axes. Matrix, batched and
   attention products are all this. It is a primitive at this level for
