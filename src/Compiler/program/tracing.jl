@@ -465,6 +465,8 @@ Base.adjoint(x::TracedArray{<:Real}) = transpose(x)
 selection_index(i::Integer) = Int(i)
 selection_index(i::Base.Slice) = 1:length(i)
 selection_index(i::AbstractRange{<:Integer}) = i
+# A vector of integers that steps evenly is a range: a formula, not a gather.
+selection_index(i::Vector{<:Integer}) = linear_range(i)
 selection_index(i::AbstractArray{<:Integer}) = i
 selection_index(i) = throw(ArgumentError("unsupported index $(typeof(i)) into a traced array"))
 
@@ -527,6 +529,18 @@ Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
 
 # A reversal is a selection by reversed ranges, not a loop of swaps.
 Base.reverse(x::TracedArray; dims = :) = x[ntuple(k -> dims isa Colon || k in dims ? (size(x, k):-1:1) : (1:size(x, k)), ndims(x))...]
+
+# Triangles are masks of positions, not loops over elements.
+LinearAlgebra.tril(x::TracedArray{<:Any, 2}, k::Integer = 0) =
+    ifelse.(reshape(1:size(x, 1), :, 1) .- reshape(1:size(x, 2), 1, :) .>= -k, x, zero(eltype(x)))
+LinearAlgebra.triu(x::TracedArray{<:Any, 2}, k::Integer = 0) =
+    ifelse.(reshape(1:size(x, 1), :, 1) .- reshape(1:size(x, 2), 1, :) .<= -k, x, zero(eltype(x)))
+
+# A scan is an ordered fold, which the language does not have.
+const SCAN = "a scan (cumsum, cumprod, accumulate) is an ordered fold, which Tempest does not trace"
+Base.cumsum(x::TracedArray; dims = :) = throw(ArgumentError(SCAN))
+Base.cumprod(x::TracedArray; dims = :) = throw(ArgumentError(SCAN))
+Base.accumulate(op, x::TracedArray; dims = :, kws...) = throw(ArgumentError(SCAN))
 
 # `map` over arrays of one shape is a broadcast, and `dot` a sum of products,
 # rather than loops over their elements.

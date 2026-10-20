@@ -492,6 +492,21 @@ if CUDA_FUNCTIONAL
     end
 end
 
+# The dropout fixture's hash, wrapping Int32 multiplies and logical shifts on
+# tiles, is claimed by the generator and then fails to build: the assembler
+# rejects the bytecode cuTile emits for it. The floor runs it, correct, and
+# the failed build warns once.
+const INTEGER_HASH = "an integer hash (wrapping multiplies, logical shifts) on Int32 tiles (cuTile's bytecode)"
+if CUDA_FUNCTIONAL
+    @testset "gap: $INTEGER_HASH" begin
+        x, s = single(data(64, 48)), Int32[7]
+        p = trace((x, s) -> Ops.dropout(x, s; rate = 0.25), x, s)
+        ex = prepare(p, CuArray(x), CuArray(s); target = T.CUDATarget(cuTile))
+        @test_broken !(only(ex.kernels) isa C.FloorKernels)
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, x, s)])
+    end
+end
+
 # Gathers by runtime indices, element by element inside the kernels that read
 # them and never stored: an embedding lookup with pointwise work and a sum; a
 # lookup with a layer norm, where the embedding plus a bias, read three times,

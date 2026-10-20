@@ -278,3 +278,29 @@ in_sweep(c) = occursin("softcap", c.name) || occursin("SiLU", c.name)
         end
     end
 end
+
+# Gaps the probes of 21 October found, each under what closes it.
+const TEMPERATURE = "a constant on the exponent, exp(c·(y − m)), as a scale of the exponential law"
+const WIDER_SUM = "a sum over more axes than its statistic's, as the fold and a sum of it"
+const REVERSED_VIEW = "a read with a negative stride as a view of its buffer (the cuTile generator)"
+
+relative(graph) = [v.definition.fold for v in graph.values if v.definition isa C.Reduction && v.definition.fold isa IR.Relative]
+
+@testset "gaps the probes found" begin
+    x = data(8, 6)
+    @testset "gap: $TEMPERATURE" begin
+        halved(x) = (e = exp.((x .- maximum(x; dims = 1)) ./ 2); e ./ sum(e; dims = 1))
+        prescaled(x) = (y = x ./ 2; e = exp.(y .- maximum(y; dims = 1)); e ./ sum(e; dims = 1))
+        @test_broken same_plan(halved, prescaled, x)
+    end
+    @testset "gap: $WIDER_SUM" begin
+        weighted(f) = any(r -> r.observe isa IR.Composed && r.observe.f === (/), relative(C.rewrite(C.lower(trace(f, x)))))
+        @test weighted(x -> sum(exp.(x .- T.logsumexp(x; dims = 1)) .* x; dims = 1))
+        @test_broken weighted(x -> sum(exp.(x .- T.logsumexp(x; dims = 1)) .* x))
+    end
+    @testset "gap: $REVERSED_VIEW" begin
+        p = C.plan(C.lower(trace(x -> reverse(x; dims = 1) .* 2, x)))
+        view = C.group_view(p, only(p.groups))
+        @test_broken !isempty(Tempest.Implementations.claims(C.cuTileGenerator(), T.CUDATarget(), view))
+    end
+end

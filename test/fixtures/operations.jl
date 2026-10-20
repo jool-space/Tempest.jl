@@ -75,21 +75,20 @@ the seed, the stream and the position, the same on every target.
 """
 struct DropoutScale{T}
     rate::Float32
-    stream::UInt32
+    stream::Int32
 end
 
-# The hash works in Int64, masked to 32 bits: the position is an Int64
-# formula, and a tile program converts between integer widths less freely
-# than Julia does.
+# The hash works in Int32, wrapping, as a tile program does: the position is
+# an Int32 formula, and the constants are the usual 32-bit ones as signed
+# integers. Shifts are logical, by Int32 amounts, as tiles take them.
 function (d::DropoutScale{T})(key::Integer, i::Integer) where {T}
-    low = Int64(0xffffffff)
-    h = ((Int64(key) * 0x9e3779b9) & low) ⊻ ((Int64(d.stream) * 0x85ebca6b) & low) ⊻ ((Int64(i) * 0xc2b2ae35) & low)
-    h ⊻= h >> 16
-    h = (h * 0x7feb352d) & low
-    h ⊻= h >> 15
-    h = (h * 0x846ca68b) & low
-    h ⊻= h >> 16
-    u = Float32(h >> 8) * Float32(2.0^-24)
+    h = (Int32(key) * Int32(-1640531535)) ⊻ (Int32(d.stream) * Int32(-2048144789)) ⊻ (Int32(i) * Int32(-1028477387))
+    h ⊻= h >>> Int32(16)
+    h *= Int32(2146121005)
+    h ⊻= h >>> Int32(15)
+    h *= Int32(-2073254261)
+    h ⊻= h >>> Int32(16)
+    u = Float32(h >>> Int32(8)) * Float32(2.0^-24)
     u >= d.rate ? T(1 / (1 - d.rate)) : zero(T)
 end
 
@@ -106,5 +105,5 @@ distinct dropout sites should use distinct `stream` numbers.
 function dropout(x, seed; rate::Real, stream::Integer = 0)
     0 <= rate < 1 || throw(ArgumentError("dropout rate must lie in [0, 1)"))
     eltype(seed) <: Integer || throw(ArgumentError("dropout seeds are integer arrays"))
-    x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), reshape(1:length(x), size(x)))
+    x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), reshape(Int32(1):Int32(length(x)), size(x)))
 end
