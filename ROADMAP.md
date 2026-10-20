@@ -12,7 +12,14 @@ operations from their implementations, and to gate on what Tempest can express
 rather than on time. On 19 October it was cut to the design alone: the
 decision procedure it described (candidates grown from anchors, a greedy
 cover) had not been built, and the code's own procedure had drifted from it;
-status, open questions and lessons moved here.
+status, open questions and lessons moved here. On 20 October named operations
+and the kernel author's interface were removed, code included (`@operation`,
+`Spec`, `Kernel`, the pairs of `register!`, the hand-written cuTile
+attention): the first version is the compiler over the primitive language,
+and the interface a kernel author writes to will be designed from kernels that
+beat the generator, once there are several, rather than from the one that
+existed. The removed kernels stay in git as the bar the generated attention is
+measured against.
 
 Tempest was rebuilt from scratch as the package Tempest itself, on a branch
 that became `main` on 18 October. The new code owns every level, from tracing
@@ -56,32 +63,21 @@ for like.
 Built: the program and index levels, the cuTile generator, the generic
 kernels, a cover with cuBLAS as a rival, the tuning record, the kernel cache,
 the generated attention forward pass, functional updates of the arrays a
-program allocates, the kernel author's interface for named operations, rates
-measured on the device, a planner linear in identical layers, and decisions
-made once per canonical group. The first gates measured time against the old
+program allocates, rates measured on the device, a planner linear in
+identical layers, and decisions made once per canonical group. The first gates measured time against the old
 Tempest and held (the 29 forward guard-rail cases at 0.94 of its time). From
 here the gates are about what Tempest can express; time is an alarm.
 
-Not yet as designed: what remains of the six fronts below, found on 19
+Not yet as designed: what remains of the five fronts below, found on 19
 October by reading the code against DESIGN.md and by probing plans, and
-worked the same day in the order given. None of them is a kernel being slow.
+worked from that day in the order given. None of them is a kernel being slow.
 Each is a decision made in the wrong place, by the wrong rule, or stated in
 the wrong vocabulary. test/promises.jl records what each front still owes as
 `@test_broken`, under a testset naming what closes it.
 
 ## Next: the fronts, in order, each closed by its gate
 
-1. **The kernel author's interface.** Done for named operations: a kernel is
-   a function of the target and the call's `Spec`s returning a `Kernel`,
-   registered as `register!(Package, operation => function)`, and the toys
-   in test/calls.jl are written in that form; docs/src/kernels.md is true and
-   its *Not built* list says what is not; the hand-written attention is two
-   such kernels, and the older call-claim methods are gone. Remaining: the
-   forms beyond a pointwise function (a scale, an add), the parameter search,
-   and building a body's tile programs at preparation rather than at the
-   first execution, so that a kernel that fails to build is withdrawn. Gate:
-   that list empties.
-2. **Estimates and measurement.** Done: no extension states a rate. Tempest
+1. **Estimates and measurement.** Done: no extension states a rate. Tempest
    measures the device on first use (launch gap, bandwidth in and out of the
    cache) and fits one line, latency and rate, per package and class of
    products from two reference products the package runs, kept in a rates
@@ -92,11 +88,13 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    latency, a rate, a rate for sums split among blocks and one for folds
    recomputed inside products, each from a reference the package runs, and
    each package moves bytes at a memory of its own. Remaining: the parameter
-   search within a budget; and `Work`'s shape, which states a kernel's work
-   in the vocabulary of the generator's schedules (recomputed flops, split
-   sums), to be restated when the kernel interface takes forms. Gate: the
-   estimate test holds as the fronts below move plans.
-3. **The decision, and compile time.** The shape is settled: the rules make
+   search within a budget; and the estimate of a product that reads stored
+   attention scores through the softmax, which is 8 to 38 times low (10.4 μs
+   estimated against 81.8 measured; 391.5 for softcap), and of a product
+   that recomputes a fold, 1.5 to 2.3 times off. Both decide whether
+   attention streams once recomputing is a priced proposal (front 2). Gate:
+   the estimate test holds as the fronts below move plans.
+2. **The decision, and compile time.** The shape is settled: the rules make
    the starting plan, every rule-made choice is also a proposal, and a
    proposal is an edit priced on the groups it changes (DESIGN.md, *The
    decision*). Done: a fixed set's group takes its kind from its folds; the
@@ -106,19 +104,28 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    session; proposals alike in identical layers are priced once and taken
    together, so the cover's trials do not grow with the layers; and Tempest
    proposes joining a stored value into the kernel that reads it, one
-   proposal per edge between groups, which closes Promise 3's test (74 of
+   proposal per edge between groups, which closes Promise 2's test (74 of
    the suite's 1004 plans drop a kernel, none gains one). A join that
    cannot form a group is rejected before any trial, proposals are classed
    by the groups they reach, and the planner's dependency check looks at
    each value once, with ancestors as masks: the GPT step's cover at 4
    layers went from 65 s to 26 s, at 8 layers from 373 s to 75 s, and one
-   plan of it at 8 layers from 0.41 s to 0.18 s. Remaining: the other
-   rule-made choices (storing a fold the rules recompute, recomputing a map
-   in its readers, declining an epilogue) become proposals too, and the
-   planner's own constants go with them; and what still grows with depth,
-   that each trial is a whole claimed plan (three plans under the `keep`
-   loop and a round of claims on every group, which the recompute-or-store
-   proposals remove) and that the classes grow (54 at 4 layers, 74 at 8).
+   plan of it at 8 layers from 0.41 s to 0.18 s. Decided, on 20 October:
+   recomputing a value becomes one proposal kind, `Recompute(value)`, the
+   same edit for a fold and a map, keyed so that identical layers price it
+   once; and the start stores every fold, so recomputing is only ever a
+   proposal. That deletes the planner's two constants, the `keep` loop and
+   `claimed_plan`: the rule they encode measures slower than storing in 9
+   of 10 small programs, up to 24 times, and is most of what a plan costs at
+   8 layers. Two commits land first: the generator names a fold's
+   accumulator by its place in the group rather than its value id, so that
+   groups alike across layers share one kernel (33 kernel keys at 4 layers
+   and 53 at 8 today, 19 fixed); and `plan` takes an explicit recompute set,
+   with no plan moving. The proposals themselves wait on three gates: the
+   estimate (front 1); compile time, since a map recomputed in a reader that
+   is itself recomputed is copied in each place, and the GPT cover at 8
+   layers went from 62 s to 790 s in the prototype; and the open question
+   below on Promise 6. The classes still grow (54 at 4 layers, 74 at 8).
    Gate: one place decides what forms a kernel, and preparing 64 layers
    costs the same per layer as 8. The floor
    stays priced only where nothing else claims: offered on every group, its
@@ -126,7 +133,7 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    quantity), it won 283 groups and 44 of them wrongly, and no fit of bytes
    and flops repairs that. Pricing it needs rates of its own, or a
    measurement whenever it is near the best claim.
-4. **Canonical forms.** Done: the operands of a commutative function are in
+3. **Canonical forms.** Done: the operands of a commutative function are in
    one order at the index level; a fold a result reads through a permutation
    is stored in the result's order, so a transposed product costs no kernel;
    a quotient by a power of two is the product by its reciprocal. Remaining:
@@ -137,15 +144,13 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    schedules for no gain in time; the open question below is whether the
    promise is the same plan or the same work. Gate: the Promise 1 gaps close
    or the promise is restated.
-5. **Forms and layouts.** A call reads dense copies and absorbs only a
-   pointwise function aligned with its output. Target: the spec carries a
-   layout and a kernel accepts or declines on it; an intermediate is written
-   in the layout its consumer accepts rather than copied; and the three forms
-   after a result, a scale, an add and a pointwise function, which are
-   cuBLAS's coefficients and fused epilogues, a verb kernel's residual, and
-   gradient accumulation in place. Rides on fronts 1 and 3. Gate: a product's
-   scale and add are coefficients; a verb kernel absorbs the residual after
-   it; a permuted argument reaches a kernel that accepts it without a copy.
+4. **Forms and layouts.** A claim reads dense copies. Target: a claim
+   accepts or declines on a layout; an intermediate is written in the layout
+   its consumer accepts rather than copied; and the forms after a product's
+   result, a scale, an add and a pointwise function, which are cuBLAS's
+   coefficients and fused epilogues, and gradient accumulation in place.
+   Rides on front 2. Gate: a product's scale and add are coefficients; a
+   permuted argument reaches a kernel that accepts it without a copy.
    Then a cuTENSOR extension: it contracts any label structure over strided
    operands and takes a scale, an add and a short list of operators, which
    are this front's forms and layouts exactly, so it is the extension that
@@ -153,7 +158,7 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    alone with the interfaces test as its gate. Not before: on today's
    programs it would claim what cuBLAS claims at cuBLAS's speed, a third
    rival to calibrate for no plan that changes.
-6. **The language and the docs.** Each a day at most, none blocking: ranges
+5. **The language and the docs.** Each a day at most, none blocking: ranges
    in a broadcast become positions and `axis_positions` goes; the language
    (tracing, the interpreter, differentiation, operations, updates) in a
    module of its own, out of Compiler; and numerics out of the target and
@@ -167,16 +172,24 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
 
 Then, as before:
 
-7. The language as declared: operations, folds with tuple states with the
-   online softmax as one, size-1 axes out of domains, and gathers by runtime
-   indices. Gate: the coverage suite passes as tests that fail, and the eager
-   slice is measured.
-8. The runtime and the GPT step: storage reuse, donation, capture and
-   functional updates. Gate: the GPT training step matches the interpreter,
-   then reaches parity with the old Tempest.
-9. Speed: schedule search measured into the tuning record, cuDNN as a rival, a
-   generated attention backward pass. Gate: measured against torch, eager and
-   compiled, at the same precision.
+6. The language as declared: folds with tuple states with the online softmax
+   as one, size-1 axes out of domains, and gathers by runtime indices. Gate:
+   the coverage suite passes as tests that fail, and the eager slice is
+   measured.
+7. The runtime and the GPT step: storage reuse, donation, capture and
+   functional updates, and a kernel's scratch in the slot plan with its
+   kernel's lifetime rather than allocated apart for the program's life.
+   Gate: the GPT training step matches the interpreter, then reaches parity
+   with the old Tempest.
+8. Speed: schedule search measured into the tuning record, cuDNN as a rival,
+   and the generated attention forward and backward against the hand-written
+   cuTile kernels removed in 58c6de1. Each gap between them is a schedule the
+   generator cannot yet express, which is this front, or a trick no schedule
+   language should express, which is the first real reason for a named
+   kernel. Gate: measured against torch, eager and compiled, at the same
+   precision.
+9. Named operations and the kernel author's interface, designed from the
+   kernels that beat the generator in front 8, once there are two or three.
 10. Bounded sizes and decode.
 
 **Stopping rule.** Stop and report when a gate fails for a reason the design
@@ -202,9 +215,18 @@ one place decides what forms a kernel.
   kernels up to the naming of their index points, beside the open gap.
 - How claims are written: as code over a group first, and as declarative
   patterns once the common cases are known.
-- Whether differentiation and planning can derive attention's backward
-  schedule (store the log-sum-exp, recompute scores inside the consumer), or
-  whether it stays hand-chosen.
+- Whether Promise 6's "stores nothing that a streaming algorithm makes
+  unnecessary" constrains the plan, or means that the streaming plan is always
+  proposed and priced. At the coverage suite's size, storing attention's
+  scores measures 3 to 5 times faster than streaming in the training steps
+  (HSTU 743 μs against 213; the attention step 701 against 135), so a cover
+  that decides by honest cost stores them and the suite's one-kernel
+  expectations fail. Under the second reading, which keeps one rule, the
+  suite checks attention at a size where streaming wins.
+- Whether differentiation and planning derive attention's backward schedule
+  (store the log-sum-exp, recompute scores inside the consumer). Since the
+  hand-written kernels went, the backward is generated from the forward's
+  body, and front 8 measures what that costs.
 - How many schedules to measure per claim, against compile time (1.6 to 4.3 s
   per product configuration on GB10), and how wide each device's noise margin
   is.

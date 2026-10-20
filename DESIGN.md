@@ -8,24 +8,23 @@ other systems.
 
 ## The contract
 
-Three kinds of people meet in Tempest. Model authors write Julia array code.
-Operation authors give operations names and meanings. Kernel authors offer
-faster ways to run them. Tempest connects them so that each can work without
-knowing the others' code.
+Two kinds of people meet in Tempest. Model authors write Julia array code.
+Implementation authors offer faster ways to run parts of it. Tempest connects
+them so that each can work without knowing the other's code.
 
 - **Tempest owns coverage; implementations own speed.** A program in Tempest's
   primitive language runs with no implementation beyond the generator and the
   generic kernels. Removing an implementation may change how fast a program
   runs, never whether it runs.
-- **A new operation changes an operation package. A new kernel changes an
-  implementation package. A better optimization changes Tempest.** None of the
-  three needs changes in the others, and a model author's code stays the same
-  through all of them.
+- **A new function is array code in the package that owns it. A new kernel
+  changes an implementation package. A better optimization changes Tempest.**
+  None of the three needs changes in the others, and a model author's code
+  stays the same through all of them.
 - **What people rely on is the promises below.** Formulas, folds, schedules and
   the planner are how Tempest keeps them today. `explain` shows them, but they
   are not the interface, and they may change.
 - **The core stays small.** A new kind of node or value needs a written
-  argument that formulas, folds, scalar functions and calls cannot express it.
+  argument that formulas, folds and scalar functions cannot express it.
 
 ## Promises
 
@@ -41,34 +40,28 @@ What a user can rely on. Each one is checked by tests.
    scalar function only operand order and common subexpressions are
    canonical: `x*2` and `x+x` stay different. Where two programs plan
    differently, `explain` names the rewrite that would unify them.
-2. **A named call is never worse than its reference.** A claim on a call is
-   compared by cost with its reference fused into its neighbours. An
-   implementation that claims a call may also claim the same computation
-   written out by hand.
-3. **One rule decides fusion.** A group becomes one kernel when the estimate
+2. **One rule decides fusion.** A group becomes one kernel when the estimate
    says it is faster or, for a claim that is measured, when the recorded
    measurement does: never because of which code path found it, and never by
    noise. A measurement overrides the estimate only beyond the device's noise
    margin, and the plan is deterministic given the record.
-4. **Every implementation computes what the program states,** its types and
+3. **Every implementation computes what the program states,** its types and
    rounding functions included, up to summation order; removing a buffer
    never removes a rounding the program states.
-5. **Every decision is visible and can be overridden.** The plan is data.
+4. **Every decision is visible and can be overridden.** The plan is data.
    `explain` prints each decision with its reason and whether it was estimated
    or measured; tests compare plans; a user pins a value's storage or a group's
    schedule by the value's stable name.
-6. **A second preparation takes seconds, in a new process.** Kernels are
+5. **A second preparation takes seconds, in a new process.** Kernels are
    cached by content, not by Julia method, and a hit loads a compiled binary
    without generating code.
-7. **Coverage does not depend on a catalogue.** Every program in the primitive
+6. **Coverage does not depend on a catalogue.** Every program in the primitive
    language plans and runs with only the generator and the generic kernels,
    whatever else is loaded. A composition nobody wrote code for (another score
    function in attention, another spelling of softmax, an extra reduction,
    gradients) gets a plan without anyone adding that combination, and stores
    nothing that a streaming algorithm makes unnecessary; the coverage suite
-   checks the kernels and bytes stored (see Testing). An opaque operation is
-   outside this promise: it runs where an implementation claims it, and
-   preparation fails, naming it, where none does.
+   checks the kernels and bytes stored (see Testing).
 
 ## Purpose and scope
 
@@ -77,18 +70,18 @@ pass) into a prepared program that runs as fast as the hardware and the best
 available kernels allow, and that explains every decision it made. The user
 writes what to compute. Tempest decides how: which values are stored, which
 are fused, how each kernel is scheduled and which implementation runs it,
-choosing among generated tile programs, vendor libraries and the user's own
-kernels. It exists because no other system combines three things:
+choosing among generated tile programs and vendor libraries. It exists
+because no other system combines three things:
 
 - **Julia functions are first class.** A pointwise function or a fold's
   operator is Julia code. Tempest reads it to plan (its derivative, its cost,
   its canonical form), and the kernel runs the function itself. It is never
   mapped onto a fixed operator set.
-- **Custom kernels and custom derivatives compose with fusion.** A named
-  operation carries a reference definition, so it fuses like any other code
-  when no kernel claims it, and is replaced whole when a kernel claims it and
-  wins on cost. An operation without a reference is opaque, and still composes
-  at its inputs and outputs.
+- **Library kernels compose with fusion.** A kernel claims a group of
+  index-level values where it wins on cost, and what it does not claim is
+  generated around it, so a vendor kernel never decides what its neighbours
+  look like, and a computation written out by hand reaches the same kernel as
+  any other spelling of it.
 - **The whole step is prepared once,** with fixed storage, and replayed as one
   captured graph.
 
@@ -100,12 +93,12 @@ Integration with today's frameworks is welcome where it comes nearly free, and
 does not shape the design.
 
 **The same code runs eagerly.** Every function Tempest adds (folds with custom
-operators, `logsumexp`, positions, verbs such as attention and dropout) has a
+operators, `logsumexp`, positions, functions such as attention and dropout) has a
 method on plain arrays, on the CPU or a GPU, so one source runs untraced,
 array by array, and traced. The coverage goal is that slice: Julia array code
 that runs eagerly should trace, except control flow on array values. Existing
-array code traces as it is; only functions whose bodies cannot trace need a
-declaration (see Operations).
+array code traces as it is; a function whose body cannot trace is given a
+method on traced arrays that states it in primitives (see Operations).
 
 **Not goals:** another framework's operator list as a checklist; a code path
 per model or pattern (every feature is formulas, folds and scalar functions,
@@ -171,9 +164,6 @@ vocabulary is small.
 - `gather` and `scatter` by runtime integer indices.
 - `positions`: the index itself, for masks, dropout and embeddings.
 - Layout: reshape, permute, view, slice, broadcast, concatenate.
-- `call`: a named operation (see Operations), with a reference written in the
-  above or, for an opaque one, declared result shapes; optional implementations
-  and an optional derivative rule.
 
 Tracing, differentiation and functional updates work at this level.
 
@@ -187,17 +177,14 @@ readers, so no version of the array is stored; its derivative masks the old
 contents and selects the values written. Three limits: the contents of
 `similar` are zero until written, where Julia leaves them undefined; a write
 at positions an array of integers or a mask selects is not a functional update
-yet; and a program never writes its inputs, nor anything sharing their memory,
-and an operation's reference never writes its arguments. Such a write fails,
+yet; and a program never writes its inputs, nor anything sharing their memory.
+Such a write fails,
 saying so: a program is a function of its inputs, and a write into one would
 change the caller's array without the program stating it.
 
-Differentiation needs one pullback per primitive; a verb may bring its own. The
-backward graph is ordinary program code and is planned together with the
-forward. A library may claim a whole named call, as cuDNN claims `attention`:
-at the index level a call is its reference expanded, with its place kept, and
-a claim replaces it where the claim is cheaper. An opaque call nobody claims
-fails preparation.
+Differentiation needs one pullback per primitive, and a scalar function may
+bring its own partials. The backward graph is ordinary program code and is
+planned together with the forward.
 
 **Scalar functions.** A callable broadcast over traced arrays enters the
 program as primitives: during tracing it runs on tracers that record each
@@ -301,69 +288,33 @@ Nothing is decided at this level.
 
 ## Operations
 
-An operation is a Julia function. Three things about it are kept apart:
+An operation is a Julia function. Two things about it are kept apart:
 
-- **its meaning,** what the function computes;
-- **its decomposition,** a reference that states the meaning in primitives,
-  which is optional;
-- **its implementations,** ways to run it, of which there may be several or
-  none.
+- **its meaning,** what the function computes, in its own methods on arrays;
+- **its primitives,** the same meaning stated in the language above, which is
+  what Tempest plans.
 
-Opacity of an operation and opacity of a kernel are separate questions. cuBLAS
-runs opaque code for a fully understood product; a custom solver may be an
-operation with no reference at all.
+For most functions the two are one method: generic array code (activations,
+`logsumexp`, a norm written with broadcasts and sums, attention written as
+two products around a softmax) needs nothing, since tracing runs it on traced
+arrays and Tempest plans its body. The name is not kept, and need not be: an
+implementation recognizes the computation at the index level, where spelling
+does not matter.
 
-A Julia function meets Tempest in one of three ways.
+A function whose body does not trace, because it branches on array values,
+writes its arguments or arrays it allocates, loops over scalars, draws from a
+global random number generator or has only device methods, is given a method
+on Tempest's traced arrays that states it in primitives. For packages Tempest
+does not own, that method lives in a package extension: for NNlib, `softmax`,
+`batched_mul` and `conv`. Eager execution is unchanged, since plain arrays
+still reach the function's own methods.
 
-1. **Its body traces.** Generic array code (activations, `logsumexp`, a norm
-   written with broadcasts and sums) needs nothing: tracing runs it on traced
-   arrays, and Tempest plans its body. The name is not kept, and need not be:
-   an implementation recognizes the computation at the index level, where
-   spelling does not matter.
-2. **It keeps its name.** `@operation f(x::AbstractArray, w::AbstractArray;
-   eps)` adds methods of `f` on traced arrays that record a call of `f`: one
-   for each mix of traced and plain arrays among the declared arguments, so
-   they are more specific than `f`'s own methods and ambiguous with none.
-   Eager execution is unchanged, since plain arrays still reach `f`'s own
-   methods. The reference is `f`'s method for the declared types run on
-   traced arrays, unless one is given with `reference`. A name buys three
-   things: a derivative rule, a claim by name, and a boundary that `explain`
-   shows.
-3. **Its body does not trace.** A function that branches on array values,
-   writes its arguments or Julia arrays it allocates, loops over scalars, draws
-   from a global random number generator or has only device methods is
-   declared the same way, with either a reference
-   that traces or, for an opaque operation, a declaration of its result shapes
-   and element types: `declared_results`, a function of its arguments' shapes
-   and element types and its keywords.
+Julia dispatch decides which function is requested; Tempest decides how it
+runs. Implementations do not dispatch on array types. They claim groups of
+index-level values, by inspecting them.
 
-An opaque operation has no decomposition. Its eager method is its meaning and
-the oracle its implementations are tested against. It differentiates only
-through a rule. At the index level it is an opaque value that reads and writes
-whole buffers, and it fuses with its neighbours only where its implementation
-takes an epilogue. With no implementation on the target, preparation fails and
-names it.
-
-Declarations for packages Tempest does not own go in package extensions, as
-methods on Tempest's traced arrays: for NNlib, the functions whose bodies do not
-trace, such as `softmax`, `batched_mul` and `conv`. An existing device method,
-such as a package's `CuArray` path, can serve as an implementation when it
-writes into a buffer it is given, runs on Tempest's stream, and neither
-synchronizes nor allocates per call.
-
-Julia dispatch decides which operation is requested; Tempest decides how it
-runs. Implementations do not dispatch on array types. They answer claims by
-operation (`typeof(f)`), target and input shapes, or by inspecting a group of
-index-level values.
-
-An extension author gets more for more effort:
-
-1. a reference: the operation composes, differentiates and fuses;
-2. a derivative rule;
-3. a kernel with conditions: it runs where it applies, and Tempest generates
-   its neighbours;
-4. a kernel that takes an epilogue: fusion across its output;
-5. a schedule in Tempest's language: fusion through it.
+Operations that keep a name, so that a kernel can claim them whole and a
+derivative rule can replace their body, are not in this design (see Not now).
 
 ## Meaning, algorithm, schedule
 
@@ -371,8 +322,8 @@ A reference establishes what a computation means, not an acceptable way to run
 it: attention that stores its score matrix is correct and useless. Three layers
 stay distinguishable, even where they share code.
 
-- **Meaning** is in the reference, owned by the operation author: scores, a
-  mask, a softmax, a weighted sum.
+- **Meaning** is in the program, owned by whoever wrote the function: scores,
+  a mask, a softmax, a weighted sum.
 - **Algorithm** is in the plan, owned by Tempest: store or stream, an online
   fold, a split, a fold recomputed inside its reader. Algorithms are rewrites of
   folds and the store-or-recompute decision, chosen by cost and permitted by
@@ -399,8 +350,8 @@ states
   `measure`, for claims whose estimate cannot separate them from their rivals;
 - a build function that returns the launches.
 
-A claim on a named call, on a written-out pattern, or on a group the
-implementation itself proposed is the same kind of claim. The roles:
+A claim on a group the generator formed and on a group the implementation
+itself proposed is the same kind of claim. The roles:
 
 - **cuTile is the generator.** It claims every group a sketch can schedule,
   with as many schedules as the search allows.
@@ -412,16 +363,14 @@ implementation itself proposed is the same kind of claim. The roles:
   deterministic scatters and opaque bodies. Because the floor claims every
   group, a plan always exists. The floor makes every plan correct; it does not
   make coverage worth having (see Meaning, algorithm, schedule).
-- **User kernels** arrive as implementations of operations or of groups (see
-  Operations).
 
 A library that accepts or declines whole graphs, as cuDNN's engines do, takes
 part by proposing groups and claiming those its engines accept. What it
 declines is generated around it.
 
-An implementation may claim a written-out pattern (attention spelled as two
-products around a softmax) as well as the named call. The index level is
-canonical, so the match does not depend on spelling.
+An implementation claims a written-out pattern (attention spelled as two
+products around a softmax) at the index level, which is canonical, so the
+match does not depend on spelling.
 
 Loading a package makes its implementations available; the target decides
 which are used. Each implementation is an extension that registers itself when
@@ -472,12 +421,12 @@ choice is also a proposal: an edit to the current plan that dissolves the
 groups owning its values, forms its group, and regroups what is left with
 every other group frozen. The estimate is a sum over groups, so an edit is
 priced on the groups it changes, and edits are taken greedily by gain. The
-other shape, candidates grown from anchors (folds, contracts, calls, results)
+other shape, candidates grown from anchors (folds, contracts, results)
 by each applicable sketch and covered greedily by estimated gain as XLA and
 Inductor do, prices every grouping the same way, but it would make the
 generator a proposer and move every plan at once; this one keeps a plan that
 always exists and adds pricing to it. Either way, no grouping may be settled
-by a rule the cover never prices. That is Promise 3, and its test is a
+by a rule the cover never prices. That is Promise 2, and its test is a
 program whose best grouping the rules alone would not find.
 
 The plan records, for each value, stored (with its layout) or recomputed; for
@@ -556,7 +505,11 @@ records for known devices can ship with the package.
 Control flow on traced values, mutation of a program's inputs, writes at
 positions an array selects, ordered folds (scans and recurrences, whose
 combine is not commutative), ragged sizes, several devices, symbolic sizes
-beyond bounded ones, serving, and an MLIR core. Checkpointing, re-running
+beyond bounded ones, serving, and an MLIR core. Named operations with kernels
+and derivative rules of their own: the first version is the compiler over the
+primitive language, and the interface a kernel author writes to will be
+designed from kernels that beat the generator, once there are several, rather
+than from the one that existed. Checkpointing, re-running
 kernels to save memory, is a cut through the graph priced by peak memory over
 a kernel order, and comes later as its own pass with a memory budget; until
 then `checkpoint(f)` marks a region to re-run. An explicit plan leaves room

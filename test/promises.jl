@@ -1,5 +1,5 @@
 # The promises in DESIGN.md, as tests over plans. Promise 1 (layout spelling
-# does not matter) and Promise 3 (one rule decides fusion) are checked here on
+# does not matter) and Promise 2 (one rule decides fusion) are checked here on
 # the plan the cover chooses; the others are checked where their mechanism
 # lives (plan.jl, coverage.jl, runtime.jl, cache.jl). Each promise has cases
 # that hold and cases that do not yet: a case not met is `@test_broken` under
@@ -98,7 +98,7 @@ function estimated(p::C.Plan, target)
     sum(g -> C.decide(d, p, g).choice.estimate, filter(g -> C.chosen(p, g), p.groups); init = 0.0)
 end
 
-@testset "promise 3: one rule decides fusion" begin
+@testset "promise 2: one rule decides fusion" begin
     x, w = data(64, 32), data(32, 16)
     p = chosen(map_fold_product, x, w)
     graph = p.graph
@@ -137,7 +137,7 @@ stack(L, dev; width = 64) =
 # tests run in parallel, and a timing shares the host.
 seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
 
-@testset "promise 6: identical layers cost the same each" begin
+@testset "promise 5: identical layers cost the same each" begin
     distinct(p) = length(unique(C.canonical(p, g) for g in p.groups))
     function planned(L)
         layers, x = stack(L, identity)
