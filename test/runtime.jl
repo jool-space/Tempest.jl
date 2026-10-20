@@ -252,6 +252,25 @@ if CUDA_FUNCTIONAL
     @testset "prepared on CUDA" begin
         check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget())
     end
+    # Claims are timed on buffers of their own, which a kernel reads as data:
+    # an integer array is an index there, and zero is outside every axis. The
+    # buffers hold ones, so that timing every option of a gather (the floor
+    # too, with bounds checked as under `Pkg.test`) reads in bounds.
+    @testset "timed on trial buffers, a gather reads in bounds" begin
+        @testset "$name" for (name, f, args) in filter(((_, _, args),) -> any(a -> a isa AbstractArray{<:Integer}, args), PROGRAMS)
+            for p in (trace(f, args...), differentiate(trace(f, args...)))
+                graph = C.lower(p)
+                planned = C.plan(graph)
+                d = C.Decider(T.CUDATarget(), graph; measure = false)
+                foreach(g -> C.buffers!(d, planned, g), planned.groups)
+                indices = [b for (v, b) in zip(graph.values, d.buffers) if b !== nothing && v.eltype <: Integer && !(v.definition isa C.ConstantArray)]
+                @test !isempty(indices) && all(b -> all(>=(1), Array(b)), indices)
+                reference = filter(!isnothing, C.leaves(interpret(p, args...)))
+                ex = prepare(p, map(x -> x isa AbstractArray ? CuArray(x) : x, args)...; target = T.CUDATarget(), measure = :all)
+                @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), reference)
+            end
+        end
+    end
     @testset "a training step as one program, on CUDA" begin
         check_steps(CuArray; rtol = 1.0e-3, by_reference = (1, 2))
         check_steps(CuArray; rtol = 1.0e-3)

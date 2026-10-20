@@ -753,7 +753,7 @@ end
 registered_with(i::Implementation) = first(is for (_, is) in REGISTERED if any(j -> j === i, is))
 
 # Buffers for a group's reads and stored members, shared by every plan the
-# decider considers (they number values alike), zeroed so that measuring reads
+# decider considers (they number values alike), filled so that measuring reads
 # nothing undefined.
 function buffers!(d::Decider, p::Plan, g::Group)
     n = length(p.graph.values)
@@ -763,12 +763,15 @@ function buffers!(d::Decider, p::Plan, g::Group)
         val = p.graph.values[v]
         def = val.definition
         d.buffers[v] = def isa ConstantArray ? upload(d.target, vec(collect(def.data))) :
-            zeroed!(allocate(d.target, val.eltype, storage_length(val)))
+            filled!(allocate(d.target, val.eltype, storage_length(val)))
     end
     d.buffers
 end
 
-zeroed!(x) = (fill!(reinterpret(UInt8, x), 0x00); x)
+# A kernel timed on a buffer reads it as data, and as an index if it is an
+# integer: zero is outside every axis and one is inside any, so integers are
+# ones and the rest zeros.
+filled!(x) = eltype(x) <: Integer ? fill!(x, one(eltype(x))) : (fill!(reinterpret(UInt8, x), 0x00); x)
 
 # Build a choice on `buffers`.
 build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
