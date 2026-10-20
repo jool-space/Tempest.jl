@@ -104,8 +104,8 @@ function pullback(op::Reduce, n, id, g, tape)
 end
 
 fold_pullback(::SumFold, x, y, g, axes, full, tape) = g
-function fold_pullback(f::ShiftedSum, x, y, g, axes, full, tape)
-    f.observe isa LogSumExp || throw(ArgumentError("no derivative rule for a shifted sum observed by $(f.observe)"))
+function fold_pullback(f::Relative, x, y, g, axes, full, tape)
+    f.observe == LOGSUMEXP || throw(ArgumentError("no derivative rule for a relative fold observed by $(f.observe)"))
     g * exp(x - y)
 end
 

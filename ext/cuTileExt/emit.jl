@@ -673,7 +673,7 @@ function emit_fold!(k, st, c::Context, t::Recomputed, indices)
     sums !== nothing || direct || init_state!(st, acc, f, A, shape)
     names = emit_tiles!(k, loop, e, unique(step_roots(e, f, t.body, sums)), Dict{Term, Any}(), indices..., at)
     valid = gensym(:valid)
-    if sums === nothing || f isa ShiftedSum
+    if sums === nothing || f isa Relative
         lanes = ntuple(q -> q == p ? tp : 1, p)
         push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
     end

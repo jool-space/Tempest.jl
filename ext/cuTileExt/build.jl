@@ -153,7 +153,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         resident || push!(body, :(for $t in Int32(1):Int32($n)
             $(loop...)
         end))
-        any(r -> fold_of(c, r) isa ShiftedSum, phase) && (k.name *= ", online softmax")
+        any(r -> fold_of(c, r) isa Relative{Exponential}, phase) && (k.name *= ", online softmax")
         for r in phase
             f, A = fold_of(c, r), accumulator(c, r)
             state = haskey(states, r) ? states[r] : fold_state!(body, c, r, sums[r], accumulators[r])
@@ -219,25 +219,25 @@ function hoist_folds!(k, st, c::Context, roots, scope, indices)
 end
 
 # Folds that accumulate as sums of terms along tile axis `p`: a sum of a
-# bilinear product, and a shifted sum of `(y, g...)`, whose sums are of each
+# bilinear product, and an exponential fold of `(y, g...)`, whose sums are of each
 # `g` times the weight `exp(y - m)` against the running maximum `m` of `y`
 # (`Weight` stands for it), in the type the fold accumulates. Each sum is a
 # term and its product, or nothing when the term adds elementwise. Nothing for
 # other folds, which accumulate elementwise in their state.
 struct Weight end
 
-# The parts of a shifted sum's element: `y`, and each `g`; one `g` of one for
+# The parts of an exponential fold's element: `y`, and each `g`; one `g` of one for
 # an element that is a number.
 function shifted_parts(c::Context, body)
     body isa Apply && body.f === tuple && return (first(body.args), Base.tail(body.args))
     (body, (Lit(one(term_eltype(body, c.g))),))
 end
 
-# The type a shifted sum's maximum and sums accumulate in.
+# The type an exponential fold's maximum and sums accumulate in.
 shifted_type(c::Context, f, body) = fieldtype(fold_types(f, term_eltype(body, c.g)).state, 1)
 
 function sweep_sums(c::Context, f, body, p)
-    if f isa ShiftedSum
+    if f isa Relative{Exponential}
         y, gs = shifted_parts(c, body)
         W = shifted_type(c, f, body)
         w = Apply(Weight(), (y,), W)
@@ -253,21 +253,21 @@ function sweep_sums(c::Context, f, body, p)
 end
 
 # The terms a step computes before its sums add: the products' factors but
-# the weights, which the step computes, and a shifted sum's `y`; or the term
+# the weights, which the step computes, and an exponential fold's `y`; or the term
 # of a fold that accumulates elementwise.
 function step_roots(c::Context, f, body, sums)
     sums === nothing && return Term[body]
     factors = Term[product_factor(c, x) for (_, product) in sums if product !== nothing for x in product[1:2] if !(x isa Apply && x.f isa Weight)]
-    f isa ShiftedSum ? [first(shifted_parts(c, body)); factors] : factors
+    f isa Relative{Exponential} ? [first(shifted_parts(c, body)); factors] : factors
 end
 
-# Accumulators of sums, named from `prefix`: a shifted sum's running maximum,
+# Accumulators of sums, named from `prefix`: an exponential fold's running maximum,
 # over the lanes `y` spans but the swept ones, then each sum's, a product's
 # matrix or the lanes its term spans.
 function sum_accumulators!(st, c::Context, f, body, sums, p, prefix)
     starts = Any[product === nothing ? :(fill($(zero(term.eltype)), $(Base.setindex(spanned_shape(c, term), 1, p)))) :
         :(fill(0.0f0, ($(tile(c)[product[3]]), $(tile(c)[product[4]])))) for (term, product) in sums]
-    if f isa ShiftedSum
+    if f isa Relative{Exponential}
         y = first(shifted_parts(c, body))
         pushfirst!(starts, :(fill($(shifted_type(c, f, body)(-Inf)), $(Base.setindex(spanned_shape(c, y), 1, p)))))
     end
@@ -276,12 +276,12 @@ function sum_accumulators!(st, c::Context, f, body, sums, p, prefix)
     acc
 end
 
-# One step of the sums. A shifted sum's running maximum rises to the step's
+# One step of the sums. An exponential fold's running maximum rises to the step's
 # first, and its sums scale by how much it rose; lanes past the swept extent
 # weigh nothing. Then each sum adds its terms.
 function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices, p)
     rise = nothing
-    if f isa ShiftedSum
+    if f isa Relative{Exponential}
         y = first(shifted_parts(c, body))
         T = shifted_type(c, f, body)
         x = as_accumulator(st, scope[y], T, term_eltype(y, c.g), spanned_shape(c, y))
@@ -306,7 +306,7 @@ function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices,
     end
 end
 
-# The state at the end of the sweep: a shifted sum's running maximum, and the
+# The state at the end of the sweep: an exponential fold's running maximum, and the
 # sums.
 sum_state(c::Context, sums, acc) = Any[acc[1:(end - length(sums))];
     [product === nothing ? a : from_matrix(c, a, product[3], product[4]) for ((_, product), a) in zip(sums, acc[(end - length(sums) + 1):end])]]

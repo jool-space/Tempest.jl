@@ -43,15 +43,20 @@ end
 function product_claim(target, g::GroupView)
     target isa CUDATarget && g.kind === :reduction || return nothing
     folds = [g.values[r].fold for r in g.reductions]
-    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, ShiftedSum}, folds) || return nothing
+    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, Relative}, folds) || return nothing
     found = product_axes(g)
     found === nothing && return nothing
     M, N, K, B = found
     extent(axes) = prod(k -> g.domain[k], axes; init = 1)
     m, n, k, b = extent(M), extent(N), extent(K), extent(B)
     max(m, n, k, b) < typemax(Int32) ÷ 2 || return nothing
+    # The factors of the first fold that is a product: a fold of weights
+    # alone, such as a log-sum-exp beside attention's weighted sum, has none.
+    first_product = findfirst(r -> product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)
+    first_product === nothing && return nothing
+    with_product = g.reductions[first_product]
     factor = product_factor(Context(g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
-        first(product_factors(first(folds), g.terms[first(g.reductions)])))
+        first(product_factors(g.values[with_product].fold, g.terms[with_product])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
     recomputed = [s for r in g.reductions for s in subterms((g.terms[r],)) if s isa Recomputed]
     recomputing = !isempty(recomputed)
@@ -76,23 +81,25 @@ function product_claim(target, g::GroupView)
         # A grid of few output tiles leaves the device idle: split the summed
         # axis among blocks (split-K), merging the partial sums in a second
         # launch; not when a fold is computed before the sweep, which every
-        # split would repeat, nor for a shifted sum.
+        # split would repeat, nor for a relative fold.
         blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
         sums = all(f -> f isa SumFold, folds)
         splits = blocks < SPLIT_KEPT_BLOCKS[1] && !hoisted && sums ? split_count(k, tk, blocks) : 1
         s = TileSchedule(:product, tiling, splits, nothing, 8, target.precision)
         c = Context(g, s)
-        all(r -> products_of(c, r), g.reductions) && expressible_over(c) && return Claim(s)
+        all(r -> products_of(c, r), g.reductions) && any(r -> has_product(c, r), g.reductions) && expressible_over(c) && return Claim(s)
     end
     nothing
 end
 
-# Whether a fold accumulates as products of tiles: a sum of a bilinear
-# product, or a shifted sum whose sums are, but for sums of its weights.
+# Whether a fold accumulates in a product's sweep: a sum of a bilinear
+# product, or an exponential fold whose sums are products or sums of its
+# weights alone; and whether it has a product among them.
 function products_of(c::Context, r)
     sums = fold_sums(c, r)
-    sums !== nothing && any(s -> s[2] !== nothing, sums) && all(((term, product),) -> product !== nothing || term.f isa Weight, sums)
+    sums !== nothing && all(((term, product),) -> product !== nothing || term.f isa Weight, sums)
 end
+has_product(c::Context, r) = (sums = fold_sums(c, r); sums !== nothing && any(s -> s[2] !== nothing, sums))
 
 # Every load a view over the tiling, every stored value too, and nothing the
 # generator cannot lower.

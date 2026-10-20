@@ -84,11 +84,12 @@ loads(t::Term) = [s for s in subterms((t,); nested = true) if s isa Load]
     product_factors(fold, term) -> (x, y) or nothing
 
 The two factors whose products a fold of `term` sums: those of a sum of a
-product; for a shifted sum of `(y, g...)`, the first `g` that is not a
-constant, and `y`, whose `exp(y - m)` weighs it.
+product; for an exponential fold of `(y, g...)`, the first `g` that is not
+a constant, and `y`, whose `exp(y - m)` weighs it.
 """
+product_factors(::Fold, t) = nothing
 product_factors(::SumFold, t) = t isa Apply && t.f === (*) && length(t.args) == 2 ? t.args : nothing
-function product_factors(::ShiftedSum, t)
+function product_factors(::Relative{Exponential}, t)
     t isa Apply && t.f === tuple || return nothing
     i = findnext(a -> !(a isa Lit), t.args, 2)
     i === nothing ? nothing : (t.args[i], t.args[1])

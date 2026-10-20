@@ -77,7 +77,7 @@ end
     a, b = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v))
     @test a.terms == b.terms
     graph = C.rewrite(C.lower(trace(by_maximum, q, k, v)))
-    @test graph.values[only(b.reductions)].definition.fold == IR.ShiftedSum(IR.Sums(/))
+    @test graph.values[only(b.reductions)].definition.fold == IR.Relative(IR.Exponential(), IR.Composed(/, (IR.Sum(1), IR.Sum(2))))
     @test length(C.recomputed_in(b)) == 1
     planned = recomputing(graph)
     @test agree(C.execute(planned, q, k, v), [interpret(trace(by_maximum, q, k, v), q, k, v)])
@@ -94,7 +94,7 @@ end
     qh, kh, vh = map(x -> BFloat16.(single(x)), (q, k, v))
     h = C.rewrite(C.lower(trace(half, qh, kh, vh)))
     fold = h.values[only(only(groups(half, qh, kh, vh)).reductions)].definition
-    @test fold.fold == IR.ShiftedSum(IR.Sums(/))
+    @test fold.fold == IR.Relative(IR.Exponential(), IR.Composed(/, (IR.Sum(1), IR.Sum(2))))
     @test h.values[fold.operand.value].eltype == Tuple{BFloat16, Float32, Float32}
     @test IR.fold_types(fold.fold, Tuple{BFloat16, Float32, Float32}).result == BFloat16
     @test agree(C.execute(recomputing(h), qh, kh, vh), [interpret(trace(half, qh, kh, vh), qh, kh, vh)]; rtol = 1.0e-2)
@@ -102,6 +102,35 @@ end
     # in BFloat16 with the weights is one too: the same fold, with the values
     # converted where they are read.
     @test length(C.rewrite(C.lower(trace((q, k, v) -> Ops.attention(q, k, v; causal = true), qh, kh, vh))).rewrites) == 1
+end
+
+# The laws are data: the same rules that make a softmax one fold relative to
+# the maximum make a variance one fold relative to the mean (Welford), and a
+# log-sum-exp written by hand the fold `logsumexp` records.
+relative_folds(g) = [v.definition.fold for v in g.values if v.definition isa C.Reduction && v.definition.fold isa IR.Relative]
+
+@testset "folds relative to a statistic" begin
+    x = data(8, 6)
+    layernorm(x) = (m = sum(x; dims = 1) ./ 8; (x .- m) ./ sqrt.(sum(abs2, x .- m; dims = 1) ./ 8 .+ 1.0e-5))
+    variance(x) = (m = sum(x; dims = 1) ./ 8; d = x .- m; sum(d .* d; dims = 1) ./ 8)
+    by_hand(x) = (m = maximum(x; dims = 1); m .+ log.(sum(exp.(x .- m); dims = 1)))
+    for (f, law, observe) in ((layernorm, IR.Square(), IR.Composed(sqrt, (IR.Composed(+, (IR.Composed(*, (IR.Sum(1), 0.125)), 1.0e-5)),))),
+            (variance, IR.Square(), IR.Composed(*, (IR.Sum(1), 0.125))),
+            (by_hand, IR.Exponential(), IR.LOGSUMEXP))
+        g = C.rewrite(C.lower(trace(f, x)))
+        @test relative_folds(g) == [IR.Relative(law, observe)]
+        p = recomputing(g)
+        @test C.structure(p).kernels == 1
+        @test agree(C.execute(p, x), [f(x)])
+    end
+    # The mean's own fold stays beside the variance's, in the same phase: one
+    # sweep, where the two-pass spelling had the variance read the mean.
+    g = C.rewrite(C.lower(trace(layernorm, x)))
+    p = recomputing(g)
+    @test all(r -> only(p.groups).phase[r] == 1, only(p.groups).reductions)
+    # The two spellings of a log-sum-exp get the same plan, the notes aside.
+    planned(f) = filter(l -> !startswith(l, "rewritten:"), split(sprint(explain, recomputing(C.rewrite(C.lower(trace(f, x))))), "\n"))
+    @test planned(by_hand) == planned(x -> T.logsumexp(x; dims = 1))
 end
 
 # A map read by a fold and by a later map over its domain is recomputed in

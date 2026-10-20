@@ -443,7 +443,7 @@ function estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::G
     flops, factor = if s.sketch === :product
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
-        r = first(g.reductions)
+        r = g.reductions[findfirst(r -> product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)]
         t = first(product_factors(g.values[r].fold, g.terms[r]))
         2.0 * m * n * k * b * length(g.reductions), term_eltype(t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t, g)
     else

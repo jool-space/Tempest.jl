@@ -5,7 +5,7 @@
 # associative and commutative up to rounding, and `fold_init` exact: it masks
 # padded lanes.
 
-public Fold, SumFold, MaxFold, MinFold, ProdFold, ShiftedSum, LogSumExp, Sums, GenericFold,
+public Fold, SumFold, MaxFold, MinFold, ProdFold, Relative, Law, Exponential, Square, Statistic, Sum, Composed, LOGSUMEXP, GenericFold,
     fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, fold_eltype,
     fold_accumulator, lse_shift, HalfFloat
 
@@ -23,7 +23,7 @@ fold_name(f::Fold) = Symbol(lowercase(string(nameof(typeof(f)))))
 
 The type a fold over elements of type `T` accumulates in. Elements convert to it
 before `fold_lift`, and the observed value rounds once to `fold_eltype(f, T)`.
-Sums, products and shifted sums of half-precision elements accumulate in
+Sums, products and relative folds of half-precision elements accumulate in
 Float32, a tuple element component by component.
 """
 fold_accumulator(::Fold, T) = T
@@ -71,53 +71,116 @@ fold_combine(::ProdFold, a, b) = (a[1] * b[1],)
 fold_observe(::ProdFold, s) = s[1]
 
 """
-    ShiftedSum(observe)
+    Relative(law, observe)
 
-The fold whose state is a running maximum and sums relative to it. An element
-is `(y, g...)`, or a number `y`, which is `(y, 1)`. The state is `m`, the
-maximum of `y` so far, and one sum of `g · exp(y - m)` for each `g`. Combining
-two states moves both sums to the larger maximum, scaling each by
-`exp(m_old - m_new)`: the softmax's exponentials are summed in one pass, shifted
-by a maximum known only at the end. The result is `observe(m, sums...)`.
-Exponentials are shifted by zero when the maximum is infinite, so an empty or
-all `-Inf` slice sums to zero, and a `+Inf` element to `+Inf`.
+A fold relative to a statistic of its own elements, in one pass. An element is
+`(y, g...)`, or a number `y`, which is `(y, 1)`. The state is the statistic's
+state over the elements so far and one sum of `g · φ(y - m)` for each `g`,
+where `m` is the statistic and `φ` the law's function: for the `Exponential`
+law, `exp(y - m)` against the maximum; for the `Square` law, `(y - m)^2`
+against the mean. Each sum is relative to the statistic of the elements it
+covers, and combining two states moves both to the statistic of their union
+by the law's `rebase`: `exp` turns a difference of maxima into a factor, and a
+sum of squares about a part's mean moves to the whole's by `n (μ_part - μ)^2`.
+So softmax and the variance are each one pass, with no statistic computed
+first. The result is `observe(law, state)`.
 
-`logsumexp` is this fold observed as `m + log(sum)` (`LogSumExp`); a sum
-weighted by a softmax becomes it by rewrite, observed as its sums (`Sums`; see
-`rewrite`).
+`logsumexp` is the exponential fold of a number observed as `m + log(sum)` (`LOGSUMEXP`);
+the sums a softmax weighs, and the sums of squares about a mean, become
+relative folds by rewrite (see `rewrite`).
 """
-struct ShiftedSum{F} <: Fold
+struct Relative{L, F} <: Fold
+    law::L
     observe::F
 end
 
-"The log-sum-exp from the maximum and the sum of exponentials relative to it."
-struct LogSumExp end
-(::LogSumExp)(m, s) = lse_shift(m) + log(s)
+abstract type Law end
 
-"`f` of the sums, the maximum dropped: `Sums(identity)` observes one sum, `Sums(/)` the quotient of two."
-struct Sums{F}
-    f::F
-end
-(o::Sums)(m, sums...) = o.f(sums...)
+"""
+`exp(y - m)` against the maximum `m`. A sum relative to one maximum moves to a
+larger one by the factor `exp(m_old - m_new)`. Exponentials are shifted by
+zero when the maximum is infinite, so an empty or all `-Inf` slice sums to
+zero, and a `+Inf` element to `+Inf`.
+"""
+struct Exponential <: Law end
 
-fold_name(f::ShiftedSum) = f.observe isa LogSumExp ? :logsumexp : Symbol("shifted sum")
-fold_init(::ShiftedSum, ::Type{T}) where {T <: Number} = (T(-Inf), zero(T))
-fold_init(::ShiftedSum, ::Type{E}) where {E <: Tuple} =
-    ntuple(i -> i == 1 ? fieldtype(E, 1)(-Inf) : zero(fieldtype(E, i)), Val(fieldcount(E)))
-fold_lift(::ShiftedSum, y::Number) = (y, one(y))
-fold_lift(::ShiftedSum, e::Tuple) = e
-fold_combine(::ShiftedSum, a, b) = shifted_combine(a, b)
-fold_observe(f::ShiftedSum, s) = f.observe(s...)
+"""
+`(y - m)^2` against the mean `m`, whose state is the count and the sum. A sum
+of squares about a part's mean moves to the mean of the whole by
+`n_part (μ_part - μ)^2` (Welford's algorithm, as Chan combines it).
+"""
+struct Square <: Law end
+
+law_function(::Exponential) = exp
+law_function(::Square) = abs2
+statistic_name(::Exponential) = "maximum"
+statistic_name(::Square) = "mean"
+
+# The statistic's own fold: its identity, one element's state, the merge of
+# two, and the statistic from the state.
+statistic_init(::Exponential, T) = (T(-Inf),)
+statistic_lift(::Exponential, y) = (y,)
+statistic_combine(::Exponential, a, b) = (max(a[1], b[1]),)
+statistic_of(::Exponential, s) = s[1]
+statistic_init(::Square, T) = (zero(T), zero(T))
+statistic_lift(::Square, y) = (one(y), y)
+statistic_combine(::Square, a, b) = (a[1] + b[1], a[2] + b[2])
+statistic_of(::Square, s) = s[2] / s[1]
+
+"A state split into the statistic's part and the sums."
+split_state(::Exponential, s) = ((s[1],), Base.tail(s))
+split_state(::Square, s) = ((s[1], s[2]), Base.tail(Base.tail(s)))
+
+# One element's sums, relative to its own statistic: `exp(y - y)` is one,
+# `(y - y)^2` zero.
+element_sums(::Exponential, y, gs) = gs
+element_sums(::Square, y, gs) = map(zero, gs)
+
+"A sum relative to the statistic of state `s`, moved to the statistic `m` of a larger set."
+rebase(::Exponential, a, s, m) = a * exp(s[1] - lse_shift(m))
+rebase(::Square, a, s, m) = ifelse(iszero(s[1]), a, a + s[1] * (s[2] / s[1] - m)^2)
+
 lse_shift(m) = ifelse(isfinite(m), m, zero(m))
 
-# States of a running maximum and sums relative to it: combining moves both
-# sums to the larger maximum.
-function shifted_combine(a, b)
-    m = max(a[1], b[1])
-    s = lse_shift(m)
-    ea, eb = exp(a[1] - s), exp(b[1] - s)
-    (m, map((x, y) -> x * ea + y * eb, Base.tail(a), Base.tail(b))...)
+fold_name(f::Relative) = f.observe == LOGSUMEXP ? :logsumexp : Symbol("sum relative to the ", statistic_name(f.law))
+fold_init(f::Relative, ::Type{T}) where {T <: Number} = (statistic_init(f.law, T)..., zero(T))
+fold_init(f::Relative, ::Type{E}) where {E <: Tuple} =
+    (statistic_init(f.law, fieldtype(E, 1))..., ntuple(i -> zero(fieldtype(E, i + 1)), Val(fieldcount(E) - 1))...)
+fold_lift(f::Relative, y::Number) = (statistic_lift(f.law, y)..., element_sums(f.law, y, (one(y),))...)
+fold_lift(f::Relative, e::Tuple) = (statistic_lift(f.law, e[1])..., element_sums(f.law, e[1], Base.tail(e))...)
+function fold_combine(f::Relative, a, b)
+    (sa, xs), (sb, ys) = split_state(f.law, a), split_state(f.law, b)
+    s = statistic_combine(f.law, sa, sb)
+    m = statistic_of(f.law, s)
+    (s..., map((x, y) -> rebase(f.law, x, sa, m) + rebase(f.law, y, sb, m), xs, ys)...)
 end
+fold_observe(f::Relative, s) = f.observe(f.law, s)
+
+# Observes: functions of the law and the state.
+
+"The statistic itself: the maximum, or the mean."
+struct Statistic end
+(::Statistic)(law, s) = statistic_of(law, first(split_state(law, s)))
+
+"The `i`th sum."
+struct Sum
+    i::Int
+end
+(o::Sum)(law, s) = last(split_state(law, s))[o.i]
+
+"`f` of other observes and numbers: `Composed(/, (Sum(1), Sum(2)))` is the quotient of two sums."
+struct Composed{F, A <: Tuple}
+    f::F
+    args::A
+end
+(o::Composed)(law, s) = o.f(map(a -> a isa Number ? a : a(law, s), o.args)...)
+
+Base.show(io::IO, ::Statistic) = print(io, "statistic")
+Base.show(io::IO, o::Sum) = print(io, "sum ", o.i)
+Base.show(io::IO, o::Composed) = print(io, o.f, "(", join(map(repr, o.args), ", "), ")")
+
+"The log-sum-exp: the maximum plus the log of the sum of exponentials relative to it."
+const LOGSUMEXP = Composed(+, (Statistic(), Composed(log, (Sum(1),))))
 
 """
     fold_reduce(f) -> function or nothing
@@ -125,17 +188,33 @@ end
 How to fold arrays of states along some of their axes at once, when `f` has a
 faster way than combining them in pairs: a function of the state's components,
 one array each, and the axes, that returns the folded components.
-Implementations call it on their own arrays, such as tiles. A shifted sum
-takes the maximum first, so that each element needs one exponential.
+Implementations call it on their own arrays, such as tiles. A relative fold
+takes the statistic first, so that each sum is moved once.
 """
 fold_reduce(::Fold) = nothing
-fold_reduce(::ShiftedSum) = shifted_sums
+fold_reduce(f::Relative) = RebasedSums(f.law)
 
-function shifted_sums(states, dims)
-    m = first(states)
-    top = maximum(m; dims)
-    shift = lse_shift.(top)
-    (top, map(s -> sum(s .* exp.(m .- shift); dims), Base.tail(states))...)
+struct RebasedSums{L}
+    law::L
+end
+
+# The statistic's state folded along `dims`, and the statistic from it, as arrays.
+statistic_reduce(::Exponential, s, dims) = (maximum(s[1]; dims),)
+statistic_reduce(::Square, s, dims) = (sum(s[1]; dims), sum(s[2]; dims))
+statistic_array(::Exponential, s) = s[1]
+statistic_array(::Square, s) = s[2] ./ s[1]
+
+# `rebase` over arrays of states, lane by lane.
+struct Rebase{L}
+    law::L
+end
+(r::Rebase)(a, sm...) = rebase(r.law, a, Base.front(sm), last(sm))
+
+function (r::RebasedSums)(states, dims)
+    sa, xs = split_state(r.law, states)
+    s = statistic_reduce(r.law, sa, dims)
+    m = statistic_array(r.law, s)
+    (s..., map(a -> sum(Rebase(r.law).(a, sa..., m); dims), xs)...)
 end
 
 """
@@ -161,8 +240,8 @@ fold_combine(f::GenericFold, a, b) = f.combine(a, b)
 fold_observe(f::GenericFold, s) = f.observe(s)
 
 const HalfFloat = Union{Float16, BFloat16}
-fold_accumulator(::Union{SumFold, ProdFold, ShiftedSum}, ::Type{<:HalfFloat}) = Float32
-fold_accumulator(::ShiftedSum, ::Type{E}) where {E <: Tuple} =
+fold_accumulator(::Union{SumFold, ProdFold, Relative}, ::Type{<:HalfFloat}) = Float32
+fold_accumulator(::Relative, ::Type{E}) where {E <: Tuple} =
     any(S -> S <: HalfFloat, fieldtypes(E)) ? Tuple{map(S -> S <: HalfFloat ? Float32 : S, fieldtypes(E))...} : E
 
 # Reference evaluation, through Base's reductions. Sums keep Base's pairwise
