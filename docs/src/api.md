@@ -76,11 +76,3 @@ Tempest.Implementations.record_name
 Tempest.Implementations.recomputes_folds
 Tempest.Implementations.in_place
 ```
-
-## Tempest.Operations
-
-```@docs
-Tempest.Operations
-Tempest.Operations.attention
-Tempest.Operations.dropout
-```

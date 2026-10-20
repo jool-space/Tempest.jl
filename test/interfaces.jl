@@ -70,7 +70,7 @@ function private_names(files)
 end
 
 @testset "public names are defined" begin
-    for m in (Tempest, T.IR, T.Compiler, T.Implementations, T.Operations)
+    for m in (Tempest, T.IR, T.Compiler, T.Implementations)
         @test filter(n -> !isdefined(m, n), names(m)) == Symbol[]
     end
 end
@@ -90,5 +90,5 @@ end
     @test private_names(source("import Tempest.Compiler as C\nC.lower(p)")) == ["Tempest.Compiler.lower"]
     @test private_names(source("using Tempest.Compiler: Plan, lower")) == ["Tempest.Compiler.lower"]
     @test private_names(source("import Tempest.Implementations: claims, REGISTERED")) == ["Tempest.Implementations.REGISTERED"]
-    @test private_names(source("using Tempest: CUDATarget; using Tempest.Operations")) == String[]
+    @test private_names(source("using Tempest: CUDATarget; using Tempest.Implementations")) == String[]
 end

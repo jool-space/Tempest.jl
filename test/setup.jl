@@ -5,7 +5,12 @@ import Tempest as T
 using Tempest.Compiler
 import Tempest.Compiler as C
 import Tempest.IR as IR
-import Tempest.Operations as Ops
+
+# Attention and dropout as a user writes them, on Tempest's primitives.
+module Ops
+using Tempest
+include(joinpath(@__DIR__, "fixtures", "operations.jl"))
+end
 
 const CUDA_FUNCTIONAL = CUDACore.functional()
 

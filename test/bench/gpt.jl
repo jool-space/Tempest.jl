@@ -22,6 +22,10 @@ module GPT
 using Tempest, Tempest.Compiler, CUDACore, Random, Printf
 import Tempest as T
 import Tempest.Compiler as C
+module Ops
+using Tempest
+include(joinpath(@__DIR__, "..", "fixtures", "operations.jl"))
+end
 
 ## Data, as nanoGPT's data.jl.
 
@@ -90,7 +94,7 @@ function attention(x, p, c, cfg)
     q = rope(project(p.wq), c, swap)
     k = rope(project(p.wk), c, swap)
     # Query head j reads key/value head cld(j, group): nanoGPT's (g h) axis.
-    o = Tempest.Operations.attention(q, k, project(p.wv); causal = true, scale = 1 / sqrt(Float32(head_dim)))
+    o = Ops.attention(q, k, project(p.wv); causal = true, scale = 1 / sqrt(Float32(head_dim)))
     reshape(p.wo, :, D)' * reshape(o, :, N)
 end
 

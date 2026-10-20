@@ -9,7 +9,12 @@
 using Tempest, Tempest.Compiler
 import Tempest as T
 import Tempest.Compiler as C
-import Tempest.Operations as Ops
+
+# Attention as a user writes it, when this file is not included beside setup.jl.
+@isdefined(Ops) || @eval module Ops
+    using Tempest
+    include($(joinpath(@__DIR__, "operations.jl")))
+end
 
 "An expectation not met yet, and the work that closes the gap."
 struct Gap
@@ -62,7 +67,7 @@ end
 training(loss, args...) = differentiate(trace(loss, args...))
 
 const ATTENTION = [
-    Composition("the verb", trace(attend, q, k, v), (q, k, v), (kernels = 1, bytes = O, largest = O)),
+    Composition("attention as a function", trace(attend, q, k, v), (q, k, v), (kernels = 1, bytes = O, largest = O)),
     Composition("written out with contract and logsumexp", trace(written, q, k, v), (q, k, v), (kernels = 1, bytes = O, largest = O)),
     Composition("softcap 30·tanh(s/30)", trace(softcap, q, k, v), (q, k, v), (kernels = 1, bytes = O, largest = O)),
     Composition("SiLU scores, no softmax (HSTU)", trace(hstu, q, k, v), (q, k, v), (kernels = 1, bytes = O, largest = O)),
@@ -70,14 +75,14 @@ const ATTENTION = [
     Composition("SiLU scores, a training step (HSTU)", training((q, k, v) -> sum(abs2, hstu(q, k, v)), q, k, v), (q, k, v),
         (kernels = 3, bytes = 5O + 4, largest = O)),
     Composition("softmax spelled exp(s - max) / sum", trace(shifted, q, k, v), (q, k, v), (kernels = 1, bytes = O, largest = O)),
-    Composition("the verb, then a residual", trace((q, k, v, x) -> attend(q, k, v) .+ x, q, k, v, x), (q, k, v, x),
+    Composition("the function, then a residual", trace((q, k, v, x) -> attend(q, k, v) .+ x, q, k, v, x), (q, k, v, x),
         (kernels = 1, bytes = O, largest = O)),
     Composition("written out, then a residual", trace((q, k, v, x) -> written(q, k, v) .+ x, q, k, v, x), (q, k, v, x),
         (kernels = 1, bytes = O, largest = O)),
-    Composition("the verb, and a reduction of its output", trace((q, k, v) -> (o = attend(q, k, v); (o, sum(abs2, o; dims = 1))), q, k, v),
+    Composition("the function, and a reduction of its output", trace((q, k, v) -> (o = attend(q, k, v); (o, sum(abs2, o; dims = 1))), q, k, v),
         (q, k, v), (kernels = 2, bytes = O + LSE, largest = O)),
     # The scores are stored once, between the forward pass and the backward.
-    Composition("the verb, a training step", training((q, k, v) -> sum(abs2, attend(q, k, v)), q, k, v), (q, k, v),
+    Composition("the function, a training step", training((q, k, v) -> sum(abs2, attend(q, k, v)), q, k, v), (q, k, v),
         (bytes = Gap(5O + 2LSE + 4, BACKWARD), largest = Gap(O, BACKWARD))),
     Composition("written out, a training step", training((q, k, v) -> sum(abs2, written(q, k, v)), q, k, v), (q, k, v),
         (largest = Gap(O, BACKWARD),)),

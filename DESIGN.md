@@ -93,12 +93,11 @@ Integration with today's frameworks is welcome where it comes nearly free, and
 does not shape the design.
 
 **The same code runs eagerly.** Every function Tempest adds (folds with custom
-operators, `logsumexp`, positions, functions such as attention and dropout) has a
-method on plain arrays, on the CPU or a GPU, so one source runs untraced,
-array by array, and traced. The coverage goal is that slice: Julia array code
+operators, `logsumexp`, positions) has a method on plain arrays, on the CPU or
+a GPU, so one source runs untraced, array by array, and traced. The coverage goal is that slice: Julia array code
 that runs eagerly should trace, except control flow on array values. Existing
 array code traces as it is; a function whose body cannot trace is given a
-method on traced arrays that states it in primitives (see Operations).
+method on traced arrays that states it in primitives (see *Operations*).
 
 **Not goals:** another framework's operator list as a checklist; a code path
 per model or pattern (every feature is formulas, folds and scalar functions,
@@ -304,10 +303,12 @@ does not matter.
 A function whose body does not trace, because it branches on array values,
 writes its arguments or arrays it allocates, loops over scalars, draws from a
 global random number generator or has only device methods, is given a method
-on Tempest's traced arrays that states it in primitives. For packages Tempest
-does not own, that method lives in a package extension: for NNlib, `softmax`,
-`batched_mul` and `conv`. Eager execution is unchanged, since plain arrays
-still reach the function's own methods.
+on Tempest's traced arrays that states it in primitives. That method lives
+with the function, in its package or a package extension: for NNlib,
+`softmax`, `batched_mul` and `conv`. Eager execution is unchanged, since plain
+arrays still reach the function's own methods. Tempest itself defines no
+operations: attention and dropout are plain code in its test fixtures, as a
+user would write them.
 
 Julia dispatch decides which function is requested; Tempest decides how it
 runs. Implementations do not dispatch on array types. They claim groups of

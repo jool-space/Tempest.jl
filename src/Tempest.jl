@@ -6,15 +6,14 @@ DESIGN.md for the design this code implements.
 programs call beyond Base. `Tempest.Compiler` is how a program becomes
 kernels, with the levels beneath `compile`. `Tempest.IR` is the vocabulary the
 levels share and implementations read, and `Tempest.Implementations` the
-interface kernel packages implement. `Tempest.Operations` holds the array
-functions Tempest defines, written as a user would write them.
+interface kernel packages implement.
 """
 module Tempest
 
 using Republic: @republic
 
 export compile, explain
-public Compiler, IR, Implementations, Operations
+public Compiler, IR, Implementations
 
 include("IR/IR.jl")
 include("Implementations/Implementations.jl")
@@ -26,8 +25,6 @@ include("Compiler/Compiler.jl")
     contract, fold, logsumexp, positions, axis_positions, batched_mul, scalar_partials
 @republic using .IR: GenericFold
 @republic using .Implementations: register!
-
-include("Operations/Operations.jl")
 
 include("precompile.jl")
 
