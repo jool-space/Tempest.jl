@@ -678,7 +678,7 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers)
         built = try
             build_choice(d.target, p, g, o, buffers)
         catch err
-            @debug "claim failed to build; trying the next" o.implementation exception = err
+            @warn "a claim failed to build; the next option runs the kernel" implementation = label(o.implementation) claim = o.claim exception = err maxlog = 1 _id = Symbol(o.key)
             nothing
         end
         built === nothing || return built

@@ -114,8 +114,20 @@ mentions(o::IndexOperand, k) = mentions(o.expr, k)
 mentions(::Literal, k) = false
 
 # Whether elements of `S` convert to `T` exactly, so that a product in `T` of
-# a factor of `S` is the product of the factor converted.
-exact(S, T) = S === T || S <: HalfFloat && T === Float32 || S <: Union{HalfFloat, Float32} && T === Float64
+# a factor of `S` is the product of the factor converted: narrower floats,
+# Booleans, and integers the float holds exactly.
+exact(S, T) = S === T || S <: HalfFloat && T === Float32 || S <: Union{HalfFloat, Float32} && T === Float64 ||
+    S === Bool && T <: AbstractFloat || S <: Integer && T === Float64 && sizeof(S) <= 4 || S <: Integer && T === Float32 && sizeof(S) <= 2
+
+# Whether an operand of a product in `T` converts to `T` exactly: a literal, an
+# operand of an exact type, or a position whose range the float holds exactly.
+function exact_operand(graph, x, T, d::Domain)
+    x isa Literal && return true
+    exact(eltype_of(graph, x), T) && return true
+    x isa IndexOperand && T <: AbstractFloat || return false
+    lo, hi = affine_range(x.expr, d)
+    max(abs(lo), abs(hi)) <= maxintfloat(T)
+end
 
 # The factors of the product `o` reads, through the products and quotients of
 # type `T` it reads: each an operand and its power, 1 or -1. A factor may be
@@ -124,7 +136,7 @@ exact(S, T) = S === T || S <: HalfFloat && T === Float32 || S <: Union{HalfFloat
 function factors(graph, o, d::Domain, T = eltype_of(graph, o), power = 1)
     if (applies(graph, o, *) || applies(graph, o, /)) && eltype_of(graph, o) === T
         xs = inner(graph, o, d)
-        if length(xs) == 2 && all(x -> x isa Literal || exact(eltype_of(graph, x), T), xs)
+        if length(xs) == 2 && all(x -> exact_operand(graph, x, T, d), xs)
             quotient = graph.values[o.value].definition.f === (/)
             return [factors(graph, xs[1], d, T, power); factors(graph, xs[2], d, T, quotient ? -power : power)]
         end
@@ -305,8 +317,8 @@ function relative!(b::Builder, graph, r, F, fr::Frame, (extras, observe))
     t = element!(b, graph, elements, E, d.iteration)
     fold = Relative(fr.law, observe(1))
     id = add!(b, Reduction(fold, t, d.iteration, d.reduced), v.dims, v.eltype, v.scalar)
-    push!(b.rewrites, id => string(law_note(fr.law), ": a sum of ", law_function(fr.law), "(y - m), m ",
-        fr.observe isa Statistic ? "the $(statistic_name(fr.law))" : "the $(fr.observe)", " of y"))
+    push!(b.rewrites, id => string(law_note(fr.law), ": a sum of ", law_function(fr.law), "(y - m), m the ",
+        fr.observe isa Statistic ? statistic_name(fr.law) : fold_name(graph.values[F].definition.fold), " of y"))
     all(along) && return id
     # The factors constant along the sum, read from its own axes, a numerator
     # first so that a quotient divides.

@@ -283,19 +283,29 @@ function storing(graph::IndexGraph; recompute = ())
     (; graph, stored, live, results, running, materialized)
 end
 
-# Whether stored pointwise value `id` is read only by the members of one group
-# over its domain, each reading it at the domain's index.
+# Whether stored pointwise value `id` is read only within one group over its
+# domain, at the domain's index: by the group's members, or by values the
+# group recomputes where it reads them, which read it so in turn.
 function recomputable(p::Plan, users, id, live, results, materialized)
     v = p.graph.values[id]
     v.definition isa Pointwise && p.stored[id] && live[id] && !(id in results) && !materialized[id] || return false
-    readers = filter(u -> live[u], users[id])
-    k = isempty(readers) ? 0 : p.owner[first(readers)]
-    k != 0 && k != p.owner[id] && p.groups[k].kind in (:reduction, :pointwise) && p.groups[k].domain == v.dims || return false
-    all(readers) do u
-        p.owner[u] == k && all(operands(p.graph.values[u].definition)) do o
-            !(id in read_values(o)) || o isa Read && o.value == id && o.index == identity_index(v.dims)
+    groups = Set{Int}()
+    pending, seen = [id], Set{Int}()
+    while !isempty(pending)
+        w = pop!(pending)
+        dims = p.graph.values[w].dims
+        for u in users[w]
+            live[u] && !(u in seen) || continue
+            push!(seen, u)
+            all(operands(p.graph.values[u].definition)) do o
+                !(w in read_values(o)) || o isa Read && o.value == w && o.index == identity_index(dims)
+            end || return false
+            p.owner[u] == 0 && !p.stored[u] ? push!(pending, u) : push!(groups, p.owner[u])
         end
     end
+    length(groups) == 1 || return false
+    k = only(groups)
+    k != 0 && k != p.owner[id] && p.groups[k].kind in (:reduction, :pointwise) && p.groups[k].domain == v.dims
 end
 
 # Insert into the sorted `frontier` the stored values after `seed` that read

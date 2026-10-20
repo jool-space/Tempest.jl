@@ -202,7 +202,8 @@ end
 # the index shifted, `2 .* (1:n)` scaled, `fld.(1:n, 4)` divided. Sums,
 # differences, multiples by a constant, division and remainder by a positive
 # constant (truncating ones where the dividend is never negative), and
-# conversions between integer types.
+# conversions between integer types, as long as the result stays within its
+# type.
 function index_arithmetic(f, inputs, input_dims, n, d)
     n.eltype <: Integer && any(a -> a isa IndexAccess, inputs) || return nothing
     all(a -> a isa IndexAccess || a isa LiteralAccess && a.value isa Integer, inputs) || return nothing
@@ -224,6 +225,10 @@ function index_arithmetic(f, inputs, input_dims, n, d)
     else
         return nothing
     end
+    # A formula is exact; integers wrap. Where the result could leave the
+    # type, the arithmetic stays as written.
+    lo, hi = affine_range(e, d)
+    typemin(n.eltype) <= lo && hi <= typemax(n.eltype) || return nothing
     IndexAccess(e, n.eltype)
 end
 
@@ -249,11 +254,18 @@ function lower(p::Program)
     nodes = p.nodes
     keep = live(nodes, p.results)
     values = Value[]
+    numbered = Dict{Value, Int}()
     access = Vector{Access}(undef, length(nodes))
     # A value defined over a node's shape, over the node's wide axes instead.
+    # Two nodes with one definition are one value: a subexpression written
+    # twice is computed once, and spellings that repeat it read the same value.
     function value!(definition, dims, T; scalar = false)
-        push!(values, Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar))
-        ValueAccess(length(values), wide_index(dims))
+        v = Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar)
+        id = get!(numbered, v) do
+            push!(values, v)
+            length(values)
+        end
+        ValueAccess(id, wide_index(dims))
     end
     value!(definition, n::Node) = value!(definition, n.dims, n.eltype; scalar = n.scalar)
     arguments = Int[]

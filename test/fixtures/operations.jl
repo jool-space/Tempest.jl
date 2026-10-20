@@ -78,12 +78,16 @@ struct DropoutScale{T}
     stream::UInt32
 end
 
+# The hash works in Int64, masked to 32 bits: the position is an Int64
+# formula, and a tile program converts between integer widths less freely
+# than Julia does.
 function (d::DropoutScale{T})(key::Integer, i::Integer) where {T}
-    h = (UInt32(key % UInt32) * 0x9e3779b9) ⊻ (d.stream * 0x85ebca6b) ⊻ (UInt32(i % UInt32) * 0xc2b2ae35)
+    low = Int64(0xffffffff)
+    h = ((Int64(key) * 0x9e3779b9) & low) ⊻ ((Int64(d.stream) * 0x85ebca6b) & low) ⊻ ((Int64(i) * 0xc2b2ae35) & low)
     h ⊻= h >> 16
-    h *= 0x7feb352d
+    h = (h * 0x7feb352d) & low
     h ⊻= h >> 15
-    h *= 0x846ca68b
+    h = (h * 0x846ca68b) & low
     h ⊻= h >> 16
     u = Float32(h >> 8) * Float32(2.0^-24)
     u >= d.rate ? T(1 / (1 - d.rate)) : zero(T)

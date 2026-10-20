@@ -307,7 +307,9 @@ writes its arguments or arrays it allocates, loops over scalars, draws from a
 global random number generator or has only device methods, is given a method
 on Tempest's traced arrays that states it in primitives. That method lives
 with the function, in its package or a package extension: for NNlib,
-`softmax`, `batched_mul` and `conv`. Eager execution is unchanged, since plain
+`softmax`, `batched_mul` and `conv`; for Statistics, `var` and `std`, whose
+loops over elements become the sum of squares about the mean. Eager
+execution is unchanged, since plain
 arrays still reach the function's own methods. Tempest itself defines no
 operations: attention and dropout are plain code in its test fixtures, as a
 user would write them.
