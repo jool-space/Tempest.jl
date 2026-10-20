@@ -87,11 +87,15 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    products from two reference products the package runs, kept in a rates
    file beside the record; `measure` takes `:none`, `:close` or `:all`; and
    a test checks, for every composition in the coverage suite, that each
-   estimate that decides is within the close-call factor of its measurement.
-   Remaining: at TF32 the generator's estimate for the verb's training step
-   is outside the factor, because its cost beyond bytes and products is not
-   counted (the GENERATOR_COST gap); and the parameter search within a
-   budget. Gate: that gap closes.
+   estimate that decides is within the close-call factor of its measurement,
+   which it is for every composition at both precisions: a line has a
+   latency, a rate, a rate for sums split among blocks and one for folds
+   recomputed inside products, each from a reference the package runs, and
+   each package moves bytes at a memory of its own. Remaining: the parameter
+   search within a budget; and `Work`'s shape, which states a kernel's work
+   in the vocabulary of the generator's schedules (recomputed flops, split
+   sums), to be restated when the kernel interface takes forms. Gate: the
+   estimate test holds as the fronts below move plans.
 3. **The decision, and compile time.** The shape is settled: the rules make
    the starting plan, every rule-made choice is also a proposal, and a
    proposal is an edit priced on the groups it changes (DESIGN.md, *The

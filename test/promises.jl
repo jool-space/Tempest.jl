@@ -220,11 +220,6 @@ end
 # clash with this file's.
 module Coverage include(joinpath(@__DIR__, "fixtures", "compositions.jl")) end
 
-const GENERATOR_COST = "the generator's estimate counts what its schedule costs beyond bytes and products"
-# Compositions and precisions where an estimate that decides is outside the close-call factor.
-const ESTIMATE_GAPS = [("the verb, a training step", :tf32),
-    ("a slice written, a training step", :full), ("a slice written, a training step", :tf32)]
-
 within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
 
 # Every option of a group chosen by estimate among several, and each side of
@@ -247,10 +242,6 @@ within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
             @test abs(measured[2] - measured[1]) <= d.rates.noise * minimum(measured) || (measured[2] < measured[1]) == C.cheaper(k.comparison)
             append!(held, within.((k.comparison.old, k.comparison.new), measured))
         end
-        if (c.name, precision) in ESTIMATE_GAPS
-            @testset "gap: $GENERATOR_COST" begin @test_broken all(held) end
-        else
-            @test all(held)
-        end
+        @test all(held)
     end
 end

@@ -29,19 +29,35 @@ struct Rates
 end
 
 """
-A package's products of one class: a launch of `flops` takes `latency + flops
-/ rate` seconds. A borrowed line is another package's, for a package that
-claims no reference product.
+A package's products of one class: a launch of `flops`, `recomputed` of them
+in folds it recomputes inside the products, takes `latency + flops / rate`
+seconds; when its blocks split the sums among them, the products take `split`
+and the recomputed flops `recompute`. A borrowed line is another package's,
+for a package that claims no reference product.
 """
 struct Line
     latency::Float64
     rate::Float64
+    split::Float64
+    recompute::Float64
     borrowed::Bool
 end
 
-seconds(w::Work, r::Rates, line) =
-    max(r.launch + w.bytes / (w.bytes <= r.cache ? r.cached : r.bandwidth) / min(1.0, w.blocks / r.blocks),
-        w.flops == 0 ? 0.0 : line.latency + w.flops / line.rate)
+"A package's memory: a launch that moves `bytes` within the cache takes `latency + bytes / bandwidth` seconds."
+struct Memory
+    latency::Float64
+    bandwidth::Float64
+end
+
+# A launch of fewer blocks than the device runs at once moves its bytes and
+# computes its products on that share of the device.
+function seconds(w::Work, r::Rates, memory::Memory, line)
+    share = min(1.0, w.blocks / r.blocks)
+    memory_seconds = memory.latency + w.bytes / (w.bytes <= r.cache ? memory.bandwidth : r.bandwidth) / share
+    w.flops + w.recomputed == 0 && return memory_seconds
+    compute = w.split ? w.flops / line.split + w.recomputed / line.recompute : (w.flops + w.recomputed) / line.rate
+    max(memory_seconds, line.latency + compute / share)
+end
 
 "The class of products of `T` factors: a half type by name, Float32 by the target's precision."
 product_class(target::CUDATarget, T) = T <: HalfFloat ? nameof(T) : target.precision
@@ -145,6 +161,7 @@ mutable struct Decider
     calibration::Dict{String, Float64}
     calibration_path::Union{Nothing, String}
     lines::Dict{Tuple{Symbol, Symbol}, Line}
+    memories::Dict{Symbol, Memory}
     record::Dict{String, Float64}
     record_path::Union{Nothing, String}
     buffers::Vector{Any}
@@ -159,7 +176,7 @@ function Decider(target, graph; measure = :close)
     path, calibration_path = record_path(target), rates_path(target)
     calibration = load_record(calibration_path)
     Decider(target, graph, measurable(target) ? level(measure) : :none, device_rates!(target, calibration, calibration_path),
-        calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), load_record(path), path,
+        calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), load_record(path), path,
         Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
 end
 
@@ -211,8 +228,10 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
     work = implementation === nothing ? floor_estimate(p, g) : estimate(implementation, claim, d.target, view)
     name = implementation === nothing ? "floor" : record_name(implementation, claim)
     key = replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
-    lines = [w.flops == 0 ? nothing : line!(d, package_of(implementation), w.factor) for w in work]
-    Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, l), work, lines); init = 0.0), key,
+    # The floor moves bytes at the device's rates.
+    memory = implementation === nothing ? Memory(d.rates.launch, d.rates.cached) : memory!(d, package_of(implementation))
+    lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_of(implementation), w.factor) for w in work]
+    Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l), work, lines); init = 0.0), key,
         any(l -> l !== nothing && l.borrowed, lines))
 end
 
@@ -800,50 +819,122 @@ reference product borrows the class's fastest line.
 function line!(d::Decider, package, T)
     class = product_class(d.target, T)
     get!(d.lines, (package, class)) do
-        measurable(d.target) || return Line(0.0, 1.0e10, false)
+        measurable(d.target) || return Line(0.0, 1.0e10, 1.0e10, 1.0e10, false)
         key(p, what) = string(p, " ", class, " ", what)
-        own(p) = Line(d.calibration[key(p, "latency")], d.calibration[key(p, "rate")], false)
+        own(p) = Line((d.calibration[key(p, what)] for what in ("latency", "rate", "split", "recompute"))..., false)
         haskey(d.calibration, key(package, "rate")) || fit!(d, T)
         haskey(d.calibration, key(package, "rate")) && return own(package)
         fastest = argmax(l -> l.rate, [own(nameof(m)) for m in used_packages(d.target) if haskey(d.calibration, key(nameof(m), "rate"))])
-        Line(fastest.latency, fastest.rate, true)
+        Line(fastest.latency, fastest.rate, fastest.split, fastest.recompute, true)
     end
 end
 
-const REFERENCE_SIZES = (256, 2048)
+"""
+The memory of `package` on the decider's target, fitted on first need and
+kept in the rates file; the device's rates for a package that claims no
+reference fold.
+"""
+function memory!(d::Decider, package)
+    get!(d.memories, package) do
+        measurable(d.target) || return Memory(d.rates.launch, d.rates.cached)
+        key(what) = string(package, " memory ", what)
+        haskey(d.calibration, key("bandwidth")) || fit_memory!(d)
+        Memory(d.calibration[key("latency")], d.calibration[key("bandwidth")])
+    end
+end
+
+"""
+Each package's fastest claim among `packages` on the group the planner forms
+for `f` over arrays like `args`: its seconds, timed as claims are, and its
+launches as the package estimates them.
+"""
+function reference(d::Decider, packages, f, args...; recompute_folds = false)
+    graph = lower(trace(f, args...))
+    timing = Decider(d.target, graph; measure = :none)
+    p = plan(graph; recompute_folds)
+    g = only(p.groups)
+    view = group_view(p, g)
+    fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()
+    for (m, is) in REGISTERED, i in is, c in (m in packages ? claims(i, d.target, view) : ())
+        t = time_launch(d.target, first(build_claim(i, c, d.target, view, buffers!(timing, p, g))))
+        t < first(get(fastest, nameof(m), (Inf,))) && (fastest[nameof(m)] = (t, estimate(i, c, d.target, view)))
+    end
+    fastest
+end
+
+# Products of factors of these shapes fit a package's line: the small one, too
+# small to split, its latency; the large one its rate; and the middle one,
+# whose few output tiles leave the device idle unless the package splits the
+# sums among blocks, its rate when it does. Products of 128×64 and 64×16384
+# factors, summed with a 16384×128 one, are recomputed inside that product, as
+# attention's scores are inside its backward pass, which splits its sum too.
+const REFERENCE_SHAPES = (((64, 16), (16, 64)), ((256, 256), (256, 256)), ((2048, 2048), (2048, 2048)))
+const RECOMPUTED_SHAPES = ((128, 64), (64, 16384), (16384, 128))
 
 """
 Fit the line of every package on the decider's target that has none for
-products of `T` factors: the fastest of the package's claims on `a * b` at
-each reference size, timed as claims are, and the line through the two times.
+products of `T` factors: the fastest of the package's claims on `a * b` for
+each reference shape, timed as claims are, the line through the small and the
+large one's times, the rate at which the middle one computes when it splits
+the sums, and the rate at which the package's claim on `(a * b) * c`, with
+`a * b` recomputed, recomputes it when that claim splits; the line's rate for
+either that does not split.
 """
 function fit!(d::Decider, T)
     class = product_class(d.target, T)
-    unfitted = [m for m in used_packages(d.target) if !haskey(d.calibration, string(nameof(m), " ", class, " rate"))]
-    times = map(REFERENCE_SIZES) do n
-        graph = lower(trace(*, zeros(T, n, n), zeros(T, n, n)))
-        reference = Decider(d.target, graph; measure = :none)
-        p = plan(graph)
-        g = only(p.groups)
-        view = group_view(p, g)
-        fastest = Dict{Symbol, Float64}()
-        for (m, is) in REGISTERED, i in is, c in (m in unfitted ? claims(i, d.target, view) : ())
-            t = time_launch(d.target, first(build_claim(i, c, d.target, view, buffers!(reference, p, g))))
-            fastest[nameof(m)] = min(get(fastest, nameof(m), Inf), t)
-        end
-        fastest
-    end
-    small, large = 2.0 .* REFERENCE_SIZES .^ 3
-    for (package, t) in times[1]
-        rate = (large - small) / (times[2][package] - t)
-        keep!(d.calibration, d.calibration_path, string(package, " ", class, " latency"), t - small / rate)
-        keep!(d.calibration, d.calibration_path, string(package, " ", class, " rate"), rate)
+    key(p, what) = string(p, " ", class, " ", what)
+    unfitted = [m for m in used_packages(d.target) if !haskey(d.calibration, key(nameof(m), "rate"))]
+    times = map(shapes -> reference(d, unfitted, *, map(dims -> zeros(T, dims), shapes)...), REFERENCE_SHAPES)
+    recomputing = reference(d, unfitted, (a, b, c) -> (a * b) * c, map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)...; recompute_folds = true)
+    # A reference's first launch: its time less those of the launches after
+    # it, which merge split sums, and its flops over its share of the device.
+    first_launch(t, work, package) = (t - sum(w -> seconds(w, d.rates, memory!(d, package), nothing), work[2:end]; init = 0.0),
+        first(work).flops / min(1.0, first(work).blocks / d.rates.blocks), first(work))
+    for (package, _) in times[1]
+        (t1, f1, _), (t2, f2, middle), (t3, f3, _) = map(fastest -> first_launch(fastest[package]..., package), times)
+        rate = (f3 - f1) / (t3 - t1)
+        latency = t1 - f1 / rate
+        split = middle.split ? f2 / (t2 - latency) : rate
+        t, f, w = haskey(recomputing, package) ? first_launch(recomputing[package]..., package) : (0.0, 0.0, Work(0.0))
+        recompute = w.split ? w.recomputed / (t - latency - f / split) : rate
+        foreach(((what, value),) -> keep!(d.calibration, d.calibration_path, key(package, what), value),
+            (("latency", latency), ("rate", rate), ("split", split), ("recompute", recompute)))
     end
 end
 
-"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors now, rather than on first need."
+# Folds over the columns of 1024-row matrices with these many columns fit a
+# package's memory: the bytes the claim moves, against its time.
+const MEMORY_COLUMNS = (256, 1024)
+
+"""
+Fit the memory of every package on the decider's target that has none: the
+line through the times of its fastest claims on a fold over each column at
+the two reference sizes, against the bytes the claims move. A package that
+claims no such fold moves bytes at the device's rates.
+"""
+function fit_memory!(d::Decider)
+    key(p, what) = string(p, " memory ", what)
+    unfitted = [m for m in used_packages(d.target) if !haskey(d.calibration, key(nameof(m), "bandwidth"))]
+    small, large = map(n -> reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n)), MEMORY_COLUMNS)
+    for m in unfitted
+        package = nameof(m)
+        latency, bandwidth = if haskey(small, package)
+            (t, a), (u, b) = small[package], large[package]
+            bytes(work) = sum(w -> w.bytes, work)
+            rate = (bytes(b) - bytes(a)) / (u - t)
+            t - bytes(a) / rate, rate
+        else
+            d.rates.launch, d.rates.cached
+        end
+        keep!(d.calibration, d.calibration_path, key(package, "latency"), latency)
+        keep!(d.calibration, d.calibration_path, key(package, "bandwidth"), bandwidth)
+    end
+end
+
+"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, and their memories, now rather than on first need."
 function calibrate!(target)
     d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none)
+    foreach(m -> memory!(d, nameof(m)), used_packages(target))
     foreach(T -> foreach(m -> line!(d, nameof(m), T), used_packages(target)), (Float32, Float16, BFloat16))
 end
 

@@ -412,57 +412,49 @@ function claims(::Tempest.Compiler.cuTileGenerator, target::CUDATarget, g::Group
     [Claim(s)]
 end
 
-# The blocks of a schedule's first launch: one per kept tile (or chunk of
-# them) and split, and one per tile of a fully reduced domain.
-first_blocks(s::TileSchedule) = s.splits * prod(s.tiling; init = 1) do ax
+# The positions at which a kernel of schedule `s` computes term `t`: every
+# position of the tiles it moves along, once per tile of the kept axes it does
+# not (every block computes it for its tile), and once per block along the
+# swept ones (before the sweep).
+positions(s::TileSchedule, t) = prod(s.tiling; init = 1.0) do ax
     tiles = cld(ax.extent, ax.tile)
-    ax.reduced ? (s.sketch === :full ? tiles : 1) : cld(tiles, ax.chunk)
+    any(a -> mentions(t, a), ax.axes) ? tiles * ax.tile : ax.reduced && s.sketch !== :full ? 1 : tiles
 end
 
-# The multiply-adds of the folds a group recomputes: each fold's extents at
-# every position of the tiles it moves along, once per tile of the kept axes
-# it does not (every block computes it for its tile) and once per block along
-# the swept ones (before the sweep), and the folds inside it at every position
-# of its extents.
-function recomputed_flops(s::TileSchedule, g::GroupView)
-    inner(t) = prod(t.extents; init = 1.0) * (2.0 + sum(u -> u isa Recomputed ? inner(u) : 0.0, subterms((t.body,)); init = 0.0))
-    roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
-    sum(subterms(roots); init = 0.0) do t
-        t isa Recomputed || return 0.0
-        positions = prod(s.tiling; init = 1.0) do ax
-            tiles = cld(ax.extent, ax.tile)
-            any(a -> mentions(t, a), ax.axes) ? tiles * ax.tile : ax.reduced && s.sketch !== :full ? 1 : tiles
-        end
-        positions * inner(t)
-    end
+# The multiply-adds of the folds that `roots` recompute, at the positions of
+# their bodies over the tiling the fold extends (see `fold_context`), and of
+# the folds inside them.
+recomputed_flops(c, roots) = sum(subterms(roots); init = 0.0) do t
+    t isa Recomputed || return 0.0
+    e = fold_context(c, t)
+    2 * positions(e.s, t.body) + recomputed_flops(e, (t.body,))
 end
 
-# A schedule's launches: the main kernel over its blocks, with the flops of its
-# products and of the folds it recomputes, and a merge of partial states when
-# blocks share a tile.
+# A schedule's launches: each of its kernels, moving the bytes of its
+# arguments over the blocks of its grid. The first computes the group's
+# products and the folds it recomputes.
 function estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
-    blocks = first_blocks(s)
-    bytes = g.bytes
-    recomputed = recomputed_flops(s, g)
-    work = if s.sketch === :product
+    c = Context(g, s)
+    workspaces = Dict{Any, Workspace}()
+    kernels = schedule_kernels(c, workspaces)
+    roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
+    recomputed = recomputed_flops(c, roots)
+    flops, factor = if s.sketch === :product
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
         r = first(g.reductions)
         t = first(product_factors(g.values[r].fold, g.terms[r]))
-        factor = t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t
-        [Work(bytes; flops = 2.0 * m * n * k * b * length(g.reductions) + recomputed, factor = term_eltype(factor, g), blocks)]
+        2.0 * m * n * k * b * length(g.reductions), term_eltype(t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t, g)
     else
-        [Work(bytes; flops = recomputed, blocks)]
+        0.0, Float32
     end
-    if s.splits > 1 || s.sketch === :full
-        # Each of the blocks that share a kept tile writes a partial state of
-        # it, and the merge reads them.
-        kept = prod((ax.extent for ax in s.tiling if !ax.reduced); init = 1)
-        sharing = blocks / prod((cld(cld(ax.extent, ax.tile), ax.chunk) for ax in s.tiling if !ax.reduced); init = 1)
-        push!(work, Work(2.0 * 4 * kept * sharing * length(g.reductions); blocks = max(1, kept / 256)))
+    element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
+    map(enumerate(kernels)) do (i, kernel)
+        bytes = sum(a -> prod(a.sizes; init = 1) * sizeof(element(a)), kernel.args; init = 0)
+        blocks = prod(kernel.grid; init = 1)
+        i == 1 ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1) : Work(bytes; blocks)
     end
-    work
 end
 
 include("emit.jl")

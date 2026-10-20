@@ -27,17 +27,22 @@ abstract type Implementation end
 
 """
 One launch's work: bytes moved, flops of products whose factors are of type
-`factor`, and its blocks. Tempest prices the flops on the line its package
-reaches for products of that class (see `seconds`).
+`factor`, flops of folds it recomputes inside them, its blocks, and whether
+they split the sums among them. Tempest prices the bytes on its package's
+memory and the flops on the line its package reaches for products of that
+class (see `seconds`).
 """
 struct Work
     bytes::Float64
     flops::Float64
+    recomputed::Float64
     factor::DataType
     blocks::Float64
+    split::Bool
 end
 
-Work(bytes; flops = 0.0, factor = Float32, blocks = Inf) = Work(bytes, flops, factor, blocks)
+Work(bytes; flops = 0.0, recomputed = 0.0, factor = Float32, blocks = Inf, split = false) =
+    Work(bytes, flops, recomputed, factor, blocks, split)
 
 # Implementations by the package that provides them, ordered by its name.
 const REGISTERED = Pair{Module, Vector{Implementation}}[]
@@ -244,7 +249,7 @@ function estimate(::Kernels, c::KernelClaim, target, g)
     launches = map(launch_work, vcat(c.kernel.cost))
     absorbed = sum(bytes(g.values[v]) for e in values(g.epilogues) for v in stored_reads(g.terms[e]); init = 0.0)
     w = first(launches)
-    [Work(w.bytes + absorbed, w.flops, w.factor, w.blocks); launches[2:end]]
+    [Work(w.bytes + absorbed, w.flops, w.recomputed, w.factor, w.blocks, w.split); launches[2:end]]
 end
 
 record_name(::Kernels, c::KernelClaim) = string(c, isempty(c.kwargs) ? "" : string(c.kwargs), isempty(c.params) ? "" : string(", ", c.params))

@@ -171,8 +171,10 @@ tiled(target, q, k, v) = target.precision === :tf32 && size(q, 1) in (16, 32, 64
 constants(q, k, causal) =
     map(ct.Constant, (size(q, 1), ATTENTION_TILE, ATTENTION_TILE, causal, size(q, 2), size(q, 2) ÷ size(k, 2), true))
 
-# The flops of a product over every query and key, which a causal mask halves.
-products(q, k, causal) = 2.0 * size(q, 1) * size(q, 3) * size(k, 3) * size(q, 2) * size(q, 4) / (causal ? 2 : 1)
+# The flops of a product over every query and key. A causal mask skips the key
+# tiles past the diagonal, but a launch lasts as long as its last block, which
+# reads every key.
+products(q, k, causal) = 2.0 * size(q, 1) * size(q, 3) * size(k, 3) * size(q, 2) * size(q, 4)
 
 # The forward kernel computes two products per query and key, reads the
 # arguments and writes the output and the log-sum-exp.
