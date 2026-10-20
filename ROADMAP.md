@@ -146,6 +146,13 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    gradient accumulation in place. Rides on fronts 1 and 3. Gate: a product's
    scale and add are coefficients; a verb kernel absorbs the residual after
    it; a permuted argument reaches a kernel that accepts it without a copy.
+   Then a cuTENSOR extension: it contracts any label structure over strided
+   operands and takes a scale, an add and a short list of operators, which
+   are this front's forms and layouts exactly, so it is the extension that
+   proves them, written against `Tempest.IR` and `Tempest.Implementations`
+   alone with the interfaces test as its gate. Not before: on today's
+   programs it would claim what cuBLAS claims at cuBLAS's speed, a third
+   rival to calibrate for no plan that changes.
 6. **The language and the docs.** Each a day at most, none blocking: ranges
    in a broadcast become positions and `axis_positions` goes; the language
    (tracing, the interpreter, differentiation, operations, updates) in a
