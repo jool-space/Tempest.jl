@@ -81,6 +81,9 @@ end
 
 Tempest.Compiler.build_floor(::CUDATarget, p::Plan, g::Group, buffers) = floor(p, g, buffers)
 
+# A scatter's items run at once: they add atomically.
+Tempest.Compiler.accumulate!(buffer::CUDACore.CuDeviceArray, i, v) = (CUDACore.@atomic buffer[i] += v; nothing)
+
 function floor(p::Plan, g::Group, buffers)
     ks = Tempest.Compiler.scalar_kernels(p.graph, p.stored, g, Tempest.Compiler.kernel_slots(p, g))
     launches = map(ks) do k

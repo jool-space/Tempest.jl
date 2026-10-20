@@ -218,72 +218,72 @@ scatter_term(o::Read, index, d) = Load(o.value, map(e -> substitute(e, index, d)
 scatter_term(o::Literal, index, d) = Lit(o.value)
 scatter_term(o::IndexOperand{T}, index, d) where {T} = Ix{T}(substitute(o.expr, index, d))
 
-# A scatter on the floor, deterministic: an item per element of the result,
-# summing the elements selected at its position in the order of their linear
-# index, as the interpreter does. An integer or a range among the indices
-# constrains the position; each index array is scanned for it, the last
-# outermost. The work is the result's length times the index arrays'.
-function scatter_kernel(graph, g::Group, slots)
+"""
+    accumulate!(buffer, i, v)
+
+Add `v` to element `i` of a buffer: in place on the CPU, where a floor
+kernel's items run in order, and atomically on a device (see CUDAExt), where
+they run at once and the sums come in no fixed order.
+"""
+accumulate!(buffer, i, v) = (@inbounds buffer[i] += v; nothing)
+
+# A scatter on the floor: the result zeroed, then one item per element
+# scattered, which adds the element at the position its indices name. An
+# integer or a range among the indices names the position along its axis; an
+# index array is read at the item's position among the array's own axes,
+# which are axes of the item domain, as a gather. The work is the elements
+# scattered, once each.
+function scatter_kernels(graph, g::Group, slots)
     v = only(g.outputs)
     d = graph.values[v].definition
     n, op = d.node, d.node.op
     T = n.eltype
-    # Variables: the result's axes, then each range's position along it and
-    # each index array's axes, which are the selection's axes.
-    extents = collect(n.dims)
-    vars = index_vars(length(n.dims))
-    selected = Affine[]
-    ranges = Expr[]
-    checks = Expr[]
-    scans = Tuple{UnitRange{Int}, Int, Int}[]
-    for (axis, i) in enumerate(op.indices)
+    slot(w) = :(buffers[$(findfirst(==(w), slots))])
+    zeroing = ScalarKernel(slots, storage_length(graph.values[v]), :(@inbounds $(slot(v))[lin + 1] = $(zero(T))))
+    # The item domain: an axis per range, and each index array's own axes.
+    extents = Int[]
+    placed = Any[]
+    for i in op.indices
         if i isa Integer
-            push!(checks, :($(vars[axis]) == $(i - 1)))
+            push!(placed, i)
         elseif i isa AbstractRange
             push!(extents, length(i))
-            push!(vars, gensym(:j))
-            offset = gensym(:offset)
-            push!(ranges, step(i) > 0 ? :($offset = $(vars[axis]) - $(first(i) - 1)) : :($offset = $(first(i) - 1) - $(vars[axis])))
-            push!(ranges, :($(last(vars)) = fld($offset, $(abs(step(i))))))
-            push!(checks, :(mod($offset, $(abs(step(i)))) == 0), :(0 <= $(last(vars)) < $(length(i))))
-            push!(selected, var(length(extents)))
+            push!(placed, (i, length(extents)))
         else
             first_axis = length(extents) + 1
             append!(extents, d.shapes[i.input][1])
-            append!(vars, [gensym(:n) for _ in d.shapes[i.input][1]])
-            push!(scans, (first_axis:length(extents), i.input, axis))
-            append!(selected, map(var, first_axis:length(extents)))
+            push!(placed, (i, first_axis:length(extents)))
         end
     end
     domain = Domain(Tuple(extents))
-    c = EmitContext(graph, slots, vars, domain)
-    acc = gensym(:acc)
-    element = scatter_term(first(d.operands), selected, domain)
-    inner = :($acc = convert($T, $acc + $(term_expr(element, nothing, c))))
-    for (axes, input, axis) in scans
-        lin = gensym(:lin)
-        loop = Expr(:block)
-        delinearize_expr(loop.args, lin, axes, extents, vars)
-        index = term_expr(scatter_term(d.operands[input], Tuple(map(var, axes)), domain), nothing, c)
-        push!(loop.args, :(if Int($index) - 1 == $(vars[axis])
-            $inner
-        end))
-        inner = :(for $lin in 0:$(prod(extents[axes]; init = 1) - 1)
-            $loop
-        end)
+    # Where each item's element comes from, as the scattered operand's axes,
+    # and where it lands, zero-based along each axis of the result.
+    selected = Affine[]
+    target = Affine[]
+    for (axis, entry) in enumerate(placed)
+        if entry isa Integer
+            push!(target, constant(entry - 1))
+        elseif entry[1] isa AbstractRange
+            r, j = entry
+            push!(selected, var(j))
+            push!(target, add(mul(var(j), step(r), domain), first(r) - 1, domain))
+        else
+            i, axes = entry
+            append!(selected, map(var, axes))
+            read = through(d.operands[i.input], Tuple(map(var, axes)), domain)
+            push!(target, add(normalize(0, (Indirect(read.value, read.index, 1, n.dims[axis]) => 1,), domain), -1, domain))
+        end
     end
+    c = EmitContext(graph, slots, [gensym(:j) for _ in extents], domain)
     body = Expr(:block)
-    delinearize_expr(body.args, :lin, 1:length(n.dims), extents, vars)
-    append!(body.args, ranges)
-    push!(body.args, :($acc = zero($T)))
-    push!(body.args, isempty(checks) ? inner : :(if $(foldl((a, b) -> :($a && $b), checks))
-        $inner
-    end))
-    at = Tuple(map(var, wide_axes(n.dims)))
-    push!(body.args, store_expr(c, v, at, acc))
-    ScalarKernel(slots, prod(n.dims; init = 1), body)
+    delinearize_expr(body.args, :lin, 1:length(extents), extents, c.vars)
+    element = scatter_term(first(d.operands), Tuple(selected), domain)
+    names = emit_terms!(body.args, [element], c)
+    at = Tuple(target[k] for k in wide_axes(n.dims))
+    push!(body.args, :($accumulate!($(slot(v)), $(affine_expr(address(graph.values[v], at, domain), c)) + 1, $(names[element]))))
+    [zeroing, ScalarKernel(slots, prod(extents; init = 1), body)]
 end
 
-"The floor's launches for a group: its kernel, then one per fold over other axes; a scatter's kernel."
-scalar_kernels(graph, stored, g::Group, slots) = g.kind === :opaque ? [scatter_kernel(graph, g, slots)] :
+"The floor's launches for a group: its kernel, then one per fold over other axes; a scatter's two."
+scalar_kernels(graph, stored, g::Group, slots) = g.kind === :opaque ? scatter_kernels(graph, g, slots) :
     [scalar_kernel(graph, stored, g, slots); [fold_kernel(graph, g, slots, r) for r in g.reductions if !primary(graph, g, r)]]

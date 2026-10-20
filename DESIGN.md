@@ -361,7 +361,8 @@ itself proposed is the same kind of claim. The roles:
   win, usually by measurement.
 - **The floor realizes any single value alone** with generic kernels. It
   covers what tile programs cannot express, such as
-  deterministic scatters and opaque bodies. Because the floor claims every
+  scatters (adding atomically on a device, in order on the CPU) and opaque
+  bodies. Because the floor claims every
   group, a plan always exists. The floor makes every plan correct; it does not
   make coverage worth having (see Meaning, algorithm, schedule).
 

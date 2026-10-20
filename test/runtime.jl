@@ -538,10 +538,11 @@ if CUDA_FUNCTIONAL
     end
 end
 
-# A gather's adjoint scatters on the device, deterministically: each element
-# of the result sums what was selected there in a fixed order, the
-# interpreter's, with repeated indices, two index arrays, and ranges and
-# integers beside an index array.
+# A gather's adjoint scatters on the device: one item per element scattered,
+# adding atomically, so the sums at an index selected more than once come in
+# no fixed order and differ from the interpreter's by rounding (Promise 3: up
+# to summation order). With repeated indices, two index arrays, and ranges
+# and integers beside an index array.
 const SCATTERS = [
     ("embedding", (E, t, g) -> sum(E[:, t] .* g), (data(64, 109), Int32.(mod1.(37 .* (1:1024) .^ 2, 109)), data(64, 1024; scale = 0.37))),
     ("repeated indices in two arrays", (x, i, j) -> sum(abs2, x[i, j]), (data(8, 6), [3, 1, 3, 8, 3], Int32[6, 6, 1])),
@@ -557,12 +558,11 @@ if CUDA_FUNCTIONAL
             ex = prepare(p, map(CuArray, args)...)
             scatters = [k for (k, g) in enumerate(ex.plan.groups) if g.kind === :opaque]
             @test !isempty(scatters) && all(k -> ex.kernels[k] isa C.FloorKernels, scatters)
-            first_run = map(Array, C.leaves(outputs(execute!(ex)))[2:2])
-            @test first_run == map(Array, C.leaves(outputs(execute!(ex)))[2:2])
-            @test first_run == C.leaves(interpret(p, args...))[2:2]
+            reference = C.leaves(interpret(p, args...))[2:2]
+            @test agree(C.leaves(outputs(execute!(ex)))[2:2], reference; rtol = 1.0e-5)
             # A scatter runs on the device, so the program can be captured.
             capture!(ex)
-            @test first_run == map(Array, C.leaves(outputs(replay!(ex)))[2:2])
+            @test agree(C.leaves(outputs(replay!(ex)))[2:2], reference; rtol = 1.0e-5)
         end
     end
 end
