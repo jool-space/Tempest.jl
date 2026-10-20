@@ -2,7 +2,7 @@
 # formulas; every other node becomes a value over its own domain.
 
 # How a program node is read: a value through a formula over the node's own
-# domain, a constant, or an integer computed from the index (positions).
+# domain, a constant, or an integer computed from the index (a range).
 abstract type Access end
 
 struct ValueAccess <: Access
@@ -198,6 +198,35 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
     value!(Reduction(SumFold(), Read(product.value, product.index), iteration, reduced), kept, n.eltype)
 end
 
+# Integer arithmetic on ranges and literals stays a formula: `(1:n) .- 1` is
+# the index shifted, `2 .* (1:n)` scaled, `fld.(1:n, 4)` divided. Sums,
+# differences, multiples by a constant, division and remainder by a positive
+# constant (truncating ones where the dividend is never negative), and
+# conversions between integer types.
+function index_arithmetic(f, inputs, input_dims, n, d)
+    n.eltype <: Integer && any(a -> a isa IndexAccess, inputs) || return nothing
+    all(a -> a isa IndexAccess || a isa LiteralAccess && a.value isa Integer, inputs) || return nothing
+    es = map((a, dims) -> a isa LiteralAccess ? constant(a.value) : substitute(a.expr, broadcast_index(dims), d), inputs, input_dims)
+    binary = length(es) == 2
+    e = if f === (+) && binary
+        add(es[1], es[2], d)
+    elseif f === (-) && binary
+        add(es[1], mul(es[2], -1, d), d)
+    elseif f === (-) && length(es) == 1
+        mul(es[1], -1, d)
+    elseif f === (*) && binary && (isconstant(es[1]) || isconstant(es[2]))
+        isconstant(es[1]) ? mul(es[2], es[1].constant, d) : mul(es[1], es[2].constant, d)
+    elseif f in (fld, mod, div, rem) && binary && isconstant(es[2]) && es[2].constant > 0 &&
+           (f in (fld, mod) || affine_range(es[1], d)[1] >= 0)
+        f in (fld, div) ? fdiv(es[1], es[2].constant, d) : fmod(es[1], es[2].constant, d)
+    elseif f isa Cast && length(es) == 1
+        es[1]
+    else
+        return nothing
+    end
+    IndexAccess(e, n.eltype)
+end
+
 # A quotient by a constant whose reciprocal is exact in the result's type, a
 # power of two, is the product by that reciprocal, which rounds alike: so
 # `x / 8` and `x * 0.125` are one value.
@@ -239,13 +268,17 @@ function lower(p::Program)
         op = n.op
         inputs = map(i -> access[i], n.inputs)
         input_dims = map(i -> nodes[i].dims, n.inputs)
-        access[id] = if op isa Constant
+        access[id] = if op isa Constant && op.value isa AbstractRange
+            # A range is the index itself: `first + step·i`.
+            r = op.value
+            IndexAccess(add(mul(only(identity_index(n.dims)), step(r), d), first(r), d), n.eltype)
+        elseif op isa Constant
             op.value isa AbstractArray ? value!(ConstantArray(op.value), n) : LiteralAccess(op.value)
-        elseif op isa Positions
-            IndexAccess(add(op.axis == 0 ? linear_index(n.dims, d) : identity_index(n.dims)[op.axis], 1, d), Int32)
         elseif op isa Map && all(a -> a isa LiteralAccess, inputs)
             # Constants fold: a map of constants is a constant.
             LiteralAccess(convert(n.eltype, op.f(map(a -> a.value, inputs)...)))
+        elseif op isa Map && (arithmetic = index_arithmetic(op.f, inputs, input_dims, n, d)) !== nothing
+            arithmetic
         elseif op isa Map && op.f === identity && nodes[only(n.inputs)].eltype === n.eltype
             # Filling out to a larger shape is a formula, as a layout is.
             fill_out(only(inputs), only(input_dims), d)

@@ -93,8 +93,7 @@ Integration with today's frameworks is welcome where it comes nearly free, and
 does not shape the design.
 
 **The same code runs eagerly.** Every function Tempest adds (folds with custom
-operators, `logsumexp`, positions) has a method on plain arrays, on the CPU or
-a GPU, so one source runs untraced, array by array, and traced. The coverage goal is that slice: Julia array code
+operators, `logsumexp`) has a method on plain arrays, on the CPU or a GPU, so one source runs untraced, array by array, and traced. The coverage goal is that slice: Julia array code
 that runs eagerly should trace, except control flow on array values. Existing
 array code traces as it is; a function whose body cannot trace is given a
 method on traced arrays that states it in primitives (see *Operations*).
@@ -161,7 +160,8 @@ vocabulary is small.
   pointwise product, and the generator recognizes that bilinear term for tensor
   cores.
 - `gather` and `scatter` by runtime integer indices.
-- `positions`: the index itself, for masks, dropout and embeddings.
+- Ranges: `1:n` broadcast against a traced array is the index itself, a
+  formula, for masks, dropout and embeddings.
 - Layout: reshape, permute, view, slice, broadcast, concatenate.
 
 Tracing, differentiation and functional updates work at this level.

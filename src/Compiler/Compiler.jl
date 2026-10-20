@@ -15,7 +15,7 @@ using Republic: @republic
 
 # The vocabulary, and the arithmetic that builds expressions in it.
 @republic republic=false inherit=:public using ..IR
-using ..IR: constant, var, add, scale, normalize, fdiv, fmod, substitute, evaluate_index, affine_key,
+using ..IR: constant, var, add, scale, mul, normalize, fdiv, fmod, substitute, evaluate_index, affine_key,
     fold_array, fold_name, stats, stored_reads
 import ..IR: mentions
 

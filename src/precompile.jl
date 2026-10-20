@@ -17,13 +17,13 @@ function workload()
     # Causal attention over (features, keys or queries, batch), written out.
     function attention(q, k, v)
         s = contract(k, q, (1, 2, 3), (1, 4, 3), (2, 4, 3))
-        s = ifelse.(axis_positions(s, 1) .<= axis_positions(s, 2), s, -Inf32)
+        s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
         contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3), (2, 4, 3), (1, 4, 3))
     end
     # A mask from a counter hash of a seed and the position: a scalar function
     # of integers, with no derivative.
     keep(seed, i) = (h = (UInt32(seed % UInt32) * 0x9e3779b9) ⊻ (UInt32(i % UInt32) * 0xc2b2ae35); h ⊻= h >> 16; h *= 0x7feb352d; (h >> 8) % 10 != 0)
-    dropout(x, seed) = x .* ifelse.(keep.(reshape(seed[1:1], 1, 1), positions(x)), 1.25f0, 0.0f0)
+    dropout(x, seed) = x .* ifelse.(keep.(reshape(seed[1:1], 1, 1), reshape(1:length(x), size(x))), 1.25f0, 0.0f0)
     x, w, b, v = sample(8, 6), sample(4, 8), sample(4), sample(8)
     q, k = sample(4, 8, 2), sample(4, 8, 2)
     losses = [

@@ -22,7 +22,7 @@ include("Compiler/Compiler.jl")
 # What models are written with: the front door, and the functions programs
 # call beyond Base. What kernel packages are written with: `register!`.
 @republic using .Compiler: compile, Compiled, gradient, explain, CPUTarget, CUDATarget,
-    contract, fold, logsumexp, positions, axis_positions, batched_mul, scalar_partials
+    contract, fold, logsumexp, batched_mul, scalar_partials
 @republic using .IR: GenericFold
 @republic using .Implementations: register!
 

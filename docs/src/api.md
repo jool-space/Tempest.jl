@@ -17,15 +17,15 @@ Tempest.CUDATarget
 
 ## Writing programs
 
-Beyond Base's broadcasts, folds, products and indexing, programs can call:
+Beyond Base's broadcasts, folds, products, indexing and ranges (a range broadcast
+against a traced array is the index itself, a formula rather than an array),
+programs can call:
 
 ```@docs
 Tempest.contract
 Tempest.fold
 Tempest.GenericFold
 Tempest.logsumexp
-Tempest.positions
-Tempest.axis_positions
 Tempest.batched_mul
 ```
 

@@ -177,7 +177,7 @@ function adjoint_selection(op, n, g, tape)
     (h(tape, record!(tape, op, (g.id, indices...), xn.dims, node(g).eltype; scalar = xn.scalar)), map(_ -> nothing, indices)...)
 end
 
-pullback(::Union{Constant, Positions, Argument}, n, id, g, tape) = map(_ -> nothing, n.inputs)
+pullback(::Union{Constant, Argument}, n, id, g, tape) = map(_ -> nothing, n.inputs)
 
 # Undo broadcasting: sum a contribution over the axes its input was broadcast
 # along, and give it the input's shape and element type.

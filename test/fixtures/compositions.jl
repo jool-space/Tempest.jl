@@ -51,7 +51,7 @@ attend(q, k, v) = Ops.attention(q, k, v; causal = true)
 # Written out: scores (keys, heads, queries, batch), a mask, and the weighted
 # sum of values.
 scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* inv(sqrt(Float32(size(q, 1))))
-causal(s, masked) = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, masked)
+causal(s, masked) = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, masked)
 combine(v, p) = T.contract(v, p, (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
 
 written(q, k, v) = (s = causal(scores(q, k), -Inf32); combine(v, exp.(s .- T.logsumexp(s; dims = 1))))

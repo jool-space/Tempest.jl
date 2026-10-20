@@ -6,7 +6,7 @@ abstract type Operation end
 "An input of the program."
 struct Argument <: Operation end
 
-"A constant: a number filling the node's shape, or an array of it."
+"A constant: a number filling the node's shape, an array of it, or a range of integers."
 struct Constant{T} <: Operation
     value::T
 end
@@ -32,16 +32,6 @@ struct Contract <: Operation
     b::Tuple{Vararg{Int}}
     out::Tuple{Vararg{Int}}
 end
-
-"""
-The one-based index of each element as `Int32`: its linear index for `axis`
-zero, else its index along that axis.
-"""
-struct Positions <: Operation
-    axis::Int
-end
-
-Positions() = Positions(0)
 
 "The input in another shape with the same elements in the same linear order."
 struct Reshape <: Operation end
@@ -116,12 +106,11 @@ end
 
 op_name(op::Operation) = lowercase(string(nameof(typeof(op))))
 op_detail(op::Operation) = ""
-op_detail(op::Constant) = op.value isa AbstractArray ? " array" : " " * repr(op.value)
+op_detail(op::Constant) = op.value isa AbstractRange ? " " * repr(op.value) : op.value isa AbstractArray ? " array" : " " * repr(op.value)
 op_detail(op::Map) = " " * string(op.f)
 op_detail(op::Reduce) = " " * string(fold_name(op.fold)) * " over " * string(op.axes)
 op_detail(op::Contract) = " " * string(op.a) * "·" * string(op.b) * "→" * string(op.out)
 op_detail(op::Permute) = " " * string(op.perm)
-op_detail(op::Positions) = op.axis == 0 ? "" : " along axis $(op.axis)"
 op_detail(op::Union{Select, Scatter}) = " " * join(map(index_summary, op.indices), ", ")
 
 index_summary(i::Integer) = string(i)

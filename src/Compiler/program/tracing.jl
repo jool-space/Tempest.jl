@@ -14,7 +14,7 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
-public contract, fold, logsumexp, positions, axis_positions, batched_mul
+public contract, fold, logsumexp, batched_mul
 
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
@@ -75,6 +75,16 @@ end
 
 constant!(tape::Tape, x::Number) = record!(tape, Constant(x), (), (), typeof(x); scalar = true)
 constant!(tape::Tape, x::AbstractArray{<:Number}) = record!(tape, Constant(collect(x)), (), size(x), eltype(x))
+
+# A range is the index itself: it stays a range, and lowers to a formula
+# rather than an array in memory, as does a range reshaped or transposed. So
+# `reshape(1:size(x, 2), 1, :)` broadcast against `x` is the position along
+# its second axis, and `reshape(1:length(x), size(x))` the linear index.
+constant!(tape::Tape, x::AbstractRange{<:Integer}) = record!(tape, Constant(x), (), size(x), eltype(x))
+constant!(tape::Tape, x::Base.ReshapedArray{<:Integer, N, <:AbstractRange}) where {N} =
+    record!(tape, Reshape(), (constant!(tape, parent(x)),), size(x), eltype(x))
+constant!(tape::Tape, x::LinearAlgebra.AdjOrTrans{<:Integer, <:AbstractRange}) =
+    record!(tape, Reshape(), (constant!(tape, parent(x)),), size(x), eltype(x))
 
 operand_id(tape, x::Union{Traced, TracedArray}) = x.id
 operand_id(tape, x::Number) = constant!(tape, x)
@@ -529,16 +539,6 @@ function LinearAlgebra.dot(x::TracedArray{<:Real}, y::TracedArray{<:Real})
     length(x) == length(y) || throw(DimensionMismatch("dot of arrays of lengths $(length(x)) and $(length(y))"))
     sum(vec(x) .* vec(y))
 end
-
-"The one-based linear index of each element of `x`, as `Int32`."
-positions(x::TracedArray) = TracedArray(x.tape, record!(x.tape, Positions(), (), size(x), Int32))
-positions(x::AbstractArray) = similar(x, Int32) .= reshape(Int32(1):Int32(length(x)), size(x))
-
-"The one-based index of each element of `x` along `axis`, as `Int32`, in the shape of `x`."
-axis_positions(x::TracedArray, axis::Integer) =
-    TracedArray(x.tape, record!(x.tape, Positions(Int(axis)), (), size(x), Int32))
-axis_positions(x::AbstractArray, axis::Integer) =
-    similar(x, Int32) .= reshape(Int32(1):Int32(size(x, axis)), ntuple(k -> k == axis ? size(x, k) : 1, ndims(x)))
 
 # Tracing a function.
 

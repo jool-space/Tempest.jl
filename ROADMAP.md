@@ -159,17 +159,16 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    alone with the interfaces test as its gate. Not before: on today's
    programs it would claim what cuBLAS claims at cuBLAS's speed, a third
    rival to calibrate for no plan that changes.
-5. **The language and the docs.** Each a day at most, none blocking: ranges
-   in a broadcast become positions and `axis_positions` goes; the language
+5. **The language and the docs.** Each a day at most, none blocking: the language
    (tracing, the interpreter, differentiation, operations, updates) in a
    module of its own, out of Compiler; and numerics out of the target and
    into the program. Done: the home page carries the contract and the
    promises as what a user relies on; an einsum spelled with Einops traces as
    one product, through the one method Einops's backend hook asks for, with
    grouped axes as reshapes and three or more operands as the pairs Einops
-   orders. Gate: the attention tests unchanged without
-   `axis_positions`; TF32 programs agree with the interpreter up to summation
-   order and no implementation reads a mode.
+   orders; a range broadcast against a traced array is a formula, so
+   `positions` and `axis_positions` went. Gate: TF32 programs agree with the
+   interpreter up to summation order and no implementation reads a mode.
 
 Then, as before:
 

@@ -49,7 +49,7 @@ grouped(x, kv) = reshape(x, size(x, 1), size(x, 2) ÷ kv, kv, size(x, 3), size(x
 function attention_scores(q, k; causal, scale)
     s = Tempest.contract(k, grouped(q, size(k, 2)), (D_, H_, N_, B_), (D_, G_, H_, M_, B_), (N_, G_, H_, M_, B_)) .* scale
     causal || return s
-    ifelse.(Tempest.axis_positions(s, 1) .<= Tempest.axis_positions(s, 4), s, typemin(eltype(s)))
+    ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, typemin(eltype(s)))
 end
 
 """
@@ -102,5 +102,5 @@ distinct dropout sites should use distinct `stream` numbers.
 function dropout(x, seed; rate::Real, stream::Integer = 0)
     0 <= rate < 1 || throw(ArgumentError("dropout rate must lie in [0, 1)"))
     eltype(seed) <: Integer || throw(ArgumentError("dropout seeds are integer arrays"))
-    x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), Tempest.positions(x))
+    x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), reshape(1:length(x), size(x)))
 end

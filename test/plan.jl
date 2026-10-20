@@ -56,7 +56,7 @@ end
 # what they computed, and the two spellings of a softmax weighting a sum plan
 # alike, one online softmax recomputing the scores in the kernel of the sum.
 scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.125
-causal(s) = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, -Inf)
+causal(s) = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf)
 weigh(v, p) = T.contract(v, p, (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
 by_logsumexp(q, k, v) = (s = causal(scores(q, k)); weigh(v, exp.(s .- T.logsumexp(s; dims = 1))))
 function by_maximum(q, k, v)
@@ -177,7 +177,7 @@ end
     q, k, v, r = data(8, 3, 16, 2; scale = 0.3), data(8, 3, 16, 2; scale = 0.2), data(8, 3, 16, 2; scale = 0.1), data(8, 3, 16, 2)
     scale = Float32(1 / sqrt(8))
     scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* scale
-    causal(s) = ifelse.(T.axis_positions(s, 1) .<= T.axis_positions(s, 3), s, -Inf)
+    causal(s) = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf)
     written(q, k, v) = (s = causal(scores(q, k)); T.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4)))
     @test same((q, k, v, r) -> Ops.attention(q, k, v; causal = true) .+ r, (q, k, v, r) -> written(q, k, v) .+ r, q, k, v, r)
 end

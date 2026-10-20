@@ -106,7 +106,7 @@ feedforward(x, p) = p.wd' * (swish.(p.wg' * x) .* (p.wu' * x))
 # where the row is the target, so it fuses with the logsumexp beside it and
 # its gradient is pointwise.
 take_rows(logits, targets) =
-    sum(ifelse.(Tempest.axis_positions(logits, 1) .== reshape(targets, 1, :), logits, zero(eltype(logits))); dims = 1)
+    sum(ifelse.((1:size(logits, 1)) .== reshape(targets, 1, :), logits, zero(eltype(logits))); dims = 1)
 
 function loss(p, batch, c, cfg)
     x = reshape(p.wte[:, batch.tokens], size(p.wte, 1), :)
