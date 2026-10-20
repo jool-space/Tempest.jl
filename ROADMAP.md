@@ -147,14 +147,16 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    scale and add are coefficients; a verb kernel absorbs the residual after
    it; a permuted argument reaches a kernel that accepts it without a copy.
 6. **The language and the docs.** Each a day at most, none blocking: ranges
-   in a broadcast become positions and `axis_positions` goes; an Einops
-   extension of one method; the language (tracing, the interpreter,
-   differentiation, operations, updates) in a module of its own, out of
-   Compiler; and numerics out of the target and into the program. Done: the
-   home page carries the contract and the promises as what a user relies on.
-   Gate: the attention tests unchanged without `axis_positions`; TF32
-   programs agree with the interpreter up to summation order and no
-   implementation reads a mode.
+   in a broadcast become positions and `axis_positions` goes; the language
+   (tracing, the interpreter, differentiation, operations, updates) in a
+   module of its own, out of Compiler; and numerics out of the target and
+   into the program. Done: the home page carries the contract and the
+   promises as what a user relies on; an einsum spelled with Einops traces as
+   one product, through the one method Einops's backend hook asks for, with
+   grouped axes as reshapes and three or more operands as the pairs Einops
+   orders. Gate: the attention tests unchanged without
+   `axis_positions`; TF32 programs agree with the interpreter up to summation
+   order and no implementation reads a mode.
 
 Then, as before:
 
