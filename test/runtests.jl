@@ -26,7 +26,7 @@ end
 # Every worker loads the same packages, so no test sees an extension that an
 # earlier test on its worker happened to load.
 const init_code = quote
-    using Tempest, Test, NNlib, CUDACore
+    using Tempest, Test, NNlib, CUDACore, Einops
     import Statistics, cuBLAS, cuTile
     include($(joinpath(@__DIR__, "setup.jl")))
 end

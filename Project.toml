@@ -16,12 +16,14 @@ Scratch = "6c6a2e73-6563-6170-7368-637461726353"
 
 [weakdeps]
 CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+Einops = "e3ce28c8-8bfb-4704-8add-e3e7f14b55c9"
 NNlib = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
 cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
 cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
 
 [extensions]
 CUDAExt = "CUDACore"
+EinopsExt = "Einops"
 NNlibExt = "NNlib"
 cuBLASExt = ["CUDACore", "cuBLAS"]
 cuTileExt = ["CUDACore", "cuTile"]
@@ -29,6 +31,7 @@ cuTileExt = ["CUDACore", "cuTile"]
 [compat]
 BFloat16s = "0.6"
 CompilerCaching = "0.5"
+Einops = "0.2.3"
 LinearAlgebra = "1.11"
 NNlib = "0.9"
 PrecompileTools = "1"
