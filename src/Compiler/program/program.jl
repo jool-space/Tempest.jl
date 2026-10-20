@@ -89,13 +89,9 @@ end
 
 mutable struct Tape
     nodes::Vector{Node}
-    # While calls are expanded (see `expand_calls`): whether a call of an
-    # operation expands, and what each expansion recorded.
-    expands::Any
-    expansions::Vector{Any}
 end
 
-Tape(nodes = Node[]) = Tape(nodes, Returns(false), [])
+Tape() = Tape(Node[])
 
 function record!(tape::Tape, op, inputs, dims, T; scalar = false)
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))
@@ -171,7 +167,7 @@ end
 
 # Whether `x` is a struct to look inside. Mutable structs are leaves, as
 # closures are: their identity is theirs, and a program does not write them.
-# So are Tempest's own, such as the nodes in a call's structure.
+# So are Tempest's own.
 function nested(x)
     T = typeof(x)
     !(x isa Union{AbstractArray, Number, Function, Type, Module, AbstractString, Symbol, AbstractDict, Tuple, NamedTuple}) &&
@@ -239,25 +235,17 @@ end
 """
     prune(program) -> Program
 
-The program without the nodes its results do not read. Arguments stay, and a
-call keeps all its results when any of them is read.
+The program without the nodes its results do not read. Arguments stay.
 """
 function prune(p::Program)
     keep = live(p.nodes, p.results)
     foreach(a -> keep[a] = true, p.arguments)
-    for (id, n) in enumerate(p.nodes)
-        n.op isa Call && keep[id] && foreach(r -> keep[r] = true, results_of(p.nodes, n.op.instance))
-    end
     all(keep) && return p
     new = zeros(Int, length(p.nodes))
     nodes = Node[]
     for (id, n) in enumerate(p.nodes)
         keep[id] || continue
-        op = n.op
-        if op isa Call
-            op = Call(op.f, op.kwargs, op.output, op.instance == id ? length(nodes) + 1 : new[op.instance], op.structure)
-        end
-        push!(nodes, Node(op, map(i -> new[i], n.inputs), n.dims, n.eltype, n.scalar))
+        push!(nodes, Node(n.op, map(i -> new[i], n.inputs), n.dims, n.eltype, n.scalar))
         new[id] = length(nodes)
     end
     Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure)

@@ -16,7 +16,7 @@ programs = [
     ("a product with an epilogue", trace((w, x, b) -> gelu.(w * x .+ b), w, x, b), (w, x, b), T.CUDATarget()),
     ("training, TF32", differentiate(trace((w, x, b) -> sum(abs2, gelu.(w * x .+ b)), w, x, b)), (w, x, b),
         T.CUDATarget(precision = :tf32)),
-    ("attention claims", differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v)),
+    ("attention training step", differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v)),
         (q, k, v), T.CUDATarget(precision = :tf32)),
     # Float64 elements, which tiles do not take.
     ("the floor", trace(x -> T.fold(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),

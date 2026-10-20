@@ -21,8 +21,7 @@ import ..IR: mentions
 
 # The protocol of implementations, which the cover calls and the generator implements.
 @republic republic=false inherit=:public import ..Implementations
-using ..Implementations: REGISTERED, Kernels, KernelClaim
-import ..Implementations: call_claims
+using ..Implementations: REGISTERED
 
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 
@@ -35,7 +34,6 @@ include("program/program.jl")
 include("program/tracing.jl")
 include("program/updates.jl")
 include("program/interpret.jl")
-include("program/calls.jl")
 include("program/differentiate.jl")
 
 # The index level.

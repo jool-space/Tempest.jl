@@ -99,10 +99,6 @@ function interpret(p::Program, args...)
     keep = live(p.nodes, p.results)
     for (id, n) in enumerate(p.nodes)
         (keep[id] && !(n.op isa Argument)) || continue
-        if n.op isa Call
-            isassigned(values, id) || evaluate_call!(values, p.nodes, id)
-            continue
-        end
         values[id] = evaluate(n.op, n, map(i -> values[i], n.inputs))
     end
     rebuild(k -> k === nothing ? nothing : values[p.results[k]], p.output_structure)

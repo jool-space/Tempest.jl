@@ -45,9 +45,8 @@ function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
         b.ids[id] = new === nothing ? add!(b, remap(v.definition, b.ids), v.dims, v.eltype, v.scalar) : new
     end
     notes = [[b.ids[v] => s for (v, s) in graph.rewrites if b.ids[v] != 0]; b.rewrites]
-    calls = [remap(c, b.ids) for c in graph.calls]
     g = IndexGraph(b.values, map(a -> b.ids[a], graph.arguments), Operand[remap(o, b.ids) for o in graph.results],
-        graph.result_dims, graph.result_scalar, graph.result_eltype, calls, notes)
+        graph.result_dims, graph.result_scalar, graph.result_eltype, notes)
     g, b.ids
 end
 
@@ -61,21 +60,15 @@ remap(o::Literal, ids) = o
 remap(o::IndexOperand{T}, ids) where {T} = IndexOperand{T}(remap(o.expr, ids))
 remap(d::Pointwise, ids) = Pointwise(d.f, map(o -> remap(o, ids), d.operands))
 remap(d::Reduction, ids) = Reduction(d.fold, remap(d.operand, ids), d.iteration, d.reduced)
-remap(d::Opaque, ids) = Opaque(d.node, map(o -> remap(o, ids), d.operands), d.shapes, d.epilogue, map(e -> remap(e, ids), d.index))
+remap(d::Opaque, ids) = Opaque(d.node, map(o -> remap(o, ids), d.operands), d.shapes)
 remap(d::Union{Input, ConstantArray}, ids) = d
-remap(c::CallSite, ids) = CallSite(filter(!iszero, map(v -> ids[v], c.values)), map(o -> remap(o, ids), c.operands), c.shapes,
-    c.results, map(o -> remap(o, ids), c.reads))
 
 # The values something reads: the results and what they read, inputs and
-# opaque work, constant arrays, and, unless `calls` is false, what the calls
-# implementations may claim read and return.
-function live_values(graph::IndexGraph; calls = true)
+# opaque work, constant arrays.
+function live_values(graph::IndexGraph)
     live = falses(length(graph.values))
     for o in graph.results, r in read_values(o)
         live[r] = true
-    end
-    calls && for c in graph.calls, o in [collect(c.operands); c.reads]
-        live[o.value] = true
     end
     for id in length(graph.values):-1:1
         d = graph.values[id].definition
@@ -187,7 +180,7 @@ function online_softmaxes(graph::IndexGraph)
                 r in sums || return nothing
                 online!(b, graph, r, F)
             end
-            if !live_values(rewritten; calls = false)[ids[F]]
+            if !live_values(rewritten)[ids[F]]
                 graph, F = compact(rewritten), 0
             end
         end

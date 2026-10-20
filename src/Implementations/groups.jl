@@ -24,11 +24,9 @@ end
 
 A group of the plan as implementations see it. A group computes its members
 over one domain: `reductions`, its folds, and `outputs`, its other values, each
-defined by its term in `terms`. An `:opaque` group computes the results of a
-call instead, and `epilogues` names, for a result, the value its kernel writes
-in the result's place, computed by `terms` from the result's tile. Folds over
-`primary_axes`, the axes its first fold reduces, can be read within the group,
-and `phase` counts the folds each member waits for. `values` describes every
+defined by its term in `terms`. An `:opaque` group computes one value that the
+index level does not model, such as a scatter. Folds over `primary_axes`, the
+axes its first fold reduces, can be read within the group, and `phase` counts the folds each member waits for. `values` describes every
 value the group computes or reads, `placement` where it keeps each member (its
 index over the domain, or nothing), and `bytes` what it reads from storage and
 writes. `reference(target, buffers)` builds the group's reference kernels, the
@@ -41,7 +39,6 @@ struct GroupView
     outputs::Vector{Int}
     terms::Dict{Int, Term}
     phase::Dict{Int, Int}
-    epilogues::Dict{Int, Int}
     primary_axes::Tuple{Vararg{Int}}
     values::Dict{Int, ValueView}
     placement::Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}
@@ -51,7 +48,7 @@ end
 
 "A group of no members over `domain`, reading `values`: where a recomputed fold's body runs."
 GroupView(kind::Symbol, domain, values) = GroupView(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}(),
-    Dict{Int, Int}(), (), values, Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}(), 0.0, nothing)
+    (), values, Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}(), 0.0, nothing)
 
 "The values a group computes, its folds first."
 members(g::GroupView) = [g.reductions; g.outputs]

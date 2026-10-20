@@ -6,12 +6,11 @@
 # priced on a line fitted to two reference products it runs, both kept in a
 # rates file beside the record.
 # Implementations also propose candidates of their own, sets of values grown
-# from anchors that they accept, and claim calls. A candidate replaces the
-# generator's groups, and a claimed call its reference expanded and fused into
-# its neighbours, when the cover with it is cheaper. Estimates within each
-# other's error are close calls: they are measured at preparation and kept in
-# the tuning record, and a measurement overrides the estimate only beyond the
-# device's noise margin, so the choice is deterministic given the record.
+# from anchors that they accept. A candidate replaces the generator's groups
+# when the cover with it is cheaper. Estimates within each other's error are
+# close calls: they are measured at preparation and kept in the tuning record,
+# and a measurement overrides the estimate only beyond the device's noise
+# margin, so the choice is deterministic given the record.
 
 """
 A device's rates for estimates: seconds per launch in a captured graph, bytes
@@ -125,9 +124,8 @@ function floor_estimate(p::Plan, g::Group)
     [Work(Float64(points * per_point) + group_bytes(p, g); blocks = items / 256)]
 end
 
-"What `explain` calls an implementation: its package for operation pairs, else its type."
+"What `explain` calls an implementation: its type."
 label(i::Implementation) = string(nameof(typeof(i)))
-label(k::Kernels) = string(nameof(k.package))
 
 "A way to realize a group: an implementation's claim, or the floor's (`nothing`)."
 struct Choice
@@ -201,9 +199,8 @@ group_identity(p::Plan, g::Group) = GroupIdentity(g.kind, g.domain, copy(g.reduc
     Any[get(g.terms, m, nothing) for m in members(g)], Bool[p.stored[m] for m in members(g)])
 
 # An opaque value without a term, as its operation computes it: the
-# operation, its keywords, and the values it reads.
-computed(d::Opaque) = string(op_name(d.node.op), op_detail(d.node.op), d.node.op isa Call ? string(" ", d.node.op.kwargs) : "",
-    " of ", join(map(o -> "%$(o.value)", reads(d)), " "))
+# operation and the values it reads.
+computed(d::Opaque) = string(op_name(d.node.op), op_detail(d.node.op), " of ", join(map(o -> "%$(o.value)", reads(d)), " "))
 
 # A group across programs: value numbers in order of appearance, with each
 # value's type and shape.
@@ -235,44 +232,14 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
         any(l -> l !== nothing && l.borrowed, lines))
 end
 
-"The call an opaque group computes, or nothing."
-function called(graph, g::Group)
-    g.kind === :opaque || return nothing
-    op = graph.values[first(g.outputs)].definition.node.op
-    op isa Call ? op : nothing
-end
+# Every group has a choice but opaque work, a scatter, which only the floor runs.
+chosen(p::Plan, g::Group) = g.kind !== :opaque
 
-# Every group has a choice but opaque work other than a call, which only the
-# floor runs.
-chosen(p::Plan, g::Group) = g.kind !== :opaque || called(p.graph, g) !== nothing
-
-# The `Spec` of each argument of a call.
-call_specs(graph, operands, shapes) = map((o, (dims, _)) -> Spec(graph.values[o.value].eltype, dims), operands, shapes)
-
-# An implementation's claims on a group, and on a call's group its claims
-# through `call_claims`, those that apply every epilogue the group absorbed.
-function group_claims(i::Implementation, target, p::Plan, g::Group, view = group_view(p, g))
-    cs = claims(i, target, view)
-    op = called(p.graph, g)
-    op === nothing && return cs
-    d = p.graph.values[first(g.outputs)].definition
-    taken = [p.graph.values[o].definition.node.op.output for o in keys(g.epilogues)]
-    calls = call_claims(i, target, op, call_specs(p.graph, d.operands, d.shapes))
-    Any[cs...; [c for c in calls if all(in(c.absorbs), taken)]...]
-end
-
-"""
-Every claim on a group, cheapest estimate first; the floor when none claims
-it, except for a call, which only implementations run.
-"""
+"Every claim on a group, cheapest estimate first; the floor when none claims it."
 function options(d::Decider, p::Plan, g::Group)
     view = group_view(p, g)
-    os = Choice[choice(d, p, g, view, i, c) for i in implementations(d.target) for c in group_claims(i, d.target, p, g, view)]
-    if isempty(os)
-        op = called(p.graph, g)
-        op === nothing || throw(ArgumentError("no implementation on $(d.target) runs $(op.f), an operation without a reference"))
-        push!(os, choice(d, p, g, view, nothing, nothing))
-    end
+    os = Choice[choice(d, p, g, view, i, c) for i in implementations(d.target) for c in claims(i, d.target, view)]
+    isempty(os) && push!(os, choice(d, p, g, view, nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
 
@@ -358,80 +325,9 @@ function compare(d::Decider, b::Plan, a::Plan)
     Comparison(ea, eb, :estimated, (da, db))
 end
 
-"""
-    ClaimedCall(site, epilogues)
-
-A call claimed in place of its reference expanded (an opaque call, in place of
-its claim without epilogues): the call's place in the graph, and the results
-after which the claimant applies an epilogue. An implementation may propose
-one among its `candidates` for a computation it recognizes (see `call_site`).
-"""
-struct ClaimedCall
-    site::CallSite
-    epilogues::Tuple{Vararg{Int}}
-end
-
-"""
-    call_site(graph, f, kwargs, values, arguments, results) -> CallSite
-
-A computation written out in `graph` as a call of `f` with keywords `kwargs`,
-for an implementation that recognizes it: `values` compute it from the values
-`arguments`, read whole, and the values `results` hold what `f` returns, in
-order.
-"""
-function call_site(graph, f, kwargs, values, arguments, results)
-    whole(v) = Read(v, identity_index(graph.values[v].dims))
-    structure = length(results) == 1 ? 1 : Tuple(eachindex(results))
-    nodes = map(enumerate(results)) do (k, r)
-        v = graph.values[r]
-        Node(Call(f, kwargs, k, -first(results), structure), (), v.dims, v.eltype, v.scalar)
-    end
-    shapes = Tuple(map(a -> (graph.values[a].dims, graph.values[a].scalar), arguments))
-    CallSite(collect(values), Tuple(map(whole, arguments)), shapes, nodes, map(whole, results))
-end
-
-"""
-    claimed(graph, calls) -> IndexGraph
-
-The graph with each claimed call computing its own results: opaque values that
-read its arguments, in place of the values its reference expanded to, which
-nothing then reads.
-"""
-function claimed(graph::IndexGraph, calls)
-    isempty(calls) && return graph
-    values = copy(graph.values)
-    for c in calls
-        site = c.site
-        for (k, (n, r)) in enumerate(zip(site.results, site.reads))
-            v = values[r.value]
-            # The read over the node's shape, over its domain.
-            index = narrow(r, narrowing(n.dims, wide_axes(n.dims))).index
-            values[r.value] = Value(Opaque(n, site.operands, site.shapes, k in c.epilogues, index), v.dims, v.eltype, v.scalar)
-        end
-    end
-    IndexGraph(values, graph.arguments, graph.results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls, graph.rewrites)
-end
-
-# The calls an implementation claims, with the epilogues each claim applies. An
-# opaque call is proposed only with epilogues: without, its group is in every plan.
-function call_proposals(d::Decider, i::Implementation)
-    graph = d.graph
-    proposals = ClaimedCall[]
-    for site in graph.calls
-        op = first(site.results).op
-        for c in call_claims(i, d.target, op, call_specs(graph, site.operands, site.shapes))
-            epilogues = Tuple(k for k in eachindex(site.results) if k in c.absorbs)
-            opaque(op.f) && isempty(epilogues) && continue
-            q = ClaimedCall(site, epilogues)
-            q in proposals || push!(proposals, q)
-        end
-    end
-    proposals
-end
-
 "A proposal the cover compared with its plan at the time, and whether it took it."
 struct Considered
-    proposal::Any # a set of values, a `ClaimedCall`, or a `Join`
+    proposal::Any # a set of values, or a `Join`
     implementation::Union{Nothing, Implementation} # nothing for the planner's own
     comparison::Comparison
     accepted::Bool
@@ -514,23 +410,19 @@ struct Join
     group::Vector{Int}
 end
 
-"The values a proposal fixes as one group, or nothing for a call."
+"The values a proposal fixes as one group."
 fixes(q::Vector{Int}) = q
 fixes(q::Join) = q.group
-fixes(q::ClaimedCall) = nothing
-
-"The values a proposal touches."
-touches(q) = q isa ClaimedCall ? [q.site.values; [r.value for r in q.site.reads]] : fixes(q)
 
 """
-A proposal's place in a plan, by what it touches: the groups its values
+A proposal's place in a plan, by the values it fixes: the groups its values
 reach (`reached`), in the order the planner forms them, and its values among
 them, numbered as `canonical` numbers one group's. Proposals with one key in
 the generator's plan are the same edit in identical layers.
 """
 function proposal_key(p::Plan, a::Around, q)
     around = Set{Int}()
-    foreach(v -> union!(around, reached(p, a, v)), touches(q))
+    foreach(v -> union!(around, reached(p, a, v)), fixes(q))
     io = IOBuffer()
     for j in sort!(collect(around); by = j -> something(a.places[j], (:opaque, minimum(a.owned[j]))))
         g = p.groups[j]
@@ -542,8 +434,7 @@ function proposal_key(p::Plan, a::Around, q)
         end
     end
     q isa Join && print(io, " || join %", q.value)
-    q isa ClaimedCall && print(io, " || call of ", first(q.site.results).op.f, " ", first(q.site.results).op.kwargs, " absorbing ", q.epilogues)
-    print(io, " || ", join(map(v -> "%$v", touches(q)), " "))
+    print(io, " || ", join(map(v -> "%$v", fixes(q)), " "))
     numbers = Dict{String, Int}()
     text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
     shapes = map(sort!(collect(numbers); by = last)) do (s, k)
@@ -571,21 +462,20 @@ end
 """
     cover(decider) -> (plan, considered)
 
-The generator's groups, with the proposals implementations make, the calls
-they claim, and the planner's own joins accepted greedily by estimated gain
-over the generator's plan, then by their values, each when its proposer
-claims the group it forms (any claim, or the floor, for a join). Proposals
-alike in the generator's plan (`proposal_key`) are one edit
-in identical layers: priced once, and taken together. A proposal is priced
-again in the current plan when an edit taken already changed a group around
-it. Each trial plans the whole graph, and is compared with the plan it
-changes on the groups that differ. Every proposal compared is returned, taken
-or not.
+The generator's groups, with the proposals implementations make and the
+planner's own joins accepted greedily by estimated gain over the generator's
+plan, then by their values, each when its proposer claims the group it forms
+(any claim, or the floor, for a join). Proposals alike in the generator's plan
+(`proposal_key`) are one edit in identical layers: priced once, and taken
+together. A proposal is priced again in the current plan when an edit taken
+already changed a group around it. Each trial plans the whole graph, and is
+compared with the plan it changes on the groups that differ. Every proposal
+compared is returned, taken or not.
 """
 function cover(d::Decider)
     base, keep = generator_plan(d)
     proposals = Tuple{Any, Union{Nothing, Implementation}}[]
-    for i in implementations(d.target), q in [call_proposals(d, i); candidates(i, d.target, base)]
+    for i in implementations(d.target), q in candidates(i, d.target, base)
         any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
     end
     for q in joins(base)
@@ -595,7 +485,7 @@ function cover(d::Decider)
     # not form one group there, where a trial would first form it, is not
     # tried. A set holding a fold the plan recomputes changes what is stored.
     start = storing(d.graph; recompute_folds = any_recomputes_folds(d.target), keep)
-    deps = opaque_groups(start.graph, start.stored, start.live, start.results, start.running)
+    deps = opaque_groups(start.graph, start.running)
     function forms(set)
         isdisjoint(set, start.recomputed) || return true
         try
@@ -607,16 +497,15 @@ function cover(d::Decider)
         end
     end
     arounds = IdDict{Plan, Around}()
-    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if !(x isa ClaimedCall)]), arounds, p)
+    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken]), arounds, p)
     function trial(current, taken, qs)
         all = Any[taken; qs]
-        sets = Vector{Int}[fixes(x) for x in all if !(x isa ClaimedCall)]
-        calls = ClaimedCall[x for x in all if x isa ClaimedCall]
+        sets = Vector{Int}[fixes(x) for x in all]
         # A value belongs to one proposal.
-        allunique(Iterators.flatten([sets; [c.site.values for c in calls]])) || return nothing
-        isempty(taken) && isempty(calls) && length(sets) == 1 && !forms(only(sets)) && return nothing
+        allunique(Iterators.flatten(sets)) || return nothing
+        isempty(taken) && length(sets) == 1 && !forms(only(sets)) && return nothing
         try
-            first(claimed_plan(d, claimed(d.graph, calls); fixed = sets, keep))
+            first(claimed_plan(d; fixed = sets, keep))
         catch e
             e isa NotAGroup || rethrow()
             nothing
@@ -639,9 +528,8 @@ function cover(d::Decider)
         x = price(base, Any[], q, i, k)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
     end
-    order(q) = q isa ClaimedCall ? (1, [minimum(q.site.values); q.epilogues...]) : (0, fixes(q))
-    sort!(ranked; by = r -> (-r[1], order(r[2])))
-    near(q) = Set(j for v in touches(q) for j in neighbours(base, a, v))
+    sort!(ranked; by = r -> (-r[1], fixes(r[2])))
+    near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
     current, considered, taken, done = base, Considered[], Any[], Set{Int}()
     kept = Set(group_identity(base, g) for g in base.groups)
     for (n, (_, _, _, k)) in enumerate(ranked)
@@ -686,7 +574,7 @@ function cover(d::Decider)
 end
 
 function explain(io::IO, p::Plan, c::Considered)
-    q, t, graph = c.proposal, c.comparison, p.graph
+    q, t = c.proposal, c.comparison
     μs(x) = string(round(1.0e6 * x; sigdigits = 3), " μs")
     times = c.accepted ? (t.new, t.old) : (t.old, t.new)
     why = string(" (the kernels that differ: ", μs(times[1]), " against ", μs(times[2]), ", ", t.how, ")")
@@ -694,20 +582,7 @@ function explain(io::IO, p::Plan, c::Considered)
         c.accepted && println(io, "%", q.value, " joins the kernel of %", first(v for v in q.group if v != q.value), ", which reads it", why)
         return
     end
-    name = label(c.implementation)
-    if q isa Vector{Int}
-        c.accepted && println(io, "candidate ", join(map(v -> "%$v", q), " "), " from ", name, " replaces the generator's grouping", why)
-        return
-    end
-    site = q.site
-    f = first(site.results).op.f
-    v = first(site.reads).value
-    epilogue = c.accepted && !isempty(p.groups[p.owner[v]].epilogues)
-    claim = string(name, "'s kernel", epilogue ? " with an epilogue" : "")
-    instead = opaque(f) ? "its kernel without an epilogue" :
-        any(s -> s === site, graph.calls) ? "its reference expanded" : "the computation as written"
-    print(io, "call of ", f, " (", join(map(r -> "%$(r.value)", site.reads), " "), "): ")
-    println(io, c.accepted ? string(claim, " replaces ", instead) : string(instead, " is kept over ", claim), why)
+    c.accepted && println(io, "candidate ", join(map(v -> "%$v", q), " "), " from ", label(c.implementation), " replaces the generator's grouping", why)
 end
 
 # Whether any implementation the target uses recomputes folds where it reads them.
@@ -722,35 +597,26 @@ recomputed_in(g; nested = true) =
 # they recompute in turn may still be recomputed in their kernels). The
 # generator's plan is the plan of the program as written; the cover's trials
 # fix proposals, which leave other folds to recompute.
-generator_plan(d::Decider) = claimed_plan(d, d.graph)
+generator_plan(d::Decider) = claimed_plan(d)
 
-function claimed_plan(d::Decider, graph; fixed = Vector{Int}[], keep = Set{Int}())
+function claimed_plan(d::Decider; fixed = Vector{Int}[], keep = Set{Int}())
     recompute_folds = any_recomputes_folds(d.target)
     keep = Set{Int}(keep)
     has_claim(view) = any(i -> !isempty(claims(i, d.target, view)), implementations(d.target))
     while true
-        p = plan(graph; fixed, recompute_folds, keep)
+        p = plan(d.graph; fixed, recompute_folds, keep)
         unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) && !has_claim(group_view(p, g))]
         isempty(unclaimed) && return p, keep
         foreach(g -> union!(keep, recomputed_in(g; nested = false)), unclaimed)
     end
 end
 
-# The implementation that claims the group a proposal of `i` forms: `i`, or for
-# a call another of its package's, as when a written-out matcher proposes what
-# the package's kernels run.
+# The implementation that claims the group a proposal of `i` forms: `i`, or nothing.
 function claimant(d::Decider, p::Plan, q, i)
-    v = q isa ClaimedCall ? first(q.site.reads).value : first(q)
+    v = first(q)
     p.owner[v] == 0 && return nothing
-    g = p.groups[p.owner[v]]
-    for j in (q isa ClaimedCall ? registered_with(i) : (i,))
-        isempty(group_claims(j, d.target, p, g)) || return j
-    end
-    nothing
+    isempty(claims(i, d.target, group_view(p, p.groups[p.owner[v]]))) ? nothing : i
 end
-
-"The implementations registered under the package of `i`, in order."
-registered_with(i::Implementation) = first(is for (_, is) in REGISTERED if any(j -> j === i, is))
 
 # Buffers for a group's reads and stored members, shared by every plan the
 # decider considers (they number values alike), filled so that measuring reads
@@ -776,7 +642,6 @@ filled!(x) = eltype(x) <: Integer ? fill!(x, one(eltype(x))) : (fill!(reinterpre
 # Build a choice on `buffers`.
 build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
     o.implementation === nothing ? build_floor(target, p, g, buffers) :
-    o.claim isa KernelClaim ? build_kernel(target, p, g, o.claim, buffers) :
     build_claim(o.implementation, o.claim, target, group_view(p, g), buffers)
 
 # Build a choice on the decider's buffers, once, to measure it: its key names
@@ -785,24 +650,19 @@ build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =
     get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, o.key)
 
 # A group's kernels: its choice, or the next claim when a build fails, and
-# the floor last; a call's group has no floor. Opaque work other than calls,
-# a scatter, runs on the floor.
+# the floor last. Opaque work, a scatter, runs on the floor.
 function build_group(d::Decider, p::Plan, g::Group, x, buffers)
     x === nothing && return build_floor(d.target, p, g, buffers)
-    failure = nothing
     for o in [x.choice; filter(!=(x.choice), x.options)]
         o.implementation === nothing && break
         built = try
             build_choice(d.target, p, g, o, buffers)
         catch err
             @debug "claim failed to build; trying the next" o.implementation exception = err
-            failure = err
             nothing
         end
         built === nothing || return built
     end
-    op = called(p.graph, g)
-    op === nothing || error("no claim on the call of $(op.f) built: $(sprint(showerror, failure))")
     build_floor(d.target, p, g, buffers)
 end
 

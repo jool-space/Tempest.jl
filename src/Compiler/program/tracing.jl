@@ -35,8 +35,7 @@ mutable struct TracedArray{T, N} <: AbstractArray{T, N}
     const dims::NTuple{N, Int}
     # The array whose memory this one shares, or nothing.
     const layout::Union{Nothing, Layout}
-    # The program's inputs, and the arguments of an operation's reference,
-    # are never written.
+    # The program's inputs are never written.
     const input::Bool
     # The layouts made from this array, which read its writes.
     const views::Vector{WeakRef}

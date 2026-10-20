@@ -126,9 +126,3 @@ end
 
 "Compile (or load) `f` for `args` and return its launch on `grid`."
 tile_launch(@nospecialize(f), @nospecialize(args), grid; occupancy = nothing) = TileLaunch(tile_function(f, args; occupancy), f, args, grid)
-
-"Launch tile kernel `f` on `grid` from a kernel's body, with its arrays as tile arrays."
-function launch(@nospecialize(f), grid, arguments...)
-    tiles = map(a -> a isa AbstractArray ? ct.TileArray(a) : a, arguments)
-    tile_launch(f, tiles, grid)()
-end

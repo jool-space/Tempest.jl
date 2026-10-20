@@ -211,15 +211,8 @@ function reverse_pass!(tape, loss, range)
     keep = live(tape.nodes, [loss])
     for id in reverse(range)
         n = tape.nodes[id]
-        if n.op isa Call
-            # A call is differentiated once, at its first result, for all.
-            n.op.instance == id || continue
-            any(r -> keep[r] && haskey(cotangents, r), results_of(tape.nodes, id)) || continue
-            contributions = call_pullback(n, id, cotangents, tape)
-        else
-            (keep[id] && haskey(cotangents, id)) || continue
-            contributions = pullback(n.op, n, id, cotangents[id], tape)
-        end
+        (keep[id] && haskey(cotangents, id)) || continue
+        contributions = pullback(n.op, n, id, cotangents[id], tape)
         for (input, c) in zip(n.inputs, contributions)
             c === nothing && continue
             tape.nodes[input].eltype <: AbstractFloat || continue
@@ -241,9 +234,6 @@ function cotangent!(tape, cotangents, id)
     end
 end
 
-# Calls without a derivative rule are differentiated through their reference.
-expands_to_differentiate(f) = !has_pullback(f) && !opaque(f)
-
 """
     differentiate(program) -> Program
 
@@ -262,7 +252,6 @@ julia> interpret(p, [1.0, 2.0, 3.0])
 function differentiate(p::Program)
     length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
         throw(ArgumentError("differentiate needs a program with one scalar result"))
-    p, _ = expand_calls(p, expands_to_differentiate)
     tape = Tape(copy(p.nodes))
     loss = only(p.results)
     cotangents = reverse_pass!(tape, loss, eachindex(p.nodes))
@@ -317,13 +306,7 @@ function gradient(f, args...)
     end
     stand_ins = rebuild(stand_in, args)
     start = length(tape.nodes) + 1
-    expands = tape.expands
-    tape.expands = g -> expands_to_differentiate(g) || expands(g)
-    value = try
-        f(stand_ins...)
-    finally
-        tape.expands = expands
-    end
+    value = f(stand_ins...)
     value isa Number && !(value isa Traced) && (value = Traced(tape, constant!(tape, value)))
     value isa Traced && value.tape === tape && node(value).scalar ||
         throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
@@ -331,7 +314,7 @@ function gradient(f, args...)
     gradients = tangent(stand_ins) do x
         x isa Union{Traced, TracedArray} || return nothing
         g = cotangent!(tape, cotangents, x.id)
-        g === nothing ? nothing : handle_of(tape, g.id)
+        g === nothing ? nothing : node(g).scalar ? Traced(tape, g.id) : TracedArray(tape, g.id)
     end
     (value, gradients...)
 end

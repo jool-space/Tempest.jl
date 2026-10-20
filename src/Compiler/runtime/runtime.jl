@@ -446,59 +446,6 @@ dimensions here, since it lives in a buffer too; `compile` returns numbers.
 """
 outputs(ex::Executable) = ex.outputs
 
-# A kernel of a named operation, built: its body and the groups it takes. The
-# launch holds them untyped, as `HostLaunch` does, so each body compiles once.
-struct KernelLaunch
-    body::Any
-    args::Tuple
-end
-
-(l::KernelLaunch)() = (l.body(l.args...); nothing)
-
-"What `explain` prints for a built kernel: its claim and the results it applies an epilogue after."
-struct BuiltKernel
-    claim::KernelClaim
-    epilogue::Vector{String}
-end
-
-Base.show(io::IO, b::BuiltKernel) = print(io, b.claim, isempty(b.claim.params) ? "" : string(", ", b.claim.params, ", the first candidates"),
-    isempty(b.epilogue) ? "" : string(", with an epilogue on ", join(b.epilogue, ", ")))
-
-# The array a buffer holds in these dims, unless nobody reads it.
-dense(buffer, dims) = buffer === nothing ? nothing : reshape(buffer, dims)
-
-# The terms of the forms a kernel names, in their structure, for the results of its call.
-after_terms(term, ::Nothing, results) = nothing
-after_terms(term, ::Form, result::Int) = term(result)
-after_terms(term, forms::Tuple, results) = ntuple(k -> after_terms(term, forms[k], results[k]), length(forms))
-after_terms(term, forms::NamedTuple, results) = map(k -> after_terms(term, forms[k], results[k]), NamedTuple{keys(forms)}(keys(forms)))
-
-"""
-Build a `KernelClaim`: the body takes groups of arrays on the target, in the
-program's shapes. The results come first, in the structure the operation
-returns, each written where the group stores it (in the place of the epilogue's
-value for a result with one); then the arguments, then the scratch the kernel
-declared, its parameters and the terms of its forms, where it declared them.
-"""
-function build_kernel(target, p::Plan, g::Group, c::KernelClaim, buffers)
-    graph, kernel = p.graph, c.kernel
-    outs = sort(filter(v -> graph.values[v].definition isa Opaque, g.outputs); by = v -> graph.values[v].definition.node.op.output)
-    d = graph.values[first(outs)].definition
-    op = d.node.op
-    results = rebuild(n -> dense(buffers[get(g.epilogues, outs[n], outs[n])], graph.values[outs[n]].definition.node.dims), op.structure)
-    arguments = map((o, (dims, _)) -> dense(buffers[o.value], dims), d.operands, d.shapes)
-    groups = Any[results, arguments]
-    kernel.scratch === nothing || push!(groups, map(s -> dense(allocate(target, eltype(s), prod(size(s); init = 1)), size(s)), kernel.scratch))
-    kernel.params === nothing || push!(groups, c.params)
-    term(n) = epilogue_term(target, p, g, outs[n], buffers)
-    kernel.epilogue === nothing || push!(groups, after_terms(term, kernel.epilogue, op.structure))
-    hasmethod(kernel.body, NTuple{length(groups), Any}) ||
-        throw(ArgumentError("the body of $c does not take $(length(groups)) groups: results, arguments, then scratch, params and after where declared"))
-    taken = sort([graph.values[r].definition.node.op.output for r in keys(g.epilogues)])
-    name(n) = op.structure isa NamedTuple ? string(findfirst(==(n), op.structure)) : string("result ", n)
-    (KernelLaunch(kernel.body, Tuple(groups)), BuiltKernel(c, map(name, taken)))
-end
-
 # The CPU target.
 allocate(::CPUTarget, T, n) = Vector{T}(undef, n)
 upload(::CPUTarget, x) = x
@@ -537,21 +484,4 @@ function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
         HostLaunch(f, Tuple(buffers[v] for v in k.slots), k.items)
     end
     (() -> foreach(l -> l(), launches), FloorKernels(ks))
-end
-
-# The term absorbed after result `r`, as a function of the result's array
-# that gives the array stored in its place: the epilogue evaluated at each
-# element, reading the other arrays at the time it is called; `identity` where
-# the group absorbed nothing after `r`.
-function epilogue_term(::CPUTarget, p::Plan, g::Group, r, buffers)
-    haskey(g.epilogues, r) || return identity
-    graph = p.graph
-    function term(y)
-        arrays = Vector{Any}(undef, length(graph.values))
-        for (id, b) in enumerate(buffers)
-            b === nothing || (arrays[id] = graph.values[id].scalar ? b[1] : reshape(b, graph.values[id].dims))
-        end
-        results = Dict(r => reshape(y, opaque_dims(graph.values[r].definition)))
-        reshape(evaluate_epilogue(g, g.epilogues[r], arrays, results, graph), size(y))
-    end
 end

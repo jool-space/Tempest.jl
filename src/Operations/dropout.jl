@@ -1,7 +1,6 @@
-# Dropout as an operation with no implementation of its own: it always runs
-# as its reference, a pointwise function of the element, the seed and the
-# position, so it fuses with the work around it and its derivative redraws the
-# mask.
+# Dropout as plain array code: a pointwise function of the element, the seed
+# and the position, so it fuses with the work around it and its derivative
+# redraws the mask.
 
 """
 The keep-scale of one element: `1 / (1 - rate)` or zero, from a counter hash of
@@ -38,5 +37,3 @@ function dropout(x, seed; rate::Real, stream::Integer = 0)
     eltype(seed) <: Integer || throw(ArgumentError("dropout seeds are integer arrays"))
     x .* DropoutScale{eltype(x)}(rate, stream).(reshape(seed[1:1], ntuple(_ -> 1, ndims(x))), positions(x))
 end
-
-@operation dropout(x, seed; rate::Real, stream::Integer = 0)

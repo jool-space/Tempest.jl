@@ -18,12 +18,9 @@ struct Group
     outputs::Vector{Int}
     terms::Dict{Int, Term}
     phase::Dict{Int, Int}
-    # An opaque group's epilogues: a result, and the value its kernel writes
-    # in its place, computed by `terms` from the result's tile (`Stat`).
-    epilogues::Dict{Int, Int}
 end
 
-Group(kind, domain) = Group(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}(), Dict{Int, Int}())
+Group(kind, domain) = Group(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}())
 
 members(g::Group) = [g.reductions; g.outputs]
 
@@ -51,9 +48,9 @@ end
 # nothing.
 function placement(graph, g::Group, v)
     val = graph.values[v]
-    # A result of the group's own opaque work, at its formula.
+    # A result of the group's own opaque work, at the variables of its domain.
     d = val.definition
-    g.kind === :opaque && d isa Opaque && return opaque_dims(d) == g.domain ? d.index : nothing
+    g.kind === :opaque && d isa Opaque && return opaque_dims(d) == g.domain ? ntuple(var, length(g.domain)) : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
     map(k -> g.domain[k], kept) == val.dims ? map(var, kept) : nothing
@@ -80,9 +77,6 @@ function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain)
     end
     if v in g.outputs
         index == placement(graph, g, v) || throw(OutsideGroup())
-        # A value the kernel computes itself, such as a claimed call's
-        # result, is read as the kernel's tile of it.
-        d isa Opaque && return Stat(v)
         return definition_term(graph, stored, g, d, val, index, domain)
     end
     stored[v] && return Load(v, index)
@@ -181,7 +175,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
     any(m -> v in stored_reads(g.terms[m]), members(g)) && return false
-    candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase, g.epilogues)
+    candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase)
     t = try
         fold ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
         value_term(graph, stored, candidate, v, index)
@@ -253,17 +247,16 @@ function storing(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = fal
     for r in results
         counts[r] += 1
     end
-    # An opaque operation runs when any of its results is read (a call's
-    # results run together), and reads its operands from storage, as a gather
-    # reads its indices.
-    running = Set(instance(graph, id) for id in 1:n if live[id] && values[id].definition isa Opaque)
+    # An opaque operation runs when its result is read, and reads its operands
+    # from storage, as a gather reads its indices.
+    running = Set(id for id in 1:n if live[id] && values[id].definition isa Opaque)
     materialized = falses(n)
     for id in 1:n
         live[id] || continue
         for o in operands(values[id].definition)
             foreach(r -> materialized[r] = true, gathered_values(o))
         end
-        values[id].definition isa Opaque && instance(graph, id) in running || continue
+        values[id].definition isa Opaque || continue
         foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
     recomputed = recompute_folds ? recomputed_folds(graph, results, materialized, union(Set{Int}(keep), fixed...)) : Set{Int}()
@@ -274,10 +267,7 @@ function storing(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = fal
         d isa Pointwise || continue
         after[id] = any(o -> o isa Read && (o.value in recomputed || after[o.value]), d.operands)
     end
-    # A result of an opaque operation that nobody reads is not stored: its
-    # kernel leaves it unwritten.
-    # Work nothing reads, such as a call's result whose reference a rewrite
-    # replaced, is not stored.
+    # Work nothing reads is not stored.
     stored = map(eachindex(values)) do id
         d = values[id].definition
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
@@ -293,9 +283,6 @@ function storing(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = fal
     end
     (; graph, stored, live, results, running, materialized, recomputed)
 end
-
-# An opaque operation's instance: a call's results run together.
-instance(graph, id) = (op = graph.values[id].definition.node.op; op isa Call ? op.instance : -id)
 
 # Whether stored pointwise value `id` is read only by the members of one group
 # over its domain, each reading it at the domain's index.
@@ -332,40 +319,26 @@ function reach!(frontier, followers, stored, from, seed)
     frontier
 end
 
-# The kernels of opaque work, with the epilogues they absorb, and what the
-# planner needs to form the rest: each value's kernel and ancestors.
-function opaque_groups(graph, stored, live, results, running)
+# The kernels of opaque work, and what the planner needs to form the rest: each
+# value's kernel and ancestors. Opaque work comes first, one group per
+# operation over its result's domain.
+function opaque_groups(graph, running)
     values = graph.values
-    n = length(values)
-    owner = zeros(Int, n)
+    owner = zeros(Int, length(values))
     groups = Group[]
-    deps = Dependencies(owner, groups, ancestors(graph))
-    # Opaque work first, one group per operation over its first result's
-    # domain (all results of a claimed call together, in order), which may
-    # absorb the pointwise work after a result as an epilogue its kernel
-    # applies over the result's output tile.
-    output(id) = (op = values[id].definition.node.op; op isa Call ? op.output : 1)
-    instances = Dict{Int, Int}()
-    for id in sort([id for id in 1:n if values[id].definition isa Opaque && instance(graph, id) in running]; by = output)
-        k = get!(instances, instance(graph, id)) do
-            push!(groups, Group(:opaque, opaque_dims(values[id].definition)))
-            length(groups)
-        end
-        push!(groups[k].outputs, id)
-        owner[id] = k
+    for id in sort!(collect(running))
+        push!(groups, Group(:opaque, opaque_dims(values[id].definition)))
+        push!(groups[end].outputs, id)
+        owner[id] = length(groups)
     end
-    users = map(u -> unique(filter(i -> live[i], u)), readers(graph))
-    for (k, g) in enumerate(groups), o in copy(g.outputs)
-        values[o].definition.epilogue && absorb_epilogue!(graph, stored, users, results, owner, g, k, o)
-    end
-    deps
+    Dependencies(owner, groups, ancestors(graph))
 end
 
 # The kernels, given what is stored.
 function group_values(graph, stored, live, results, running, fixed)
     values = graph.values
     n = length(values)
-    deps = opaque_groups(graph, stored, live, results, running)
+    deps = opaque_groups(graph, running)
     owner, groups, up = deps.owner, deps.groups, deps.up
     for set in fixed
         push!(groups, fixed_group(graph, stored, deps, set))
@@ -553,46 +526,6 @@ function recomputes(values, v, selected, results, materialized)
     false
 end
 
-# An epilogue: the chain of pointwise values after an opaque result, each read
-# only by the next, over the result's domain (`opaque_dims`), whose other reads
-# align with the result's tile (see `aligned_axes`).
-# Limits: pointwise work only, aligned reads only, no positions; the last value
-# of the chain is written in the result's place.
-function absorb_epilogue!(graph, stored, users, results, owner, g::Group, k, o)
-    values = graph.values
-    D = opaque_dims(values[o].definition)
-    chain = Int[]
-    current, final, final_term = o, nothing, nothing
-    while !(current in results) && length(users[current]) == 1
-        c = only(users[current])
-        values[c].definition isa Pointwise && values[c].dims == D && owner[c] == 0 || break
-        trial = Group(:opaque, D)
-        push!(trial.outputs, o)
-        append!(trial.outputs, chain)
-        push!(trial.outputs, c)
-        t = try
-            value_term(graph, stored, trial, c, identity_index(D))
-        catch e
-            e isa OutsideGroup || rethrow()
-            break
-        end
-        aligned(graph, t, D) || break
-        push!(chain, c)
-        current, final, final_term = c, c, t
-    end
-    final === nothing && return
-    stored[o] = false
-    foreach(c -> stored[c] = false, chain)
-    stored[final] = true
-    g.epilogues[o] = final
-    g.terms[final] = final_term
-    push!(g.outputs, final)
-    foreach(c -> owner[c] = k, chain)
-end
-
-aligned(graph, t, D) =
-    all(s -> !(s isa Union{Ix, Recomputed}) && !(s isa Load && aligned_axes(graph.values[s.value].dims, s.index, D) === nothing), subterms((t,)))
-
 # Every result becomes a value read whole, so results are buffers: a result
 # that is a layout of a value, or a constant, gets a value of its own. A fold
 # or pointwise value that only one result reads, through a permutation of its
@@ -602,14 +535,13 @@ function with_stored_results(graph::IndexGraph)
     values = copy(graph.values)
     results = copy(graph.results)
     users = readers(graph)
-    called = Set(v for c in graph.calls for v in [c.values; [o.value for o in c.operands]; [o.value for o in c.reads]])
     for (k, r) in enumerate(results)
         r isa Read || continue
         v = values[r.value]
         p = permutation(r.index)
         (p === nothing || issorted(p)) && continue
         v.definition isa Union{Pointwise, Reduction} && !v.scalar || continue
-        isempty(users[r.value]) && !(r.value in called) && count(o -> o isa Read && o.value == r.value, results) == 1 || continue
+        isempty(users[r.value]) && count(o -> o isa Read && o.value == r.value, results) == 1 || continue
         values[r.value] = permuted(v, p)
         results[k] = Read(r.value, identity_index(values[r.value].dims))
     end
@@ -621,7 +553,7 @@ function with_stored_results(graph::IndexGraph)
             graph.result_eltype[k], graph.result_scalar[k]))
         results[k] = Read(length(values), wide_index(dims))
     end
-    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.calls, graph.rewrites)
+    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.rewrites)
 end
 
 # The axes an index reads a value at, when it is a permutation of the reader's

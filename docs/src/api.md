@@ -29,14 +29,9 @@ Tempest.axis_positions
 Tempest.batched_mul
 ```
 
-## Writing operations
+## Derivative rules
 
 ```@docs
-@operation
-Tempest.reference
-Tempest.declared_results
-Tempest.verb_pullback
-Tempest.has_pullback
 Tempest.scalar_partials
 ```
 
@@ -68,11 +63,6 @@ Tempest.IR
 Tempest.Implementations
 Tempest.Implementations.Implementation
 Tempest.Implementations.register!
-Tempest.Implementations.Spec
-Tempest.Implementations.bytes
-Tempest.Implementations.Kernel
-Tempest.Implementations.Form
-Tempest.Implementations.pointwise
 Tempest.Implementations.GroupView
 Tempest.Implementations.ValueView
 Tempest.Implementations.members

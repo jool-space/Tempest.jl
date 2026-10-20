@@ -60,15 +60,15 @@ if CUDA_FUNCTIONAL
         # Launch parameters are those cuTile's code generation gives the kernel.
         ext = Base.get_extension(Tempest, :cuTileExt)
         y = CuArray{Float32}(undef, 16, 8)
-        epilogue = ext.Epilogue(C.generated(:(function (y, arrays, index) y end)), (ext.tile_array(y, (16, 8)),))
-        for argument in (ext.tile_array(y, (16, 8)), cuTile.Constant(64), 1.5f0, epilogue, (cuTile.Constant(true), 2.0f0))
+        tiles = (C.generated(:(function (y, arrays, index) y end)), (cuTile.TileArray(y),))
+        for argument in (cuTile.TileArray(y), cuTile.Constant(64), 1.5f0, tiles, (cuTile.Constant(true), 2.0f0))
             expressions, types = Any[], Any[]
             cuTile.flatten_params!(expressions, types, typeof(argument), :argument)
             @test map(typeof, ext.flatten!(Any[], argument)) == types
         end
         # So are the groups of arrays that overlap.
-        whole, part, other = ext.tile_array(y, (16, 8)), cuTile.TileArray(view(y, :, 3:4)), ext.tile_array(CuArray{Float32}(undef, 4), (4,))
-        for arguments in ((whole, other), (whole, other, part), (other, epilogue, whole), ())
+        whole, part, other = cuTile.TileArray(y), cuTile.TileArray(view(y, :, 3:4)), cuTile.TileArray(CuArray{Float32}(undef, 4))
+        for arguments in ((whole, other), (whole, other, part), (other, tiles, whole), ())
             @test ext.alias_groups(arguments) == cuTile.alias_groups(arguments...)
         end
 

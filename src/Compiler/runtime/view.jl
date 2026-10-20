@@ -23,7 +23,7 @@ function group_view(p::Plan, g::Group)
     values = Dict(v => value_view(p, v) for v in seen)
     places = Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}(m => placement(graph, g, m) for m in members(g))
     reference(target, buffers) = build_floor(target, p, g, buffers)
-    GroupView(g.kind, g.domain, copy(g.reductions), copy(g.outputs), g.terms, g.phase, g.epilogues,
+    GroupView(g.kind, g.domain, copy(g.reductions), copy(g.outputs), g.terms, g.phase,
         primary_axes(graph, g), values, places, group_bytes(p, g), reference)
 end
 

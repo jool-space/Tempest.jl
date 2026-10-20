@@ -279,7 +279,7 @@ function scatter_kernel(graph, g::Group, slots)
     push!(body.args, isempty(checks) ? inner : :(if $(foldl((a, b) -> :($a && $b), checks))
         $inner
     end))
-    at = map(e -> substitute(e, Tuple(map(var, wide_axes(n.dims))), domain), d.index)
+    at = Tuple(map(var, wide_axes(n.dims)))
     push!(body.args, store_expr(c, v, at, acc))
     ScalarKernel(slots, prod(n.dims; init = 1), body)
 end

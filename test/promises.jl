@@ -181,15 +181,14 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         length(d.decided)
     end
     @test decided(32) == decided(8)
-    # A call's group names the call and what it reads: attention over 6 keys
-    # and over 9 are different groups.
-    function call_key(n)
+    # A group names what it reads: attention over 6 keys and over 9 are
+    # different groups.
+    function attention_key(n)
         q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, n, 2; scale = 0.2), data(4, 2, n, 2; scale = 0.1)
-        graph = C.lower(trace((q, k, v) -> Ops.attention(q, k, v), q, k, v))
-        p = C.plan(C.claimed(graph, [C.ClaimedCall(s, ()) for s in graph.calls]))
-        C.canonical(p, only(g for g in p.groups if g.kind === :opaque))
+        p = C.plan(C.lower(trace((q, k, v) -> Ops.attention(q, k, v), q, k, v)))
+        join(sort!([C.canonical(p, g) for g in p.groups]), " | ")
     end
-    @test call_key(6) != call_key(9)
+    @test attention_key(6) != attention_key(9)
     if CUDA_FUNCTIONAL
         # Options rank alike in groups alike, so a rank chosen for one is the
         # same choice in each.

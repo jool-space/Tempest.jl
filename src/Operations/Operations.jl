@@ -1,14 +1,14 @@
 """
-The operations Tempest defines, `attention` and `dropout`. They are written
-against `Tempest` alone, as an operation package would write its own.
+The array functions Tempest defines, `attention` and `dropout`. They are plain
+code on Tempest's primitives, written against `Tempest` alone.
 """
 module Operations
 
-using ..Tempest: @operation, contract, logsumexp, positions, axis_positions
-import ..Tempest: has_pullback, verb_pullback, scalar_partials
+using ..Tempest: contract, logsumexp, positions, axis_positions
+import ..Tempest: scalar_partials
 
 export attention
-public attention_forward, attention_backward
+public attention_forward
 include("attention.jl")
 
 export dropout
