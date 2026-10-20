@@ -198,16 +198,15 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
 end
 
 """
-    plan(graph::IndexGraph; fixed = [], recompute_folds = false, keep = ()) -> Plan
+    plan(graph::IndexGraph; fixed = [], recompute = ()) -> Plan
 
 Decide what is stored and form the kernels. Each set of values in `fixed`, a
 candidate an implementation proposed, forms a group of its own, its folds
-stored; the planner groups the rest around them. With `recompute_folds`, folds
-that `recomputed_folds` selects, apart from those in `keep` and `fixed`, are
-recomputed where they are read instead of stored.
+stored; the planner groups the rest around them. Each value in `recompute` is
+recomputed where it is read instead of stored.
 """
-function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false, keep = ())
-    s = storing(graph; fixed, recompute_folds, keep)
+function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = ())
+    s = storing(graph; recompute)
     graph, stored, live, results, running = s.graph, s.stored, s.live, s.results, s.running
     # A pointwise value read only by one group over its domain, at the same
     # index, is recomputed by that group: grouped again without it.
@@ -222,7 +221,8 @@ end
 
 # What `plan` decides before it forms kernels: the graph with its results
 # stored, what is stored, what runs, and the folds recomputed where read.
-function storing(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false, keep = ())
+function storing(graph::IndexGraph; recompute = ())
+    recomputed = Set{Int}(recompute)
     graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
@@ -259,7 +259,6 @@ function storing(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = fal
         values[id].definition isa Opaque || continue
         foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
-    recomputed = recompute_folds ? recomputed_folds(graph, results, materialized, union(Set{Int}(keep), fixed...)) : Set{Int}()
     # Maps of recomputed folds are recomputed with them.
     after = falses(n)
     for id in 1:n
@@ -281,7 +280,7 @@ function storing(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = fal
         all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
         all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
     end
-    (; graph, stored, live, results, running, materialized, recomputed)
+    (; graph, stored, live, results, running, materialized)
 end
 
 # Whether stored pointwise value `id` is read only by the members of one group
@@ -468,7 +467,9 @@ end
 const RECOMPUTED_PRODUCT = 256
 const RECOMPUTED_SPAN = 128
 
-function recomputed_folds(graph, results, materialized, kept = Set{Int}())
+function recomputed_folds(graph, kept = Set{Int}())
+    s = storing(graph)
+    graph, results, materialized = s.graph, s.results, s.materialized
     values = graph.values
     users = readers(graph)
     selected = Set{Int}()

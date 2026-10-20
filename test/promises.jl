@@ -141,7 +141,8 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
     distinct(p) = length(unique(C.canonical(p, g) for g in p.groups))
     function planned(L)
         layers, x = stack(L, identity)
-        C.plan(C.lower(differentiate(trace(stack_loss, x, layers))); recompute_folds = true)
+        graph = C.lower(differentiate(trace(stack_loss, x, layers)))
+        C.plan(graph; recompute = C.recomputed_folds(graph))
     end
     @test distinct(planned(32)) == distinct(planned(8))
     # Two groups alike generate the same floor kernels, so each has one content
@@ -182,7 +183,7 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
     function per_layer_plan(L)
         layers, x = stack(L, identity)
         g = C.lower(differentiate(trace(stack_loss, x, layers)))
-        seconds(() -> C.plan(g; recompute_folds = true)) / L
+        seconds(() -> C.plan(g; recompute = C.recomputed_folds(g))) / L
     end
     # The planner grows each group from the values that read it, so a layer
     # costs the same however many precede it.

@@ -12,19 +12,22 @@ include("fixtures/programs.jl")
     end
 end
 
+# The plan that recomputes the folds `recomputed_folds` selects.
+recomputing(graph) = C.plan(graph; recompute = C.recomputed_folds(graph))
+
 # Folds recomputed where they are read, as plans for cuTile recompute them:
 # the same results, and attention's scores and logsumexp inside the one
 # kernel of the sum over keys.
 @testset "plans recomputing folds" begin
     @testset "$name" for (name, f, args) in PROGRAMS
         for p in (trace(f, args...), differentiate(trace(f, args...)))
-            planned = C.plan(C.lower(p); recompute_folds = true)
+            planned = recomputing(C.lower(p))
             @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))
         end
     end
     q, k, v = data(4, 4, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
     p = trace((q, k, v) -> Ops.attention(q, k, v; causal = true), q, k, v)
-    planned = C.plan(C.lower(p); recompute_folds = true)
+    planned = recomputing(C.lower(p))
     @test length(planned.groups) == 1
     @test length(C.recomputed_in(only(planned.groups))) == 2
     @test agree(C.execute(planned, q, k, v), [interpret(p, q, k, v)])
@@ -43,7 +46,7 @@ end
         T.contract(x, d, (1, 3), (2, 3), (1, 2))
     end
     p = trace(f, q, k, x)
-    planned = C.plan(C.lower(p); recompute_folds = true)
+    planned = recomputing(C.lower(p))
     @test all(g -> C.recomputed_in(g) == C.recomputed_in(g; nested = false), planned.groups)
     @test count(g -> !isempty(C.recomputed_in(g)), planned.groups) == 1
     @test agree(C.execute(planned, q, k, x), [interpret(p, q, k, x)])
@@ -65,18 +68,18 @@ end
 @testset "rewritten sums" begin
     @testset "$name" for (name, f, args) in PROGRAMS
         for p in (trace(f, args...), differentiate(trace(f, args...)))
-            planned = C.plan(C.rewrite(C.lower(p)); recompute_folds = true)
+            planned = recomputing(C.rewrite(C.lower(p)))
             @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))
         end
     end
-    groups(f, args...) = C.plan(C.rewrite(C.lower(trace(f, args...))); recompute_folds = true).groups
+    groups(f, args...) = recomputing(C.rewrite(C.lower(trace(f, args...)))).groups
     q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
     a, b = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v))
     @test a.terms == b.terms
     graph = C.rewrite(C.lower(trace(by_maximum, q, k, v)))
     @test graph.values[only(b.reductions)].definition.fold == C.OnlineSoftmax(/)
     @test length(C.recomputed_in(b)) == 1
-    planned = C.plan(graph; recompute_folds = true)
+    planned = recomputing(graph)
     @test agree(C.execute(planned, q, k, v), [interpret(trace(by_maximum, q, k, v), q, k, v)])
     @test occursin("online softmax", sprint(explain, planned))
 end
@@ -156,7 +159,7 @@ end
 # and attention, whose grouped heads have such an axis with one query head per
 # key head, against attention written out without it.
 @testset "axes of extent one" begin
-    explained(p) = [sprint(explain, C.plan(C.lower(p); recompute_folds)) for recompute_folds in (false, true)]
+    explained(p) = [sprint(explain, C.plan(C.lower(p))), sprint(explain, recomputing(C.lower(p)))]
     same(f, g, args...) = explained(trace(f, args...)) == explained(trace(g, args...))
     same_gradient(f, g, args...) = explained(differentiate(trace(f, args...))) == explained(differentiate(trace(g, args...)))
     x, w, c = data(8, 6), data(8; scale = 0.1), data(5)

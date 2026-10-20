@@ -484,10 +484,11 @@ function cover(d::Decider)
     # What the generator's plan stores and its opaque kernels: a set that does
     # not form one group there, where a trial would first form it, is not
     # tried. A set holding a fold the plan recomputes changes what is stored.
-    start = storing(d.graph; recompute_folds = any_recomputes_folds(d.target), keep)
+    recomputed = any_recomputes_folds(d.target) ? recomputed_folds(d.graph, keep) : Set{Int}()
+    start = storing(d.graph; recompute = recomputed)
     deps = opaque_groups(start.graph, start.running)
     function forms(set)
-        isdisjoint(set, start.recomputed) || return true
+        isdisjoint(set, recomputed) || return true
         try
             fixed_group(start.graph, start.stored, deps, set)
             true
@@ -600,11 +601,11 @@ recomputed_in(g; nested = true) =
 generator_plan(d::Decider) = claimed_plan(d)
 
 function claimed_plan(d::Decider; fixed = Vector{Int}[], keep = Set{Int}())
-    recompute_folds = any_recomputes_folds(d.target)
     keep = Set{Int}(keep)
     has_claim(view) = any(i -> !isempty(claims(i, d.target, view)), implementations(d.target))
     while true
-        p = plan(d.graph; fixed, recompute_folds, keep)
+        recompute = any_recomputes_folds(d.target) ? recomputed_folds(d.graph, union(keep, fixed...)) : ()
+        p = plan(d.graph; fixed, recompute)
         unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) && !has_claim(group_view(p, g))]
         isempty(unclaimed) && return p, keep
         foreach(g -> union!(keep, recomputed_in(g; nested = false)), unclaimed)
@@ -732,10 +733,10 @@ Each package's fastest claim among `packages` on the group the planner forms
 for `f` over arrays like `args`: its seconds, timed as claims are, and its
 launches as the package estimates them.
 """
-function reference(d::Decider, packages, f, args...; recompute_folds = false)
+function reference(d::Decider, packages, f, args...; recomputing = false)
     graph = lower(trace(f, args...))
     timing = Decider(d.target, graph; measure = :none)
-    p = plan(graph; recompute_folds)
+    p = plan(graph; recompute = recomputing ? recomputed_folds(graph) : ())
     g = only(p.groups)
     view = group_view(p, g)
     fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()
@@ -769,7 +770,7 @@ function fit!(d::Decider, T)
     key(p, what) = string(p, " ", class, " ", what)
     unfitted = [m for m in used_packages(d.target) if !haskey(d.calibration, key(nameof(m), "rate"))]
     times = map(shapes -> reference(d, unfitted, *, map(dims -> zeros(T, dims), shapes)...), REFERENCE_SHAPES)
-    recomputing = reference(d, unfitted, (a, b, c) -> (a * b) * c, map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)...; recompute_folds = true)
+    recomputing = reference(d, unfitted, (a, b, c) -> (a * b) * c, map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)...; recomputing = true)
     # A reference's first launch: its time less those of the launches after
     # it, which merge split sums, and its flops over its share of the device.
     first_launch(t, work, package) = (t - sum(w -> seconds(w, d.rates, memory!(d, package), nothing), work[2:end]; init = 0.0),
