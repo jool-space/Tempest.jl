@@ -117,11 +117,12 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    proposal. That deletes the planner's two constants, the `keep` loop and
    `claimed_plan`: the rule they encode measures slower than storing in 9
    of 10 small programs, up to 24 times, and is most of what a plan costs at
-   8 layers. Two commits land first: the generator names a fold's
-   accumulator by its place in the group rather than its value id, so that
-   groups alike across layers share one kernel (33 kernel keys at 4 layers
-   and 53 at 8 today, 19 fixed); and `plan` takes an explicit recompute set,
-   with no plan moving. The proposals themselves wait on three gates: the
+   8 layers. Done since: the generator names a fold's accumulator by its
+   place in the group rather than its value id, so that groups alike across
+   layers share one kernel (the stack of 8 builds none the stack of 4 has
+   not; before, 33 kernels at 4 layers and 36 more at 8); and `plan` takes
+   an explicit recompute set, with no plan of 556 moving. The proposals
+   themselves wait on three gates: the
    estimate (front 1); compile time, since a map recomputed in a reader that
    is itself recomputed is copied in each place, and the GPT cover at 8
    layers went from 62 s to 790 s in the prototype; and the open question
