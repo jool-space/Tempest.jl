@@ -1,5 +1,5 @@
 # The coverage suite's cases: compositions nobody wrote code for, each with the
-# structure recorded for its plan. test/coverage.jl checks them and
+# structure recorded for its streaming plan. test/coverage.jl checks them and
 # test/bench/coverage.jl times them.
 #
 # A structure is the number of kernels, the bytes stored (inputs and constants

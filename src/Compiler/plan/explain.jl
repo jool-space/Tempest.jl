@@ -30,7 +30,7 @@ they are read. For a prepared program, also the precision of its products,
 the close calls measured between implementations, how values share storage,
 and which implementation runs each kernel, at what estimated or measured time.
 
-It describes how Tempest keeps its promises today; what it prints may change.
+It describes what Tempest decided today; what it prints may change.
 """
 function explain end
 

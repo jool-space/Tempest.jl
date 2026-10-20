@@ -564,8 +564,8 @@ end
 
 # A gather's adjoint scatters on the device: one item per element scattered,
 # adding atomically, so the sums at an index selected more than once come in
-# no fixed order and differ from the interpreter's by rounding (Promise 3: up
-# to summation order). With repeated indices, two index arrays, and ranges
+# no fixed order and differ from the interpreter's by rounding, which is the
+# order every kernel is held to. With repeated indices, two index arrays, and ranges
 # and integers beside an index array.
 const SCATTERS = [
     ("embedding", (E, t, g) -> sum(E[:, t] .* g), (data(64, 109), Int32.(mod1.(37 .* (1:1024) .^ 2, 109)), data(64, 1024; scale = 0.37))),

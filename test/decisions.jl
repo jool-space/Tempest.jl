@@ -1,10 +1,11 @@
-# The promises in DESIGN.md, as tests over plans. Promise 1 (layout spelling
-# does not matter) and Promise 2 (one rule decides fusion) are checked here on
-# the plan the cover chooses; the others are checked where their mechanism
-# lives (plan.jl, coverage.jl, runtime.jl, cache.jl). Each promise has cases
-# that hold and cases that do not yet: a case not met is `@test_broken` under
-# a testset that names what closes the gap, as the coverage suite does. A
-# closed gap fails here as an unexpected pass, and its case moves up.
+# What a user relies on of the plans Tempest decides, as tests: that the
+# spelling of a layout does not change them, that one rule decides fusion,
+# that identical layers cost the same each, and that the estimates that
+# decide hold up when measured. What holds of kernels, coverage, the runtime
+# and the cache is tested where each lives. Each property has cases that hold
+# and cases that do not yet: a case not met is `@test_broken` under a testset
+# that names what closes the gap, as the coverage suite does. A closed gap
+# fails here as an unexpected pass, and its case moves up.
 using Statistics
 
 # The plan the cover chooses for `f`, with every implementation the target
@@ -43,7 +44,7 @@ end
 const CANONICAL_DOMAIN = "one canonical axis order for a group's domain"
 const SCALING_FORMS = "x / n and x · (1 / n) one form under the numerics policy where 1 / n is inexact"
 
-@testset "promise 1: layout spelling does not matter" begin
+@testset "layout spelling does not matter" begin
     a, b = data(8, 6), data(8, 6; scale = 0.3)
     # Spellings that plan alike today.
     @test same_plan(a -> sum(a; dims = 1), a -> reduce(+, a; dims = 1), a)
@@ -98,7 +99,7 @@ function estimated(p::C.Plan, target)
     sum(g -> C.decide(d, p, g).choice.estimate, filter(g -> C.chosen(p, g), p.groups); init = 0.0)
 end
 
-@testset "promise 2: one rule decides fusion" begin
+@testset "one rule decides fusion" begin
     x, w = data(64, 32), data(32, 16)
     p = chosen(map_fold_product, x, w)
     graph = p.graph
@@ -137,7 +138,7 @@ stack(L, dev; width = 64) =
 # tests run in parallel, and a timing shares the host.
 seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
 
-@testset "promise 5: identical layers cost the same each" begin
+@testset "identical layers cost the same each" begin
     distinct(p) = length(unique(C.canonical(p, g) for g in p.groups))
     function planned(L)
         layers, x = stack(L, identity)
@@ -245,7 +246,7 @@ within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
 # work is not priced: the estimate of the plan that stores the scores is low
 # and of the one that recomputes them high, and where they decide, the
 # decision contradicts the measurement.
-const SWEEP_ESTIMATE = "estimates of pointwise work inside a product's sweep (ROADMAP, front 1)"
+const SWEEP_ESTIMATE = "estimates of pointwise work inside a product's sweep (TRIALS: the cost of a kernel)"
 in_sweep(c) = occursin("softcap", c.name) || occursin("SiLU", c.name)
 
 @testset "estimates that decide are within the close-call factor, or measured" begin
@@ -279,7 +280,7 @@ in_sweep(c) = occursin("softcap", c.name) || occursin("SiLU", c.name)
     end
 end
 
-# Gaps the probes of 21 October found, each under what closes it.
+# Gaps the probes of unfamiliar spellings found, each under what closes it.
 const TEMPERATURE = "a constant on the exponent, exp(c·(y − m)), as a scale of the exponential law"
 const WIDER_SUM = "a sum over more axes than its statistic's, as the fold and a sum of it"
 const REVERSED_VIEW = "a read with a negative stride as a view of its buffer (the cuTile generator)"

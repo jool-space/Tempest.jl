@@ -1,6 +1,5 @@
 """
-Tempest compiles traced Julia array programs into planned, fused kernels. See
-DESIGN.md for the design this code implements.
+Tempest compiles traced Julia array programs into planned, fused kernels.
 
 `Tempest` holds what models are written with: `compile`, and the functions
 programs call beyond Base. `Tempest.Compiler` is how a program becomes
