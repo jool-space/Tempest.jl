@@ -1,13 +1,13 @@
-the verb	157.4566401541233
-written out with contract and logsumexp	157.62176364660263
-softcap 30·tanh(s/30)	168.02268025154868
-SiLU scores, no softmax (HSTU)	109.48444509671793
+the verb	123.60999244265258
+written out with contract and logsumexp	123.64199210423976
+softcap 30·tanh(s/30)	135.11282680877324
+SiLU scores, no softmax (HSTU)	124.95793822792268
 SiLU scores, a training step (HSTU)	679.5626444121202
-softmax spelled exp(s - max) / sum	378.68800573050976
-the verb, then a residual	159.49866307588914
-written out, then a residual	158.75199809670448
-the verb, and a reduction of its output	159.43167731165886
-the verb, a training step	589.2022911991392
+softmax spelled exp(s - max) / sum	123.2719951076433
+the verb, then a residual	124.10100316628814
+written out, then a residual	124.2180005647242
+the verb, and a reduction of its output	124.95000555645674
+the verb, a training step	754.4768042862415
 written out, a training step	195.40800713002682
 RMSNorm, divided by the root	9.887040359899402
 RMSNorm, times the inverse root	9.776640217751265
@@ -17,5 +17,9 @@ layer norm, from the mean of squares	9.98624018393457
 softmax through logsumexp	5.564320017583668
 softmax shifted by the maximum	5.694080027751625
 softmax, exp written twice	5.00096008181572
-softmax, exp computed once	7.9500803258270025
+softmax, exp computed once	4.939680220559239
 linear, bias, GELU	13.43664014711976
+padding, then a reduction	2.190240047639236
+a concatenation, then a map	4.694079980254173
+a slice written, then a reduction	3.86208004783839
+a slice written, a training step	12.129759415984154

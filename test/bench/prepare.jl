@@ -5,6 +5,7 @@
 #   julia --project=test test/bench/prepare.jl [--save|--compare path]
 include("guard_rails.jl")
 using Serialization
+import Tempest.Operations as Ops
 
 D, H, S, B = 64, 12, 256, 16
 q, k, v = guard_data(D, H, S, B; scale = 0.001f0), guard_data(D, H, S, B; scale = 0.002f0), guard_data(D, H, S, B; scale = 0.003f0)
