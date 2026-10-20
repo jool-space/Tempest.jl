@@ -107,14 +107,20 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    together, so the cover's trials do not grow with the layers; and Tempest
    proposes joining a stored value into the kernel that reads it, one
    proposal per edge between groups, which closes Promise 3's test (74 of
-   the suite's 1004 plans drop a kernel, none gains one). Remaining: the
-   other rule-made choices (storing a fold the rules recompute, recomputing
-   a map in its readers, declining an epilogue) become proposals too, and
-   the planner's own constants go with them; and the planner's dependency
-   check (`ancestors`, `depends`), which still grows faster than the layers
-   (about 1.0 ms per layer at 16 layers, 1.9 at 64, 3.7 at 128), so that
-   each whole-graph trial does too. Gate: one place decides what forms a
-   kernel, and preparing 64 layers costs the same per layer as 8. The floor
+   the suite's 1004 plans drop a kernel, none gains one). A join that
+   cannot form a group is rejected before any trial, proposals are classed
+   by the groups they reach, and the planner's dependency check looks at
+   each value once, with ancestors as masks: the GPT step's cover at 4
+   layers went from 65 s to 26 s, at 8 layers from 373 s to 75 s, and one
+   plan of it at 8 layers from 0.41 s to 0.18 s. Remaining: the other
+   rule-made choices (storing a fold the rules recompute, recomputing a map
+   in its readers, declining an epilogue) become proposals too, and the
+   planner's own constants go with them; and what still grows with depth,
+   that each trial is a whole claimed plan (three plans under the `keep`
+   loop and a round of claims on every group, which the recompute-or-store
+   proposals remove) and that the classes grow (54 at 4 layers, 74 at 8).
+   Gate: one place decides what forms a kernel, and preparing 64 layers
+   costs the same per layer as 8. The floor
    stays priced only where nothing else claims: offered on every group, its
    estimate was wrong by up to 467 times (a serial sweep is not a roofline
    quantity), it won 283 groups and 44 of them wrongly, and no fit of bytes
