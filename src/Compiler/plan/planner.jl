@@ -207,6 +207,22 @@ that `recomputed_folds` selects, apart from those in `keep` and `fixed`, are
 recomputed where they are read instead of stored.
 """
 function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false, keep = ())
+    s = storing(graph; fixed, recompute_folds, keep)
+    graph, stored, live, results, running = s.graph, s.stored, s.live, s.results, s.running
+    # A pointwise value read only by one group over its domain, at the same
+    # index, is recomputed by that group: grouped again without it.
+    p = group_values(graph, copy(stored), live, results, running, fixed)
+    users = readers(graph)
+    n = length(graph.values)
+    shared = filter(id -> !any(s -> id in s, fixed) && recomputable(p, users, id, live, results, s.materialized), 1:n)
+    isempty(shared) && return p
+    stored[shared] .= false
+    group_values(graph, stored, live, results, running, fixed)
+end
+
+# What `plan` decides before it forms kernels: the graph with its results
+# stored, what is stored, what runs, and the folds recomputed where read.
+function storing(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false, keep = ())
     graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
@@ -269,14 +285,7 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute_folds = false,
         all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
         all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
     end
-    # A pointwise value read only by one group over its domain, at the same
-    # index, is recomputed by that group: grouped again without it.
-    p = group_values(graph, copy(stored), live, results, running, fixed)
-    users = readers(graph)
-    shared = filter(id -> !any(s -> id in s, fixed) && recomputable(p, users, id, live, results, materialized), 1:n)
-    isempty(shared) && return p
-    stored[shared] .= false
-    group_values(graph, stored, live, results, running, fixed)
+    (; graph, stored, live, results, running, materialized, recomputed)
 end
 
 # An opaque operation's instance: a call's results run together.
@@ -317,14 +326,14 @@ function reach!(frontier, followers, stored, from, seed)
     frontier
 end
 
-# The kernels, given what is stored.
-function group_values(graph, stored, live, results, running, fixed)
+# The kernels of opaque work, with the epilogues they absorb, and what the
+# planner needs to form the rest: each value's kernel and ancestors.
+function opaque_groups(graph, stored, live, results, running)
     values = graph.values
     n = length(values)
-    up = ancestors(graph)
     owner = zeros(Int, n)
     groups = Group[]
-    deps = Dependencies(owner, groups, up)
+    deps = Dependencies(owner, groups, ancestors(graph))
     # Opaque work first, one group per operation over its first result's
     # domain (all results of a claimed call together, in order), which may
     # absorb the pointwise work after a result as an epilogue its kernel
@@ -343,6 +352,15 @@ function group_values(graph, stored, live, results, running, fixed)
     for (k, g) in enumerate(groups), o in copy(g.outputs)
         values[o].definition.epilogue && absorb_epilogue!(graph, stored, users, results, owner, g, k, o)
     end
+    deps
+end
+
+# The kernels, given what is stored.
+function group_values(graph, stored, live, results, running, fixed)
+    values = graph.values
+    n = length(values)
+    deps = opaque_groups(graph, stored, live, results, running)
+    owner, groups, up = deps.owner, deps.groups, deps.up
     for set in fixed
         push!(groups, fixed_group(graph, stored, deps, set))
         foreach(m -> owner[m] = length(groups), set)

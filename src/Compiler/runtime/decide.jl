@@ -472,36 +472,41 @@ function Around(p::Plan, sets)
     Around(owned, map(place, eachindex(p.groups)), reading, followers)
 end
 
-# The groups of `p` that a change to value `v` could change: its own; those
-# that could grow into it, owning or reading what it loads; and those that
-# read it, directly or through values not stored.
-function neighbours(p::Plan, a::Around, v)
-    v > length(p.owner) && return Int[]
-    found = p.owner[v] == 0 ? Int[] : [p.owner[v]]
-    pending, seen = [v], Set{Int}()
+# The stored values `v` reads, directly or through values not stored.
+function loaded(p::Plan, v)
+    found, pending, seen = Int[], [v], Set{Int}()
     while !isempty(pending)
         for o in operands(p.graph.values[pop!(pending)].definition), r in read_values(o)
             r in seen && continue
             push!(seen, r)
-            if p.stored[r] || p.owner[r] != 0
-                p.owner[r] == 0 || push!(found, p.owner[r])
-                append!(found, a.reading[r])
-            else
-                push!(pending, r)
-            end
+            p.stored[r] || p.owner[r] != 0 ? push!(found, r) : push!(pending, r)
         end
     end
+    found
+end
+
+# The groups of `p` that value `v` reaches directly: its own, those owning
+# what it loads, and those reading it, directly or through values not stored.
+function reached(p::Plan, a::Around, v)
+    v > length(p.owner) && return Int[]
+    found = [p.owner[v]; [p.owner[r] for r in loaded(p, v)]]
     pending, seen = [v], Set{Int}()
     while !isempty(pending)
         for w in a.followers[pop!(pending)]
             w in seen && continue
             push!(seen, w)
-            p.owner[w] == 0 || push!(found, p.owner[w])
+            push!(found, p.owner[w])
             p.stored[w] || push!(pending, w)
         end
     end
-    found
+    filter!(!=(0), found)
 end
+
+# The groups of `p` that a change to value `v` could change: those it
+# reaches, and those that could grow into it, reading what it loads; in a
+# stack of layers the latter may span them all.
+neighbours(p::Plan, a::Around, v) =
+    v > length(p.owner) ? Int[] : [reached(p, a, v); (a.reading[r] for r in loaded(p, v))...]
 
 "A stored value joined into the group of a kernel that reads it: a proposal of the planner's own."
 struct Join
@@ -518,14 +523,14 @@ fixes(q::ClaimedCall) = nothing
 touches(q) = q isa ClaimedCall ? [q.site.values; [r.value for r in q.site.reads]] : fixes(q)
 
 """
-A proposal's place in a plan, by what it touches: the groups around its
-values, in the order the planner forms them, and its values among them,
-numbered as `canonical` numbers one group's. Proposals with one key in the
-generator's plan are the same edit in identical layers.
+A proposal's place in a plan, by what it touches: the groups its values
+reach (`reached`), in the order the planner forms them, and its values among
+them, numbered as `canonical` numbers one group's. Proposals with one key in
+the generator's plan are the same edit in identical layers.
 """
 function proposal_key(p::Plan, a::Around, q)
     around = Set{Int}()
-    foreach(v -> union!(around, neighbours(p, a, v)), touches(q))
+    foreach(v -> union!(around, reached(p, a, v)), touches(q))
     io = IOBuffer()
     for j in sort!(collect(around); by = j -> something(a.places[j], (:opaque, minimum(a.owned[j]))))
         g = p.groups[j]
@@ -586,6 +591,21 @@ function cover(d::Decider)
     for q in joins(base)
         any(x -> fixes(x[1]) == q.group, proposals) || push!(proposals, (q, nothing))
     end
+    # What the generator's plan stores and its opaque kernels: a set that does
+    # not form one group there, where a trial would first form it, is not
+    # tried. A set holding a fold the plan recomputes changes what is stored.
+    start = storing(d.graph; recompute_folds = any_recomputes_folds(d.target), keep)
+    deps = opaque_groups(start.graph, start.stored, start.live, start.results, start.running)
+    function forms(set)
+        isdisjoint(set, start.recomputed) || return true
+        try
+            fixed_group(start.graph, start.stored, deps, set)
+            true
+        catch e
+            e isa NotAGroup || rethrow()
+            false
+        end
+    end
     arounds = IdDict{Plan, Around}()
     around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if !(x isa ClaimedCall)]), arounds, p)
     function trial(current, taken, qs)
@@ -594,6 +614,7 @@ function cover(d::Decider)
         calls = ClaimedCall[x for x in all if x isa ClaimedCall]
         # A value belongs to one proposal.
         allunique(Iterators.flatten([sets; [c.site.values for c in calls]])) || return nothing
+        isempty(taken) && isempty(calls) && length(sets) == 1 && !forms(only(sets)) && return nothing
         try
             first(claimed_plan(d, claimed(d.graph, calls); fixed = sets, keep))
         catch e
