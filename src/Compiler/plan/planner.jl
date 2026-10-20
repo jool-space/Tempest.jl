@@ -122,12 +122,14 @@ gathered_values(o::Literal) = Int[]
 read_values(o::Read) = [o.value; gathered_values(o)]
 read_values(o::Operand) = gathered_values(o)
 
-# The values each value reads, directly or through others.
+# The values each value reads, directly or through others, as a mask over
+# the values.
 function ancestors(graph)
-    up = [Set{Int}() for _ in graph.values]
+    n = length(graph.values)
+    up = [falses(n) for _ in 1:n]
     for (id, v) in enumerate(graph.values), o in operands(v.definition), r in read_values(o)
-        push!(up[id], r)
-        union!(up[id], up[r])
+        up[id][r] = true
+        up[id] .|= up[r]
     end
     up
 end
@@ -139,7 +141,7 @@ yet), each value's ancestors, and what each kernel reads, once asked.
 struct Dependencies
     owner::Vector{Int}
     groups::Vector{Group}
-    up::Vector{Set{Int}}
+    up::Vector{BitVector}
     reads::Dict{Int, Set{Int}}
 end
 
@@ -149,14 +151,18 @@ Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{
 # its ancestors, and through the kernels that own any of them, each of which
 # runs after everything its members read. A kernel that read such a value and
 # joined such a member would make kernels depend on each other in a cycle.
+# A value among the ancestors of one already looked at is passed over: its
+# ancestors are among them, and their kernels were looked at.
 function depends(graph, deps::Dependencies, reads, group)
-    pending, seen, kernels = collect(reads), Set{Int}(), Set{Int}()
+    pending, covered, kernels = collect(reads), falses(length(deps.owner)), Set{Int}()
     while !isempty(pending)
         r = pop!(pending)
-        r in seen && continue
-        push!(seen, r)
-        (r in group || !isdisjoint(deps.up[r], group)) && return true
-        for u in Iterators.flatten(((r,), deps.up[r]))
+        covered[r] && continue
+        any(m -> m == r || deps.up[r][m], group) && return true
+        fresh = deps.up[r] .& .!covered
+        fresh[r] = true
+        covered .|= fresh
+        for u in findall(fresh)
             k = deps.owner[u]
             (k == 0 || k in kernels) && continue
             push!(kernels, k)
@@ -416,7 +422,7 @@ function group_values(graph, stored, live, results, running, fixed)
             other = frontier[k]
             k += 1
             live[other] && owner[other] == 0 && values[other].definition isa Pointwise && values[other].dims == g.domain || continue
-            any(m -> m in up[other], members(g)) && try_add!(graph, stored, deps, g, other; fold = false) || continue
+            any(m -> up[other][m], members(g)) && try_add!(graph, stored, deps, g, other; fold = false) || continue
             reach!(frontier, followers, stored, [other], id)
         end
         push!(groups, g)
