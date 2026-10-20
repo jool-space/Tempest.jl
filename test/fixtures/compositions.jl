@@ -34,8 +34,6 @@ Composition(name, program, args, expected; generated = expected) = Composition(n
 
 sample(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
 
-const BACKWARD = "a generated attention backward pass (DESIGN, next 4)"
-
 ## Attention: (features, heads, positions, batch), causal, one key head per
 ## query head. Small enough to compile quickly, long enough to stream keys.
 
@@ -81,11 +79,13 @@ const ATTENTION = [
         (kernels = 1, bytes = O, largest = O)),
     Composition("the function, and a reduction of its output", trace((q, k, v) -> (o = attend(q, k, v); (o, sum(abs2, o; dims = 1))), q, k, v),
         (q, k, v), (kernels = 2, bytes = O + LSE, largest = O)),
-    # The scores are stored once, between the forward pass and the backward.
+    # The streaming plan recomputes the scores in the backward pass too, so no
+    # value as large as them is stored; the cover stores them at this size,
+    # measured faster.
     Composition("the function, a training step", training((q, k, v) -> sum(abs2, attend(q, k, v)), q, k, v), (q, k, v),
-        (bytes = Gap(5O + 2LSE + 4, BACKWARD), largest = Gap(O, BACKWARD))),
+        (bytes = 5O + 2LSE + 4, largest = O)),
     Composition("written out, a training step", training((q, k, v) -> sum(abs2, written(q, k, v)), q, k, v), (q, k, v),
-        (largest = Gap(O, BACKWARD),)),
+        (largest = O,)),
 ]
 
 ## Spellings outside attention, over the columns of a matrix.

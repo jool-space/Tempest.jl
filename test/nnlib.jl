@@ -58,7 +58,8 @@ if CUDA_FUNCTIONAL
             (q, k, v) -> (s = scores(q, k); NNlib.batched_mul(v, exp.(s .- T.logsumexp(s; dims = 1))))]
         q, k, v = (Float32.(data(16, 200, 3; scale)) for scale in (0.1, 0.2, 0.3))
         for f in spellings
-            ex = prepare(trace(f, q, k, v), map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
+            p = trace(f, q, k, v)
+            ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile), recompute = C.recomputable_folds(C.rewrite(C.lower(p))))
             kernel = only(ex.kernels)
             @test !(kernel isa C.FloorKernels) && occursin("online softmax", string(kernel))
             @test close(C.leaves(outputs(execute!(ex))), [f(q, k, v)]; rtol = 1.0e-4)

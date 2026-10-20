@@ -110,14 +110,16 @@ the wrong vocabulary. test/promises.jl records what each front still owes as
    by the groups they reach, and the planner's dependency check looks at
    each value once, with ancestors as masks: the GPT step's cover at 4
    layers went from 65 s to 26 s, at 8 layers from 373 s to 75 s, and one
-   plan of it at 8 layers from 0.41 s to 0.18 s. Decided, on 20 October:
-   recomputing a value becomes one proposal kind, `Recompute(value)`, the
-   same edit for a fold and a map, keyed so that identical layers price it
-   once; and the start stores every fold, so recomputing is only ever a
-   proposal. That deletes the planner's two constants, the `keep` loop and
-   `claimed_plan`: the rule they encode measures slower than storing in 9
-   of 10 small programs, up to 24 times, and is most of what a plan costs at
-   8 layers. Done since: the generator names a fold's accumulator by its
+   plan of it at 8 layers from 0.41 s to 0.18 s. Done, on 21 October: the start
+   stores every fold, and recomputing a fold where it is read is one
+   proposal kind, `Recompute(value)`, priced where an implementation that
+   recomputes folds claims every kernel that recomputes it; the planner's
+   two constants, the `keep` loop and `claimed_plan` are gone, and
+   `prepare` takes `recompute` to pin folds. At the coverage suite's size
+   the cover stores attention's scores, measured faster (96 against 131 μs
+   forward, 214 against 3300 μs for the step); at 1024 and 2048 positions
+   it streams, measured a wash. HSTU's forward is the miss: streaming
+   measures 5% faster and the estimate says 4.6 times slower. Done since: the generator names a fold's accumulator by its
    place in the group rather than its value id, so that groups alike across
    layers share one kernel (the stack of 8 builds none the stack of 4 has
    not; before, 33 kernels at 4 layers and 36 more at 8); and `plan` takes
@@ -215,14 +217,10 @@ one place decides what forms a kernel.
   kernels up to the naming of their index points, beside the open gap.
 - How claims are written: as code over a group first, and as declarative
   patterns once the common cases are known.
-- Whether Promise 6's "stores nothing that a streaming algorithm makes
-  unnecessary" constrains the plan, or means that the streaming plan is always
-  proposed and priced. At the coverage suite's size, storing attention's
-  scores measures 3 to 5 times faster than streaming in the training steps
-  (HSTU 743 μs against 213; the attention step 701 against 135), so a cover
-  that decides by honest cost stores them and the suite's one-kernel
-  expectations fail. Under the second reading, which keeps one rule, the
-  suite checks attention at a size where streaming wins.
+- Resolved, 21 October: Promise 6 means the streaming plan is always
+  proposed and priced, and the cover chooses by cost. The coverage suite
+  checks the streaming plan's structure by pinning its folds, and that the
+  chosen plan is correct and no worse by estimate.
 - Whether differentiation and planning derive attention's backward schedule
   (store the log-sum-exp, recompute scores inside the consumer). Since the
   hand-written kernels went, the backward is generated from the forward's

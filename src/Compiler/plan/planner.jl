@@ -452,22 +452,15 @@ function fixed_group(graph, stored, deps, set)
     g
 end
 
-# A fold recomputed where it is read saves its storage and a kernel. Selected
-# when every value it reaches through maps is a fold over another domain (a
-# fold over the same domain joins its group as a later phase instead), each
-# reading fold computes it at most once per block (it moves along every kept
-# axis of the reader wider than a tile), and either the fold is a product over
-# few elements, recomputed as one product per tile, or no reading fold reads
-# it at positions that move along its own reduced axes, so a kernel computes
-# it once per block, before or during its sweep. A fold that recomputes one
-# selected before it is selected only in the last case: inside a reader's
-# sweep, the folds it recomputes would be recomputed at every step, for every
-# position they do not depend on. Results, the operands of opaque work, the
-# indices of gathers and the folds `kept` stay stored.
-const RECOMPUTED_PRODUCT = 256
-const RECOMPUTED_SPAN = 128
-
-function recomputed_folds(graph, kept = Set{Int}())
+# The folds that can be recomputed where they are read, as proposals for the
+# cover (see `Recompute`): a fold that is not a result, an operand of opaque
+# work, an index of a gather, or in `kept`, whose every reader through maps is
+# a fold over another domain (a fold over the same domain joins its group as
+# a later phase instead). A fold recomputed inside a reader's sweep, at
+# positions that move along its own reduced axes, does not recompute such a
+# fold in turn: nested sweeps multiply the work past what a plan should price.
+# Whether recomputing pays is the cover's decision, by cost.
+function recomputable_folds(graph, kept = Set{Int}())
     s = storing(graph)
     graph, results, materialized = s.graph, s.results, s.materialized
     values = graph.values
@@ -497,16 +490,9 @@ function recomputed_folds(graph, kept = Set{Int}())
             end
         end
         ok && !isempty(consumers) || continue
-        all(consumers) do (u, at)
-            du = values[u].definition
-            du.iteration != d.iteration &&
-                all(k -> k in du.reduced || du.iteration[k] <= RECOMPUTED_SPAN || any(e -> mentions(e, k), at), eachindex(du.iteration))
-        end || continue
-        o = d.operand
-        product = prod(k -> d.iteration[k], d.reduced; init = 1) <= RECOMPUTED_PRODUCT && o isa Read &&
-            values[o.value].definition isa Pointwise{typeof(*)} && length(values[o.value].definition.operands) == 2
+        all(((u, _),) -> values[u].definition.iteration != d.iteration, consumers) || continue
         hoisted = all(((u, at),) -> !any(k -> any(e -> mentions(e, k), at), values[u].definition.reduced), consumers)
-        hoisted || product && !recomputes(values, v, selected, results, materialized) || continue
+        hoisted || !recomputes(values, v, union(selected, kept), results, materialized) || continue
         push!(selected, v)
     end
     selected

@@ -41,14 +41,26 @@ const TOLERANCE = 1.0e-3
 
 if CUDA_FUNCTIONAL
     references = Dict(c.name => filter(!isnothing, C.leaves(interpret(c.program, c.args...))) for c in COMPOSITIONS)
-    prepared(c, target) = prepare(c.program, map(CuArray, c.args)...; target, measure = false)
+    # The streaming plan: every fold that can be recomputed where it is read
+    # is. The structure recorded for a composition is this plan's. The cover
+    # chooses by cost, so its plan may store more: it is correct, and never
+    # worse by its own estimate than the streaming plan.
+    streaming(c) = C.recomputable_folds(C.rewrite(C.lower(c.program)))
+    prepared(c, target; recompute = ()) = prepare(c.program, map(CuArray, c.args)...; target, measure = false, recompute)
+    function estimated(ex)
+        d = C.Decider(ex.target, ex.plan.graph; measure = false)
+        sum(g -> C.decide(d, ex.plan, g).choice.estimate, filter(g -> C.chosen(ex.plan, g), ex.plan.groups); init = 0.0)
+    end
 
     @testset "coverage" begin
         @testset "every implementation" begin
             @testset "$(c.name)" for c in COMPOSITIONS
-                ex = prepared(c, T.CUDATarget())
+                ex = prepared(c, T.CUDATarget(); recompute = streaming(c))
                 @test relative_error(ex, references[c.name]) <= TOLERANCE
                 check_structure(structure(ex), c.expected)
+                chosen = prepared(c, T.CUDATarget())
+                @test relative_error(chosen, references[c.name]) <= TOLERANCE
+                @test estimated(chosen) <= estimated(ex) * (1 + 1.0e-6)
             end
         end
         # Removing an implementation changes how fast a program runs, never
@@ -56,7 +68,7 @@ if CUDA_FUNCTIONAL
         # without the generator (cuBLAS and the floor).
         @testset "an implementation removed" begin
             @testset "$(c.name)" for c in COMPOSITIONS
-                ex = prepared(c, T.CUDATarget(cuTile))
+                ex = prepared(c, T.CUDATarget(cuTile); recompute = streaming(c))
                 @test relative_error(ex, references[c.name]) <= TOLERANCE
                 check_structure(structure(ex), c.generated)
                 ex = prepared(c, T.CUDATarget(cuBLAS))

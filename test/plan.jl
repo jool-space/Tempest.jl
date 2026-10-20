@@ -12,8 +12,8 @@ include("fixtures/programs.jl")
     end
 end
 
-# The plan that recomputes the folds `recomputed_folds` selects.
-recomputing(graph) = C.plan(graph; recompute = C.recomputed_folds(graph))
+# The plan that recomputes every fold that can be: what the cover proposes.
+recomputing(graph) = C.plan(graph; recompute = C.recomputable_folds(graph))
 
 # Folds recomputed where they are read, as plans for cuTile recompute them:
 # the same results, and attention's scores and logsumexp inside the one

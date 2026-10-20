@@ -162,6 +162,8 @@ mutable struct Decider
     memories::Dict{Symbol, Memory}
     record::Dict{String, Float64}
     record_path::Union{Nothing, String}
+    # Folds pinned to be recomputed where they are read, in every plan.
+    pinned::Set{Int}
     buffers::Vector{Any}
     built::Dict{String, Any}
     # The choice for each group alike (by `canonical`): its rank among the
@@ -170,12 +172,12 @@ mutable struct Decider
     instances::Dict{Any, Decision}
 end
 
-function Decider(target, graph; measure = :close)
+function Decider(target, graph; measure = :close, recompute = ())
     path, calibration_path = record_path(target), rates_path(target)
     calibration = load_record(calibration_path)
     Decider(target, graph, measurable(target) ? level(measure) : :none, device_rates!(target, calibration, calibration_path),
         calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), load_record(path), path,
-        Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
+        Set{Int}(recompute), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
 end
 
 level(measure::Bool) = measure ? :close : :none
@@ -410,9 +412,15 @@ struct Join
     group::Vector{Int}
 end
 
-"The values a proposal fixes as one group."
+"A fold recomputed where it is read instead of stored: a proposal of the planner's own."
+struct Recompute
+    value::Int
+end
+
+"The values a proposal is about: those it fixes as one group, or the fold it recomputes."
 fixes(q::Vector{Int}) = q
 fixes(q::Join) = q.group
+fixes(q::Recompute) = [q.value]
 
 """
 A proposal's place in a plan, by the values it fixes: the groups its values
@@ -434,6 +442,7 @@ function proposal_key(p::Plan, a::Around, q)
         end
     end
     q isa Join && print(io, " || join %", q.value)
+    q isa Recompute && print(io, " || recompute")
     print(io, " || ", join(map(v -> "%$v", fixes(q)), " "))
     numbers = Dict{String, Int}()
     text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
@@ -462,18 +471,22 @@ end
 """
     cover(decider) -> (plan, considered)
 
-The generator's groups, with the proposals implementations make and the
-planner's own joins accepted greedily by estimated gain over the generator's
-plan, then by their values, each when its proposer claims the group it forms
-(any claim, or the floor, for a join). Proposals alike in the generator's plan
-(`proposal_key`) are one edit in identical layers: priced once, and taken
-together. A proposal is priced again in the current plan when an edit taken
-already changed a group around it. Each trial plans the whole graph, and is
-compared with the plan it changes on the groups that differ. Every proposal
-compared is returned, taken or not.
+The planner's groups, with every fold stored, and the proposals: those
+implementations make, the planner's own joins of a stored value into the
+kernel that reads it, and the planner's own recomputing of a fold where it is
+read (see `recomputable_folds`), where an implementation recomputes folds.
+Proposals are accepted greedily by estimated gain over the plan, then by
+their values, each when its proposer claims the group it forms (any claim,
+or the floor, for a join; a claim of an implementation that recomputes folds,
+for a fold recomputed). Proposals alike in the starting plan (`proposal_key`)
+are one edit in identical layers: priced once, and taken together. A proposal
+is priced again in the current plan when an edit taken already changed a
+group around it. Each trial plans the whole graph, and is compared with the
+plan it changes on the groups that differ. Every proposal compared is
+returned, taken or not. Folds the decider pins are recomputed in every plan.
 """
 function cover(d::Decider)
-    base, keep = generator_plan(d)
+    base = generator_plan(d)
     proposals = Tuple{Any, Union{Nothing, Implementation}}[]
     for i in implementations(d.target), q in candidates(i, d.target, base)
         any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
@@ -481,14 +494,18 @@ function cover(d::Decider)
     for q in joins(base)
         any(x -> fixes(x[1]) == q.group, proposals) || push!(proposals, (q, nothing))
     end
-    # What the generator's plan stores and its opaque kernels: a set that does
+    if any_recomputes_folds(d.target)
+        for v in sort!(collect(recomputable_folds(d.graph, d.pinned)))
+            push!(proposals, (Recompute(v), nothing))
+        end
+    end
+    # What the starting plan stores and its opaque kernels: a set that does
     # not form one group there, where a trial would first form it, is not
-    # tried. A set holding a fold the plan recomputes changes what is stored.
-    recomputed = any_recomputes_folds(d.target) ? recomputed_folds(d.graph, keep) : Set{Int}()
-    start = storing(d.graph; recompute = recomputed)
+    # tried. A set holding a pinned fold changes what is stored.
+    start = storing(d.graph; recompute = d.pinned)
     deps = opaque_groups(start.graph, start.running)
     function forms(set)
-        isdisjoint(set, recomputed) || return true
+        isdisjoint(set, d.pinned) || return true
         try
             fixed_group(start.graph, start.stored, deps, set)
             true
@@ -498,28 +515,33 @@ function cover(d::Decider)
         end
     end
     arounds = IdDict{Plan, Around}()
-    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken]), arounds, p)
+    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if !(x isa Recompute)]), arounds, p)
     function trial(current, taken, qs)
         all = Any[taken; qs]
-        sets = Vector{Int}[fixes(x) for x in all]
+        sets = Vector{Int}[fixes(x) for x in all if !(x isa Recompute)]
+        recompute = Set{Int}(d.pinned)
+        foreach(x -> x isa Recompute && push!(recompute, x.value), all)
         # A value belongs to one proposal.
-        allunique(Iterators.flatten(sets)) || return nothing
+        allunique(Iterators.flatten(fixes(x) for x in all)) || return nothing
         isempty(taken) && length(sets) == 1 && !forms(only(sets)) && return nothing
         try
-            first(claimed_plan(d; fixed = sets, keep))
+            plan(d.graph; fixed = sets, recompute = recompute)
         catch e
             e isa NotAGroup || rethrow()
             nothing
         end
     end
     # A proposal's comparison with the plan it is priced in, and the
-    # implementation that claims its group: by key, once.
+    # implementation that claims its group: by key, once. A fold recomputed
+    # is priced when every kernel that recomputes it is claimed by an
+    # implementation that recomputes folds.
     priced = Dict{String, Any}()
     price(current, taken, q, i, key) = get!(priced, key) do
         p = trial(current, taken, Any[q])
         p === nothing && return nothing
         j = i === nothing ? nothing : claimant(d, p, q, i)
         i === nothing || j !== nothing || return nothing
+        q isa Recompute && !recomputed_claimed(d, p, q.value) && return nothing
         (compare(d, p, current), j)
     end
     a = around(base, Any[])
@@ -582,6 +604,9 @@ function explain(io::IO, p::Plan, c::Considered)
     if q isa Join
         c.accepted && println(io, "%", q.value, " joins the kernel of %", first(v for v in q.group if v != q.value), ", which reads it", why)
         return
+    elseif q isa Recompute
+        c.accepted && println(io, "%", q.value, " is recomputed where it is read", why)
+        return
     end
     c.accepted && println(io, "candidate ", join(map(v -> "%$v", q), " "), " from ", label(c.implementation), " replaces the generator's grouping", why)
 end
@@ -592,23 +617,17 @@ any_recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementat
 recomputed_in(g; nested = true) =
     Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Recomputed)
 
-# A plan of `graph`, folds recomputed where they are read when an
-# implementation recomputes them, and the folds kept stored: those in `keep`,
-# and the outermost ones recomputed in a group no implementation claims (folds
-# they recompute in turn may still be recomputed in their kernels). The
-# generator's plan is the plan of the program as written; the cover's trials
-# fix proposals, which leave other folds to recompute.
-generator_plan(d::Decider) = claimed_plan(d)
+# The starting plan: the program as written, every fold stored but those
+# the decider pins to be recomputed.
+generator_plan(d::Decider) = plan(d.graph; recompute = d.pinned)
 
-function claimed_plan(d::Decider; fixed = Vector{Int}[], keep = Set{Int}())
-    keep = Set{Int}(keep)
-    has_claim(view) = any(i -> !isempty(claims(i, d.target, view)), implementations(d.target))
-    while true
-        recompute = any_recomputes_folds(d.target) ? recomputed_folds(d.graph, union(keep, fixed...)) : ()
-        p = plan(d.graph; fixed, recompute)
-        unclaimed = [g for g in p.groups if !isempty(recomputed_in(g)) && !has_claim(group_view(p, g))]
-        isempty(unclaimed) && return p, keep
-        foreach(g -> union!(keep, recomputed_in(g; nested = false)), unclaimed)
+# Whether every kernel of `p` that recomputes fold `v` is claimed by an
+# implementation that recomputes folds on the decider's target.
+function recomputed_claimed(d::Decider, p::Plan, v)
+    recomputing = [i for i in implementations(d.target) if recomputes_folds(i, d.target)]
+    all(p.groups) do g
+        v in recomputed_in(g) || return true
+        any(i -> !isempty(claims(i, d.target, group_view(p, g))), recomputing)
     end
 end
 
@@ -736,7 +755,7 @@ launches as the package estimates them.
 function reference(d::Decider, packages, f, args...; recomputing = false)
     graph = lower(trace(f, args...))
     timing = Decider(d.target, graph; measure = :none)
-    p = plan(graph; recompute = recomputing ? recomputed_folds(graph) : ())
+    p = plan(graph; recompute = recomputing ? recomputable_folds(graph) : ())
     g = only(p.groups)
     view = group_view(p, g)
     fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()

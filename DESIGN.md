@@ -59,9 +59,11 @@ What a user can rely on. Each one is checked by tests.
    language plans and runs with only the generator and the generic kernels,
    whatever else is loaded. A composition nobody wrote code for (another score
    function in attention, another spelling of softmax, an extra reduction,
-   gradients) gets a plan without anyone adding that combination, and stores
-   nothing that a streaming algorithm makes unnecessary; the coverage suite
-   checks the kernels and bytes stored (see Testing).
+   gradients) gets a plan without anyone adding that combination, and has a
+   plan that stores nothing a streaming algorithm makes unnecessary, which
+   the cover proposes and prices against storing, choosing by cost; the
+   coverage suite checks that plan's kernels and bytes, and that the chosen
+   plan is correct and never worse by the cover's own estimate (see Testing).
 
 ## Purpose and scope
 

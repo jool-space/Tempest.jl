@@ -111,7 +111,7 @@ end
 
 
 """
-    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = ()) -> Executable
+    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = ()) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
@@ -137,6 +137,11 @@ positions in `by_reference`, which must be of the target's array type: they
 are the executable's storage. The caller keeps them alive and may write them
 between executions, and a result that replaces one writes into it.
 
+`recompute` pins folds to be recomputed where they are read rather than
+stored, by their numbers among the values of the program's index graph, as
+`explain` prints them: what the cover would otherwise decide by cost (see
+`Tempest.Compiler.recomputable_folds`).
+
 A training loop, where the step returns the loss and the new parameters and
 optimizer state:
 
@@ -155,10 +160,10 @@ For a function called on new arguments each time, `compile` does the binding
 and copying.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = :close,
-        replaces = (), by_reference = ())
+        replaces = (), by_reference = (), recompute = ())
     graph = lower(program)
     permits_rewrites(target) && (graph = rewrite(graph))
-    d = Decider(target, graph; measure)
+    d = Decider(target, graph; measure, recompute)
     p, considered = cover(d)
     ds = decisions(d, p)
     pairs = replacements(program, replaces)

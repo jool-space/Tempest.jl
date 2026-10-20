@@ -208,33 +208,42 @@ attention_cases = [
     end
 end
 
-# A proposal the cover tries leaves other folds to recompute, and a fold
-# recomputed where no implementation claims its reader stays stored, as in
-# the generator's plan. This implementation claims groups over three axes, or
-# that recompute nothing, finds recomputing slow, and proposes storing each
-# fold it recomputes: storing `q` lets `s` be recomputed in the logsumexp,
-# over two axes, which it does not claim.
-struct RecomputesOverThree <: C.Implementation end
+# Recomputing a fold where it is read is a proposal: priced only where an
+# implementation that recomputes folds claims every kernel that recomputes
+# it, and taken by cost. These implementations claim groups over three axes,
+# or that recompute nothing; one finds recomputing slow, the other cheap.
+# Recomputing `q` in the product of `s`, over three axes, is proposed and
+# priced; recomputing `s` in the logsumexp, over two axes, is never priced,
+# since nothing claims that kernel, and `s` reads `q` inside its sweep.
+struct RecomputesOverThree{Cheap} <: C.Implementation end
 C.recomputes_folds(::RecomputesOverThree, target) = true
 C.claims(::RecomputesOverThree, target, g) = isempty(C.recomputed_in(g)) || length(g.domain) >= 3 ? (:claim,) : ()
-C.estimate(::RecomputesOverThree, claim, target, g) = [C.Work(0.0; flops = isempty(C.recomputed_in(g)) ? 1.0e-6 : 1.0)]
-C.candidates(::RecomputesOverThree, target::T.CPUTarget, p) = [[v] for g in p.groups for v in C.recomputed_in(g)]
+C.estimate(::RecomputesOverThree{Cheap}, claim, target, g) where {Cheap} =
+    [C.Work(0.0; flops = isempty(C.recomputed_in(g)) == Cheap ? 1.0 : 1.0e-6)]
 
-@testset "a fold recomputed where nothing claims its reader stays stored" begin
-    C.register!(@__MODULE__, RecomputesOverThree())
-    try
-        x, w = data(8, 6), data(8, 8)
-        function f(x, w)
-            q = T.contract(w, x, (1, 2), (1, 3), (2, 3))
-            s = T.contract(q, q, (1, 2), (1, 3), (2, 3))
-            T.logsumexp(s; dims = 1)
+@testset "recomputing a fold is a proposal, priced where its kernels are claimed" begin
+    x, w = data(8, 6), data(8, 8)
+    function f(x, w)
+        q = T.contract(w, x, (1, 2), (1, 3), (2, 3))
+        s = T.contract(q, q, (1, 2), (1, 3), (2, 3))
+        T.logsumexp(s; dims = 1)
+    end
+    graph = C.lower(trace(f, x, w))
+    q = only(C.recomputable_folds(graph))
+    @test graph.values[q].definition isa C.Reduction && graph.values[q].dims == (8, 6)
+    for cheap in (false, true)
+        C.register!(@__MODULE__, RecomputesOverThree{cheap}())
+        try
+            d = C.Decider(T.CPUTarget(), graph; measure = false)
+            p, considered = C.cover(d)
+            proposed = filter(c -> c.proposal isa C.Recompute, considered)
+            @test map(c -> c.proposal.value, proposed) == [q]
+            @test only(proposed).accepted == cheap
+            @test (q in reduce(union, map(C.recomputed_in, p.groups); init = Set{Int}())) == cheap
+            @test all(g -> !isempty(C.claims(RecomputesOverThree{cheap}(), d.target, C.group_view(p, g))), p.groups)
+        finally
+            C.register!(@__MODULE__)
         end
-        d = C.Decider(T.CPUTarget(), C.lower(trace(f, x, w)); measure = false)
-        p, considered = C.cover(d)
-        @test any(c -> c.accepted, considered)
-        @test all(g -> !isempty(C.claims(RecomputesOverThree(), d.target, C.group_view(p, g))), p.groups)
-    finally
-        C.register!(@__MODULE__)
     end
 end
 
@@ -576,13 +585,18 @@ const GENERATED_ATTENTION = [
     ("one head", (8, 1, 1, 133, 1), false),
 ]
 
+# The folds a program's streaming plan recomputes where they are read, as
+# numbered in the graph `prepare` plans for `target`.
+streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewrite(C.lower(p)) : C.lower(p))
+
 if CUDA_FUNCTIONAL
     @testset "attention generated on cuTile" begin
         @testset "$name" for (name, (D, H, KV, S, B), causal) in GENERATED_ATTENTION
             q, k, v = single(data(D, H, S, B; scale = 0.1)), single(data(D, KV, S, B; scale = 0.2)), single(data(D, KV, S, B; scale = 0.3))
             p = trace((q, k, v) -> Ops.attention(q, k, v; causal), q, k, v)
             for online in (true, false)
-                ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile; online))
+                target = T.CUDATarget(cuTile; online)
+                ex = prepare(p, map(CuArray, (q, k, v))...; target, recompute = streaming(p, target))
                 kernel = only(ex.kernels)
                 @test !(kernel isa C.FloorKernels)
                 @test occursin("online softmax", string(kernel)) == online
@@ -599,7 +613,8 @@ if CUDA_FUNCTIONAL
             T.contract(v, e ./ sum(e; dims = 1), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
         end
         for precision in (:full, :tf32)
-            ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile; precision))
+            target = T.CUDATarget(cuTile; precision)
+            ex = prepare(p, map(CuArray, (q, k, v))...; target, recompute = streaming(p, target))
             @test occursin("online softmax", string(only(ex.kernels)))
             @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v)]; rtol = precision === :tf32 ? 1.0e-2 : 1.0e-4)
         end
@@ -608,7 +623,7 @@ if CUDA_FUNCTIONAL
         # rounded to BFloat16 for the tensor cores.
         qh, kh, vh = map(x -> BFloat16.(single(x)), (data(16, 2, 70, 2; scale = 0.1), data(16, 2, 70, 2; scale = 0.2), data(16, 2, 70, 2; scale = 0.3)))
         p = trace((q, k, v) -> Ops.attention(q, k, v; causal = true), qh, kh, vh)
-        ex = prepare(p, map(CuArray, (qh, kh, vh))...; target = T.CUDATarget(cuTile))
+        ex = prepare(p, map(CuArray, (qh, kh, vh))...; target = T.CUDATarget(cuTile), recompute = streaming(p, T.CUDATarget(cuTile)))
         @test occursin("online softmax", string(only(ex.kernels)))
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, qh, kh, vh)]; rtol = 1.0e-2)
         # The reference's gradient: every product generated, also those that
@@ -631,7 +646,7 @@ if CUDA_FUNCTIONAL
         # head, where the reference groups heads along an axis of extent one.
         x = single(data(16, 2, 70, 2; scale = 0.5))
         p = trace((q, k, v, x) -> Ops.attention(q, k, v; causal = true) .+ x, q, k, v, x)
-        ex = prepare(p, map(CuArray, (q, k, v, x))...; target = T.CUDATarget(cuTile))
+        ex = prepare(p, map(CuArray, (q, k, v, x))...; target = T.CUDATarget(cuTile), recompute = streaming(p, T.CUDATarget(cuTile)))
         @test length(ex.kernels) == 1 && !(only(ex.kernels) isa C.FloorKernels)
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
     end
