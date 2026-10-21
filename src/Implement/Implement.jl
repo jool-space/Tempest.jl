@@ -6,7 +6,7 @@ makes its implementations available with `register!` when it loads, and a
 target decides which of them it uses. Claims read a `GroupView` of the group,
 in the vocabulary of `Tempest.IR`.
 """
-module Implementations
+module Implement
 
 using Republic: @republic
 @republic republic=false inherit=:public using ..IR

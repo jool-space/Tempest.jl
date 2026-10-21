@@ -22,8 +22,8 @@ using ..IR: constant, var, add, scale, mul, normalize, fdiv, fmod, substitute, e
 import ..IR: mentions
 
 # The protocol of implementations, which the cover calls and the generator implements.
-@republic republic=false inherit=:public import ..Implementations
-using ..Implementations: REGISTERED
+@republic republic=false inherit=:public import ..Implement
+using ..Implement: REGISTERED
 
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 

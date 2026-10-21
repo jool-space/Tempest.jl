@@ -1,5 +1,5 @@
 # Extensions are written against Tempest's public names, as packages of their
-# own would be: what they implement is `Tempest.Implementations` or the target
+# own would be: what they implement is `Tempest.Implement` or the target
 # protocol public in `Tempest.Compiler`, and what they read is `Tempest.IR`,
 # the plan names and the traced arrays public in `Tempest.Compiler`.
 const ROOT = joinpath(@__DIR__, "..")
@@ -69,7 +69,7 @@ function private_names(files)
 end
 
 @testset "public names are defined" begin
-    for m in (Tempest, T.IR, T.Compiler, T.Implementations)
+    for m in (Tempest, T.IR, T.Compiler, T.Implement)
         @test filter(n -> !isdefined(m, n), names(m)) == Symbol[]
     end
 end
@@ -84,6 +84,6 @@ end
     @test private_names(source("Tempest.Compiler.Plan; Tempest.Compiler.Decider")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("import Tempest.Compiler as C\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("using Tempest.Compiler: Plan, Decider")) == ["Tempest.Compiler.Decider"]
-    @test private_names(source("import Tempest.Implementations: claims, REGISTERED")) == ["Tempest.Implementations.REGISTERED"]
-    @test private_names(source("using Tempest: CUDATarget; using Tempest.Implementations")) == String[]
+    @test private_names(source("import Tempest.Implement: claims, REGISTERED")) == ["Tempest.Implement.REGISTERED"]
+    @test private_names(source("using Tempest: CUDATarget; using Tempest.Implement")) == String[]
 end

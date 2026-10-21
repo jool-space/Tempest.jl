@@ -9,7 +9,7 @@ using BFloat16s: BFloat16
 using Republic: @republic
 using Tempest: CUDATarget
 @republic republic=false inherit=:public using Tempest.IR
-@republic republic=false inherit=:public import Tempest.Implementations
+@republic republic=false inherit=:public import Tempest.Implement
 using Tempest.Compiler: Plan, group_view
 
 struct cuBLASProducts <: Implementation end

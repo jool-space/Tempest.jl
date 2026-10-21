@@ -100,22 +100,22 @@ Tempest.Compiler.concurrently
 Tempest.IR
 ```
 
-## Tempest.Implementations
+## Tempest.Implement
 
 ```@docs
-Tempest.Implementations
-Tempest.Implementations.Implementation
-Tempest.Implementations.register!
-Tempest.Implementations.GroupView
-Tempest.Implementations.ValueView
-Tempest.Implementations.members
-Tempest.Implementations.product_axes
-Tempest.Implementations.claims
-Tempest.Implementations.estimate
-Tempest.Implementations.Work
-Tempest.Implementations.build_claim
-Tempest.Implementations.candidates
-Tempest.Implementations.record_name
-Tempest.Implementations.recomputes_folds
-Tempest.Implementations.in_place
+Tempest.Implement
+Tempest.Implement.Implementation
+Tempest.Implement.register!
+Tempest.Implement.GroupView
+Tempest.Implement.ValueView
+Tempest.Implement.members
+Tempest.Implement.product_axes
+Tempest.Implement.claims
+Tempest.Implement.estimate
+Tempest.Implement.Work
+Tempest.Implement.build_claim
+Tempest.Implement.candidates
+Tempest.Implement.record_name
+Tempest.Implement.recomputes_folds
+Tempest.Implement.in_place
 ```
