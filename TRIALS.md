@@ -14,16 +14,6 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**The generator's schedules.** The cuTile generator picks tiles, splits and
-occupancy from six constants measured on one device and a decision tree over
-them (`ext/cuTileExt/cuTileExt.jl`, `default_tiles`; `ext/cuTileExt/contract.jl`,
-`product_tiles`). Challengers: tinygrad's BEAM search over per-kernel options
-measured on device (`tinygrad/engine/search.py`), the small version, and TVM's
-MetaSchedule (`python/tvm/meta_schedule`), the full one. Judged by the
-guard-rail cases and the coverage compositions against the constants, on
-this device and on one it was not measured on, and by the seconds a cold
-preparation adds.
-
 **Masked attention does twice the work.** A causal mask is a formula over
 positions, and the generator still visits every tile of the scores
 (`ext/cuTileExt/build.jl`). Challenger: FlexAttention's block mask
@@ -32,7 +22,56 @@ rules out entirely. Tempest can derive which tiles those are from the mask's
 index formula at plan time. Judged by the measured time of causal attention
 at 1024 and 2048 positions against non-causal, which should approach half.
 
+**The schedule search's cold cost.** Every tile of every product is
+compiled and timed once per device and shape: the GPT step's cold
+preparation doubled, 71 to 142 s (the schedules trial's table). Challenger:
+the staged form of the same search, output tile first at the default
+depth, then the depth of the best, then split-K, which tinygrad's BEAM
+approximates with its beam width. Judged by the cold preparation's seconds
+against the measured step, which must not lose beyond the noise, on the
+GPT step and the guard rails.
+
 ## Decided
+
+**The generator's schedules: a measured set of product tiles wins and is
+adopted; neighbours of the other sketches' constants do not, on this
+device.** On trial were the cuTile generator's tiles, splits and occupancy
+from six constants measured once on one device and a decision tree over
+them (`ext/cuTileExt/cuTileExt.jl`, `default_tiles`;
+`ext/cuTileExt/contract.jl`, `product_tiles`). The challenger, tinygrad's
+BEAM search (`tinygrad/engine/search.py`), the small version: a fixed set of
+options per kernel, each compiled and timed on the device, the fastest
+kept. For products, the generator now claims a group under each tile of a
+set (four output tiles and two depths per class, two and three for a
+product that recomputes a fold, with and without split-K where the grid is
+small), and the cover measures every claim of the implementation whose
+claim it ranks best, since the estimate cannot rank tiles of one product;
+unmeasured, each implementation stands by its first claim, the constants'
+tile. The tuning record keeps what was found. Judged on
+the GB10 by measured time, the same plans agreeing with the interpreter:
+
+| case | before | after |
+|---|---|---|
+| GPT step, 4 layers, T=64, B=16, tf32, steady | 1.914 ms | 1.382 ms |
+| GPT step, full precision, steady | 2.291 ms | 2.190 ms |
+| attention's weighted sum, tf32, one kernel | 77 μs | 22.7 μs |
+| guard rails, full precision, 36 cases | 8937 μs | 8957 μs |
+| guard rails, tf32 | 6255 μs | 6249 μs |
+| GPT cold preparation, full and tf32 | 71 s, 76 s | 142 s, 156 s |
+
+The cold preparation doubles: every tile of every product is compiled and
+timed once per device and shape, which the record then remembers. For the
+other sketches, neighbours of each constant (the elements of a pointwise or
+full tile, what a resident tile packs and its occupancy, a streamed
+column's rows per step, a streamed row's columns, a split sum's ways) were
+claimed and measured the same way: the guard rails came to 8945 μs against
+8937, a few small kernels twenty percent faster and as many twenty percent
+slower under measurement, and the one occupancy neighbour measured four
+times slower than the constant. Not adopted; the patch is kept with the
+session. What was not judged, named: a device the constants were not
+measured on, where the neighbours are the only way the constants would be
+corrected, and the staged search (output tile first, then depth, then
+split) that would cut the cold cost by half.
 
 **The constants of the cost model: the fit does not win yet, and is not
 adopted.** On trial were the constants a kernel's estimate is made of,
@@ -101,7 +140,10 @@ occupancy, and the HSTU step's recomputing kernels and the softcap's tf32
 kernels run at other shapes and occupancies, where the estimate misses by up
 to three times while the decision stands. That is the constants' trial. The
 device's division and square root cost twenty times its exponential in the
-generated code, which the table now says rather than hides.
+generated code, which the table now says rather than hides. The table costs
+a minute per precision to measure on a cold cache, each function under its
+reference product, which a fresh tuning directory, as the test suite uses,
+pays at the start.
 
 **Store or recompute across forward and backward: the min-cut partition
 wins, and is adopted.** On trial was the cover deciding store against

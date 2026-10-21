@@ -361,15 +361,17 @@ if CUDA_FUNCTIONAL
         @test isempty(built(ex))
     end
     @testset "choosing between claims" begin
-        # Half-precision products cuBLAS and cuTile both claim, every option
-        # measured at preparation and kept in the tuning record.
+        # Half-precision products cuBLAS claims and cuTile claims under each
+        # of its tiles, every option measured at preparation and kept in the
+        # tuning record.
         a, b = Float16.(data(1024, 256; scale = 0.1)), Float16.(data(256, 1024))
         p = trace((a, b) -> a * b, a, b)
         target = T.CUDATarget()
         prepared() = prepare(p, CuArray(a), CuArray(b); target, measure = :all)
         ex = prepared()
         x = only(ex.decisions)
-        @test x.how === :measured && length(x.options) == 2
+        @test x.how === :measured && length(x.options) >= 2
+        @test length(unique(C.package_of(o.implementation) for o in x.options)) == 2
         @test occursin("chosen by measurement", sprint(explain, ex))
         path = C.record_path(target)
         lines = readlines(path)
@@ -379,7 +381,7 @@ if CUDA_FUNCTIONAL
         @test readlines(path) == lines && only(again.decisions).choice.key == x.choice.key
         # A measurement overrides the estimate only beyond the noise margin.
         rewrite(f) = write(path, join((string(k, '\t', f(k, parse(Float64, t))) for (k, t) in split.(lines, '\t')), '\n') * '\n')
-        other = only(o for o in x.options if o.key != x.choice.key)
+        other = first(o for o in x.options if o.key != x.choice.key)
         rewrite((k, t) -> k == other.key ? 1.0e-7 : 1.0e-5)
         @test only(prepared().decisions).choice.key == other.key
         rewrite((k, t) -> 1.0e-5)

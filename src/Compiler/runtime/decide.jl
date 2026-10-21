@@ -149,6 +149,7 @@ struct Choice
     estimate::Float64
     key::String
     borrowed::Bool # priced on another package's line, which bounds a time only from below
+    order::Int # the claim's place among its implementation's claims on the group; its own ranking of them
 end
 
 "What was chosen for a group, how, and the time measured for it, if any."
@@ -242,7 +243,7 @@ function canonical(p::Plan, g::Group)
     string(text, "; ", join(shapes, ", "))
 end
 
-function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
+function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, order = 0)
     work = implementation === nothing ? floor_estimate(p, g) : estimate(implementation, claim, d.target, view)
     name = implementation === nothing ? "floor" : record_name(implementation, claim)
     key = replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
@@ -251,7 +252,7 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_of(implementation), w.factor) for w in work]
     price(w) = (regime, f) -> price!(d, regime, product_class(d.target, w.factor), f)
     Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0), key,
-        any(l -> l !== nothing && l.borrowed, lines))
+        any(l -> l !== nothing && l.borrowed, lines), order)
 end
 
 # Every group has a choice but opaque work, a scatter, which only the floor runs.
@@ -260,7 +261,7 @@ chosen(p::Plan, g::Group) = g.kind !== :opaque
 "Every claim on a group, cheapest estimate first; the floor when none claims it."
 function options(d::Decider, p::Plan, g::Group)
     view = group_view(p, g)
-    os = Choice[choice(d, p, g, view, i, c) for i in implementations(d.target) for c in claims(i, d.target, view)]
+    os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) for (k, c) in enumerate(claims(i, d.target, view))]
     isempty(os) && push!(os, choice(d, p, g, view, nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
@@ -304,7 +305,9 @@ function choose(d::Decider, p::Plan, g::Group, os)
         foreach(k -> measure!(d, p, g, os[k]), ranks)
     end
     times = [get(d.record, os[k].key, nothing) for k in ranks]
-    any(isnothing, times) && return (1, :estimated, nothing)
+    # Unmeasured, each implementation stands by its first claim: the estimate
+    # ranks implementations, not an implementation's own alternatives.
+    any(isnothing, times) && return (findfirst(o -> o.order <= 1, os), :estimated, nothing)
     k = argmin(times)
     k = times[k] < (1 - d.rates.noise) * times[1] ? k : 1
     (ranks[k], :measured, times[k])
@@ -868,7 +871,9 @@ function reference(d::Decider, packages, f, args...; recomputing = false)
     g = only(p.groups)
     view = group_view(p, g)
     fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()
-    for (m, is) in REGISTERED, i in is, c in (m in packages ? claims(i, d.target, view) : ())
+    # Each implementation's first claim: what it stands by unmeasured, which
+    # a reference is measured under, not the fastest of its alternatives.
+    for (m, is) in REGISTERED, i in is, c in (m in packages ? Iterators.take(claims(i, d.target, view), 1) : ())
         t = time_launch(d.target, first(build_claim(i, c, d.target, view, buffers!(timing, p, g))))
         t < first(get(fastest, nameof(m), (Inf,))) && (fastest[nameof(m)] = (t, estimate(i, c, d.target, view)))
     end
@@ -944,12 +949,12 @@ function fit_memory!(d::Decider)
     end
 end
 
-"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function, now rather than on first need."
+"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function in products of Float32 factors, now rather than on first need; the half classes' are priced on first need."
 function calibrate!(target)
     d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none)
     foreach(m -> memory!(d, nameof(m)), used_packages(target))
     foreach(T -> foreach(m -> line!(d, nameof(m), T), used_packages(target)), (Float32, Float16, BFloat16))
-    applied!(d, (Float32, Float16, BFloat16))
+    applied!(d)
 end
 
 ## The tuning record: measured seconds by claim, one file per device.

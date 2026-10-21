@@ -237,9 +237,12 @@ module Coverage include(joinpath(@__DIR__, "fixtures", "compositions.jl")) end
 
 within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
 
-# Every option of a group chosen by estimate among several, and each side of
-# a comparison made by estimate, is within the close-call factor of its
-# measurement, and each such comparison stands when measured.
+# A group chosen by estimate among several options: the choice is within the
+# close-call factor of its measurement, and no option measures faster beyond
+# the noise, since an implementation's own alternatives (a product's tiles)
+# are measured, not ranked by the estimate. Each side of a comparison made
+# by estimate is within the factor of its measurement, and each such
+# comparison stands when measured.
 # Pointwise work inside a product's sweep (a softcap's tanh, HSTU's SiLU) is
 # priced per position by a constant measured at one shape, at full occupancy.
 # Where the kernel's occupancy or sweep differs from that shape's, as HSTU's
@@ -257,7 +260,9 @@ in_sweep(c, precision) = occursin("SiLU", c.name) || occursin("softcap", c.name)
         held = Bool[]
         for g in filter(g -> C.chosen(p, g), p.groups)
             x = C.decide(d, p, g)
-            x.how === :estimated && append!(held, [within(o.estimate, timed(p, g, o)) for o in x.options])
+            x.how === :estimated && length(x.options) > 1 || continue
+            push!(held, within(x.choice.estimate, timed(p, g, x.choice)))
+            push!(held, all(o -> timed(p, g, o) >= (1 - d.rates.noise) * timed(p, g, x.choice), x.options))
         end
         # A comparison decided by estimate stands when measured; times within
         # the device's noise are a tie, which the estimate decides.
