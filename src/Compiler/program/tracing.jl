@@ -14,7 +14,7 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
-public contract, fold, logsumexp, batched_mul, TracedArray, permuted
+public contract, fold, logsumexp, TracedArray, permuted
 
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
@@ -405,7 +405,6 @@ for (A, B) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (Abstra
     @eval begin
         Base.:*(a::$A{<:Real, 2}, b::$B{<:Real, 2}) = contract(a, b, (1, 2), (2, 3), (1, 3))
         Base.:*(a::$A{<:Real, 2}, b::$B{<:Real, 1}) = contract(a, b, (1, 2), (2,), (1,))
-        batched_mul(a::$A{<:Real, 3}, b::$B{<:Real, 3}) = contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
     end
 end
 
@@ -415,15 +414,6 @@ Base.:*(a::LinearAlgebra.AdjOrTransAbsVec{<:Real}, b::TracedArray{<:Real, 2}) = 
 Base.:*(a::LinearAlgebra.AdjOrTransAbsVec{<:Real}, b::TracedArray{<:Real, 1}) = sum(vec(a) .* b)
 Base.:*(a::Transpose{T, <:AbstractVector}, b::TracedArray{T, 1}) where {T <: Real} = sum(vec(a) .* b)
 Base.:*(a::LinearAlgebra.Diagonal{<:Real}, b::TracedArray{<:Real, 1}) = a.diag .* b
-
-"""
-    Tempest.batched_mul(a, b)
-
-`a[:, :, k] * b[:, :, k]` for each `k` along the third axis.
-"""
-function batched_mul(a::AbstractArray{<:Real, 3}, b::AbstractArray{<:Real, 3})
-    stack(k -> a[:, :, k] * b[:, :, k], axes(a, 3); dims = 3)
-end
 
 # Layout. As in Julia, `reshape`, `vec`, `view` and `transpose` share the
 # memory of the array they are made from; `permutedims` and `getindex` copy.

@@ -5,6 +5,7 @@ using NNlib
 
 results(ex) = filter(!isnothing, C.leaves(outputs(execute!(ex))))
 gradients(p, args...) = filter(!isnothing, C.leaves(interpret(differentiate(p), args...)))
+batched(a, b) = T.contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
 
 const NNLIB = [
     ("softmax", (x, t) -> sum(NNlib.softmax(x; dims = 1) .* t),
@@ -14,11 +15,11 @@ const NNLIB = [
     ("logsoftmax", (x, t) -> sum(NNlib.logsoftmax(x) .* t),
      (x, t) -> sum((x .- T.logsumexp(x; dims = 1)) .* t), (data(8, 6), data(8, 6; scale = 0.7))),
     ("batched_mul", (a, b) -> sum(abs2, NNlib.batched_mul(a, b)),
-     (a, b) -> sum(abs2, T.batched_mul(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
+     (a, b) -> sum(abs2, batched(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
     ("batched_mul of transposes", (a, b) -> sum(abs2, NNlib.batched_mul(NNlib.batched_transpose(b), NNlib.batched_adjoint(a))),
-     (a, b) -> sum(abs2, T.batched_mul(permutedims(b, (2, 1, 3)), permutedims(a, (2, 1, 3)))), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
+     (a, b) -> sum(abs2, batched(permutedims(b, (2, 1, 3)), permutedims(a, (2, 1, 3)))), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
     ("batched_mul sharing a batch", (a, b) -> sum(abs2, NNlib.batched_mul(a, b)),
-     (a, b) -> sum(abs2, T.batched_mul(a .* ones(1, 1, 2), b)), (data(3, 4, 1), data(4, 5, 2; scale = 0.3))),
+     (a, b) -> sum(abs2, batched(a .* ones(1, 1, 2), b)), (data(3, 4, 1), data(4, 5, 2; scale = 0.3))),
 ]
 
 @testset "NNlib on traced arrays" begin

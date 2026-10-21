@@ -26,11 +26,11 @@ Tempest.contract
 Tempest.fold
 Tempest.GenericFold
 Tempest.logsumexp
-Tempest.batched_mul
 ```
 
-A package that adds functions programs call writes them on traced arrays, in
-these primitives, as NNlibExt does:
+Any other function a program calls, a batched product say, is written in
+these and lives in its own package. Where its body does not trace, an
+extension writes it on traced arrays, in these primitives, as NNlibExt does:
 
 ```@docs
 Tempest.Compiler.TracedArray

@@ -7,6 +7,7 @@ T.scalar_partials(::typeof(leaky), g, y, x) = (ifelse(x > 0, g, oftype(g, 0.01) 
 rmsnorm(x, w) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0e-5) .* w
 softmax_columns(x) = exp.(x .- T.logsumexp(x; dims = 1))
 softmax_rows(x) = exp.(x .- T.logsumexp(x; dims = 2))
+batched(a, b) = T.contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
 function layernorm(x, w)
     m = sum(x; dims = 1) ./ size(x, 1)
     v = sum(abs2, x .- m; dims = 1) ./ size(x, 1)
@@ -50,13 +51,13 @@ const PROGRAMS = [
     ("residual epilogue", (w, x) -> sum(abs2, w * x .+ x), (data(7, 7; scale = 0.2), data(7, 10))),
     ("scaling prologue", (w, x) -> sum(abs2, w * (x .* 0.5) ./ 3), (data(9, 7; scale = 0.2), data(7, 10))),
     ("products of transposes", (a, b) -> sum(abs2, a' * b' .+ 1), (data(7, 5; scale = 0.2), data(6, 7))),
-    ("batched product", (a, b) -> sum(abs2, T.batched_mul(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
+    ("batched product", (a, b) -> sum(abs2, batched(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
     ("matrix vector", (a, v) -> sum(abs2, a * v), (data(5, 4), data(4; scale = 0.5))),
     ("a constant times x", x -> sum(abs2, eltype(x).(WEIGHTS) * x), (data(4, 3),)),
     ("x' times a constant", x -> sum(abs2, tanh.(x' * eltype(x).(WEIGHTS))), (data(5, 3),)),
     ("a constant times a vector", v -> sum(abs2, eltype(v).(WEIGHTS) * v), (data(4; scale = 0.5),)),
-    ("batched product with a constant", a -> sum(abs2, T.batched_mul(a, eltype(a).(BATCH))), (data(3, 4, 2),)),
-    ("constant batched product", b -> sum(abs2, T.batched_mul(eltype(b).(BATCH), b)), (data(3, 5, 2),)),
+    ("batched product with a constant", a -> sum(abs2, batched(a, eltype(a).(BATCH))), (data(3, 4, 2),)),
+    ("constant batched product", b -> sum(abs2, batched(eltype(b).(BATCH), b)), (data(3, 5, 2),)),
     ("swish", x -> sum(swish.(x)), (data(8, 6),)),
     ("opaque leaky with a rule", x -> sum(abs2, leaky.(x)), (data(8, 6),)),
     ("powers", x -> sum(x .^ 2 .+ x .^ 3 .+ sqrt.(abs.(x) .+ 1)), (data(8, 6),)),

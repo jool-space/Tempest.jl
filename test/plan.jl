@@ -220,7 +220,7 @@ end
     unit_norm(x, w) = reshape(rmsnorm(reshape(x, 8, 1, 6), reshape(w, 8, 1)), 8, 6)
     @test same(rmsnorm, unit_norm, x, w)
     @test same_gradient((x, w) -> sum(abs2, rmsnorm(x, w)), (x, w) -> sum(abs2, unit_norm(x, w)), x, w)
-    unit_product(a, b) = reshape(T.batched_mul(reshape(a, 5, 7, 1), reshape(b, 7, 6, 1)), 5, 6)
+    unit_product(a, b) = reshape(T.contract(reshape(a, 5, 7, 1), reshape(b, 7, 6, 1), (1, 2, 4), (2, 3, 4), (1, 3, 4)), 5, 6)
     @test same((a, b, c) -> tanh.(a * b .+ c), (a, b, c) -> tanh.(unit_product(a, b) .+ reshape(c, 5, 1, 1)), a, b, c)
     @test same_gradient((a, b) -> sum(abs2, a * b), (a, b) -> sum(abs2, unit_product(a, b)), a, b)
     q, k, v, r = data(8, 3, 16, 2; scale = 0.3), data(8, 3, 16, 2; scale = 0.2), data(8, 3, 16, 2; scale = 0.1), data(8, 3, 16, 2)
