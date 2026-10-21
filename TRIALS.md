@@ -66,6 +66,19 @@ the first result, cold and warm, on prepare.jl's programs and the GPT step,
 with the compiled step's time, which must not lose beyond the noise. The
 schedule search's cold cost, above, is one part of this.
 
+The baseline, each in a new process without the startup file, wall seconds:
+prepare.jl's programs cold 98 and warm 34, the GPT step cold 126 and warm 44
+(its preparation 120 and 37). Warm was 99% Julia compilation: the workloads
+covered only the CPU target, and the launch path compiled a specialization
+per kernel. Cold adds one kernel compiled per second, serialized, and three
+quarters of them are candidates the search times and discards. Taken so
+far: a preparation that builds nothing, so the workloads cover the CUDA
+planning path; no specialization per kernel; every proposal's trial planned
+in parallel; a grouped five-axis attention in the workloads. After them:
+prepare.jl's programs warm 20, the GPT step's preparation warm 19.6 and
+cold 85.6. Still open: the kernels compiled and discarded, and their serial
+compilation.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
