@@ -79,9 +79,12 @@ end
 
 mutable struct Tape
     nodes::Vector{Node}
+    # The nodes a reverse pass appended: the backward of the program.
+    backward::BitSet
 end
 
-Tape() = Tape(Node[])
+Tape() = Tape(Node[], BitSet())
+Tape(nodes::Vector{Node}) = Tape(nodes, BitSet())
 
 function record!(tape::Tape, op, inputs, dims, T; scalar = false)
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))
@@ -92,9 +95,10 @@ end
 """
     Program
 
-A traced program: its nodes, the nodes that are its inputs and results, and
-the structures they came in, as nested tuples, named tuples and `Fields` of
-leaf indices.
+A traced program: its nodes, the nodes that are its inputs and results, the
+structures they came in, as nested tuples, named tuples and `Fields` of leaf
+indices, and the nodes that are its backward, where a reverse pass recorded
+them.
 """
 struct Program
     nodes::Vector{Node}
@@ -102,7 +106,11 @@ struct Program
     results::Vector{Int}
     input_structure::Any
     output_structure::Any
+    backward::BitSet
 end
+
+Program(nodes, arguments, results, input_structure, output_structure) =
+    Program(nodes, arguments, results, input_structure, output_structure, BitSet())
 
 op_name(op::Operation) = lowercase(string(nameof(typeof(op))))
 op_detail(op::Operation) = ""
@@ -237,5 +245,6 @@ function prune(p::Program)
         push!(nodes, Node(n.op, map(i -> new[i], n.inputs), n.dims, n.eltype, n.scalar))
         new[id] = length(nodes)
     end
-    Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure)
+    Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure,
+        BitSet(new[i] for i in p.backward if keep[i]))
 end

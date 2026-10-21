@@ -168,8 +168,9 @@ end
 function Step(params, batch, c, cfg; target, device)
     state = state_of(params)
     program = step_program(params, state, batch, c, cfg)
+    # TEMPEST_GPT_PARTITION=0 saves every map the backward reads (TRIALS: store or recompute).
     ex = prepare(program, map_leaves(device, params), map_leaves(device, state), map_leaves(device, batch); target,
-        replaces = (2 => 1, 3 => 2))
+        replaces = (2 => 1, 3 => 2), partition = get(ENV, "TEMPEST_GPT_PARTITION", "1") != "0")
     Step(program, ex)
 end
 

@@ -14,17 +14,6 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**Store or recompute across forward and backward.** The cover decides store
-against recompute one proposal at a time, greedily, priced by estimate
-(`src/Compiler/runtime/decide.jl`, `cover`). Measured, the training step's
-streaming backward is fifteen times slower than storing, and nothing in the
-cover sees the forward and the backward as one graph. Challenger: PyTorch's
-min-cut rematerialization (`torch/_functorch/partitioners.py`), which cuts the
-joint graph by bytes with cheap work allowed to recompute. Judged by the
-measured time of the attention and layer-norm training steps at the
-coverage suite's sizes and at 2048 positions, and by compile time at eight
-identical layers.
-
 **The cost of a kernel.** Estimates are lines fitted from two reference
 products per package, plus bytes at a measured bandwidth
 (`src/Compiler/runtime/decide.jl`, `line!`, `fit!`, `seconds`). They do not
@@ -58,4 +47,35 @@ at 1024 and 2048 positions against non-causal, which should approach half.
 
 ## Decided
 
-Nothing yet.
+**Store or recompute across forward and backward: the min-cut partition
+wins, and is adopted.** On trial was the cover deciding store against
+recompute one proposal at a time, by estimate (`src/Compiler/runtime/decide.jl`,
+`cover`), which could not express recomputing a map in the backward from a
+smaller saved value at all. The challenger, PyTorch's rematerialization
+partitioner (`torch/_functorch/partitioners.py`), read in full: a minimum cut
+of the joint graph with bytes as the capacity of saving a value, infinite
+edges for reads, a source feeding what may not be recomputed, a sink
+draining what the backward reads, and recomputation counted as free.
+Implemented as `src/Compiler/plan/partition.jl` on the forward-backward
+boundary, with Tempest's bytes, folds and opaque work banned, maps
+recomputable, a map a backward product reads as a factor banned, and the
+cut pinned into the planner; the cover still prices folds. Judged by
+measured step time on the GB10, every plan agreeing with the interpreter:
+
+| step | stored, before | stored, after | time, before | time, after |
+|---|---|---|---|---|
+| SwiGLU block | 62.0 MiB | 38.0 MiB | 1609 μs | 1324 μs |
+| norm, SwiGLU, residual | 74.0 MiB | 50.0 MiB | 1552 μs | 1281 μs |
+| attention | 10.5 MiB | 10.5 MiB | 212 μs | 210 μs |
+| tanh MLP, residual | 28.0 MiB | 28.0 MiB | 654 μs | 660 μs |
+| GPT, 4 layers, T=64, B=16, steady | | 4 kernels fewer | 2.450 ms | 2.279 ms |
+
+The first measurement lost by two to six times: the planner's rule that
+maps of a recomputed value are recomputed with it, written for folds,
+cascaded a recomputed map into a backward product's factor, which cuBLAS
+cannot claim and the generator runs at seven times the cost. Limiting the
+cascade to folds was the whole difference. What the challenger's objective
+does not see, named: bytes stand for time only where a recomputed map lands
+in a kernel that absorbs it, which Tempest's products do not; the ban on
+product factors is the constraint, and the cost-model trial is where it
+would be priced instead of banned.

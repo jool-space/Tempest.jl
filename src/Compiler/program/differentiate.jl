@@ -209,6 +209,13 @@ end
 # tape, recorded into the tape: the cotangent of each node it reaches. Nodes
 # before `range` are constants to it.
 function reverse_pass!(tape, loss, range)
+    first_appended = length(tape.nodes) + 1
+    cotangents = reverse_pass_nodes!(tape, loss, range)
+    union!(tape.backward, first_appended:length(tape.nodes))
+    cotangents
+end
+
+function reverse_pass_nodes!(tape, loss, range)
     cotangents = Dict{Int, Traced}()
     cotangents[loss] = h(tape, constant!(tape, one(tape.nodes[loss].eltype)))
     keep = live(tape.nodes, [loss])
@@ -255,7 +262,7 @@ julia> interpret(p, [1.0, 2.0, 3.0])
 function differentiate(p::Program)
     length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
         throw(ArgumentError("differentiate needs a program with one scalar result"))
-    tape = Tape(copy(p.nodes))
+    tape = Tape(copy(p.nodes), copy(p.backward))
     loss = only(p.results)
     cotangents = reverse_pass!(tape, loss, eachindex(p.nodes))
     results = [loss]
@@ -268,7 +275,7 @@ function differentiate(p::Program)
     end
     gradients = tangent(result, p.input_structure)
     # Rules may build what nothing reads, such as a constant operand's share.
-    prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...)))
+    prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...), tape.backward))
 end
 
 """

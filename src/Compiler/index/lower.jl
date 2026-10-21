@@ -254,6 +254,8 @@ function lower(p::Program)
     nodes = p.nodes
     keep = live(nodes, p.results)
     values = Value[]
+    backward = BitVector()
+    in_backward = false
     numbered = Dict{Value, Int}()
     access = Vector{Access}(undef, length(nodes))
     # A value defined over a node's shape, over the node's wide axes instead.
@@ -263,6 +265,7 @@ function lower(p::Program)
         v = Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar)
         id = get!(numbered, v) do
             push!(values, v)
+            push!(backward, in_backward)
             length(values)
         end
         ValueAccess(id, wide_index(dims))
@@ -276,6 +279,7 @@ function lower(p::Program)
             continue
         end
         keep[id] || continue
+        in_backward = id in p.backward
         d = Domain(n.dims)
         op = n.op
         inputs = map(i -> access[i], n.inputs)
@@ -323,5 +327,7 @@ function lower(p::Program)
         [nodes[r].dims for r in p.results],
         [nodes[r].scalar for r in p.results],
         [nodes[r].eltype for r in p.results],
+        Pair{Int, String}[],
+        backward,
     )
 end

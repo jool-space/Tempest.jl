@@ -73,7 +73,7 @@ end
     same(f, args...) = interpret(trace(f, args...), args...) == f(args...)
     @test same(x -> (y = similar(x); y .= 1; y[3, 2] = x[1]; y[CartesianIndex(4, 5)] = 7; y[11] = -1; y[:, 6] = x[:, 1]; y), x)
     @test same((x, v) -> (y = copy(x); y[2:4, :] = v; y[end, :] .= 2; y), x, v)
-    @test same(x -> (y = zeros(1) .* similar(x, 10, 8); y[1:2:8, end:-2:1] = x[1:4, 1:4]; y), x)
+    @test same(x -> (y = fill!(similar(x, 10, 8), 0); y[1:2:8, end:-2:1] = x[1:4, 1:4]; y), x)
     @test same(x -> (y = fill!(similar(x, 7), 0.5); copyto!(y, 2, x, 5, 3); y), x)
     @test same(x -> (y = similar(x, 6, 8); permutedims!(y, x, (2, 1)); map!(abs, y, y)), x)
     @test same(x -> (r = sum(x; dims = 1); r ./= size(x, 1); r), x)

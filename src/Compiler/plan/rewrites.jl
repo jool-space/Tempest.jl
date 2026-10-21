@@ -37,11 +37,16 @@ struct Builder
     values::Vector{Value}
     ids::Vector{Int}
     rewrites::Vector{Pair{Int, String}}
+    # Whether the values added now belong to the backward: those of the old
+    # value being rebuilt.
+    backward::BitVector
+    in_backward::Base.RefValue{Bool}
 end
 
 "Add a value to the new graph; its id."
 function add!(b::Builder, d::Definition, dims, T, scalar = false)
     push!(b.values, Value(d, dims, T, scalar))
+    push!(b.backward, b.in_backward[])
     length(b.values)
 end
 
@@ -49,15 +54,16 @@ end
 # the id of (or kept, for `nothing`), leaving out the values `keep` excludes;
 # and each old value's new id.
 function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
-    b = Builder(Value[], zeros(Int, length(graph.values)), Pair{Int, String}[])
+    b = Builder(Value[], zeros(Int, length(graph.values)), Pair{Int, String}[], BitVector(), Ref(false))
     for (id, v) in enumerate(graph.values)
         keep[id] || continue
+        b.in_backward[] = graph.backward[id]
         new = f(b, id)
         b.ids[id] = new === nothing ? add!(b, remap(v.definition, b.ids), v.dims, v.eltype, v.scalar) : new
     end
     notes = [[b.ids[v] => s for (v, s) in graph.rewrites if b.ids[v] != 0]; b.rewrites]
     g = IndexGraph(b.values, map(a -> b.ids[a], graph.arguments), Operand[remap(o, b.ids) for o in graph.results],
-        graph.result_dims, graph.result_scalar, graph.result_eltype, notes)
+        graph.result_dims, graph.result_scalar, graph.result_eltype, notes, b.backward)
     g, b.ids
 end
 

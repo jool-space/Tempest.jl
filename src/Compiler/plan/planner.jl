@@ -259,12 +259,14 @@ function storing(graph::IndexGraph; recompute = ())
         values[id].definition isa Opaque || continue
         foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
-    # Maps of recomputed folds are recomputed with them.
+    # Maps of recomputed folds are recomputed with them: a fold recomputed
+    # where it is read has no storage, so a map of it is a map of its term. A
+    # recomputed map's readers may still be stored; they recompute it inside.
     after = falses(n)
     for id in 1:n
         d = values[id].definition
         d isa Pointwise || continue
-        after[id] = any(o -> o isa Read && (o.value in recomputed || after[o.value]), d.operands)
+        after[id] = any(o -> o isa Read && (o.value in recomputed && values[o.value].definition isa Reduction || after[o.value]), d.operands)
     end
     # Work nothing reads is not stored.
     stored = map(eachindex(values)) do id
@@ -550,7 +552,8 @@ function with_stored_results(graph::IndexGraph)
             graph.result_eltype[k], graph.result_scalar[k]))
         results[k] = Read(length(values), wide_index(dims))
     end
-    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.rewrites)
+    IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.rewrites,
+        vcat(graph.backward, falses(length(values) - length(graph.backward))))
 end
 
 # The axes an index reads a value at, when it is a permutation of the reader's

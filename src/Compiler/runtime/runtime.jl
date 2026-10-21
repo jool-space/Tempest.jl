@@ -140,7 +140,10 @@ between executions, and a result that replaces one writes into it.
 `recompute` pins folds to be recomputed where they are read rather than
 stored, by their numbers among the values of the program's index graph, as
 `explain` prints them: what the cover would otherwise decide by cost (see
-`Tempest.Compiler.recomputable_folds`).
+`Tempest.Compiler.recomputable_folds`). `partition` decides which of the
+forward's maps the backward recomputes rather than reads, by a minimum cut
+of what saving them costs (see `Tempest.Compiler.partition`); `false` saves
+every map the backward reads, as a trial's comparison.
 
 A training loop, where the step returns the loss and the new parameters and
 optimizer state:
@@ -160,15 +163,37 @@ For a function called on new arguments each time, `compile` does the binding
 and copying.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = :close,
-        replaces = (), by_reference = (), recompute = ())
+        replaces = (), by_reference = (), recompute = (), partition::Bool = true)
     graph = lower(program)
     permits_rewrites(target) && (graph = rewrite(graph))
-    d = Decider(target, graph; measure, recompute)
+    pairs = replacements(program, replaces)
+    input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
+    pinned = Set{Int}(recompute)
+    if partition
+        # The forward's maps the backward recomputes rather than reads (see
+        # `partition`), but for a map reading an argument a result replaces:
+        # recomputed in the kernel that writes the result, it would read the
+        # argument where the result is written, and the result would be
+        # copied there instead (see `writes_over`).
+        replaced = Set(input[a] for (_, a) in pairs)
+        saved, recomputed = Compiler.partition(graph)
+        # Reads directly, or through maps, which may be recomputed with it.
+        function reads_replaced(v)
+            d = graph.values[v].definition
+            any(operands(d)) do o
+                any(read_values(o)) do r
+                    r in replaced || graph.values[r].definition isa Pointwise && reads_replaced(r)
+                end
+            end
+        end
+        filter!(!reads_replaced, recomputed)
+        foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
+        union!(pinned, recomputed)
+    end
+    d = Decider(target, graph; measure, recompute = pinned)
     p, considered = cover(d)
     ds = decisions(d, p)
-    pairs = replacements(program, replaces)
     values = p.graph.values
-    input = Dict(v.definition.argument => id for (id, v) in enumerate(values) if v.definition isa Input)
     result_value(k) = p.graph.results[k].value
     # A result that is an argument's storage would change as another result replaces it.
     for k in eachindex(p.graph.results), (r, a) in pairs
