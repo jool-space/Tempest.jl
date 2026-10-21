@@ -7,6 +7,7 @@ using CUDACore
 using cuBLAS
 using BFloat16s: BFloat16
 using Republic: @republic
+import Tempest
 using Tempest: CUDATarget
 @republic republic=false inherit=:public using Tempest.IR
 @republic republic=false inherit=:public import Tempest.Implement
@@ -199,5 +200,32 @@ function build_claim(::cuBLASProducts, c::GemmClaim, target, g::GroupView, buffe
 end
 
 __init__() = register!(cuBLAS, cuBLASProducts())
+
+# Work the cuBLAS products do while they precompile, without a GPU: preparing
+# small programs with products for CUDA without building them, which claims,
+# estimates, proposes candidates and decides. Building needs a library
+# handle, so it compiles in the session.
+
+using PrecompileTools: @setup_workload, @compile_workload
+
+@setup_workload begin
+    sample(T, dims...) = T.(reshape(sin.(1:prod(dims)), dims))
+    gelu(x) = x / (1 + exp(-1.702f0 * x))
+    losses = Tuple{Any, Any}[((w, x, b) -> sum(abs2, gelu.(w * x .+ b)), (sample(T, 32, 64), sample(T, 64, 48), sample(T, 32)))
+        for T in FACTOR_TYPES]
+    # A batch of products over (features, keys, heads, batch), as attention makes.
+    q, k = sample(Float32, 16, 32, 2, 2), sample(Float32, 16, 32, 2, 2)
+    push!(losses, ((q, k) -> sum(abs2, Tempest.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
+    @compile_workload begin
+        # Registered for this process alone; the package registers it when it loads.
+        register!(cuBLAS, cuBLASProducts())
+        for (f, args) in losses, target in (CUDATarget(cuBLAS), CUDATarget(cuBLAS; precision = :tf32))
+            program = Tempest.Compiler.differentiate(Tempest.Compiler.trace(f, args...))
+            ex = Tempest.Compiler.prepare(program, args...; target, build = false)
+            Tempest.explain(devnull, ex)
+        end
+        register!(cuBLAS)
+    end
+end
 
 end
