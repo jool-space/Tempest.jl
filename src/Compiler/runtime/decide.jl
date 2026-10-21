@@ -77,6 +77,11 @@ package_of(implementation) = nameof(first(m for (m, is) in REGISTERED if impleme
 
 const NOISE = 0.05
 
+# Whether the rates file holds every rate of a package's line for a class: a
+# file from before a line had its split and recompute rates is fitted again.
+fitted_line(d, package, class) =
+    all(what -> haskey(d.calibration, string(package, " ", class, " ", what)), ("latency", "rate", "split", "recompute"))
+
 # The CPU has no product claims: its lines are one nominal line (see `line!`).
 rates(::CPUTarget) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE)
 
@@ -286,10 +291,13 @@ function choose(d::Decider, p::Plan, g::Group, os)
         return (1, :only, get(d.record, best.key, nothing))
     end
     # Every option under `:all`; otherwise those within the estimate's error of
-    # the best, and every option when the best rests on a borrowed line, which
-    # bounds a time only from below.
+    # the best, every option when the best rests on a borrowed line, which
+    # bounds a time only from below, and every claim of the best's
+    # implementation when it made several: those are alternatives it offers
+    # for measurement, which the estimate cannot rank.
+    searched(o) = o.implementation !== nothing && o.implementation === best.implementation
     ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
-        [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate)]
+        [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate) || searched(o)]
     length(ranks) == 1 && return (1, :estimated, get(d.record, best.key, nothing))
     if d.measure !== :none
         build_unmeasured!(d, [(p, g, os[k]) for k in ranks])
@@ -741,9 +749,9 @@ function line!(d::Decider, package, T)
         measurable(d.target) || return Line(0.0, 1.0e10, 1.0e10, 1.0e10, false)
         key(p, what) = string(p, " ", class, " ", what)
         own(p) = Line((d.calibration[key(p, what)] for what in ("latency", "rate", "split", "recompute"))..., false)
-        haskey(d.calibration, key(package, "rate")) || fit!(d, T)
-        haskey(d.calibration, key(package, "rate")) && return own(package)
-        fastest = argmax(l -> l.rate, [own(nameof(m)) for m in used_packages(d.target) if haskey(d.calibration, key(nameof(m), "rate"))])
+        fitted_line(d, package, class) || fit!(d, T)
+        fitted_line(d, package, class) && return own(package)
+        fastest = argmax(l -> l.rate, [own(nameof(m)) for m in used_packages(d.target) if fitted_line(d, nameof(m), class)])
         Line(fastest.latency, fastest.rate, fastest.split, fastest.recompute, true)
     end
 end
@@ -888,7 +896,7 @@ either that does not split.
 function fit!(d::Decider, T)
     class = product_class(d.target, T)
     key(p, what) = string(p, " ", class, " ", what)
-    unfitted = [m for m in used_packages(d.target) if !haskey(d.calibration, key(nameof(m), "rate"))]
+    unfitted = [m for m in used_packages(d.target) if !fitted_line(d, nameof(m), class)]
     times = map(shapes -> reference(d, unfitted, *, map(dims -> zeros(T, dims), shapes)...), REFERENCE_SHAPES)
     recomputing = reference(d, unfitted, (a, b, c) -> (a * b) * c, map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)...; recomputing = true)
     # A reference's first launch: its time less those of the launches after

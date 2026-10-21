@@ -385,8 +385,8 @@ recomputes_folds(::Tempest.Compiler.cuTileGenerator, target) = target isa CUDATa
 
 function claims(::Tempest.Compiler.cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind in (:pointwise, :reduction) || return Claim[]
-    product = product_claim(target, g)
-    product === nothing || return [product]
+    products = product_claims(target, g)
+    isempty(products) || return products
     expressible(g) || return Claim[]
     A, B, reduced, C = collapse_axes(g)
     maximum(axes -> prod(k -> g.domain[k], axes; init = 1), (A, B, C)) < typemax(Int32) ÷ 2 || return Claim[]
