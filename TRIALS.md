@@ -14,22 +14,6 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**The constants of the cost model.** A kernel's estimate is memory time
-against compute time, each from constants measured at a few shapes: a
-package's product line from three reference products, a memory line from
-two, the seconds per position of each scalar function in each of three
-regimes from one shape each, the device's share from a block count, and the
-overlap of memory and compute from XLA (`src/Compiler/runtime/decide.jl`,
-`seconds`, `fit!`, `fit_applied!`). Where a kernel's shape or occupancy
-differs from the reference's, the estimate misses by up to three times (the
-skipped cases in `test/decisions.jl`). Challenger: the featurization of
-Halide's Adams autoscheduler (`src/autoschedulers/adams2019`), whose cost is
-hand-written terms with non-negative coefficients learned from measured
-schedules, here fitted to the tuning record Tempest already keeps, as it
-grows. Judged by the held-out relative error of the fitted estimate against
-the constants', over the record, and by the estimate test holding with no
-case skipped.
-
 **The generator's schedules.** The cuTile generator picks tiles, splits and
 occupancy from six constants measured on one device and a decision tree over
 them (`ext/cuTileExt/cuTileExt.jl`, `default_tiles`; `ext/cuTileExt/contract.jl`,
@@ -49,6 +33,39 @@ index formula at plan time. Judged by the measured time of causal attention
 at 1024 and 2048 positions against non-causal, which should approach half.
 
 ## Decided
+
+**The constants of the cost model: the fit does not win yet, and is not
+adopted.** On trial were the constants a kernel's estimate is made of,
+each measured at a few shapes: a package's product line, a memory line, the
+seconds per position of each scalar function in each regime, the device's
+share from a block count, the overlap of memory and compute
+(`src/Compiler/runtime/decide.jl`, `seconds`). The challenger, after the
+cost model of Halide's Adams autoscheduler (`src/autoschedulers/adams2019`):
+the estimate as a sum of its terms with non-negative coefficients fitted to
+the tuning record, each measured launch's error relative to its seconds,
+drawn toward the prior, with the terms kept beside each measurement. Judged
+on the GB10 over the 46 launches the coverage compositions measure, held
+out one at a time:
+
+| estimate | mean relative error | median | worst | within 1.5× |
+|---|---|---|---|---|
+| the constants | 0.359 | 0.238 | 1.43 | 33 of 46 |
+| the fit, held out | 0.357 | 0.339 | 1.07 | 35 of 46 |
+
+The worst misses are one kind of kernel: a product of sixteen blocks whose
+sweep applies an exponential or a softcap to each stored score, measured at
+82 μs where the estimate says 17 at tf32, and at 129 μs where it says 315
+at full precision. The same kernel costs about the same in both precisions,
+and the per-class table says otherwise: what a function adds to a product
+at the calibration shape is not what it costs in a sweep of sixteen blocks.
+A term for the serial steps each block takes was offered and given weight
+zero, since the same step count is over-priced in one precision and
+under-priced in the other. The constraint, named: 46 launches of six
+compositions cannot fit nine coefficients, and the misses need a term the
+record does not yet discriminate. The entry reopens when the generator's
+schedule trial has filled the record with many measured schedules per
+group; the fit, the held-out test and the terms file are kept as a patch
+with the session, not in the code.
 
 **The cost of a kernel: a measured table of scalar functions, in three
 regimes, is adopted.** On trial were estimates that priced a product by its
