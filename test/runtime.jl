@@ -596,6 +596,7 @@ end
 # Attention generated from its reference: one kernel, a fold over keys whose
 # scores and logsumexp are recomputed in it, online or in two passes.
 const GENERATED_ATTENTION = [
+    ("causal", (16, 2, 2, 200, 2), true),
     ("causal, grouped heads", (16, 4, 2, 200, 2), true),
     ("grouped heads", (16, 4, 2, 200, 2), false),
     ("causal, odd sizes", (32, 3, 1, 70, 3), true),
@@ -617,6 +618,11 @@ if CUDA_FUNCTIONAL
                 kernel = only(ex.kernels)
                 @test !(kernel isa C.FloorKernels)
                 @test occursin("online softmax", string(kernel)) == online
+                # A causal mask is a formula: the steps it rules out are
+                # skipped, where the queries have a tile axis of their own.
+                # Grouped heads may share it with the group, which the
+                # formula's bound over a tile cannot see through.
+                (!causal || H == KV) && @test occursin("masked steps skipped", string(kernel)) == causal
                 @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v)]; rtol = 1.0e-4)
             end
         end

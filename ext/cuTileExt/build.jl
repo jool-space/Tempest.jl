@@ -150,9 +150,15 @@ function unsplit_kernel(c::Context, workspaces, slots)
                 states[r] = direct_state!(loop, f, A, x, valid1, p)
             end
         end
-        resident || push!(body, :(for $t in Int32(1):Int32($n)
-            $(loop...)
-        end))
+        if !resident
+            # Steps a mask rules out for every fold of the phase are skipped.
+            live = live_steps(c, phase, p, indices, n)
+            lo, hi = live === nothing ? (:(Int32(1)), :(Int32($n))) : live
+            live === nothing || (k.name *= ", masked steps skipped")
+            push!(body, :(for $t in $lo:$hi
+                $(loop...)
+            end))
+        end
         any(r -> fold_of(c, r) isa Relative{Exponential}, phase) && (k.name *= ", online softmax")
         for r in phase
             f, A = fold_of(c, r), accumulator(c, r)
@@ -415,7 +421,10 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     scope = copy(names)
     emit_tiles!(k, loop, c, phase_roots(c, phase, sums), scope, at(t)...)
     foreach(r -> fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t)), phase)
-    push!(st, :(for $t in ((part - Int32(1)) * Int32($chunk) + Int32(1)):min(part * Int32($chunk), Int32($(sweeps(c.s))))
+    live = live_steps(c, phase, p, indices, sweeps(c.s))
+    lo, hi = live === nothing ? (:(Int32(1)), :(Int32($(sweeps(c.s))))) : live
+    live === nothing || (k.name *= ", masked steps skipped")
+    push!(st, :(for $t in max($lo, (part - Int32(1)) * Int32($chunk) + Int32(1)):min($hi, part * Int32($chunk), Int32($(sweeps(c.s))))
         $(loop...)
     end))
     for r in phase

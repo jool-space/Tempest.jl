@@ -517,6 +517,7 @@ end
 
 include("emit.jl")
 include("cache.jl")
+include("mask.jl")
 include("build.jl")
 include("contract.jl")
 

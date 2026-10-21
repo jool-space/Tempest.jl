@@ -8,7 +8,10 @@ public GroupView, ValueView, members, product_axes
 """
 What a view holds of a value: its element type and dims, whether it is a
 number rather than an array (stored as one element), and whether it is stored;
-for a fold, the fold and the axes of its domain it reduces.
+for a fold, the fold and the axes of its domain it reduces; and for a value
+masked by formulas over its positions, `masked`: the formulas, each at most
+zero where the mask holds, and the number the value is where it fails (see
+`Tempest.Compiler.masked`).
 """
 struct ValueView
     eltype::DataType
@@ -17,6 +20,7 @@ struct ValueView
     stored::Bool
     fold::Union{Nothing, Fold}
     reduced::Tuple{Vararg{Int}}
+    masked::Union{Nothing, Tuple{Vector{Affine}, Any}}
 end
 
 """

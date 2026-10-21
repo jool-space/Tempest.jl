@@ -230,3 +230,28 @@ end
     written(q, k, v) = (s = causal(scores(q, k)); T.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4)))
     @test same((q, k, v, r) -> Ops.attention(q, k, v; causal = true) .+ r, (q, k, v, r) -> written(q, k, v) .+ r, q, k, v, r)
 end
+
+# A value masked by a formula over its positions carries the formula and the
+# number it is where the mask fails, through the maps of it: the planner
+# reads it, so that a kernel sweeping the value skips the tiles the mask
+# rules out.
+@testset "masked values carry their formulas" begin
+    s = single(data(6, 6))
+    causal(s) = ifelse.(reshape(1:size(s, 1), :, 1) .<= reshape(1:size(s, 2), 1, :), s, -Inf32)
+    g = C.lower(trace(s -> exp.(causal(s) .- T.logsumexp(causal(s); dims = 1)), s))
+    found = filter(!isnothing, [C.masked(g, v) for v in eachindex(g.values)])
+    # The masked scores are minus infinity where the mask fails, and their
+    # probabilities zero.
+    @test any(((m, x),) -> x == -Inf32, found)
+    @test any(((m, x),) -> x == 0.0f0, found)
+    # Keys at most the query: keys − queries ≤ 0, over the value's axes.
+    @test all(((m, x),) -> m == [IR.add(IR.var(1), IR.scale(IR.var(2), -1), IR.Domain((6, 6)))], found)
+    # A fold of a masked value is no masked value, nor is a product of one
+    # and something unmasked, which the mask makes infinite, not a number.
+    @test all(v -> C.masked(g, v) === nothing, [v for v in eachindex(g.values) if g.values[v].definition isa C.Reduction])
+    h = C.lower(trace(s -> causal(s) .* s, s))
+    @test C.masked(h, length(h.values)) === nothing
+    # A sum of one and something unmasked is minus infinity there.
+    h = C.lower(trace(s -> causal(s) .+ s, s))
+    @test C.masked(h, length(h.values)) !== nothing && C.masked(h, length(h.values))[2] == -Inf32
+end

@@ -14,13 +14,26 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**Masked attention does twice the work.** A causal mask is a formula over
-positions, and the generator still visits every tile of the scores
-(`ext/cuTileExt/build.jl`). Challenger: FlexAttention's block mask
-(`torch/_inductor/kernel/flex_attention.py`), which skips tiles the mask
-rules out entirely. Tempest can derive which tiles those are from the mask's
-index formula at plan time. Judged by the measured time of causal attention
-at 1024 and 2048 positions against non-causal, which should approach half.
+**Attention's backward costs fifteen forwards.** At 1024 positions and
+TF32 the forward takes 0.19 ms and the training step 2.8 ms, at 2048 0.46
+and 10.6 ms (the masked-attention trial's table). The step stores the
+scores and their probabilities, since the partition may not recompute a
+fold, and the backward is a scores product, a resident softmax gradient
+over the stored scores, and three products over the stored probabilities
+and their gradient (`src/Compiler/plan/partition.jl`, the ban on folds;
+`ext/cuTileExt/build.jl`, the resident kernel). Challenger:
+FlashAttention-2's backward (`flash_attn/flash_attn_triton.py`, the
+Triton version reads shortest), which keeps only the log-sum-exp and the
+output's dot with its gradient, and recomputes the probabilities inside
+the sweeps of the three backward products from the queries, the keys and
+the log-sum-exp, one pass over keys writing the key and value gradients
+and accumulating the query gradient. Tempest's index level has the pieces:
+the forward already recomputes the scores inside its sweep, and a fold
+read in the backward as `exp(s - lse)` with `lse` stored is a map of a
+recomputed product, which the partition could price rather than ban.
+Judged by the step's time at 1024 and 2048 positions against the forward's,
+which FlashAttention holds near two and a half, and by the bytes the step
+stores; the answers agreeing with the interpreter.
 
 **The schedule search's cold cost.** Every tile of every product is
 compiled and timed once per device and shape: the GPT step's cold
@@ -32,6 +45,46 @@ against the measured step, which must not lose beyond the noise, on the
 GPT step and the guard rails.
 
 ## Decided
+
+**Masked attention does twice the work: the mask's formula bounds the
+sweep, and is adopted.** On trial was the generator visiting every tile of
+a product's sweep where a mask rules whole tiles out
+(`ext/cuTileExt/build.jl`). The challenger, FlexAttention's block mask
+(`torch/_inductor/kernel/flex_attention.py`): the key blocks a mask rules
+out entirely are skipped, found by evaluating the mask on blocks. Here the
+mask is a formula, so the planner reads it: a value `ifelse(cond, x,
+literal)` with `cond` a conjunction of comparisons between index formulas,
+or a map of one that is a known number where the mask fails, as the
+probabilities of masked scores are zero, carries its formulas and that
+number in the view (`src/Compiler/plan/masks.jl`, `masked`). A fold whose
+body is that number's identity where the mask fails, in its own term or in
+a stored value it loads, sees nothing of a step whose tile fails every
+comparison; interval arithmetic on the formulas over the block's indices
+bounds the live steps, an interval of the sweep, and the kernel's loop runs
+over it (`ext/cuTileExt/mask.jl`, `live_steps`). Judged on the GB10 at
+TF32, 64 features, 8 heads, batch 2, the answers agreeing with the
+interpreter at 512 positions:
+
+| case | non-causal | causal | ratio |
+|---|---|---|---|
+| forward, 1024 positions | 195 μs | 145 μs | 0.74 |
+| forward, 2048 positions | 771 μs | 457 μs | 0.59 |
+| training step, 1024 positions | 3.14 ms | 2.79 ms | 0.89 |
+| training step, 2048 positions | 11.95 ms | 10.57 ms | 0.88 |
+
+The forward approaches half at 2048, where the sixteen key steps a query
+block would take become eight and a half; at 1024, eight become four and a
+half, the diagonal step and the block's fixed cost weighing more. The step
+skips in three of its seven kernels: the probabilities' product with the
+values, and the two backward products that read the stored, masked
+probabilities or their gradient, each from the formula carried with the
+stored value; the kernel computing both query and key gradients in one
+sweep sees the mask both ways, and runs the union, every step. What is not
+judged, named: the step's other kernels, the scores' product and the
+resident softmax and its gradient, still visit every tile, since their
+sweeps are not along the masked axis or they are no sweep; and the two
+WRONG marks the guard rails give TF32 at a sum of 8192 are the tolerance,
+not the mask.
 
 **The generator's schedules: a measured set of product tiles wins and is
 adopted; neighbours of the other sketches' constants do not, on this
