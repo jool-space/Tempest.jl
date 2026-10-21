@@ -154,6 +154,27 @@ C.claims(::HostProducts, ::T.CPUTarget, g) = lone_product(g) ? [:host] : []
 C.estimate(::HostProducts, claim, target, g) = [C.Work(0.0)]
 C.build_claim(::HostProducts, claim, target, g, buffers) = g.reference(target, buffers)
 
+@testset "prepared without building" begin
+    x = single(data(8, 6))
+    p = trace(x -> sum(abs2, tanh.(x); dims = 1), x)
+    ex = prepare(p, x; build = false)
+    @test !ex.built && isempty(ex.launches) && length(ex.kernels) == length(ex.plan.groups)
+    @test occursin("not built", sprint(explain, ex))
+    for f in (() -> execute!(ex), () -> bind!(ex, x), () -> capture!(ex))
+        @test occursin("build = false", message(f))
+    end
+    # The plan and the decisions of a built preparation on the same nominal rates.
+    built = prepare(p, x; measure = :none)
+    @test [g.terms for g in ex.plan.groups] == [g.terms for g in built.plan.groups]
+    how(ds) = [d === nothing ? nothing : (d.choice.implementation, d.how) for d in ds]
+    @test how(ex.decisions) == how(built.decisions)
+    if CUDA_FUNCTIONAL
+        # Inputs on the host: only their shapes and types are read.
+        ex = prepare(p, x; target = T.CUDATarget(), build = false)
+        @test !ex.built && occursin("cuTile", sprint(explain, ex))
+    end
+end
+
 @testset "candidates from implementations" begin
     a, b = data(6, 5; scale = 0.3), data(5, 4)
     p = trace((a, b) -> tanh.(a * b), a, b)

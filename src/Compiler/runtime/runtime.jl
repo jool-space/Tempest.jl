@@ -51,11 +51,13 @@ mutable struct Executable{T <: Target}
     copies::Vector{Any}
     # The graph `execute!` replays, once captured (see `capture!`).
     captured::Any
+    # Whether its kernels were built; a plan alone can be explained, not run.
+    built::Bool
 end
 
 
 """
-    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = ()) -> Executable
+    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = (), build = true) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
@@ -89,6 +91,10 @@ forward's maps the backward recomputes rather than reads, by a minimum cut
 of what saving them costs (see `Tempest.Compiler.partition`); `false` saves
 every map the backward reads, as a trial's comparison.
 
+`build = false` plans and decides but builds and allocates nothing: the
+executable can be explained, not run, on a machine without the target's
+device. No claim is timed, and claims are priced on nominal rates.
+
 A training loop, where the step returns the loss and the new parameters and
 optimizer state:
 
@@ -107,7 +113,7 @@ For a function called on new arguments each time, `compile` does the binding
 and copying.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = :close,
-        replaces = (), by_reference = (), recompute = (), partition::Bool = true)
+        replaces = (), by_reference = (), recompute = (), partition::Bool = true, build::Bool = true)
     graph = lower(program)
     permits_rewrites(target) && (graph = rewrite(graph))
     pairs = replacements(program, replaces)
@@ -134,7 +140,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
         union!(pinned, recomputed)
     end
-    d = Decider(target, graph; measure, recompute = pinned)
+    d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned)
     p, considered = cover(d)
     ds = decisions(d, p)
     values = p.graph.values
@@ -146,6 +152,12 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || in_place(o.implementation, o.claim), x.options)
     p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
     ds = ds[order]
+    if !build
+        none(n) = Vector{Any}(nothing, n)
+        return Executable(program, p, target, used_packages(target), s, Any[], none(length(values)),
+            none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
+            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], nothing, false)
+    end
     slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
     referenced = Vector{Any}(nothing, length(program.arguments))
     xs = argument_leaves(program, inputs)
@@ -179,10 +191,12 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
     outs = rebuild(k -> k === nothing ? nothing : results[k], program.output_structure)
     ex = Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results, outs,
-        Any[first(b) for b in built], Any[last(b) for b in built], Any[ds...], Any[considered...], copies, nothing)
+        Any[first(b) for b in built], Any[last(b) for b in built], Any[ds...], Any[considered...], copies, nothing, true)
     bind!(ex, inputs...)
     ex
 end
+
+runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
 
 "A value of `n` elements of type `T` in the first bytes of a slot."
 slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
@@ -277,10 +291,12 @@ julia> outputs(execute!(ex))
 ```
 """
 function bind!(ex::Executable, @nospecialize(inputs...))
+    runnable(ex)
     bind_leaves!(ex, leaves(ex.program.input_structure), leaves(inputs))
 end
 
 function bind!(ex::Executable, bindings::Pair{<:Integer}...)
+    runnable(ex)
     foreach(((j, x),) -> bind_leaves!(ex, leaves(ex.program.input_structure[j]), leaves(x)), bindings)
     ex
 end
@@ -302,6 +318,7 @@ then copy staged results into the arguments they replace. The results are in
 kernel; `replay!` runs the capture.
 """
 function execute!(ex::Executable)
+    runnable(ex)
     run_once(ex)
     ex
 end
@@ -330,6 +347,7 @@ replay!(ex)                     # the same graph, on the new values
 ```
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
+    runnable(ex)
     ex.captured === nothing || release(ex.target, ex.captured)
     ex.captured = nothing
     ex.captured = capture(ex.target, () -> foreach(_ -> run_once(ex), 1:repetitions), (ex.launches, ex.copies))
@@ -361,7 +379,7 @@ function explain(io::IO, ex::Executable)
         ", and the floor:")
     for (k, d) in enumerate(ex.kernels)
         x = ex.decisions[k]
-        println(io, "  kernel ", k, ": ", d, x === nothing ? "" : string(" (", x, ")"))
+        println(io, "  kernel ", k, ": ", ex.built ? d : "not built", x === nothing ? "" : string(" (", x, ")"))
     end
 end
 
@@ -383,6 +401,7 @@ function Base.show(io::IO, ::MIME"text/plain", ex::Executable)
     counts = sort!([(count(==(r), runners), r) for r in unique(runners)]; rev = true)
     println(io, "  ", counted(length(runners), "kernel"), ": ", join(map(((n, r),) -> "$n $r", counts), ", "))
     ex.captured === nothing || println(io, "  captured: replay! runs the recording")
+    ex.built || println(io, "  not built: explain(ex) shows the plan, and nothing runs")
     print(io, "  explain(ex) shows what each kernel computes and stores, and what runs it")
 end
 

@@ -69,8 +69,9 @@ package_of(implementation) = nameof(first(m for (m, is) in REGISTERED if impleme
 
 const NOISE = 0.05
 
-# The CPU has no product claims: its lines are one nominal line (see `line!`).
-rates(::CPUTarget) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE)
+# A target that cannot measure, or a decider that must not, has nominal
+# rates: no latency, one line for every product (see `line!`).
+rates(::Target) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE)
 
 value_bytes(v::Value) = sizeof(v.eltype) * storage_length(v)
 

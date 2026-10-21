@@ -63,15 +63,22 @@ mutable struct Decider
 end
 
 function Decider(target, graph; measure = :close, recompute = ())
-    path, calibration_path = record_path(target), rates_path(target)
+    dry = level(measure) === :dry
+    path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     calibration = load_record(calibration_path)
-    Decider(target, graph, measurable(target) ? level(measure) : :none, device_rates!(target, calibration, calibration_path),
-        calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
+    r = dry ? rates(target) : device_rates!(target, calibration, calibration_path)
+    Decider(target, graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
         Set{Int}(recompute), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
 end
 
+# What is measured: nothing (`:none`), the close calls (`:close`) or every
+# option (`:all`); `:dry` touches no device at all, pricing claims on nominal
+# rates and reading no record, for a preparation that builds nothing.
 level(measure::Bool) = measure ? :close : :none
 level(measure::Symbol) = measure
+
+"Whether the decider may time claims and fit rates on its target: not when dry."
+measures(d::Decider) = d.measure !== :dry && measurable(d.target)
 
 # A group within one preparation: its kind, members, terms and what it stores.
 # One concrete type, so that the sets and tables of identities compile once.
@@ -170,7 +177,7 @@ function choose(d::Decider, p::Plan, g::Group, os)
     ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
         [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate) || searched(o)]
     length(ranks) == 1 && return (1, :estimated, get(d.record, best.key, nothing))
-    if d.measure !== :none
+    if d.measure in (:close, :all)
         build_unmeasured!(d, [(p, g, os[k]) for k in ranks])
         foreach(k -> measure!(d, p, g, os[k]), ranks)
     end

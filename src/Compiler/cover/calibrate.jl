@@ -16,7 +16,7 @@ reference product borrows the class's fastest line.
 function line!(d::Decider, package, T)
     class = product_class(d.target, T)
     get!(d.lines, (package, class)) do
-        measurable(d.target) || return Line(0.0, 1.0e10, 1.0e10, 1.0e10, false)
+        measures(d) || return Line(0.0, 1.0e10, 1.0e10, 1.0e10, false)
         key(p, what) = string(p, " ", class, " ", what)
         own(p) = Line((d.calibration[key(p, what)] for what in ("latency", "rate", "split", "recompute"))..., false)
         fitted_line(d, package, class) || fit!(d, T)
@@ -56,7 +56,7 @@ function price!(d::Decider, regime, class, f)
     get!(d.applied, (regime, class, f)) do
         i = findfirst(((_, g),) -> g == f, APPLIED)
         i === nothing && return price!(d, regime, class, +)
-        measurable(d.target) || return 0.0
+        measures(d) || return 0.0
         get!(d.calibration, join(("applied", regime, class, APPLIED[i][1]), " ")) do
             fit_applied!(d, regime, class, f)
         end
@@ -119,7 +119,7 @@ reference fold.
 """
 function memory!(d::Decider, package)
     get!(d.memories, package) do
-        measurable(d.target) || return Memory(d.rates.launch, d.rates.cached)
+        measures(d) || return Memory(d.rates.launch, d.rates.cached)
         key(what) = string(package, " memory ", what)
         haskey(d.calibration, key("bandwidth")) || fit_memory!(d)
         Memory(d.calibration[key("latency")], d.calibration[key("bandwidth")])

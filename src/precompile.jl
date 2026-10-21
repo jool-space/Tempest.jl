@@ -24,8 +24,15 @@ function workload()
     # of integers, with no derivative.
     keep(seed, i) = (h = (UInt32(seed % UInt32) * 0x9e3779b9) ⊻ (UInt32(i % UInt32) * 0xc2b2ae35); h ⊻= h >> 16; h *= 0x7feb352d; (h >> 8) % 10 != 0)
     dropout(x, seed) = x .* ifelse.(keep.(reshape(seed[1:1], 1, 1), reshape(1:length(x), size(x))), 1.25f0, 0.0f0)
+    # The same over (features, keys or queries, heads, batch).
+    function attention4(q, k, v)
+        s = contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))
+        s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
+        contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (2, 5, 3, 4), (1, 5, 3, 4))
+    end
     x, w, b, v = sample(8, 6), sample(4, 8), sample(4), sample(8)
     q, k = sample(4, 8, 2), sample(4, 8, 2)
+    q4, k4 = sample(4, 8, 2, 2), sample(4, 8, 2, 2)
     losses = [
         ((w, x, b) -> sum(abs2, gelu.(w * x .+ b)), (w, x, b)),
         ((x, v) -> sum(abs2, rmsnorm(x, v)), (x, v)),
@@ -33,6 +40,7 @@ function workload()
         (x -> sum(exp.(x .- logsumexp(x; dims = 1)) .* x), (x,)),
         (x -> sum(exp.(x .- logsumexp(x; dims = 2))) + sum(maximum(x; dims = 1)), (x,)),
         ((q, k) -> sum(abs2, attention(q, k, k) .+ q), (q, k)),
+        ((q, k) -> sum(abs2, attention4(q, k, k) .+ q), (q4, k4)),
         ((x, s) -> sum(abs2, dropout(permutedims(x), s)), (x, Int32[1])),
         (x -> sum(abs2, Float16.(reshape(x, 6, 8))), (x,)),
         (x -> (y = copy(x); y[2:3, :] .= 0; sum(abs2, vcat(y, x))), (x,)),
