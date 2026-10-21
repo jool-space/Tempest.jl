@@ -231,19 +231,25 @@ function cover(d::Decider)
     # is priced when every kernel that recomputes it is claimed by an
     # implementation that recomputes folds.
     priced = Dict{String, Any}()
-    price(current, taken, q, i, key) = get!(priced, key) do
-        p = trial(current, taken, Any[q])
+    function priced_plan(p, current, q, i)
         p === nothing && return nothing
         j = i === nothing ? nothing : claimant(d, p, q, i)
         i === nothing || j !== nothing || return nothing
         q isa Recompute && !recomputed_claimed(d, p, q.value) && return nothing
         (compare(d, p, current), j)
     end
+    price(current, taken, q, i, key) = get!(() -> priced_plan(trial(current, taken, Any[q]), current, q, i), priced, key)
     a = around(base, Any[])
+    # Every proposal's trial against the starting plan, planned side by side
+    # on the threads there are: a trial is pure, and planning is most of the
+    # cover's time. Priced in order, once per key, as before.
+    keyed = [(q, i, proposal_key(base, a, q)) for (q, i) in proposals]
+    firsts = Dict{String, Any}()
+    foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
+    planned = Dict(k => Threads.@spawn(trial(base, Any[], Any[q])) for (k, q) in firsts)
     ranked = Tuple{Float64, Any, Union{Nothing, Implementation}, String}[]
-    for (q, i) in proposals
-        k = proposal_key(base, a, q)
-        x = price(base, Any[], q, i, k)
+    for (q, i, k) in keyed
+        x = get!(() -> priced_plan(fetch_result(planned[k]), base, q, i), priced, k)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
     end
     sort!(ranked; by = r -> (-r[1], fixes(r[2])))
