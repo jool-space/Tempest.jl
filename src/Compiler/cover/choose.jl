@@ -130,12 +130,12 @@ end
 # A choice's name in the tuning record: the target's numerics, the claim's
 # record name and the group's canonical form.
 function choice_key(d::Decider, p::Plan, g::Group, implementation, claim)
-    name = implementation === nothing ? "floor" : record_name(implementation, claim)
+    name = implementation === nothing ? "floor" : Base.invokelatest(record_name, implementation, claim)
     replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
 end
 
 function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, order = 0)
-    work = implementation === nothing ? floor_estimate(p, g) : estimate(implementation, claim, d.target, view)
+    work = implementation === nothing ? floor_estimate(p, g) : Base.invokelatest(estimate, implementation, claim, d.target, view)
     key = choice_key(d, p, g, implementation, claim)
     # The floor moves bytes at the device's rates.
     memory = implementation === nothing ? Memory(d.rates.launch, d.rates.cached) : memory!(d, package_of(implementation))
@@ -143,7 +143,7 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     price(w) = (regime, f) -> price!(d, regime, product_class(d.target, w.factor), f)
     Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0), key,
         any(l -> l !== nothing && l.borrowed, lines), order,
-        implementation === nothing ? Any[] : Any[variants(implementation, d.target, view, claim)...])
+        implementation === nothing ? Any[] : Any[Base.invokelatest(variants, implementation, d.target, view, claim)...])
 end
 
 # Every group has a choice but opaque work, a scatter, which only the floor runs.
@@ -152,7 +152,12 @@ chosen(p::Plan, g::Group) = g.kind !== :opaque
 "Every claim on a group, cheapest estimate first; the floor when none claims it."
 function options(d::Decider, p::Plan, g::Group)
     view = group_view(p, g)
-    os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) for (k, c) in enumerate(claims(i, d.target, view))]
+    # The protocol is called in the latest world here and wherever the
+    # compiler calls it, as a callback is: kernel packages add methods to it
+    # as they load, and were a call to bind the one method a package saw
+    # while it precompiled, the cover's code that package cached would be
+    # void in every session where another package loaded too.
+    os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
     isempty(os) && push!(os, choice(d, p, g, view, nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
@@ -270,7 +275,7 @@ function price_all!(d::Decider, p::Plan)
     for g in p.groups
         chosen(p, g) || continue
         view = group_view(p, g)
-        for i in implementations(d.target), c in claims(i, d.target, view), w in estimate(i, c, d.target, view)
+        for i in implementations(d.target), c in Base.invokelatest(claims, i, d.target, view), w in Base.invokelatest(estimate, i, c, d.target, view)
             class = product_class(d.target, w.factor)
             foreach(((f, _),) -> push!(needs, (:streamed, :any, named(f))), w.applied)
             foreach(((f, _),) -> push!(needs, (:swept, class, named(f))), w.swept)
@@ -365,7 +370,7 @@ filled!(x) = eltype(x) <: Integer ? fill!(x, one(eltype(x))) : (fill!(reinterpre
 # Build a choice on `buffers`.
 build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
     o.implementation === nothing ? build_floor(target, p, g, buffers) :
-    build_claim(o.implementation, o.claim, target, group_view(p, g), buffers)
+    Base.invokelatest(build_claim, o.implementation, o.claim, target, group_view(p, g), buffers)
 
 # Build a choice on the decider's buffers, once, to measure it: its key names
 # the group alike, so the first of them builds for all.

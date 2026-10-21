@@ -150,7 +150,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     for k in eachindex(p.graph.results), (r, a) in pairs
         k != r && result_value(k) == input[a] && throw(ArgumentError("result $k is argument $a, which result $r replaces"))
     end
-    writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || in_place(o.implementation, o.claim), x.options)
+    writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
     ds = ds[order]
     if !build

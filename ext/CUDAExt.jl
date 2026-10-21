@@ -8,7 +8,11 @@ import Tempest: CUDATarget
 
 Tempest.Compiler.target_for(::CuArray) = CUDATarget()
 Tempest.Compiler.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
-Tempest.Compiler.upload(::CUDATarget, x) = CuArray(x)
+# A copy of `x` on the device, filled rather than constructed from `x`:
+# CuArray's constructor from an array dispatches among every package's
+# constructor methods, so code that reached it, the cover entire, was compiled
+# again in each session where cuBLAS added its own (a Diagonal's).
+Tempest.Compiler.upload(::CUDATarget, x) = copyto!(CuArray{eltype(x)}(undef, size(x)), x)
 Tempest.Compiler.bindable(::CUDATarget, x) = x isa CuArray
 
 function Tempest.Compiler.task_state(::CUDATarget)

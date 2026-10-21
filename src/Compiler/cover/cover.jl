@@ -184,7 +184,7 @@ function cover(d::Decider)
     base = generator_plan(d)
     search!(d, base)
     proposals = Tuple{Any, Union{Nothing, Implementation}}[]
-    for i in implementations(d.target), q in candidates(i, d.target, base)
+    for i in implementations(d.target), q in Base.invokelatest(candidates, i, d.target, base)
         any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
     end
     for q in joins(base)
@@ -314,7 +314,7 @@ function explain(io::IO, p::Plan, c::Considered)
 end
 
 # Whether any implementation the target uses recomputes folds where it reads them.
-any_recomputes_folds(target) = any(i -> recomputes_folds(i, target), implementations(target))
+any_recomputes_folds(target) = any(i -> Base.invokelatest(recomputes_folds, i, target), implementations(target))
 
 recomputed_in(g; nested = true) =
     Set(t.value for m in members(g) if haskey(g.terms, m) for t in subterms((g.terms[m],); nested) if t isa Recomputed)
@@ -326,10 +326,10 @@ generator_plan(d::Decider) = plan(d.graph; recompute = d.pinned)
 # Whether every kernel of `p` that recomputes fold `v` is claimed by an
 # implementation that recomputes folds on the decider's target.
 function recomputed_claimed(d::Decider, p::Plan, v)
-    recomputing = [i for i in implementations(d.target) if recomputes_folds(i, d.target)]
+    recomputing = [i for i in implementations(d.target) if Base.invokelatest(recomputes_folds, i, d.target)]
     all(p.groups) do g
         v in recomputed_in(g) || return true
-        any(i -> !isempty(claims(i, d.target, group_view(p, g))), recomputing)
+        any(i -> !isempty(Base.invokelatest(claims, i, d.target, group_view(p, g))), recomputing)
     end
 end
 
@@ -337,5 +337,5 @@ end
 function claimant(d::Decider, p::Plan, q, i)
     v = first(q)
     p.owner[v] == 0 && return nothing
-    isempty(claims(i, d.target, group_view(p, p.groups[p.owner[v]]))) ? nothing : i
+    isempty(Base.invokelatest(claims, i, d.target, group_view(p, p.groups[p.owner[v]]))) ? nothing : i
 end

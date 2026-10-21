@@ -179,8 +179,8 @@ function build_reference(d::Decider, packages, f, args...; recomputing = false)
     g = only(p.groups)
     view = group_view(p, g)
     launches = Tuple{Symbol, Any, Vector{Work}}[]
-    for (m, is) in REGISTERED, i in is, c in (m in packages ? Iterators.take(claims(i, d.target, view), 1) : ())
-        push!(launches, (nameof(m), first(build_claim(i, c, d.target, view, buffers!(timing, p, g))), estimate(i, c, d.target, view)))
+    for (m, is) in REGISTERED, i in is, c in (m in packages ? Iterators.take(Base.invokelatest(claims, i, d.target, view), 1) : ())
+        push!(launches, (nameof(m), first(Base.invokelatest(build_claim, i, c, d.target, view, buffers!(timing, p, g))), Base.invokelatest(estimate, i, c, d.target, view)))
     end
     Reference(launches)
 end
