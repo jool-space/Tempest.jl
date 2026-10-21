@@ -53,7 +53,7 @@ end
 end
 
 # Rewrites of sums, which change rounding: rewritten programs plan and compute
-# what they computed, and the two spellings of a softmax weighting a sum plan
+# what they computed, and the spellings of a softmax weighting a sum plan
 # alike, one shifted sum recomputing the scores in the kernel of the sum.
 scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.125
 causal(s) = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf)
@@ -63,6 +63,13 @@ function by_maximum(q, k, v)
     s = causal(scores(q, k))
     e = exp.(s .- maximum(s; dims = 1))
     weigh(v, e ./ sum(e; dims = 1))
+end
+# The log-sum-exp written out is a statistic once composed into one fold, and
+# the weighted sum is relative to it then.
+function spelled_out(q, k, v)
+    s = causal(scores(q, k))
+    m = maximum(s; dims = 1)
+    weigh(v, exp.(s .- (m .+ log.(sum(exp.(s .- m); dims = 1)))))
 end
 
 @testset "rewritten sums" begin
@@ -74,8 +81,8 @@ end
     end
     groups(f, args...) = recomputing(C.rewrite(C.lower(trace(f, args...)))).groups
     q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
-    a, b = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v))
-    @test a.terms == b.terms
+    a, b, c = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v)), only(groups(spelled_out, q, k, v))
+    @test a.terms == b.terms == c.terms
     graph = C.rewrite(C.lower(trace(by_maximum, q, k, v)))
     @test graph.values[only(b.reductions)].definition.fold == IR.Relative(IR.Exponential(), IR.Composed(/, (IR.Sum(1), IR.Sum(2))))
     @test length(C.recomputed_in(b)) == 1

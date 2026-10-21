@@ -16,16 +16,18 @@
     rewrite(graph) -> IndexGraph
 
 The graph with its sums relative to a statistic made relative folds, and
-pointwise functions of them composed into the folds' observes. The graph's
-`rewrites` notes each, and `explain` prints them.
+pointwise functions of them composed into the folds' observes, until neither
+finds anything. The graph's `rewrites` notes each, and `explain` prints them.
 """
 function rewrite(graph::IndexGraph)
-    graph = relative_sums(graph)
-    # Compositions nest, `m + log(s)` over `log(s)`: each pass composes one level.
+    # Each rewrite can make another possible. Compositions nest, `m + log(s)`
+    # over `log(s)`, and each pass composes one level; a log-sum-exp written
+    # out is a statistic only once composed, and a sum weighted by its
+    # exponential is relative to it only then.
     while true
-        composed = compose_observes(graph)
-        length(composed.rewrites) == length(graph.rewrites) && return compact(composed)
-        graph = composed
+        next = compose_observes(relative_sums(graph))
+        length(next.rewrites) == length(graph.rewrites) && return compact(next)
+        graph = next
     end
 end
 
