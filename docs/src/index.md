@@ -44,4 +44,5 @@ in the repository is the docket of what the code is being measured against.
 
 The [API](api.md) page documents the functions Tempest exports for compiling,
 differentiating and explaining a program, the primitives programs can call,
-and the interface an implementation package writes to.
+the interface an implementation package writes to, and what a package that
+adds a target defines.

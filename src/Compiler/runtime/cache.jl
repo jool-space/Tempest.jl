@@ -19,6 +19,8 @@
 using SHA
 using CompilerCaching: ObjCache
 
+public content_key, cached_kernel, store_kernel, store_failure, uncached_kernel, generated
+
 "Kernels loaded from the cache and kernels compiled (or failed to), in this session."
 const CACHE_COUNTS = (loaded = Threads.Atomic{Int}(0), compiled = Threads.Atomic{Int}(0))
 
@@ -59,11 +61,19 @@ function store_kernel(key, entry::String, binary::Vector{UInt8})
     (entry, binary)
 end
 
-"Count a kernel that failed to compile and keep the compiler's message."
+"Count a kernel that failed to compile and keep the compiler's message under `key`."
 function store_failure(key, message::String)
     Threads.atomic_add!(CACHE_COUNTS.compiled, 1)
     put_entry(key, "", Vector{UInt8}(message))
 end
+
+"""
+    uncached_kernel(entry, binary) -> (entry, binary)
+
+Count a kernel compiled in this session that the cache cannot keep, one that
+refers to values of the session, and return it as `cached_kernel` expects.
+"""
+uncached_kernel(entry, binary) = (Threads.atomic_add!(CACHE_COUNTS.compiled, 1); (entry, binary))
 
 function put_entry(key, entry, binary)
     ObjCache.put!(KERNELS, store_key(key), [reinterpret(UInt8, [UInt32(ncodeunits(entry))]); codeunits(entry); binary])
@@ -95,12 +105,21 @@ function cached_kernel(compile, key)
     fetch_result(task)
 end
 
+# Generated kernels live here.
+module Generated end
+
 # Generated functions, by type, with the source that defined them: in a key a
 # generated function is its source, since its name differs between sessions.
 const GENERATED_SOURCES = IdDict{Any, Expr}()
 const GENERATED_LOCK = ReentrantLock()
 
-"Define the function `source` in `Generated`, keeping its source for cache keys."
+"""
+    generated(source::Expr) -> function
+
+Define the function `source`, an anonymous function expression, in the
+module `Generated`, keeping its source: in a `content_key` a generated
+function is its source, since its name differs between sessions.
+"""
 function generated(source::Expr)
     f = Core.eval(Generated, source)
     @lock GENERATED_LOCK GENERATED_SOURCES[typeof(f)] = source

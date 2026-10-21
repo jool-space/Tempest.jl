@@ -21,6 +21,11 @@ using Tempest: CUDATarget
 @republic republic=false inherit=:public using Tempest.IR
 @republic republic=false inherit=:public import Tempest.Implementations
 
+"cuTile's generator: one implementation for every group a sketch can schedule."
+struct cuTileGenerator <: Implementation end
+
+in_place(::cuTileGenerator, claim) = true
+
 # Defaults measured on GB10 (48 SMs, 24 MiB L2) by the earlier cuTile schedules.
 const RESIDENT_ROWS = 4096       # columns up to this many rows stay in one tile
 const STREAMED_ROWS = 1024       # rows per step of a streamed column
@@ -381,9 +386,9 @@ end
 # small.
 const PARTIAL_BLOCKS = 256
 
-recomputes_folds(::Tempest.Compiler.cuTileGenerator, target) = target isa CUDATarget
+recomputes_folds(::cuTileGenerator, target) = target isa CUDATarget
 
-function claims(::Tempest.Compiler.cuTileGenerator, target::CUDATarget, g::GroupView)
+function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind in (:pointwise, :reduction) || return Claim[]
     products = product_claims(target, g)
     isempty(products) || return products
@@ -490,7 +495,7 @@ end
 # A schedule's launches: each of its kernels, moving the bytes of its
 # arguments over the blocks of its grid. The first computes the group's
 # products and the folds it recomputes.
-function estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::GroupView)
+function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
     c = Context(g, s)
     workspaces = Dict{Any, Workspace}()
@@ -521,7 +526,7 @@ include("mask.jl")
 include("build.jl")
 include("contract.jl")
 
-__init__() = register!(ct, Tempest.Compiler.cuTileGenerator())
+__init__() = register!(ct, cuTileGenerator())
 
 include("precompile.jl")
 

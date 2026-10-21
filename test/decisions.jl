@@ -306,6 +306,6 @@ relative(graph) = [v.definition.fold for v in graph.values if v.definition isa C
     @testset "gap: $REVERSED_VIEW" begin
         p = C.plan(C.lower(trace(x -> reverse(x; dims = 1) .* 2, x)))
         view = C.group_view(p, only(p.groups))
-        @test_broken !isempty(Tempest.Implementations.claims(C.cuTileGenerator(), T.CUDATarget(), view))
+        @test_broken !isempty(Tempest.Implementations.claims(Base.get_extension(Tempest, :cuTileExt).cuTileGenerator(), T.CUDATarget(), view))
     end
 end

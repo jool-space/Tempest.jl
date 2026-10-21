@@ -5,7 +5,6 @@ module CUDAExt
 using Tempest
 using CUDACore
 import Tempest: CUDATarget
-import Tempest.Compiler: Plan, Group
 
 Tempest.Compiler.target_for(::CuArray) = CUDATarget()
 Tempest.Compiler.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
@@ -79,25 +78,19 @@ function Tempest.Compiler.calibrate(target::CUDATarget)
      blocks = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)))
 end
 
-Tempest.Compiler.build_floor(::CUDATarget, p::Plan, g::Group, buffers) = floor(p, g, buffers)
-
 # A scatter's items run at once: they add atomically.
 Tempest.Compiler.accumulate!(buffer::CUDACore.CuDeviceArray, i, v) = (CUDACore.@atomic buffer[i] += v; nothing)
 
-function floor(p::Plan, g::Group, buffers)
-    ks = Tempest.Compiler.scalar_kernels(p.graph, p.stored, g, Tempest.Compiler.kernel_slots(p, g))
-    launches = map(ks) do k
-        f = Tempest.Compiler.generated(:(function (buffers, n)
-            lin = ($(CUDACore.blockIdx)().x - 1) * $(CUDACore.blockDim)().x + $(CUDACore.threadIdx)().x - 1
-            lin < n || return
-            $(k.body)
-            return
-        end))
-        args = CUDACore.cudaconvert(Tuple(buffers[v] for v in k.slots))
-        threads = min(THREADS, k.items)
-        FloorLaunch(floor_function(f, args, k.items)..., (args, k.items), cld(k.items, threads), threads)
-    end
-    (() -> foreach(l -> l(), launches), Tempest.Compiler.FloorKernels(ks))
+function Tempest.Compiler.floor_launch(::CUDATarget, k::Tempest.Compiler.ScalarKernel, args)
+    f = Tempest.Compiler.generated(:(function (buffers, n)
+        lin = ($(CUDACore.blockIdx)().x - 1) * $(CUDACore.blockDim)().x + $(CUDACore.threadIdx)().x - 1
+        lin < n || return
+        $(k.body)
+        return
+    end))
+    args = CUDACore.cudaconvert(args)
+    threads = min(THREADS, k.items)
+    FloorLaunch(floor_function(f, args, k.items)..., (args, k.items), cld(k.items, threads), threads)
 end
 
 # A floor kernel and its exception slot, from the kernel cache or compiled and
@@ -115,8 +108,7 @@ function floor_function(@nospecialize(f), @nospecialize(args), n)
             Base.@lock CUDACore.cufunction_lock CUDACore.compile_or_lookup(job)
         end
         isempty(compiled.relocations.records) && return Tempest.Compiler.store_kernel(key, compiled.entry, compiled.image)
-        Threads.atomic_add!(Tempest.Compiler.CACHE_COUNTS.compiled, 1)
-        compiled.entry, compiled
+        Tempest.Compiler.uncached_kernel(compiled.entry, compiled)
     end
     # A kernel with relocations is the compiled kernel itself, and not an image.
     image, relocations = binary isa Vector{UInt8} ? (binary, CUDACore.GPUCompiler.Relocations()) : (binary.image, binary.relocations)

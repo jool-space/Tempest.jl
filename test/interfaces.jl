@@ -1,10 +1,9 @@
 # Extensions are written against Tempest's public names, as packages of their
-# own would be: what they implement is `Tempest.Implementations`, and what they
-# read is `Tempest.IR` and the plan names public in `Tempest.Compiler`. An
-# extension that still reaches past them is a broken test until it is rewritten.
+# own would be: what they implement is `Tempest.Implementations` or the target
+# protocol public in `Tempest.Compiler`, and what they read is `Tempest.IR`,
+# the plan names and the traced arrays public in `Tempest.Compiler`.
 const ROOT = joinpath(@__DIR__, "..")
 const EXTENSIONS = sort!(map(n -> replace(n, r"\.jl$" => ""), readdir(joinpath(ROOT, "ext"))))
-const AGAINST_INTERFACES = ["cuBLASExt"]
 
 # The source files of an extension: ext/Name.jl, or every file in ext/Name/.
 function sources(name)
@@ -76,19 +75,15 @@ end
 end
 
 @testset "$name uses public names only" for name in EXTENSIONS
-    if name in AGAINST_INTERFACES
-        @test private_names(sources(name)) == String[]
-    else
-        @test_broken private_names(sources(name)) == String[]
-    end
+    @test private_names(sources(name)) == String[]
 end
 
 # The check sees through aliases, and through `import` and `using` lists.
 @testset "what the check finds" begin
     source(code) = (f = tempname() * ".jl"; write(f, code); [f])
-    @test private_names(source("Tempest.Compiler.Plan; Tempest.Compiler.lower")) == ["Tempest.Compiler.lower"]
-    @test private_names(source("import Tempest.Compiler as C\nC.lower(p)")) == ["Tempest.Compiler.lower"]
-    @test private_names(source("using Tempest.Compiler: Plan, lower")) == ["Tempest.Compiler.lower"]
+    @test private_names(source("Tempest.Compiler.Plan; Tempest.Compiler.Decider")) == ["Tempest.Compiler.Decider"]
+    @test private_names(source("import Tempest.Compiler as C\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
+    @test private_names(source("using Tempest.Compiler: Plan, Decider")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("import Tempest.Implementations: claims, REGISTERED")) == ["Tempest.Implementations.REGISTERED"]
     @test private_names(source("using Tempest: CUDATarget; using Tempest.Implementations")) == String[]
 end

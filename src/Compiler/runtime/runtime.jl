@@ -1,61 +1,5 @@
 # Prepared programs: a plan with fixed buffers and a launch per kernel.
 
-public CPUTarget, CUDATarget
-
-abstract type Target end
-
-"Run on the CPU, through the same generated floor code CUDA runs."
-struct CPUTarget <: Target end
-
-Base.show(io::IO, ::CPUTarget) = print(io, "CPUTarget()")
-
-"""
-    CUDATarget(packages...; precision = :full, online = true)
-
-Run on an NVIDIA GPU; needs CUDACore loaded. `packages` names the packages whose
-implementations the target may use, as in `CUDATarget(cuTile)`; by default it
-uses every implementation available when a program is prepared. The floor is
-always used. `precision` is the numerics policy for products: `:full` keeps
-Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
-`:tf32x3` splits each Float32 factor into two TF32 parts and sums three
-tensor-core products (close to Float32 accuracy). Half-precision products
-always accumulate in Float32. `online` permits the online softmax (see
-`rewrite`): a sum weighted by a softmax accumulates in one pass with the
-softmax's maximum, rescaled as it grows, which changes rounding.
-"""
-struct CUDATarget <: Target
-    precision::Symbol
-    online::Bool
-    packages::Union{Nothing, Tuple{Vararg{Module}}}
-end
-
-function CUDATarget(packages::Module...; precision::Symbol = :full, online::Bool = true)
-    precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision, online, isempty(packages) ? nothing : packages)
-end
-
-Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", t.packages === nothing ? "" : join(map(string ∘ nameof, t.packages), ", ") * "; ",
-    "precision = :", t.precision, t.online ? "" : ", online = false", ")")
-
-target_for(x::AbstractArray) = CPUTarget()
-target_for(x) = nothing
-
-function default_target(inputs)
-    for leaf in leaves(inputs)
-        t = target_for(leaf)
-        t === nothing || return t
-    end
-    CPUTarget()
-end
-
-# Generated kernels live here.
-module Generated end
-
-"cuTile's generator; active when cuTile is loaded."
-struct cuTileGenerator <: Implementation end
-
-in_place(::cuTileGenerator, claim) = true
-
 "The packages a target names, or nothing for every registered one."
 packages(::Target) = nothing
 packages(target::CUDATarget) = target.packages
@@ -243,10 +187,6 @@ end
 "A value of `n` elements of type `T` in the first bytes of a slot."
 slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
 
-"Whether array `x` can be storage on `target`, bound by reference."
-bindable(::Target, x) = false
-bindable(::CPUTarget, x) = x isa Array
-
 # The results that replace arguments: pairs of a result's position among the
 # program's results and the argument's among its arguments, leaf by leaf.
 function replacements(program, replaces)
@@ -284,14 +224,6 @@ function footprint(ex::Executable)
     apart = sum(v -> s.slots[v] > 0 ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
     (bytes = own + sum(s.sizes; init = 0), apart = own + apart)
 end
-
-"""
-    task_state(target) -> function
-
-A function that, called first in a new task, gives the task the state on
-`target` of the task that asked for it (for CUDA, its context and stream).
-"""
-task_state(target) = () -> nothing
 
 """
     concurrently(f, xs, target) -> results
@@ -417,18 +349,6 @@ function replay!(ex::Executable)
     ex
 end
 
-"""
-    capture(target, run, keep) -> graph
-
-`run`, which launches work on `target`, captured as a graph for `replay(target,
-graph)` to launch again. The graph keeps `keep`, what it launches, alive until
-`release(target, graph)` or the collector destroys it. A target without graphs
-replays `run` itself.
-"""
-capture(::Target, run, keep) = run
-replay(::Target, run) = run()
-release(::Target, graph) = nothing
-
 function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
@@ -476,10 +396,6 @@ dimensions here, since it lives in a buffer too; `compile` returns numbers.
 """
 outputs(ex::Executable) = ex.outputs
 
-# The CPU target.
-allocate(::CPUTarget, T, n) = Vector{T}(undef, n)
-upload(::CPUTarget, x) = x
-
 kernel_slots(p, g) = sort!(collect(union(group_reads(p.graph, g), [v for v in members(g) if p.stored[v]])))
 
 "The floor's kernels for one group, in launch order."
@@ -489,29 +405,10 @@ end
 
 Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, " items") for k in f.kernels), " then "))
 
-"""
-A floor kernel's launch on the CPU. Each kernel is a new function, so its
-launch holds the function and arguments untyped: a closure over them would be
-a new type too, and every method it passes through would compile again for it.
-"""
-struct HostLaunch
-    f::Any
-    args::Tuple
-    items::Int
-end
-
-(l::HostLaunch)() = Base.invokelatest(l.f, l.args, l.items)
-
-function build_floor(target::CPUTarget, p::Plan, g::Group, buffers)
+# The floor for a group on any target: its scalar kernels, each launched as
+# the target launches one (see `floor_launch`).
+function build_floor(target, p::Plan, g::Group, buffers)
     ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
-    launches = map(ks) do k
-        f = generated(:(function (buffers, n)
-            for lin in 0:(n - 1)
-                $(k.body)
-            end
-            nothing
-        end))
-        HostLaunch(f, Tuple(buffers[v] for v in k.slots), k.items)
-    end
+    launches = [floor_launch(target, k, Tuple(buffers[v] for v in k.slots)) for k in ks]
     (() -> foreach(l -> l(), launches), FloorKernels(ks))
 end

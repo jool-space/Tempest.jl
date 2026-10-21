@@ -2,10 +2,13 @@
 # time. An item is an element of a pointwise group's domain, or a position
 # along a reduction group's kept axes, whose reductions run sequentially. The
 # same code runs on the CPU in a loop and on CUDA one thread per item.
-#
-# Buffers are dense and one-dimensional; the generated function receives them
-# as a tuple, in the order of `slots`.
 
+"""
+A kernel of the floor: `body` computes item `lin`, zero-based, of `items`,
+over the buffers of the values `slots`, dense and one-dimensional, which the
+function generated from the body receives as a tuple in that order (see
+`floor_launch`).
+"""
 struct ScalarKernel
     slots::Vector{Int}
     items::Int

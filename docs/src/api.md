@@ -29,6 +29,14 @@ Tempest.logsumexp
 Tempest.batched_mul
 ```
 
+A package that adds functions programs call writes them on traced arrays, in
+these primitives, as NNlibExt does:
+
+```@docs
+Tempest.Compiler.TracedArray
+Tempest.Compiler.permuted
+```
+
 ## Derivative rules
 
 ```@docs
@@ -48,7 +56,42 @@ Tempest.Compiler.execute!
 Tempest.Compiler.capture!
 Tempest.Compiler.replay!
 Tempest.Compiler.outputs
+Tempest.Compiler.lower
+Tempest.Compiler.plan
 Tempest.Compiler.group_view
+```
+
+### Adding a target
+
+```@docs
+Tempest.Compiler.Target
+Tempest.Compiler.target_for
+Tempest.Compiler.allocate
+Tempest.Compiler.upload
+Tempest.Compiler.bindable
+Tempest.Compiler.task_state
+Tempest.Compiler.floor_launch
+Tempest.Compiler.ScalarKernel
+Tempest.Compiler.accumulate!
+Tempest.Compiler.capture
+Tempest.Compiler.replay
+Tempest.Compiler.release
+Tempest.Compiler.device_name
+Tempest.Compiler.measurable
+Tempest.Compiler.time_launch
+Tempest.Compiler.calibrate
+```
+
+### Building kernels
+
+```@docs
+Tempest.Compiler.content_key
+Tempest.Compiler.cached_kernel
+Tempest.Compiler.store_kernel
+Tempest.Compiler.store_failure
+Tempest.Compiler.uncached_kernel
+Tempest.Compiler.generated
+Tempest.Compiler.concurrently
 ```
 
 ## Tempest.IR

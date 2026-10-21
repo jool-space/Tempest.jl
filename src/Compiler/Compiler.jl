@@ -4,8 +4,10 @@ cover, code generation, the kernel cache, and prepared programs. Its exports are
 beneath `compile`: `trace`, `differentiate` and `interpret` for programs, and
 `prepare`, `bind!`, `execute!`, `capture!`, `replay!` and `outputs` for prepared
 ones. Its other public names are the language programs are written in, which
-`Tempest` makes its own, and what implementations read of a plan beyond
-`Tempest.IR`.
+`Tempest` makes its own; what implementations read of a plan beyond
+`Tempest.IR`, and what they build kernels with (the kernel cache, `generated`
+and `concurrently`); and the protocol a package that adds a target defines
+(see `Target`).
 """
 module Compiler
 
@@ -26,8 +28,9 @@ using ..Implementations: REGISTERED
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 
 # What proposals read, until a view of the graph replaces it: the plan, and the
-# view of each of its groups.
-public Plan, group_view
+# view of each of its groups; the levels between a program and its plan; and
+# how kernels are built side by side.
+public Plan, group_view, lower, plan, concurrently
 
 # The program level.
 include("program/program.jl")
@@ -52,6 +55,7 @@ include("plan/storage.jl")
 
 # Code generation and prepared programs.
 include("codegen/scalar.jl")
+include("runtime/target.jl")
 include("runtime/runtime.jl")
 
 # The cover: which groups there are, and how each runs.

@@ -512,7 +512,7 @@ function Base.show(io::IO, b::BuiltTiles)
     print(io, "cuTile ", b.schedule, ": ", join((string(k.name, " grid ", k.grid) for k in b.kernels), "; "))
 end
 
-function build_claim(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::GroupView, buffers)
+function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buffers)
     c = Context(g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
     launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule, target)

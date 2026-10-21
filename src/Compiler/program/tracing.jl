@@ -14,7 +14,7 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
-public contract, fold, logsumexp, batched_mul
+public contract, fold, logsumexp, batched_mul, TracedArray, permuted
 
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
@@ -27,6 +27,13 @@ struct Layout{A}
     inputs::Tuple{Vararg{Int}}
 end
 
+"""
+An array a program is written with: a stand-in that records what is done to
+it as nodes of its tape. It is memory, as a Julia array is: an array the
+traced code allocates can be written, and views, reshapes and transposes
+share the memory of the array they are made from. A package that adds
+functions programs call defines them on it, in Tempest's primitives.
+"""
 mutable struct TracedArray{T, N} <: AbstractArray{T, N}
     const tape::Tape
     # The node holding the array's contents. A write records a new node and
@@ -447,7 +454,12 @@ function Base.permutedims(x::TracedArray, perm)
     TracedArray(x.tape, record!(x.tape, Permute(perm), (x.id,), map(p -> size(x, p), perm), eltype(x)))
 end
 
-"`x` with its axes permuted, sharing its memory, as `PermutedDimsArray` does."
+"""
+    permuted(x::TracedArray, perm) -> TracedArray
+
+`x` with its axes permuted, sharing its memory, as `PermutedDimsArray` does;
+`permutedims` copies.
+"""
 function permuted(x::TracedArray, perm)
     perm = check_permutation(x, perm)
     perm == ntuple(identity, ndims(x)) ? x : layout(x, Permute(perm), (), map(p -> size(x, p), perm))

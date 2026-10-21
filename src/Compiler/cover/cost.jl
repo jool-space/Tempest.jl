@@ -89,21 +89,3 @@ function floor_estimate(p::Plan, g::Group)
     items = g.kind === :reduction ? prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1) : points
     [Work(Float64(points * per_point) + group_bytes(p, g); blocks = items / 256)]
 end
-
-# What the cover asks of a target.
-
-"Measure the device's rates on `target` (see CUDAExt)."
-function calibrate end
-
-device_name(::CPUTarget) = "cpu"
-"The target's numerics, as part of the tuning record's key."
-numerics(::Target) = :default
-numerics(target::CUDATarget) = target.online ? target.precision : Symbol(target.precision, "-two-pass")
-
-"Whether a target permits the rewrites of sums that change rounding (see `rewrite`)."
-permits_rewrites(::Target) = true
-permits_rewrites(target::CUDATarget) = target.online
-
-"Whether claims on `target` can be timed at preparation; `time_launch` times one."
-measurable(::Target) = false
-function time_launch end
