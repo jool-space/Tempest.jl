@@ -44,6 +44,84 @@ approximates with its beam width. Judged by the cold preparation's seconds
 against the measured step, which must not lose beyond the noise, on the
 GPT step and the guard rails.
 
+**Time to first execution, cold and warm.** From `using Tempest` to a
+program's first result: cold, in a new process with an empty kernel cache
+and no record; warm, in a new process whose cache holds every kernel and
+whose record holds every time. The GPT step's cold preparation is 142 s
+(the schedules trial's table); `test/bench/prepare.jl` times each
+guard-rail program's trace, plan, build and first execution and counts the
+kernels loaded and compiled, and its totals are the baseline to record
+first. What stands trial: the precompile workloads (`src/precompile.jl`,
+`ext/cuTileExt/precompile.jl`), the kernel cache
+(`src/Compiler/runtime/cache.jl`), the cover's measuring of close calls and
+its calibration (`src/Compiler/cover/choose.jl`, `calibrate.jl`), and one
+function compiled per kernel (`generated`). Challengers, by what each
+solved: tinygrad's cache, every compiled kernel and every search result in
+one database keyed by source (`tinygrad/helpers.py`, `diskcache`), for the
+warm case needing nothing but loads; JAX's persistent compilation cache and
+torch.compile's FX graph cache, which key a whole program rather than a
+kernel; and for the cold case, what a precompile workload can hold without
+a device, where cuTile's own compile is the floor. Judged by the seconds to
+the first result, cold and warm, on prepare.jl's programs and the GPT step,
+with the compiled step's time, which must not lose beyond the noise. The
+schedule search's cold cost, above, is one part of this.
+
+**The jury is transformer-shaped.** Every number that has decided a trial
+came from products, reductions, softmax in its spellings, norms and
+attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
+`test/bench/gpt.jl`): what a transformer step spends its time on, and what
+every compiler benchmarks, but a narrow jury for an algebra. Challengers:
+programs outside the transformer, each a test of one part of the algebra.
+A cumulative sum or a linear recurrence, which is a scan; a segment sum or
+a message pass over an index array, which is indirection in formulas; and a
+convolution written as array code, where im2col must become a formula and
+not a copy. Judged by whether each runs with no package loaded, by its
+kernels against the floor and against a hand-written kernel, and by the
+entries it opens.
+
+**Scans are refused.** `cumsum`, `cumprod` and `accumulate` throw
+(`src/Compiler/program/tracing.jl`, `SCAN`): the fold algebra has no
+ordered fold, and the eager slice (`test/bench/eager_slice.jl`) counts them
+among what does not run. Challenger: Futhark, whose `scanomap` is the fused
+form of a map into a scan and whose segmented scans are the implementation
+(`futhark/src/Futhark/IR/SOACS`, and `SegScan` in the GPU backend), with
+the fold's `fold_combine` as the operator. Judged by a cumulative sum and a
+linear recurrence running on the CPU and on CUDA, their answers agreeing
+with the interpreter, and their time against a hand loop. Nothing measured
+needs this yet; it is on the docket so that it is not refused by
+forgetting.
+
+**Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
+`src/IR/expressions.jl`), a kernel's grid and tiles are chosen for it, and
+a program for a new size is a new preparation; decode, where a length grows
+by one each step, would prepare at every step. Challenger: tinygrad's
+symbolic shapes (`Variable` in `tinygrad/shape/shapetracker.py`), a bound
+dimension as a runtime argument of one kernel; Futhark's incremental
+flattening, several kernel versions chosen by size when the program runs.
+Tempest's formulas are quasi-affine in integer variables already; a variable
+standing for an extent rather than an index is the smallest step. Judged by
+one preparation serving every length in a bound, its time per step against
+the kernels prepared for each length, within the noise.
+
+**The schedules are a small set.** A product is claimed under eight tiles
+per class and the cover measures them; every other sketch's parameters are
+constants measured on one device (`ext/cuTileExt/cuTileExt.jl`, the
+constants; `contract.jl`, `product_tiles`), and the neighbours of those
+constants found nothing on this device (the schedules trial). Challenger:
+TVM's MetaSchedule (`python/tvm/meta_schedule`), where sketch rules
+generate the space, random annotation fills the parameters, an evolutionary
+search with a learned cost model picks, and a database keeps every result;
+tinygrad's BEAM is its smallest form, already taken for products. Judged on
+the GPT step and the guard rails, with the cold cost bounded by the entry
+above, and on a second device when there is one, where the constants are a
+guess and a search is not.
+
+Not on the docket: the kernel-author question, how a kernel no implementation
+claims is written by hand in a package. Pallas (a kernel in the same language
+on explicit refs, transparent to tracing, with its own derivative) and Exo
+(plain code scheduled by named, checked transformations) are the two designs
+to read when it reopens, which is when such a kernel is first wanted.
+
 ## Decided
 
 **Masked attention does twice the work: the mask's formula bounds the
