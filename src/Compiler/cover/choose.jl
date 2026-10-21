@@ -3,7 +3,9 @@
 # they keep busy, and so is the floor's. Estimates within each other's error
 # are close calls: they are measured at preparation and kept in the tuning
 # record, and a measurement overrides the estimate only beyond the device's
-# noise margin, so the choice is deterministic given the record. Groups alike
+# noise margin, so the choice is deterministic given the record. An
+# implementation may stage its claims: the variants it offers of the claim
+# that measured best are tried next, until the best has none new. Groups alike
 # choose once.
 
 # Two estimates closer than this factor are a close call.
@@ -19,7 +21,8 @@ struct Choice
     estimate::Float64
     key::String
     borrowed::Bool # priced on another package's line, which bounds a time only from below
-    order::Int # the claim's place among its implementation's claims on the group; its own ranking of them
+    order::Int # the claim's place among its implementation's claims on the group, its own ranking of them; a variant's is past its parent's
+    variants::Vector{Any} # the claims its implementation offers once it measures best (see `Tempest.Implement.variants`)
 end
 
 "What was chosen for a group, how, and the time measured for it, if any."
@@ -124,16 +127,23 @@ function canonical(p::Plan, g::Group)
     string(text, "; ", join(shapes, ", "))
 end
 
+# A choice's name in the tuning record: the target's numerics, the claim's
+# record name and the group's canonical form.
+function choice_key(d::Decider, p::Plan, g::Group, implementation, claim)
+    name = implementation === nothing ? "floor" : record_name(implementation, claim)
+    replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
+end
+
 function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, order = 0)
     work = implementation === nothing ? floor_estimate(p, g) : estimate(implementation, claim, d.target, view)
-    name = implementation === nothing ? "floor" : record_name(implementation, claim)
-    key = replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
+    key = choice_key(d, p, g, implementation, claim)
     # The floor moves bytes at the device's rates.
     memory = implementation === nothing ? Memory(d.rates.launch, d.rates.cached) : memory!(d, package_of(implementation))
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_of(implementation), w.factor) for w in work]
     price(w) = (regime, f) -> price!(d, regime, product_class(d.target, w.factor), f)
     Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0), key,
-        any(l -> l !== nothing && l.borrowed, lines), order)
+        any(l -> l !== nothing && l.borrowed, lines), order,
+        implementation === nothing ? Any[] : Any[variants(implementation, d.target, view, claim)...])
 end
 
 # Every group has a choice but opaque work, a scatter, which only the floor runs.
@@ -158,7 +168,10 @@ its group's values, so one taken from another group would build on its buffers.
 function decide(d::Decider, p::Plan, g::Group)
     get!(d.instances, group_identity(p, g)) do
         os = options!(d, p, g)
-        k, how, measured = get!(() -> choose(d, p, g, os), d.decided, canonical(p, g))
+        # Searched already, or alike a group that was: the search grows the
+        # options from the record and measures nothing.
+        search!(d, [(p, g, os)])
+        k, how, measured = get!(() -> choose(d, os), d.decided, canonical(p, g))
         Decision(os[k], os, how, measured)
     end
 end
@@ -175,32 +188,74 @@ options!(d::Decider, p::Plan, g::Group) = get!(() -> options(d, p, g), d.options
 # which bounds a time only from below, and every claim of the best's
 # implementation when it made several: alternatives it offers for
 # measurement, which the estimate cannot rank. None when the best stands
-# alone.
+# alone, unless it has variants: then it is measured to seed their search.
 function measured_ranks(d::Decider, os)
     best = first(os)
-    length(os) == 1 && return d.measure === :all ? [1] : Int[]
+    alone = isempty(best.variants)
+    length(os) == 1 && return d.measure === :all || !alone ? [1] : Int[]
     searched(o) = o.implementation !== nothing && o.implementation === best.implementation
     ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
         [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate) || searched(o)]
-    length(ranks) == 1 ? Int[] : ranks
+    length(ranks) == 1 && alone ? Int[] : ranks
 end
 
 """
-Build at once what the decisions on `p`'s groups will measure, so that their
-kernels compile side by side rather than group by group; each decision then
-finds its options built. Groups decided already build nothing here.
+Search how `p`'s groups run, all of them at once: each stage's kernels compile
+side by side and are timed one at a time, for every group, rather than group
+by group (see `search!` on groups); each decision then finds its options
+searched. Groups decided already search nothing here.
 """
-function prebuild!(d::Decider, p::Plan)
+function search!(d::Decider, p::Plan)
     d.measure in (:close, :all) || return nothing
     price_all!(d, p)
-    pending = Tuple{Plan, Group, Choice}[]
-    for g in p.groups
-        chosen(p, g) && !haskey(d.decided, canonical(p, g)) || continue
-        os = options!(d, p, g)
-        append!(pending, [(p, g, os[k]) for k in measured_ranks(d, os)])
-    end
-    build_unmeasured!(d, pending)
+    search!(d, [(p, g, options!(d, p, g)) for g in p.groups if chosen(p, g) && !haskey(d.decided, canonical(p, g))])
     nothing
+end
+
+"""
+Search the options of each of `groups`, `(plan, group, options)` each, in
+stages, all groups in each stage: the options a decision measures (see
+`measured_ranks`) are built side by side and timed one at a time; then the
+variants an implementation offers of each group's best measured option, and
+of each within the noise of it (of every measured option, under `:all`); and
+so on, until no group has a variant left to try. Each group's options grow by
+what was tried, sorted by estimate, so that groups alike, searched again from
+the record, grow alike. Under `:none`, the record alone is searched: what it
+holds times is expanded, and nothing is measured.
+"""
+function search!(d::Decider, groups)
+    while true
+        pending = [(p, g, os[k]) for (p, g, os) in groups for k in measured_ranks(d, os) if !haskey(d.record, os[k].key)]
+        if !isempty(pending) && d.measure in (:close, :all)
+            build_unmeasured!(d, pending)
+            foreach(((p, g, o),) -> measure!(d, p, g, o), pending)
+        end
+        any(map(((p, g, os),) -> expand!(d, p, g, os), groups)) || break
+    end
+end
+
+# Grow a group's options by the variants of its best measured option, and of
+# each within the noise of it (of every measured option under `:all`), that
+# were not tried; whether any were added. A variant's order is past its
+# parent's: it is never an implementation's first claim.
+function expand!(d::Decider, p::Plan, g::Group, os::Vector{Choice})
+    timed = [(o, d.record[o.key]) for o in os if o.implementation !== nothing && haskey(d.record, o.key)]
+    isempty(timed) && return false
+    best = minimum(last, timed)
+    isfinite(best) || return false
+    from = [o for (o, t) in timed if d.measure === :all || t <= best / (1 - d.rates.noise)]
+    view = group_view(p, g)
+    keys = Set(o.key for o in os)
+    added = false
+    for o in from, c in o.variants
+        key = choice_key(d, p, g, o.implementation, c)
+        key in keys && continue
+        push!(keys, key)
+        push!(os, choice(d, p, g, view, o.implementation, c, o.order + 1))
+        added = true
+    end
+    added && sort!(os; by = o -> o.estimate)
+    added
 end
 
 # Every scalar function the claims on `p`'s groups apply, in every regime and
@@ -228,22 +283,19 @@ function price_all!(d::Decider, p::Plan)
     nothing
 end
 
-function choose(d::Decider, p::Plan, g::Group, os)
+# The choice among options `os`, sorted by estimate and searched (see
+# `search!`): the rank of the best estimate, unless a measurement beats its
+# time beyond the noise, among every option the record holds a time for.
+function choose(d::Decider, os)
     best = first(os)
-    if length(os) == 1
-        d.measure === :all && measure!(d, p, g, best)
-        return (1, :only, get(d.record, best.key, nothing))
-    end
-    ranks = measured_ranks(d, os)
-    isempty(ranks) && return (1, :estimated, get(d.record, best.key, nothing))
-    if d.measure in (:close, :all)
-        build_unmeasured!(d, [(p, g, os[k]) for k in ranks])
-        foreach(k -> measure!(d, p, g, os[k]), ranks)
-    end
-    times = [get(d.record, os[k].key, nothing) for k in ranks]
-    # Unmeasured, each implementation stands by its first claim: the estimate
-    # ranks implementations, not an implementation's own alternatives.
-    any(isnothing, times) && return (findfirst(o -> o.order <= 1, os), :estimated, nothing)
+    length(os) == 1 && return (1, :only, get(d.record, best.key, nothing))
+    isempty(measured_ranks(d, os)) && return (1, :estimated, get(d.record, best.key, nothing))
+    ranks = [k for (k, o) in enumerate(os) if haskey(d.record, o.key)]
+    # The best estimate unmeasured, each implementation stands by its first
+    # claim: the estimate ranks implementations, not an implementation's own
+    # alternatives.
+    1 in ranks || return (findfirst(o -> o.order <= 1, os), :estimated, nothing)
+    times = [d.record[os[k].key] for k in ranks]
     k = argmin(times)
     k = times[k] < (1 - d.rates.noise) * times[1] ? k : 1
     (ranks[k], :measured, times[k])

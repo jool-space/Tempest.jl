@@ -35,15 +35,6 @@ Judged by the step's time at 1024 and 2048 positions against the forward's,
 which FlashAttention holds near two and a half, and by the bytes the step
 stores; the answers agreeing with the interpreter.
 
-**The schedule search's cold cost.** Every tile of every product is
-compiled and timed once per device and shape: the GPT step's cold
-preparation doubled, 71 to 142 s (the schedules trial's table). Challenger:
-the staged form of the same search, output tile first at the default
-depth, then the depth of the best, then split-K, which tinygrad's BEAM
-approximates with its beam width. Judged by the cold preparation's seconds
-against the measured step, which must not lose beyond the noise, on the
-GPT step and the guard rails.
-
 **Time to first execution, cold and warm.** From `using Tempest` to a
 program's first result: cold, in a new process with an empty kernel cache
 and no record; warm, in a new process whose cache holds every kernel and
@@ -64,7 +55,7 @@ kernel; and for the cold case, what a precompile workload can hold without
 a device, where cuTile's own compile is the floor. Judged by the seconds to
 the first result, cold and warm, on prepare.jl's programs and the GPT step,
 with the compiled step's time, which must not lose beyond the noise. The
-schedule search's cold cost, above, is one part of this.
+schedule search's cold cost (decided below) is one part of this.
 
 The baseline, each in a new process without the startup file, wall seconds:
 prepare.jl's programs cold 98 and warm 34, the GPT step cold 126 and warm 44
@@ -101,12 +92,18 @@ plan applies priced together, the references built side by side
 against about a minute, prices within the noise of the sequential ones, the
 GPT step's cold preparation 71.6 to 63.0 s.
 
-Standing, each in a new process: the GPT step's preparation warm 37 to
-19 s and cold 120 to 63 s; prepare.jl's programs warm 27 to 15 s in the
-process, cold 92 to 69, of which calibration's first program 22. Open: the
-candidates compiled and timed and then discarded (the staged search, above),
-the first preparation's remaining Julia compilation (about 10 s), and the
-timing of candidates one at a time.
+Taken next: the staged search of a product's tiles (decided below), the GPT
+step's cold preparation 63.0 to 55.1 s, prepare.jl's programs 68.6 to
+63.2 s. Standing, each in a new process: the GPT step's preparation warm 37
+to 20 s and cold 120 to 55 s; prepare.jl's programs warm 27 to 13 s in the
+process, cold 92 to 63. What the cold GPT preparation spends now, phase by
+phase: the front end 5.5 s, the device's calibration 6.7 s, the search on
+the generator's plan 24.3 s (104 kernels compiled, 71 claims timed, the
+applied functions priced), the cover's 81 trials 14.5 s (45 compiled, 46
+timed), and the rest of prepare 9.9 s (27 kernels compiled for the groups
+the search did not touch, storage, capture). Open: the candidates still
+timed one at a time, the kernels of unsearched groups compiled last and
+late, and the first preparation's Julia compilation.
 
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
@@ -145,18 +142,20 @@ standing for an extent rather than an index is the smallest step. Judged by
 one preparation serving every length in a bound, its time per step against
 the kernels prepared for each length, within the noise.
 
-**The schedules are a small set.** A product is claimed under eight tiles
-per class and the cover measures them; every other sketch's parameters are
-constants measured on one device (`ext/cuTileExt/cuTileExt.jl`, the
-constants; `contract.jl`, `product_tiles`), and the neighbours of those
-constants found nothing on this device (the schedules trial). Challenger:
+**The schedules are a small set.** A product is claimed under four output
+tiles per class, then the depths and the split of the best, and the cover
+measures them in stages; every other sketch's parameters are constants
+measured on one device (`ext/cuTileExt/cuTileExt.jl`, the constants;
+`contract.jl`, `product_tiles` and `product_variants`), and the neighbours
+of those constants found nothing on this device (the schedules trial).
+Challenger:
 TVM's MetaSchedule (`python/tvm/meta_schedule`), where sketch rules
 generate the space, random annotation fills the parameters, an evolutionary
 search with a learned cost model picks, and a database keeps every result;
 tinygrad's BEAM is its smallest form, already taken for products. Judged on
-the GPT step and the guard rails, with the cold cost bounded by the entry
-above, and on a second device when there is one, where the constants are a
-guess and a search is not.
+the GPT step and the guard rails, with the cold cost bounded as the staged
+search bounds it, and on a second device when there is one, where the
+constants are a guess and a search is not.
 
 Not on the docket: the kernel-author question, how a kernel no implementation
 claims is written by hand in a package. Pallas (a kernel in the same language
@@ -165,6 +164,43 @@ on explicit refs, transparent to tracing, with its own derivative) and Exo
 to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
+
+**The schedule search's cold cost: the staged search wins and is adopted.**
+On trial was the search over a product's tiles, every tile of every product
+compiled and timed once per device and shape (`ext/cuTileExt/contract.jl`,
+`product_claims`; `src/Compiler/cover/choose.jl`, `measured_ranks`). The
+challenger, the staged form of the same search, which tinygrad's BEAM
+(`tinygrad/engine/search.py`) approximates with its beam width: every
+output tile at the class's default depth first, then the variants of the
+tile that measured best, its other depths and its sum split the other way,
+and so on until the best has no variant left. Now an implementation may
+stage its claims (`Tempest.Implement.variants`), and the cover searches
+every group's options in stages, all groups in each: a stage's kernels
+compile side by side and are timed one at a time, and every measured option
+within the noise of the best is expanded (`search!`, `expand!`); the record
+replays the search without the device. Judged on the GB10, each
+preparation in a new process with an empty kernel cache and tuning
+directory, the same plans agreeing with the interpreter:
+
+| case | before | staged |
+|---|---|---|
+| GPT step, cold preparation, full precision | 63.0 s | 55.1 s |
+| GPT step, cold preparation, tf32 | 65.2 s | 56.7 s |
+| GPT step, warm preparation | 19.6 s | 20.2 s |
+| prepare.jl's programs, cold | 68.6 s | 63.2 s |
+| product claims compiled and timed, GPT step and prepare.jl | 192, 84 | 100, 65 |
+| GPT step, device time, two runs | 2.098, 2.102 ms | 2.095, 2.093 ms |
+| GPT step, tf32, device time | 1.256 ms | 1.262 ms |
+| guard rails, full precision, 36 cases, two runs | 8980, 8948 μs | 8969, 8947 μs |
+
+The claims measured halve and the seconds fall by an eighth: each stage's
+kernels compile together, but its candidates are still timed one at a time
+and the stages run in sequence. On a 256×4096·4096×256 product at full
+precision on cuTile alone, the staged search tried 10 of the 14 tiles and
+found the exhaustive search's best, three tiles tied within the noise and
+each expanded. What was not judged, named: a product whose best tile lies
+off the greedy path, which the step's and the guard rails' times would have
+shown.
 
 **Masked attention does twice the work: the mask's formula bounds the
 sweep, and is adopted.** On trial was the generator visiting every tile of

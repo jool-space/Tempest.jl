@@ -409,6 +409,43 @@ if CUDA_FUNCTIONAL
         @test only(prepared().decisions).choice.key == first(x.options).key
         @test isapprox(Array(only(C.leaves(outputs(execute!(prepared()))))), interpret(p, a, b); rtol = 2 * eps(Float16))
     end
+    @testset "the search is staged" begin
+        # The generator claims a product under every output tile at the
+        # default depth, and the cover tries the variants of the one that
+        # measures best: its other depths, and its sum split the other way. A
+        # close-call search tries fewer tiles than measuring every option
+        # does, and chooses alike each time from the record. A product with
+        # an epilogue, on a target of cuTile alone, at full precision:
+        # depths 16 and 32, and a grid of few output tiles, so that the sum
+        # splits.
+        a, b, c = single(data(256, 4096; scale = 0.1)), single(data(4096, 256)), single(data(256))
+        p = trace((a, b, c) -> gelu.(a * b .+ c), a, b, c)
+        target = T.CUDATarget(cuTile)
+        dir = mktempdir()
+        rates = C.rates_path(target)
+        isfile(rates) && (mkpath(joinpath(dir, "tuning")); cp(rates, joinpath(dir, "tuning", basename(rates))))
+        ext = Base.get_extension(Tempest, :cuTileExt)
+        tile(o) = (s = o.claim.schedule; (s.tiling[1].tile, s.tiling[3].tile, s.tiling[2].tile, s.splits))
+        withenv("TEMPEST_CACHE" => dir) do
+            prepared(measure) = only(x for x in prepare(p, CuArray(a), CuArray(b), CuArray(c); target, measure).decisions
+                if x !== nothing && x.choice.implementation isa ext.cuTileGenerator && x.choice.claim.schedule.sketch === :product)
+            staged = prepared(:close)
+            tiles = map(tile, staged.options)
+            @test staged.how === :measured
+            # Every output tile at depth 16, the default, and the variants of
+            # the best: at least its other depth and its split, fewer than all.
+            @test length(unique(t[1:2] for t in tiles if t[3] == 16)) == 4
+            @test length(tiles) >= 6
+            again = prepared(:close)
+            @test again.choice.key == staged.choice.key && length(again.options) == length(staged.options)
+            # Every option: the four output tiles at both depths, split and
+            # not, but the tile of 32 output blocks, which does not split.
+            every = prepared(:all)
+            @test length(staged.options) < length(every.options) == 14
+            @test all(t -> t[1:3] in [(tm, tn, tk) for (tm, tn) in ((64, 64), (128, 64), (64, 128), (32, 64)) for tk in (16, 32)],
+                map(tile, every.options))
+        end
+    end
     @testset "implementation sets" begin
         w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
         p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)

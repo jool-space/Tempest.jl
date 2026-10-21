@@ -11,7 +11,7 @@ module Implement
 using Republic: @republic
 @republic republic=false inherit=:public using ..IR
 
-public Implementation, Work, register!, claims, estimate, build_claim, candidates, record_name,
+public Implementation, Work, register!, claims, variants, estimate, build_claim, candidates, record_name,
     recomputes_folds, in_place
 
 include("groups.jl")
@@ -77,6 +77,18 @@ a value of its own type that `estimate` and `build_claim` take; empty when it
 cannot, as by default.
 """
 claims(::Implementation, target, group) = ()
+
+"""
+    variants(implementation, target, group, claim) -> claims
+
+The claims that vary `claim`, offered once it has measured best among the
+claims tried on `group` so far: the next stage of a search the implementation
+stages, as the generator stages its product tiles (every output tile at one
+depth, then the depths of the best and its split). The cover tries them in
+turn until the best has none new. None by default: then `claims` is the whole
+search.
+"""
+variants(::Implementation, target, group, claim) = ()
 
 """
     estimate(implementation, claim, target, group) -> Vector{Work}

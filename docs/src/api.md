@@ -111,6 +111,7 @@ Tempest.Implement.ValueView
 Tempest.Implement.members
 Tempest.Implement.product_axes
 Tempest.Implement.claims
+Tempest.Implement.variants
 Tempest.Implement.estimate
 Tempest.Implement.Work
 Tempest.Implement.build_claim

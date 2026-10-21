@@ -9,55 +9,98 @@
 # heads and queries are in attention's backward pass. Everything else is the
 # ordinary resident or streamed reduction kernel.
 
-# The tiles a product may take: its output tile's rows and columns, and the
-# depth of each step of its sum. The generator claims the group under each,
-# and the cover measures the claims whose estimates are close, which for
-# tiles of one product they are, so the tile is found on the device and kept
-# in the tuning record, not chosen here (tinygrad's BEAM search, the small
-# version: a fixed set of options per kernel, timed). The set is what is
-# searched: full-precision Float32 products on cuTile run far below the
-# tensor cores' rates and favour small tiles; TF32 and half products large
-# ones; a product whose factor recomputes a fold (attention's scores, inside
-# the sum over keys) does that work once per step and per block, so its rows
-# stay in one tile when they fit, and the depth of its steps is its own
-# question. `TEMPEST_PRODUCT_TILE=m,n,k` names one tile instead, for
+# The tiles a product may take: its output tile's rows and columns, the depth
+# of each step of its sum, and whether its sum is split among blocks. The
+# generator claims the group under every output tile at the class's default
+# depth, split as the grid's size suggests, and offers the variants of the
+# claim that measures best: its other depths, and its sum split the other way
+# (`variants`). So the cover searches the tiles on the device in stages,
+# tinygrad's BEAM search at width one, and the tile is found there and kept
+# in the tuning record, not chosen here. The set is what is searched:
+# full-precision Float32 products on cuTile run far below the tensor cores'
+# rates and favour small tiles; TF32 and half products large ones; a product
+# whose factor recomputes a fold (attention's scores, inside the sum over
+# keys) does that work once per step and per block, so its rows stay in one
+# tile when they fit, and the depth of its steps is its own question.
+# `TEMPEST_PRODUCT_TILE=m,n,k` names one tile instead, with no variants, for
 # experiments. The products inside a recomputed fold step at the depth
 # measured best for the class: 16 at full precision, 32 otherwise.
 product_step(precision, T) = T === Float32 && precision === :full ? 16 : 32
 
+full_precision(target, T) = T === Float32 && target.precision === :full
+
+product_outputs(target, T; recomputing) = recomputing ? ((128, 128), (64, 128)) :
+    full_precision(target, T) ? ((64, 64), (128, 64), (64, 128), (32, 64)) : ((128, 128), (128, 64), (64, 128), (64, 64))
+product_depths(target, T; recomputing) = full_precision(target, T) ? (16, 32) : recomputing ? (16, 32, 64) : (32, 64)
+
+# A tile within a product's extents.
+fitted((tm, tn, tk), m, n, k) = (min(tm, nextpow(2, m)), min(tn, nextpow(2, n)), min(tk, nextpow(2, k)))
+
+# The tiles the search begins with: every output tile at the default depth.
 function product_tiles(target, T, m, n, k; recomputing)
-    full = T === Float32 && target.precision === :full
-    outputs = recomputing ? ((128, 128), (64, 128)) :
-        full ? ((64, 64), (128, 64), (64, 128), (32, 64)) : ((128, 128), (128, 64), (64, 128), (64, 64))
-    depths = full ? (16, 32) : recomputing ? (16, 32, 64) : (32, 64)
     override = get(ENV, "TEMPEST_PRODUCT_TILE", "")
-    candidates = isempty(override) ? [(tm, tn, tk) for (tm, tn) in outputs for tk in depths] : [Tuple(parse.(Int, split(override, ",")))]
-    unique((min(tm, nextpow(2, m)), min(tn, nextpow(2, n)), min(tk, nextpow(2, k))) for (tm, tn, tk) in candidates)
+    tiles = isempty(override) ? [(tm, tn, product_step(target.precision, T)) for (tm, tn) in product_outputs(target, T; recomputing)] :
+        [Tuple(parse.(Int, split(override, ",")))]
+    unique(fitted(t, m, n, k) for t in tiles)
+end
+
+# What the product sketch needs of a group beyond its axes: the type of its
+# factors, the folds recomputed inside its sum, and whether every fold is a
+# plain sum, which a split may merge; nothing when the group is no product.
+function product_facts(target, g::GroupView)
+    target isa CUDATarget && g.kind === :reduction || return nothing
+    folds = [g.values[r].fold for r in g.reductions]
+    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, Relative}, folds) || return nothing
+    # The factors of the first fold that is a product: a fold of weights
+    # alone, such as a log-sum-exp beside attention's weighted sum, has none.
+    first_product = findfirst(r -> product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)
+    first_product === nothing && return nothing
+    with_product = g.reductions[first_product]
+    factor = product_factor(Context(g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
+        first(product_factors(g.values[with_product].fold, g.terms[with_product])))
+    recomputed = [s for r in g.reductions for s in subterms((g.terms[r],)) if s isa Recomputed]
+    (T = term_eltype(factor, g), recomputed, sums = all(f -> f isa SumFold, folds))
+end
+
+# Whether a product's sum over the `swept` axes may be split among blocks: not
+# when a recomputed fold does not move along them, so is computed once per
+# block before the sweep, which every split would repeat; nor for a relative
+# fold.
+splittable(facts, swept) = facts.sums && !any(s -> !any(a -> mentions(s, a), swept), facts.recomputed)
+
+# How many ways the sum of tile `(tm, tn, tk)` over `tiling` (M, K and N, then
+# the grid's axes and those swept in turn) splits among blocks: a grid of few
+# output tiles leaves the device idle, so the summed axis is split among
+# blocks (split-K), merging the partial sums in a second launch.
+function product_split(tiling, tm, tn, tk, splittable)
+    M, K, N = tiling[1:3]
+    blocks = cld(M.extent, tm) * cld(N.extent, tn) * prod((ax.extent for ax in tiling[4:end] if !ax.reduced); init = 1)
+    k = K.extent * prod((ax.extent for ax in tiling[4:end] if ax.reduced); init = 1)
+    splittable && blocks < SPLIT_KEPT_BLOCKS[1] ? split_count(k, tk, blocks) : 1
+end
+
+# The claim under tile `(tm, tn, tk)`, its sum split `split` ways, over
+# `tiling`; nothing when the generator cannot express the group over it.
+function product_claim(g::GroupView, tiling, tm, tn, tk, split, precision)
+    M, K, N = tiling[1:3]
+    t = [TileAxis(M.axes, M.extent, tm, false), TileAxis(K.axes, K.extent, tk, true), TileAxis(N.axes, N.extent, tn, false), tiling[4:end]...]
+    s = TileSchedule(:product, t, split, nothing, 8, precision)
+    c = Context(g, s)
+    all(r -> products_of(c, r), g.reductions) && any(r -> has_product(c, r), g.reductions) && expressible_over(c) ? Claim(s) : nothing
 end
 
 function product_claims(target, g::GroupView)
-    target isa CUDATarget && g.kind === :reduction || return Claim[]
-    folds = [g.values[r].fold for r in g.reductions]
-    all(r -> g.phase[r] == 1, g.reductions) && all(f -> f isa Union{SumFold, Relative}, folds) || return Claim[]
+    facts = product_facts(target, g)
+    facts === nothing && return Claim[]
     found = product_axes(g)
     found === nothing && return Claim[]
     M, N, K, B = found
     extent(axes) = prod(k -> g.domain[k], axes; init = 1)
     m, n, k, b = extent(M), extent(N), extent(K), extent(B)
     max(m, n, k, b) < typemax(Int32) ÷ 2 || return Claim[]
-    # The factors of the first fold that is a product: a fold of weights
-    # alone, such as a log-sum-exp beside attention's weighted sum, has none.
-    first_product = findfirst(r -> product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)
-    first_product === nothing && return Claim[]
-    with_product = g.reductions[first_product]
-    factor = product_factor(Context(g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
-        first(product_factors(g.values[with_product].fold, g.terms[with_product])))
     longest(axes) = axes[argmax(map(a -> g.domain[a], axes))]
-    recomputed = [s for r in g.reductions for s in subterms((g.terms[r],)) if s isa Recomputed]
-    recomputing = !isempty(recomputed)
-    # A recomputed fold that does not move along the summed axes is computed
-    # once per block, before the sweep.
-    hoisted = any(s -> !any(a -> mentions(s, a), K), recomputed)
+    recomputing = !isempty(facts.recomputed)
+    may_split = splittable(facts, K)
     # Summed axes the factors do not read as one strided axis are swept in
     # turn: the longest piece over which they do is tiled, every other piece
     # an index per step.
@@ -68,29 +111,38 @@ function product_claims(target, g::GroupView)
         Mt, Nt = collapsed ? (M, N) : ([longest(M)], [longest(N)])
         grid = collapsed ? (isempty(B) ? Vector{Int}[] : [B]) : [[a] for a in sort!([setdiff(M, Mt); setdiff(N, Nt); B])]
         mt, nt, kt = extent(Mt), extent(Nt), extent(Kt)
-        T = term_eltype(factor, g)
+        tiling = [TileAxis(Mt, mt, 1, false), TileAxis(Kt, kt, 1, true), TileAxis(Nt, nt, 1, false)]
+        append!(tiling, [TileAxis(a, extent(a), 1, false) for a in grid])
+        append!(tiling, [TileAxis(a, extent(a), 1, true) for a in others])
         found = Claim[]
-        for (tm, tn, tk) in product_tiles(target, T, mt, nt, kt; recomputing)
-            tiling = [TileAxis(Mt, mt, tm, false), TileAxis(Kt, kt, tk, true), TileAxis(Nt, nt, tn, false)]
-            append!(tiling, [TileAxis(a, extent(a), 1, false) for a in grid])
-            append!(tiling, [TileAxis(a, extent(a), 1, true) for a in others])
-            # A grid of few output tiles leaves the device idle: the summed
-            # axis may be split among blocks (split-K), merging the partial
-            # sums in a second launch, and the cover measures both; not when
-            # a fold is computed before the sweep, which every split would
-            # repeat, nor for a relative fold.
-            blocks = cld(mt, tm) * cld(nt, tn) * b * (m ÷ mt) * (n ÷ nt)
-            sums = all(f -> f isa SumFold, folds)
-            splits = blocks < SPLIT_KEPT_BLOCKS[1] && !hoisted && sums ? split_count(k, tk, blocks) : 1
-            for split in unique((1, splits))
-                s = TileSchedule(:product, tiling, split, nothing, 8, target.precision)
-                c = Context(g, s)
-                all(r -> products_of(c, r), g.reductions) && any(r -> has_product(c, r), g.reductions) && expressible_over(c) && push!(found, Claim(s))
-            end
+        for (tm, tn, tk) in product_tiles(target, facts.T, mt, nt, kt; recomputing)
+            c = product_claim(g, tiling, tm, tn, tk, product_split(tiling, tm, tn, tk, may_split), target.precision)
+            c === nothing || push!(found, c)
         end
         isempty(found) || return found
     end
     Claim[]
+end
+
+# The variants of a product claim, offered once it measures best: the other
+# depths at its output tile, split as it is, and its sum split the other way.
+function product_variants(target, g::GroupView, c::Claim)
+    s = c.schedule
+    s.sketch === :product && isempty(get(ENV, "TEMPEST_PRODUCT_TILE", "")) || return Claim[]
+    facts = product_facts(target, g)
+    facts === nothing && return Claim[]
+    M, K, N = s.tiling[1:3]
+    may_split = splittable(facts, [K.axes; [a for ax in s.tiling[4:end] if ax.reduced for a in ax.axes]])
+    natural(tk) = product_split(s.tiling, M.tile, N.tile, tk, may_split)
+    depths = unique(min(tk, nextpow(2, K.extent)) for tk in product_depths(target, facts.T; recomputing = !isempty(facts.recomputed)))
+    tiles = [(K.tile, s.splits > 1 ? 1 : natural(K.tile)); [(tk, s.splits > 1 ? natural(tk) : 1) for tk in depths]]
+    found = Claim[]
+    for (tk, split) in unique(tiles)
+        (tk, split) == (K.tile, s.splits) && continue
+        x = product_claim(g, s.tiling, M.tile, N.tile, tk, split, s.precision)
+        x === nothing || push!(found, x)
+    end
+    found
 end
 
 # Whether a fold accumulates in a product's sweep: a sum of a bilinear

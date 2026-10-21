@@ -182,7 +182,7 @@ returned, taken or not. Folds the decider pins are recomputed in every plan.
 """
 function cover(d::Decider)
     base = generator_plan(d)
-    prebuild!(d, base)
+    search!(d, base)
     proposals = Tuple{Any, Union{Nothing, Implementation}}[]
     for i in implementations(d.target), q in candidates(i, d.target, base)
         any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
