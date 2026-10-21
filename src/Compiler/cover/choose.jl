@@ -192,6 +192,7 @@ finds its options built. Groups decided already build nothing here.
 """
 function prebuild!(d::Decider, p::Plan)
     d.measure in (:close, :all) || return nothing
+    price_all!(d, p)
     pending = Tuple{Plan, Group, Choice}[]
     for g in p.groups
         chosen(p, g) && !haskey(d.decided, canonical(p, g)) || continue
@@ -199,6 +200,31 @@ function prebuild!(d::Decider, p::Plan)
         append!(pending, [(p, g, os[k]) for k in measured_ranks(d, os)])
     end
     build_unmeasured!(d, pending)
+    nothing
+end
+
+# Every scalar function the claims on `p`'s groups apply, in every regime and
+# class they apply it in, priced together where the rates file lacks it (see
+# `fit_applied_all!`): the references are built side by side rather than two
+# at a time on first need. A function the table does not name is priced as
+# addition, as `price!` prices it.
+function price_all!(d::Decider, p::Plan)
+    measures(d) || return nothing
+    needs = Set{Tuple{Symbol, Symbol, Any}}()
+    named(f) = findfirst(((_, g),) -> g == f, APPLIED) === nothing ? (+) : f
+    for g in p.groups
+        chosen(p, g) || continue
+        view = group_view(p, g)
+        for i in implementations(d.target), c in claims(i, d.target, view), w in estimate(i, c, d.target, view)
+            class = product_class(d.target, w.factor)
+            foreach(((f, _),) -> push!(needs, (:streamed, :any, named(f))), w.applied)
+            foreach(((f, _),) -> push!(needs, (:swept, class, named(f))), w.swept)
+            foreach(((f, _),) -> push!(needs, (:inner, class, named(f))), w.inner)
+        end
+    end
+    key((regime, class, f)) = join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")
+    unfitted = [n for n in needs if !haskey(d.applied, n) && !haskey(d.calibration, key(n))]
+    isempty(unfitted) || fit_applied_all!(d, unfitted)
     nothing
 end
 

@@ -63,10 +63,15 @@ function price!(d::Decider, regime, class, f)
     end
 end
 
-# Every function priced in every regime, for the classes `types` make.
+# Every function priced in every regime, for the classes `types` make: those
+# the rates file lacks are fitted together.
 function applied!(d::Decider, types = (Float32,))
-    for (_, f) in APPLIED, regime in REGIMES, T in types
-        price!(d, regime, product_class(d.target, T), f)
+    needs = unique((regime, regime === :streamed ? :any : product_class(d.target, T), f) for (_, f) in APPLIED, regime in REGIMES, T in types)
+    key((regime, class, f)) = join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")
+    unfitted = [n for n in needs if measures(d) && !haskey(d.calibration, key(n))]
+    isempty(unfitted) || fit_applied_all!(d, unfitted)
+    for (regime, class, f) in needs
+        price!(d, regime, class, f)
     end
     d.applied
 end
@@ -75,34 +80,64 @@ const APPLIED_SHAPE = (4096, 512)
 const APPLIED_TIMES = 8
 const SWEEP_SHAPES = ((256, 512), (512, 2048))
 
-function fit_applied!(d::Decider, regime, class, f)
+# The seconds per position of each of `needs`, triples `(regime, class, f)`,
+# fitted together: the reference programs of all of them are built side by
+# side, their kernels compiling at once, then timed one at a time, as claims
+# are. Each regime's plain reference (the fold, or the product, without the
+# function) is one program for every function of a class.
+function fit_applied_all!(d::Decider, needs)
     packages = used_packages(d.target)
-    key = join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")
+    specs = Dict{Any, Tuple}()
+    for (regime, class, f) in needs
+        plain, applied = applied_references(regime, class, f)
+        get!(specs, (regime, class), plain)
+        specs[(regime, class, f)] = applied
+    end
+    keys_ = collect(keys(specs))
+    built = concurrently(k -> build_reference(d, packages, specs[k][1], specs[k][2]...; recomputing = specs[k][3]), keys_, d.target)
+    timed = Dict(k => time_reference(d, r) for (k, r) in zip(keys_, built))
+    for (regime, class, f) in needs
+        name = APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]
+        keep!(d.calibration, d.calibration_path, join(("applied", regime, class, name), " "),
+            applied_seconds(regime, f, timed[(regime, class)], timed[(regime, class, f)]))
+    end
+    nothing
+end
+
+function fit_applied!(d::Decider, regime, class, f)
+    fit_applied_all!(d, [(regime, class, f)])
+    d.calibration[join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")]
+end
+
+# The two reference programs that price `f` in a regime for a class: the plain
+# one, and the one applying `f`, each `(function, arguments, recomputing)`.
+function applied_references(regime, class, f)
     if regime === :streamed
         x = zeros(Float32, APPLIED_SHAPE)
         chain(x) = foldl((y, _) -> apply_chain(f, y), 1:APPLIED_TIMES; init = x)
-        fastest(r) = minimum(first.(values(r)); init = Inf)
-        base = fastest(reference(d, packages, x -> sum(x; dims = 1), x))
-        timed = fastest(reference(d, packages, x -> sum(chain(x); dims = 1), x))
-        return keep!(d.calibration, d.calibration_path, key, max(0.0, timed - base) / (APPLIED_TIMES * length(x)))
+        return ((x -> sum(x; dims = 1), (x,), false), (x -> sum(chain(x); dims = 1), (x,), false))
     end
-    # What the function adds to the product of the package that computes it,
-    # against that package's product without it; the package it costs least.
     T = class in (:Float16, :BFloat16) ? getfield(@__MODULE__, class) : Float32
     if regime === :swept
         a, b = zeros(T, SWEEP_SHAPES[1]), zeros(T, SWEEP_SHAPES[2])
-        base = reference(d, packages, (a, b) -> a * b, a, b)
-        r = reference(d, packages, (a, b) -> a * apply_chain(f, b), a, b)
-    else
-        a, b, c = map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)
-        base = reference(d, packages, (a, b, c) -> (a * b) * c, a, b, c; recomputing = true)
-        r = reference(d, packages, (a, b, c) -> apply_chain(f, a * b) * c, a, b, c; recomputing = true)
+        return (((a, b) -> a * b, (a, b), false), ((a, b) -> a * apply_chain(f, b), (a, b), false))
     end
-    both = [p for p in keys(r) if haskey(base, p)]
-    isempty(both) && return keep!(d.calibration, d.calibration_path, key, 0.0)
-    package = argmin(p -> first(r[p]) - first(base[p]), both)
-    n = sum(n for w in last(r[package]) for (g, n) in getfield(w, regime) if g == f; init = 0.0)
-    keep!(d.calibration, d.calibration_path, key, n > 0 ? max(0.0, first(r[package]) - first(base[package])) / n : 0.0)
+    a, b, c = map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)
+    (((a, b, c) -> (a * b) * c, (a, b, c), true), ((a, b, c) -> apply_chain(f, a * b) * c, (a, b, c), true))
+end
+
+# Seconds per position from the two references' times: streamed, the time
+# the applications add to the fold, per application; swept or inner, what
+# the function adds to the product of the package that computes it, against
+# that package's product without it, for the package it costs least.
+function applied_seconds(regime, f, plain, applied)
+    fastest(r) = minimum(first.(values(r)); init = Inf)
+    regime === :streamed && return max(0.0, fastest(applied) - fastest(plain)) / (APPLIED_TIMES * prod(APPLIED_SHAPE))
+    both = [p for p in keys(applied) if haskey(plain, p)]
+    isempty(both) && return 0.0
+    package = argmin(p -> first(applied[p]) - first(plain[p]), both)
+    n = sum(n for w in last(applied[package]) for (g, n) in getfield(w, regime) if g == f; init = 0.0)
+    n > 0 ? max(0.0, first(applied[package]) - first(plain[package])) / n : 0.0
 end
 
 # One application of `f` to an array, with a literal second operand where it
@@ -127,25 +162,46 @@ function memory!(d::Decider, package)
 end
 
 """
-Each package's fastest claim among `packages` on the group the planner forms
-for `f` over arrays like `args`: its seconds, timed as claims are, and its
-launches as the package estimates them.
+A reference program, `f` over arrays like `args`, built: planned as one group,
+with each package's first claim on it built on buffers of its own, for
+`time_reference` to time as claims are. The first claim is what a package
+stands by unmeasured, which a reference is measured under, not the fastest
+of its alternatives.
 """
-function reference(d::Decider, packages, f, args...; recomputing = false)
+struct Reference
+    launches::Vector{Tuple{Symbol, Any, Vector{Work}}} # package, launch, estimate
+end
+
+function build_reference(d::Decider, packages, f, args...; recomputing = false)
     graph = lower(trace(f, args...))
     timing = Decider(d.target, graph; measure = :none)
     p = plan(graph; recompute = recomputing ? recomputable_folds(graph) : ())
     g = only(p.groups)
     view = group_view(p, g)
-    fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()
-    # Each implementation's first claim: what it stands by unmeasured, which
-    # a reference is measured under, not the fastest of its alternatives.
+    launches = Tuple{Symbol, Any, Vector{Work}}[]
     for (m, is) in REGISTERED, i in is, c in (m in packages ? Iterators.take(claims(i, d.target, view), 1) : ())
-        t = time_launch(d.target, first(build_claim(i, c, d.target, view, buffers!(timing, p, g))))
-        t < first(get(fastest, nameof(m), (Inf,))) && (fastest[nameof(m)] = (t, estimate(i, c, d.target, view)))
+        push!(launches, (nameof(m), first(build_claim(i, c, d.target, view, buffers!(timing, p, g))), estimate(i, c, d.target, view)))
+    end
+    Reference(launches)
+end
+
+"Each package's fastest launch of a built reference: its seconds, and its launches as the package estimates them."
+function time_reference(d::Decider, r::Reference)
+    fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()
+    for (package, launch, work) in r.launches
+        t = time_launch(d.target, launch)
+        t < first(get(fastest, package, (Inf,))) && (fastest[package] = (t, work))
     end
     fastest
 end
+
+"""
+Each package's fastest claim among `packages` on the group the planner forms
+for `f` over arrays like `args`: its seconds, timed as claims are, and its
+launches as the package estimates them.
+"""
+reference(d::Decider, packages, f, args...; recomputing = false) =
+    time_reference(d, build_reference(d, packages, f, args...; recomputing))
 
 # Products of factors of these shapes fit a package's line: the small one, too
 # small to split, its latency; the large one its rate; and the middle one,

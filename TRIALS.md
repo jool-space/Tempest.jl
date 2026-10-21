@@ -95,7 +95,18 @@ group's measured candidates built at once before any decision
 the harness's cold GPT preparation 85.6 to 71.6 s. What remains cold, on a
 calibrated device: one burst of compiles (about 20 s), the candidates timed
 one at a time, and the warm work; on a fresh device, calibration's
-references built one at a time (about 25 s).
+references built one at a time (about 25 s). Taken next: every function a
+plan applies priced together, the references built side by side
+(`fit_applied_all!`, `price_all!`): one precision's calibration 24.6 s
+against about a minute, prices within the noise of the sequential ones, the
+GPT step's cold preparation 71.6 to 63.0 s.
+
+Standing, each in a new process: the GPT step's preparation warm 37 to
+19 s and cold 120 to 63 s; prepare.jl's programs warm 27 to 15 s in the
+process, cold 92 to 69, of which calibration's first program 22. Open: the
+candidates compiled and timed and then discarded (the staged search, above),
+the first preparation's remaining Julia compilation (about 10 s), and the
+timing of candidates one at a time.
 
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
