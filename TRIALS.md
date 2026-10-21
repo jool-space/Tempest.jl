@@ -116,7 +116,35 @@ now: compile bursts 12 to 16 s for 130 kernels, of which the search on the
 generator's plan 7 s for 84; timings 1 s; the front end 5.5 s; the device's
 calibration 6.7 s; and about 25 s of CPU work in the cover, planning 81
 trials of the whole graph and compiling the compiler, which the warm
-preparation pays too. Open: that CPU work, which is the warm floor.
+preparation pays too.
+
+Taken next, the warm floor. The warm GPT preparation's 20 s were 11.7 s of
+Julia compilation, 1214 instances of some 10 ms each, and 8.5 s of work: the
+cover's loop, which plans the whole graph again after each of the 23
+classes it takes and prices 26 proposals again around them, 3.6 s; its
+trials planned side by side, 0.5 s of wall; the search on the generator's
+plan 0.8 s; the build 1.5 s. Of the compilation, three causes, each with
+its number. The second kernel package to load voided the first's cached
+cover code: cuBLAS's CuArray constructor from a Diagonal, reached from
+`upload`, invalidated 333 instances, and the Implementation protocol's
+call sites, bound by inference to the one method a package sees while it
+precompiles, some 60 more. The protocol called in the latest world and the
+upload filled rather than constructed: the cuTile workload's own program
+compiles 1.85 to 0.83 s in a session with both packages (0.19 with cuTile
+alone), the GPT step warm 20.2 to 19.6 s, prepare.jl's programs 13.0 to
+12.3. The tracer specialized on what it traced: its entry points
+unspecialized and a selection's indices data rather than a type parameter,
+the trace's compilation 3.62 to 2.31 s, the GPT step warm 19.6 to 18.1,
+prepare.jl 12.3 to 11.8. The cuBLAS products had no workload: with one,
+the two-package program 0.83 to 0.34 s, the GPT step warm 18.1 to 17.2,
+prepare.jl 11.8 to 10.3. Measured and left: cuTile's integer overlays
+show in Julia 1.13's log as voiding Tempest's tracing code, but tracing
+again after cuTile loads costs 0.03 s. Open, with numbers: the IR's term
+types (`Composed`, `Relative`), on which every visitor specializes, about
+1 s of compilation; `Pointwise{F}` and `Reduction{F}`, 0.35 s, which the
+rewrites dispatch on; the walkers of the arguments' nested structures,
+0.3 s; the build's instances on device types, 3 s, which no workload can
+run; and the cover's loop, 3.6 s of work.
 
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
