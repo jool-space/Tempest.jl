@@ -17,38 +17,46 @@ or compiled through cuTile and kept.
 function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothing)
     tt = Tuple{map(Core.Typeof, args)...}
     groups = alias_groups(args)
-    get!(FUNCTIONS, (CUDACore.context(), f, tt, occupancy, groups)) do
-        arch = ct.device_sm_arch()
-        key = Tempest.Compiler.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
-            ct.tileiras_version(), ct.bytecode_version(), ENTRY)
-        entry, cubin = Tempest.Compiler.cached_kernel(key) do
-            Base.invokelatest(f, tt) do f, tt
-                argtypes, constants = ct.unwrap_argtypes(f, tt)
-                job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
-                    name = ENTRY, alias_groups = groups)
-                cubin = try
-                    ct.invoke_frozen(ct.compile_or_lookup, job).cubin
-                catch err
-                    # A kernel cuTile cannot express fails the same way next time.
-                    err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(key, sprint(showerror, err))
-                    rethrow()
-                end
-                Tempest.Compiler.store_kernel(key, ENTRY, cubin)
+    # Every kernel's function is a type of its own: the key is untyped, and
+    # what follows takes the function and its types without specializing, so
+    # that no Julia code compiles per kernel.
+    key = Any[CUDACore.context(), f, tt, occupancy, groups]
+    fun = get(FUNCTIONS, key, nothing)
+    fun === nothing || return fun
+    FUNCTIONS[key] = compiled_function(f, tt, occupancy, groups)
+end
+
+function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, groups)
+    arch = ct.device_sm_arch()
+    key = Tempest.Compiler.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
+        ct.tileiras_version(), ct.bytecode_version(), ENTRY)
+    entry, cubin = Tempest.Compiler.cached_kernel(key) do
+        Base.invokelatest(f, tt) do f, tt
+            argtypes, constants = ct.unwrap_argtypes(f, tt)
+            job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
+                name = ENTRY, alias_groups = groups)
+            cubin = try
+                ct.invoke_frozen(ct.compile_or_lookup, job).cubin
+            catch err
+                # A kernel cuTile cannot express fails the same way next time.
+                err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(key, sprint(showerror, err))
+                rethrow()
             end
+            Tempest.Compiler.store_kernel(key, ENTRY, cubin)
         end
-        CuFunction(CuModule(cubin), entry)
     end
+    CuFunction(CuModule(cubin), entry)
 end
 
 # A kernel's function, loaded once per context for the kernel, its argument
 # types, its occupancy and the aliasing among its arguments: a body launches
 # the same kernel at every execution, and identical groups share theirs.
-const FUNCTIONS = Dict{Any, CuFunction}()
+const FUNCTIONS = Dict{Vector{Any}, CuFunction}()
 
 # The groups of arrays among `args` whose memory overlaps, as cuTile's
 # `alias_groups` finds them, without compiling a generated function for each
 # kernel's argument types.
-function alias_groups(args)
+function alias_groups(@nospecialize(args))
     leaves = ct.array_leaves(map(Core.Typeof, args))
     ranges = map(((n, path),) -> memory_range(foldl(getfield, path; init = args[n - 1])), leaves)
     labels = collect(eachindex(ranges))

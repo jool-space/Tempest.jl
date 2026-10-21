@@ -260,7 +260,7 @@ end
 Run `f` on another thread, if there is one, and wait for it while the calling
 thread's other tasks run. For compilation, which makes no device objects.
 """
-elsewhere(f) = fetch_result(Threads.@spawn f())
+elsewhere(@nospecialize(f)) = fetch_result(Threads.@spawn f())
 
 function fetch_result(t::Task)
     try

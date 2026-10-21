@@ -95,7 +95,7 @@ returns `(entry, binary)` and stores it, when the cache has none. This happens
 once per key in a session, so that callers in flight together wait for the
 first. The compilation runs `elsewhere`, and a failure fails every caller.
 """
-function cached_kernel(compile, key)
+function cached_kernel(@nospecialize(compile), key)
     task = @lock RESOLVED_LOCK get!(RESOLVED_KERNELS, key) do
         @async begin
             found = load_kernel(key)
@@ -134,10 +134,10 @@ generated_source(T) = @lock GENERATED_LOCK get(GENERATED_SOURCES, T, nothing)
 A hash of `parts` that is the same in every session for the same content: of
 their `canonical_text`.
 """
-content_key(parts...) = bytes2hex(sha256(canonical_text(parts...)))
+content_key(@nospecialize(parts...)) = bytes2hex(sha256(canonical_text(parts...)))
 
 "The content of `parts` written out, with the identities of the packages they name."
-function canonical_text(parts...)
+function canonical_text(@nospecialize(parts...))
     c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
     print(c.io, "julia ", VERSION, " ", Base.GIT_VERSION_INFO.commit, " options ", compiler_options(), "\n")
     for p in parts
