@@ -94,16 +94,29 @@ GPT step's cold preparation 71.6 to 63.0 s.
 
 Taken next: the staged search of a product's tiles (decided below), the GPT
 step's cold preparation 63.0 to 55.1 s, prepare.jl's programs 68.6 to
-63.2 s. Standing, each in a new process: the GPT step's preparation warm 37
-to 20 s and cold 120 to 55 s; prepare.jl's programs warm 27 to 13 s in the
-process, cold 92 to 63. What the cold GPT preparation spends now, phase by
-phase: the front end 5.5 s, the device's calibration 6.7 s, the search on
-the generator's plan 24.3 s (104 kernels compiled, 71 claims timed, the
-applied functions priced), the cover's 81 trials 14.5 s (45 compiled, 46
-timed), and the rest of prepare 9.9 s (27 kernels compiled for the groups
-the search did not touch, storage, capture). Open: the candidates still
-timed one at a time, the kernels of unsearched groups compiled last and
-late, and the first preparation's Julia compilation.
+63.2 s. Then measured and closed without a change, each on the cold GPT
+preparation with every compile burst and every timing wrapped. The kernels
+of the groups the search never touches, compiled last: 27 kernels in a
+2.5 s concurrent burst, and compile throughput is the bound, so an earlier
+burst would take as long; 7 of them run on buffers that alias (results
+written in place), whose keys a build on the decider's separate buffers
+cannot serve. Timing the candidates one at a time: 140 launches timed in
+1.2 s. The cover's trials searched together ahead of pricing, rather than
+one group at a time inside each comparison (`trials-batch.patch` with the
+session): the small bursts fell from about 10 s to 4 s, but the batch
+fitted four reference functions and measured ten candidates the
+sequential pricing never reaches, and lost the A/B, 54.5, 54.3, 53.9 s
+against 55.8, 56.3, 54.5. Each group's claims and estimates found once
+rather than by `price_all!` and `options!` each: no change, 55.0, 54.7,
+55.3 against 55.4, 55.1, 54.8; the 2.7 s charged to the second pass was
+Julia compiling the first. Standing, each in a new process: the GPT step's
+preparation warm 37 to 20 s and cold 120 to 55 s; prepare.jl's programs
+warm 27 to 13 s in the process, cold 92 to 63. The cold GPT preparation
+now: compile bursts 12 to 16 s for 130 kernels, of which the search on the
+generator's plan 7 s for 84; timings 1 s; the front end 5.5 s; the device's
+calibration 6.7 s; and about 25 s of CPU work in the cover, planning 81
+trials of the whole graph and compiling the compiler, which the warm
+preparation pays too. Open: that CPU work, which is the warm floor.
 
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
