@@ -240,14 +240,13 @@ within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
 # Every option of a group chosen by estimate among several, and each side of
 # a comparison made by estimate, is within the close-call factor of its
 # measurement, and each such comparison stands when measured.
-# Recomputing a fold is priced like any proposal, so the estimate of a product
-# whose sweep applies pointwise work to each element (a softcap's tanh, HSTU's
-# SiLU, inside or before the product) decides whether attention streams. That
-# work is not priced: the estimate of the plan that stores the scores is low
-# and of the one that recomputes them high, and where they decide, the
-# decision contradicts the measurement.
-const SWEEP_ESTIMATE = "estimates of pointwise work inside a product's sweep (TRIALS: the cost of a kernel)"
-in_sweep(c) = occursin("softcap", c.name) || occursin("SiLU", c.name)
+# Pointwise work inside a product's sweep (a softcap's tanh, HSTU's SiLU) is
+# priced per position by a constant measured at one shape, at full occupancy.
+# Where the kernel's occupancy or sweep differs from that shape's, as HSTU's
+# recomputing kernels' and the softcap's tf32 kernels' do, the estimate misses
+# by up to three times, though the decision stands.
+const SWEEP_SHAPE = "a sweep's pointwise work priced per position at one shape and occupancy (TRIALS: the constants of the cost model)"
+in_sweep(c, precision) = occursin("SiLU", c.name) || occursin("softcap", c.name) && precision === :tf32
 
 @testset "estimates that decide are within the close-call factor, or measured" begin
     @test !hasfield(Tempest.Implementations.Work, :rate)
@@ -268,8 +267,8 @@ in_sweep(c) = occursin("softcap", c.name) || occursin("SiLU", c.name)
             push!(stands, abs(measured[2] - measured[1]) <= d.rates.noise * minimum(measured) || (measured[2] < measured[1]) == C.cheaper(k.comparison))
             append!(held, within.((k.comparison.old, k.comparison.new), measured))
         end
-        if in_sweep(c)
-            @testset "gap: $SWEEP_ESTIMATE" begin
+        if in_sweep(c, precision)
+            @testset "gap: $SWEEP_SHAPE" begin
                 @test_skip all(stands)
                 @test_skip all(held)
             end

@@ -50,12 +50,22 @@ end
 
 # A launch of fewer blocks than the device runs at once moves its bytes and
 # computes its products on that share of the device.
-function seconds(w::Work, r::Rates, memory::Memory, line)
+# Memory time and compute time overlap all but a little: the combination is
+# the larger plus a share of the smaller (XLA's GPU performance model uses
+# 0.05 of the smaller, chosen empirically).
+const OVERLAP = 0.05
+
+function seconds(w::Work, r::Rates, memory::Memory, line, price = (regime, f) -> 0.0)
     share = min(1.0, w.blocks / r.blocks)
     memory_seconds = memory.latency + w.bytes / (w.bytes <= r.cache ? memory.bandwidth : r.bandwidth) / share
-    w.flops + w.recomputed == 0 && return memory_seconds
-    compute = w.split ? w.flops / line.split + w.recomputed / line.recompute : (w.flops + w.recomputed) / line.rate
-    max(memory_seconds, line.latency + compute / share)
+    # Elementwise work: each function at its positions, at the seconds per
+    # position measured for it on the device, in the regime it is applied in.
+    cost(regime, pairs) = sum(((f, n),) -> n * price(regime, f), pairs; init = 0.0)
+    elementwise = (cost(:streamed, w.applied) + cost(:swept, w.swept) + cost(:inner, w.inner)) / share
+    products = w.flops + w.recomputed == 0 ? 0.0 :
+        line.latency + (w.split ? w.flops / line.split + w.recomputed / line.recompute : (w.flops + w.recomputed) / line.rate) / share
+    compute = products + elementwise
+    max(memory_seconds, compute) + OVERLAP * min(memory_seconds, compute)
 end
 
 "The class of products of `T` factors: a half type by name, Float32 by the target's precision."
@@ -160,6 +170,10 @@ mutable struct Decider
     calibration_path::Union{Nothing, String}
     lines::Dict{Tuple{Symbol, Symbol}, Line}
     memories::Dict{Symbol, Memory}
+    # Seconds per position of each scalar function on the device, measured
+    # once, in each regime: streamed, swept in a product of a class, swept in
+    # a product of a class that recomputes a fold.
+    applied::Dict{Tuple{Symbol, Symbol, Any}, Float64}
     record::Dict{String, Float64}
     record_path::Union{Nothing, String}
     # Folds pinned to be recomputed where they are read, in every plan.
@@ -176,7 +190,7 @@ function Decider(target, graph; measure = :close, recompute = ())
     path, calibration_path = record_path(target), rates_path(target)
     calibration = load_record(calibration_path)
     Decider(target, graph, measurable(target) ? level(measure) : :none, device_rates!(target, calibration, calibration_path),
-        calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), load_record(path), path,
+        calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
         Set{Int}(recompute), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
 end
 
@@ -230,7 +244,8 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim)
     # The floor moves bytes at the device's rates.
     memory = implementation === nothing ? Memory(d.rates.launch, d.rates.cached) : memory!(d, package_of(implementation))
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_of(implementation), w.factor) for w in work]
-    Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l), work, lines); init = 0.0), key,
+    price(w) = (regime, f) -> price!(d, regime, product_class(d.target, w.factor), f)
+    Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0), key,
         any(l -> l !== nothing && l.borrowed, lines))
 end
 
@@ -733,6 +748,92 @@ function line!(d::Decider, package, T)
     end
 end
 
+# The scalar functions whose seconds per position are measured: the
+# primitives programs apply elementwise, by name in the rates file.
+const APPLIED = (
+    ("exp", exp), ("log", log), ("tanh", tanh), ("sqrt", sqrt), ("sin", sin), ("cos", cos), ("abs", abs), ("abs2", abs2),
+    ("inv", inv), ("*", *), ("+", +), ("-", -), ("/", /), ("^", ^), ("max", max), ("min", min),
+    ("identity", identity), ("Float32", Cast{Float32}()), ("BFloat16", Cast{BFloat16}()),
+)
+
+# The regimes a function is applied in, each priced by its own measurement:
+# streamed, in a kernel that reads and writes its tiles once; swept, in a
+# product's sweep over its factors' tiles; inner, in the sweep of a product
+# that recomputes a fold, over the fold's tiles.
+const REGIMES = (:streamed, :swept, :inner)
+
+"""
+The seconds per position of a scalar function `f` applied in `regime` in a
+kernel whose products are of `class`, measured on first need and kept in the
+rates file. Streamed: the time of a fold over eight applications of the
+function beyond that of the fold alone, per application, the same for every
+class. Swept: the time a product's factor computed by the function adds to
+the product. Inner: the same for a product that recomputes the fold the
+function is applied to. A function priced where other work hides it measures
+as nothing, which is what it costs there. A function the table does not name
+costs what addition does.
+"""
+function price!(d::Decider, regime, class, f)
+    regime === :streamed && (class = :any)
+    get!(d.applied, (regime, class, f)) do
+        i = findfirst(((_, g),) -> g == f, APPLIED)
+        i === nothing && return price!(d, regime, class, +)
+        measurable(d.target) || return 0.0
+        get!(d.calibration, join(("applied", regime, class, APPLIED[i][1]), " ")) do
+            fit_applied!(d, regime, class, f)
+        end
+    end
+end
+
+# Every function priced in every regime, for the classes `types` make.
+function applied!(d::Decider, types = (Float32,))
+    for (_, f) in APPLIED, regime in REGIMES, T in types
+        price!(d, regime, product_class(d.target, T), f)
+    end
+    d.applied
+end
+
+const APPLIED_SHAPE = (4096, 512)
+const APPLIED_TIMES = 8
+const SWEEP_SHAPES = ((256, 512), (512, 2048))
+
+function fit_applied!(d::Decider, regime, class, f)
+    packages = used_packages(d.target)
+    key = join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")
+    if regime === :streamed
+        x = zeros(Float32, APPLIED_SHAPE)
+        chain(x) = foldl((y, _) -> apply_chain(f, y), 1:APPLIED_TIMES; init = x)
+        fastest(r) = minimum(first.(values(r)); init = Inf)
+        base = fastest(reference(d, packages, x -> sum(x; dims = 1), x))
+        timed = fastest(reference(d, packages, x -> sum(chain(x); dims = 1), x))
+        return keep!(d.calibration, d.calibration_path, key, max(0.0, timed - base) / (APPLIED_TIMES * length(x)))
+    end
+    # What the function adds to the product of the package that computes it,
+    # against that package's product without it; the package it costs least.
+    T = class in (:Float16, :BFloat16) ? getfield(@__MODULE__, class) : Float32
+    if regime === :swept
+        a, b = zeros(T, SWEEP_SHAPES[1]), zeros(T, SWEEP_SHAPES[2])
+        base = reference(d, packages, (a, b) -> a * b, a, b)
+        r = reference(d, packages, (a, b) -> a * apply_chain(f, b), a, b)
+    else
+        a, b, c = map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)
+        base = reference(d, packages, (a, b, c) -> (a * b) * c, a, b, c; recomputing = true)
+        r = reference(d, packages, (a, b, c) -> apply_chain(f, a * b) * c, a, b, c; recomputing = true)
+    end
+    both = [p for p in keys(r) if haskey(base, p)]
+    isempty(both) && return keep!(d.calibration, d.calibration_path, key, 0.0)
+    package = argmin(p -> first(r[p]) - first(base[p]), both)
+    n = sum(n for w in last(r[package]) for (g, n) in getfield(w, regime) if g == f; init = 0.0)
+    keep!(d.calibration, d.calibration_path, key, n > 0 ? max(0.0, first(r[package]) - first(base[package])) / n : 0.0)
+end
+
+# One application of `f` to an array, with a literal second operand where it
+# takes one, so that the chain stays one term of one kernel.
+apply_chain(f, y) = f.(y)
+apply_chain(f::Union{typeof(*), typeof(+), typeof(-), typeof(/), typeof(max), typeof(min)}, y) = f.(y, 1.5f0)
+apply_chain(::typeof(^), y) = y .^ 3
+apply_chain(c::Cast{T}, y) where {T} = Float32.(c.(y)) .+ 1.5f0
+
 """
 The memory of `package` on the decider's target, fitted on first need and
 kept in the rates file; the device's rates for a package that claims no
@@ -835,11 +936,12 @@ function fit_memory!(d::Decider)
     end
 end
 
-"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, and their memories, now rather than on first need."
+"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function, now rather than on first need."
 function calibrate!(target)
     d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none)
     foreach(m -> memory!(d, nameof(m)), used_packages(target))
     foreach(T -> foreach(m -> line!(d, nameof(m), T), used_packages(target)), (Float32, Float16, BFloat16))
+    applied!(d, (Float32, Float16, BFloat16))
 end
 
 ## The tuning record: measured seconds by claim, one file per device.
@@ -886,7 +988,7 @@ function save_record(path, key, seconds)
     open(io -> println(io, key, '\t', seconds), path, "a")
 end
 
-keep!(calibration, path, key, value) = (calibration[key] = value; save_record(path, key, value))
+keep!(calibration, path, key, value) = (calibration[key] = value; save_record(path, key, value); value)
 
 # The device's rates from its rates file, measured and kept there first when
 # the file has none. A target that cannot measure has fixed rates.

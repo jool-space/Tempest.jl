@@ -14,18 +14,21 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**The cost of a kernel.** Estimates are lines fitted from two reference
-products per package, plus bytes at a measured bandwidth
-(`src/Compiler/runtime/decide.jl`, `line!`, `fit!`, `seconds`). They do not
-price pointwise work inside a product's sweep, and where that work decides,
-the estimate contradicts the measurement (the skipped cases in
-`test/decisions.jl`). Challengers: XLA's GPU performance model
-(`xla/service/gpu/model/`), which counts elementwise work per element, and
-the featurization of Halide's Adams autoscheduler
-(`src/autoschedulers/adams2019`), fitted to the tuning record Tempest already
-keeps. Judged by the estimate test holding for every composition with no
-case skipped, and by no comparison the cover decides by estimate
-contradicting its measurement beyond the noise.
+**The constants of the cost model.** A kernel's estimate is memory time
+against compute time, each from constants measured at a few shapes: a
+package's product line from three reference products, a memory line from
+two, the seconds per position of each scalar function in each of three
+regimes from one shape each, the device's share from a block count, and the
+overlap of memory and compute from XLA (`src/Compiler/runtime/decide.jl`,
+`seconds`, `fit!`, `fit_applied!`). Where a kernel's shape or occupancy
+differs from the reference's, the estimate misses by up to three times (the
+skipped cases in `test/decisions.jl`). Challenger: the featurization of
+Halide's Adams autoscheduler (`src/autoschedulers/adams2019`), whose cost is
+hand-written terms with non-negative coefficients learned from measured
+schedules, here fitted to the tuning record Tempest already keeps, as it
+grows. Judged by the held-out relative error of the fitted estimate against
+the constants', over the record, and by the estimate test holding with no
+case skipped.
 
 **The generator's schedules.** The cuTile generator picks tiles, splits and
 occupancy from six constants measured on one device and a decision tree over
@@ -46,6 +49,42 @@ index formula at plan time. Judged by the measured time of causal attention
 at 1024 and 2048 positions against non-causal, which should approach half.
 
 ## Decided
+
+**The cost of a kernel: a measured table of scalar functions, in three
+regimes, is adopted.** On trial were estimates that priced a product by its
+flops on a fitted line and a kernel's bytes at a bandwidth, and pointwise
+work not at all (`src/Compiler/runtime/decide.jl`, `seconds`). Where a
+product's sweep applies a tanh or a SiLU to each score, the estimate chose
+to store the scores, and the measurement said to recompute them. The
+challenger, XLA's GPU performance model (`xla/service/gpu/model/`), prices
+each elementwise op by a per-op cycle count and combines memory and compute
+as the larger plus a twentieth of the smaller. Adopted as a table of seconds
+per position for each scalar function, measured on the device on first need
+and kept in the rates file: streamed, as what eight applications add to a
+fold; swept, as what computing a product's factor by the function adds to
+the product; inner, the same for a product that recomputes the fold the
+function is applied to. The last two per product class, since what a
+function adds to a tf32 product's sweep is a fifth of what it adds to an
+FP32 one. The generator reports which functions each kernel applies, at how
+many positions, in which regime. Judged by the estimate test on the GB10,
+each comparison's two sides estimated against measured, in μs:
+
+| composition, precision | before | after | decision before, after |
+|---|---|---|---|
+| softcap attention, full | 66/154 vs 358/164 | 337/203 vs 356/163 | stored, wrong; streams |
+| SiLU attention (HSTU), full | 66/307 vs 300/135 | a close call, measured | stored, wrong; streams |
+| SiLU attention (HSTU), tf32 | 20/67 vs 51/36 | a close call, measured | stored, wrong; streams |
+| attention, full | 66/154 vs 97/128 | 76/171 vs 96/127 | streams, both |
+| softcap attention, tf32 | measured | 121/34 vs 408/54 | streams, both |
+| HSTU step, full, forward | 144/771 vs 120/568 | 163/848 vs 119/559 | stored, both |
+
+What the challenger's model does not see, named: a function's price per
+position is one constant per regime and class, measured at one shape at full
+occupancy, and the HSTU step's recomputing kernels and the softcap's tf32
+kernels run at other shapes and occupancies, where the estimate misses by up
+to three times while the decision stands. That is the constants' trial. The
+device's division and square root cost twenty times its exponential in the
+generated code, which the table now says rather than hides.
 
 **Store or recompute across forward and backward: the min-cut partition
 wins, and is adopted.** On trial was the cover deciding store against

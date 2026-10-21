@@ -430,6 +430,63 @@ recomputed_flops(c, roots) = sum(subterms(roots); init = 0.0) do t
     2 * positions(e.s, t.body) + recomputed_flops(e, (t.body,))
 end
 
+# The scalar functions `roots` apply, each with the positions it is applied
+# at: those of its term over the tiling, and inside recomputed folds over the
+# tiling the fold extends. A tuple is no work; a product's own multiply is
+# priced as flops, not here; a shifted sum's weight is an exponential.
+function applied!(counts, c, roots; inner = counts)
+    for t in subterms(roots)
+        if t isa Recomputed
+            # A recomputed product's multiply is its flops, priced as such; its
+            # factors are applied, inside the fold's sweep.
+            e = fold_context(c, t)
+            body = t.body
+            bilinear = c.g.values[t.value].fold isa SumFold && body isa Apply && body.f === (*) && length(body.args) == 2
+            applied!(inner, e, bilinear ? map(x -> product_factor(e, x), body.args) : (body,); inner)
+        elseif t isa Apply && t.f !== tuple && !(t.f isa Weight)
+            counts[t.f] = get(counts, t.f, 0.0) + positions(c.s, t)
+        end
+    end
+    counts
+end
+
+# The functions a schedule's kernels apply, streamed, and those applied inside
+# a product's sweep: the factors of its sums, without the multiply that the
+# tensor cores do, and the exponential of each element an exponential fold
+# weighs. Any other schedule streams everything.
+function applied(c, roots)
+    sorted(counts) = sort!(collect(counts); by = p -> string(p.first))
+    streaming, swept, inner = Dict{Any, Float64}(), Dict{Any, Float64}(), Dict{Any, Float64}()
+    if c.s.sketch !== :product
+        applied!(streaming, c, roots; inner)
+        return (sorted(streaming), Pair{Any, Float64}[], sorted(inner))
+    end
+    factors = Term[]
+    for r in c.g.reductions
+        sums = fold_sums(c, r)
+        if sums === nothing
+            push!(factors, c.g.terms[r])
+        else
+            for (term, product) in sums
+                product === nothing ? (term.f isa Weight || push!(factors, term)) :
+                    append!(factors, [product_factor(c, product[1]), product_factor(c, product[2])])
+            end
+        end
+        f = fold_of(c, r)
+        if f isa Relative{Exponential}
+            y = first(shifted_parts(c, c.g.terms[r]))
+            push!(factors, y)
+            swept[exp] = get(swept, exp, 0.0) + positions(c.s, y)
+        end
+    end
+    applied!(swept, c, unique(factors); inner)
+    applied!(streaming, c, [c.g.terms[m] for m in c.g.outputs]; inner)
+    # A product that recomputes a fold sweeps the fold's tiles, which hide
+    # a stall differently from a product's: all its swept work is inner.
+    any(t -> t isa Recomputed, subterms(unique(factors))) && (mergewith!(+, inner, swept); empty!(swept))
+    (sorted(streaming), sorted(swept), sorted(inner))
+end
+
 # A schedule's launches: each of its kernels, moving the bytes of its
 # arguments over the blocks of its grid. The first computes the group's
 # products and the folds it recomputes.
@@ -450,10 +507,11 @@ function estimate(::Tempest.Compiler.cuTileGenerator, claim::Claim, target, g::G
         0.0, Float32
     end
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
+    streaming, swept, inner = applied(c, roots)
     map(enumerate(kernels)) do (i, kernel)
         bytes = sum(a -> prod(a.sizes; init = 1) * sizeof(element(a)), kernel.args; init = 0)
         blocks = prod(kernel.grid; init = 1)
-        i == 1 ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1) : Work(bytes; blocks)
+        i == 1 ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
     end
 end
 

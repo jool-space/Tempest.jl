@@ -26,10 +26,16 @@ abstract type Implementation end
 
 """
 One launch's work: bytes moved, flops of products whose factors are of type
-`factor`, flops of folds it recomputes inside them, its blocks, and whether
-they split the sums among them. Tempest prices the bytes on its package's
-memory and the flops on the line its package reaches for products of that
-class (see `seconds`).
+`factor`, flops of folds it recomputes inside them, its blocks, whether they
+split the sums among them, and the scalar functions it applies elementwise,
+each with the number of positions it is applied at. Tempest prices the
+bytes on its package's memory, the flops on the line its package reaches for
+products of that class, and each function on the time it measured for it on
+the device (see `seconds`). Functions applied inside a product's sweep, to
+its factors, are `swept`: each step's small tile of them stalls the sweep,
+and they cost many times what they cost streamed; those applied inside a
+fold the sweep recomputes, to that fold's tiles, are `inner`, at a factor of
+their own.
 """
 struct Work
     bytes::Float64
@@ -38,10 +44,14 @@ struct Work
     factor::DataType
     blocks::Float64
     split::Bool
+    applied::Vector{Pair{Any, Float64}}
+    swept::Vector{Pair{Any, Float64}}
+    inner::Vector{Pair{Any, Float64}}
 end
 
-Work(bytes; flops = 0.0, recomputed = 0.0, factor = Float32, blocks = Inf, split = false) =
-    Work(bytes, flops, recomputed, factor, blocks, split)
+Work(bytes; flops = 0.0, recomputed = 0.0, factor = Float32, blocks = Inf, split = false,
+    applied = Pair{Any, Float64}[], swept = Pair{Any, Float64}[], inner = Pair{Any, Float64}[]) =
+    Work(bytes, flops, recomputed, factor, blocks, split, applied, swept, inner)
 
 # Implementations by the package that provides them, ordered by its name.
 const REGISTERED = Pair{Module, Vector{Implementation}}[]
