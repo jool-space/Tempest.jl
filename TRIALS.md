@@ -79,6 +79,24 @@ prepare.jl's programs warm 20, the GPT step's preparation warm 19.6 and
 cold 85.6. Still open: the kernels compiled and discarded, and their serial
 compilation.
 
+Worker processes for compilation (tinygrad's BEAM pool), tried and NOT
+adopted. The premise was wrong: a process compiles kernels in parallel on
+its threads already (16 distinct GPT kernels: 666 ms each in sequence, 92
+ms each on threads); the one-thread run that suggested otherwise was bound
+by calibration's references, built one at a time. A pool of eight warmed
+workers lost on every measurement: the calibrated GPT step with cold
+kernels 60.8 s locally against 69.3 s, 236 ms per kernel through the pool
+against 92 on threads, a worker's first kernel 6 to 9 s. The patch is
+`compile-workers.patch` in the session's scratchpad. What the intervals
+showed instead: compiles arrive in bursts of twelve to sixteen, one group's
+candidates at a time, between stretches of one at a time. Taken: every
+group's measured candidates built at once before any decision
+(`prebuild!`), the calibrated GPT step with cold kernels 65.7 to 51.0 s;
+the harness's cold GPT preparation 85.6 to 71.6 s. What remains cold, on a
+calibrated device: one burst of compiles (about 20 s), the candidates timed
+one at a time, and the warm work; on a fresh device, calibration's
+references built one at a time (about 25 s).
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,

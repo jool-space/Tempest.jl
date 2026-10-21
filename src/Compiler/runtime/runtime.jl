@@ -142,6 +142,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     end
     d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned)
     p, considered = cover(d)
+    prebuild!(d, p)
     ds = decisions(d, p)
     values = p.graph.values
     result_value(k) = p.graph.results[k].value

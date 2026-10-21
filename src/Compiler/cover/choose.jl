@@ -60,6 +60,9 @@ mutable struct Decider
     # options, how it was made, and the time measured; and each group's decision.
     decided::Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}
     instances::Dict{Any, Decision}
+    # Each group's options (by `group_identity`), found before its decision
+    # when its kernels are built ahead (see `prebuild!`).
+    options::Dict{Any, Vector{Choice}}
 end
 
 function Decider(target, graph; measure = :close, recompute = ())
@@ -68,7 +71,8 @@ function Decider(target, graph; measure = :close, recompute = ())
     calibration = load_record(calibration_path)
     r = dry ? rates(target) : device_rates!(target, calibration, calibration_path)
     Decider(target, graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
-        Set{Int}(recompute), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}())
+        Set{Int}(recompute), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
+        Dict{Any, Vector{Choice}}())
 end
 
 # What is measured: nothing (`:none`), the close calls (`:close`) or every
@@ -153,7 +157,7 @@ its group's values, so one taken from another group would build on its buffers.
 """
 function decide(d::Decider, p::Plan, g::Group)
     get!(d.instances, group_identity(p, g)) do
-        os = options(d, p, g)
+        os = options!(d, p, g)
         k, how, measured = get!(() -> choose(d, p, g, os), d.decided, canonical(p, g))
         Decision(os[k], os, how, measured)
     end
@@ -162,21 +166,50 @@ end
 # The rank of the choice among options `os`, sorted by estimate; how it was
 # made; and its measured time. A rank and not a claim, because claims hold
 # value ids.
+"A group's options, found once by its identity (see `prebuild!`)."
+options!(d::Decider, p::Plan, g::Group) = get!(() -> options(d, p, g), d.options, group_identity(p, g))
+
+# The ranks among `os`, sorted by estimate, of the options a decision
+# measures: every option under `:all`; otherwise those within the estimate's
+# error of the best, every option when the best rests on a borrowed line,
+# which bounds a time only from below, and every claim of the best's
+# implementation when it made several: alternatives it offers for
+# measurement, which the estimate cannot rank. None when the best stands
+# alone.
+function measured_ranks(d::Decider, os)
+    best = first(os)
+    length(os) == 1 && return d.measure === :all ? [1] : Int[]
+    searched(o) = o.implementation !== nothing && o.implementation === best.implementation
+    ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
+        [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate) || searched(o)]
+    length(ranks) == 1 ? Int[] : ranks
+end
+
+"""
+Build at once what the decisions on `p`'s groups will measure, so that their
+kernels compile side by side rather than group by group; each decision then
+finds its options built. Groups decided already build nothing here.
+"""
+function prebuild!(d::Decider, p::Plan)
+    d.measure in (:close, :all) || return nothing
+    pending = Tuple{Plan, Group, Choice}[]
+    for g in p.groups
+        chosen(p, g) && !haskey(d.decided, canonical(p, g)) || continue
+        os = options!(d, p, g)
+        append!(pending, [(p, g, os[k]) for k in measured_ranks(d, os)])
+    end
+    build_unmeasured!(d, pending)
+    nothing
+end
+
 function choose(d::Decider, p::Plan, g::Group, os)
     best = first(os)
     if length(os) == 1
         d.measure === :all && measure!(d, p, g, best)
         return (1, :only, get(d.record, best.key, nothing))
     end
-    # Every option under `:all`; otherwise those within the estimate's error of
-    # the best, every option when the best rests on a borrowed line, which
-    # bounds a time only from below, and every claim of the best's
-    # implementation when it made several: those are alternatives it offers
-    # for measurement, which the estimate cannot rank.
-    searched(o) = o.implementation !== nothing && o.implementation === best.implementation
-    ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
-        [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate) || searched(o)]
-    length(ranks) == 1 && return (1, :estimated, get(d.record, best.key, nothing))
+    ranks = measured_ranks(d, os)
+    isempty(ranks) && return (1, :estimated, get(d.record, best.key, nothing))
     if d.measure in (:close, :all)
         build_unmeasured!(d, [(p, g, os[k]) for k in ranks])
         foreach(k -> measure!(d, p, g, os[k]), ranks)
