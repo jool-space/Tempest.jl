@@ -30,6 +30,14 @@ function workload()
         s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
         contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (2, 5, 3, 4), (1, 5, 3, 4))
     end
+    # Grouped queries: two query heads per key head, the queries over five axes.
+    function grouped(q, k, v)
+        f, h, n, b = size(q)
+        q5 = reshape(q, f, h ÷ size(k, 2), size(k, 2), n, b)
+        s = contract(k, q5, (1, 2, 3, 4), (1, 5, 2, 6, 4), (3, 6, 5, 2, 4))
+        s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
+        contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 6, 5, 2, 4), (1, 6, 5, 2, 4))
+    end
     x, w, b, v = sample(8, 6), sample(4, 8), sample(4), sample(8)
     q, k = sample(4, 8, 2), sample(4, 8, 2)
     q4, k4 = sample(4, 8, 2, 2), sample(4, 8, 2, 2)
@@ -41,6 +49,7 @@ function workload()
         (x -> sum(exp.(x .- logsumexp(x; dims = 2))) + sum(maximum(x; dims = 1)), (x,)),
         ((q, k) -> sum(abs2, attention(q, k, k) .+ q), (q, k)),
         ((q, k) -> sum(abs2, attention4(q, k, k) .+ q), (q4, k4)),
+        ((q, k) -> sum(abs2, grouped(q, k, k)), (sample(4, 4, 8, 2), sample(4, 2, 8, 2))),
         ((x, s) -> sum(abs2, dropout(permutedims(x), s)), (x, Int32[1])),
         (x -> sum(abs2, Float16.(reshape(x, 6, 8))), (x,)),
         (x -> (y = copy(x); y[2:3, :] .= 0; sum(abs2, vcat(y, x))), (x,)),

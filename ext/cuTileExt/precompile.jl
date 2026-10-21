@@ -19,6 +19,14 @@ unbacked_tile_array(T, spec) = ct.TileArray(Ptr{T}(256), Int32.(spec.sizes), Int
         s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
         Tempest.contract(v, exp.(s .- Tempest.logsumexp(s; dims = 1)), (1, 2, 3, 4), (2, 5, 3, 4), (1, 5, 3, 4))
     end
+    # Grouped queries: two query heads per key head, the queries over five axes.
+    function grouped(q, k, v)
+        f, h, n, b = size(q)
+        q5 = reshape(q, f, h ÷ size(k, 2), size(k, 2), n, b)
+        s = Tempest.contract(k, q5, (1, 2, 3, 4), (1, 5, 2, 6, 4), (3, 6, 5, 2, 4))
+        s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
+        Tempest.contract(v, exp.(s .- Tempest.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 6, 5, 2, 4), (1, 6, 5, 2, 4))
+    end
     x, w, b, v, y = sample(64, 48), sample(32, 64), sample(32), sample(64), sample(48, 4096)
     tall, long, h = sample(8192, 16), sample(16, 8192), Float16.(sample(256, 64))
     q, k = sample(16, 32, 2, 2), sample(16, 32, 2, 2)
@@ -30,6 +38,7 @@ unbacked_tile_array(T, spec) = ct.TileArray(Ptr{T}(256), Int32.(spec.sizes), Int
         ((t, l) -> sum(abs2, sum(t; dims = 1)) + sum(abs2, sum(l; dims = 2)) + sum(abs2, l * t), (tall, long)),
         (h -> sum(abs2, sum(abs2, h; dims = 1)) + sum(abs2, h), (h,)),
         ((q, k) -> sum(abs2, attention(q, k, k) .+ q), (q, k)),
+        ((q, k) -> sum(abs2, grouped(q, k, k)), (sample(16, 4, 32, 2), sample(16, 2, 32, 2))),
     ]
     @compile_workload begin
         # Registered for this process alone; the package registers it when it loads.
