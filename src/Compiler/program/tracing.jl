@@ -66,7 +66,7 @@ Base.show(io::IO, x::TracedArray{T, N}) where {T, N} = print(io, "TracedArray{$T
 Base.show(io::IO, ::MIME"text/plain", x::TracedArray) = show(io, x)
 Base.show(io::IO, x::Traced{T}) where {T} = print(io, "Traced{$T}(%", x.id, ")")
 
-function broadcast_dims(dims...)
+function broadcast_dims(@nospecialize(dims...))
     n = maximum(length, dims; init = 0)
     ntuple(n) do k
         extent = 1
@@ -118,7 +118,7 @@ neutral(::typeof(+), a, b) = zero_(b) ? a : zero_(a) ? b : nothing
 neutral(::typeof(-), a, b) = zero_(b) ? a : nothing
 neutral(f, args...) = nothing
 
-function simplify(f, args...)
+function simplify(@nospecialize(f), @nospecialize(args...))
     length(args) == 2 && any(plain, args) || return nothing
     a = neutral(f, args...)
     a isa Traced || return nothing
@@ -128,8 +128,14 @@ function simplify(f, args...)
     n.dims == dims && n.eltype === T && n.scalar == all(x -> !(x isa Traced) || node(x).scalar, args) ? a : nothing
 end
 
+# The tracer does not specialize on what it traces. A program's functions
+# and shapes are its data, and Julia code specialized on them is compiled
+# once per program, hundreds of instances for a transformer step, before a
+# single node is recorded. So the tracer's entry points take their arguments
+# unspecialized and dispatch at run time, which costs a traced operation
+# about a microsecond.
 "Record `f` applied elementwise to the operands, broadcast together."
-function record_map(f, args...)
+function record_map(@nospecialize(f), @nospecialize(args...))
     simplified = simplify(f, args...)
     simplified === nothing || return simplified
     tape = tape_of(args...)
@@ -234,7 +240,7 @@ operand_dims(x) = ()
 # Each function of a broadcast, nested ones included, runs on handles by
 # itself, so a function that cannot be traced is recorded whole without taking
 # the functions around it along.
-function trace_broadcast(f, args, tape)
+function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
     mark = length(tape.nodes)
     result = try
         f(args...)
@@ -252,14 +258,14 @@ function trace_broadcast(f, args, tape)
     record_map(g, inputs...)
 end
 
-broadcast_handle(bc::Broadcast.Broadcasted, tape) =
+broadcast_handle(@nospecialize(bc::Broadcast.Broadcasted), tape) =
     trace_broadcast(bc.f, map(a -> broadcast_handle(a, tape), bc.args), tape)
 broadcast_handle(x, tape) = handle(x, tape)
 
-broadcast_dims_of(bc::Broadcast.Broadcasted) = broadcast_dims(map(broadcast_dims_of, bc.args)...)
+broadcast_dims_of(@nospecialize(bc::Broadcast.Broadcasted)) = broadcast_dims(map(broadcast_dims_of, bc.args)...)
 broadcast_dims_of(x) = operand_dims(x)
 
-function tape_in(bc::Broadcast.Broadcasted)
+function tape_in(@nospecialize(bc::Broadcast.Broadcasted))
     for a in bc.args
         t = a isa Broadcast.Broadcasted ? tape_in(a) : a isa Union{Traced, TracedArray} ? a.tape : nothing
         t === nothing || return t
@@ -267,7 +273,7 @@ function tape_in(bc::Broadcast.Broadcasted)
     nothing
 end
 
-function Base.copy(bc::Broadcast.Broadcasted{TracedStyle})
+function Base.copy(@nospecialize(bc::Broadcast.Broadcasted{TracedStyle}))
     tape = tape_in(bc)
     TracedArray(tape, filled(tape, broadcast_handle(bc, tape).id, broadcast_dims_of(bc)))
 end

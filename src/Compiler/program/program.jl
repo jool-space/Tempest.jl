@@ -44,18 +44,20 @@ end
 """
 Part of the input, its first input. Each entry of `indices` selects along one
 axis of the input: an integer drops the axis, a range keeps it, and an
-`IndexInput` replaces it by the axes of an array of integers (a gather).
+`IndexInput` replaces it by the axes of an array of integers (a gather). The
+indices are data, not a type parameter: every method on a selection would be
+compiled once per shape of selection a program makes.
 """
-struct Select{I <: Tuple} <: Operation
-    indices::I
+struct Select <: Operation
+    indices::Tuple
 end
 
 """
 The adjoint of a selection: an array of the shape `dims` of zeros, with each
 element of the first input added at the position it was selected from.
 """
-struct Scatter{I <: Tuple} <: Operation
-    indices::I
+struct Scatter <: Operation
+    indices::Tuple
 end
 
 """
@@ -86,7 +88,7 @@ end
 Tape() = Tape(Node[], BitSet())
 Tape(nodes::Vector{Node}) = Tape(nodes, BitSet())
 
-function record!(tape::Tape, op, inputs, dims, T; scalar = false)
+function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))
     push!(tape.nodes, Node(op, Tuple(inputs), Tuple(dims), T, scalar))
     length(tape.nodes)
