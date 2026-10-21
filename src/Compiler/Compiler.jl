@@ -1,6 +1,6 @@
 """
-How a program becomes kernels: the program, index and plan levels, code
-generation, the kernel cache, and prepared programs. Its exports are the levels
+How a program becomes kernels: the program, index and plan levels, the
+cover, code generation, the kernel cache, and prepared programs. Its exports are the levels
 beneath `compile`: `trace`, `differentiate` and `interpret` for programs, and
 `prepare`, `bind!`, `execute!`, `capture!`, `replay!` and `outputs` for prepared
 ones. Its other public names are the language programs are written in, which
@@ -53,8 +53,16 @@ include("plan/storage.jl")
 # Code generation and prepared programs.
 include("codegen/scalar.jl")
 include("runtime/runtime.jl")
-include("runtime/view.jl")
-include("runtime/decide.jl")
+
+# The cover: which groups there are, and how each runs.
+include("cover/view.jl")
+include("cover/cost.jl")
+include("cover/choose.jl")
+include("cover/cover.jl")
+include("cover/calibrate.jl")
+include("cover/record.jl")
+
+# The kernel cache, and the front door.
 include("runtime/cache.jl")
 include("runtime/compile.jl")
 

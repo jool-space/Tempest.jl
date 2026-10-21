@@ -131,7 +131,7 @@ adopted.** On trial were the constants a kernel's estimate is made of,
 each measured at a few shapes: a package's product line, a memory line, the
 seconds per position of each scalar function in each regime, the device's
 share from a block count, the overlap of memory and compute
-(`src/Compiler/runtime/decide.jl`, `seconds`). The challenger, after the
+(`src/Compiler/cover/cost.jl`, `seconds`). The challenger, after the
 cost model of Halide's Adams autoscheduler (`src/autoschedulers/adams2019`):
 the estimate as a sum of its terms with non-negative coefficients fitted to
 the tuning record, each measured launch's error relative to its seconds,
@@ -162,7 +162,7 @@ with the session, not in the code.
 **The cost of a kernel: a measured table of scalar functions, in three
 regimes, is adopted.** On trial were estimates that priced a product by its
 flops on a fitted line and a kernel's bytes at a bandwidth, and pointwise
-work not at all (`src/Compiler/runtime/decide.jl`, `seconds`). Where a
+work not at all (`src/Compiler/cover/cost.jl`, `seconds`). Where a
 product's sweep applies a tanh or a SiLU to each score, the estimate chose
 to store the scores, and the measurement said to recompute them. The
 challenger, XLA's GPU performance model (`xla/service/gpu/model/`), prices
@@ -200,7 +200,7 @@ pays at the start.
 
 **Store or recompute across forward and backward: the min-cut partition
 wins, and is adopted.** On trial was the cover deciding store against
-recompute one proposal at a time, by estimate (`src/Compiler/runtime/decide.jl`,
+recompute one proposal at a time, by estimate (`src/Compiler/cover/cover.jl`,
 `cover`), which could not express recomputing a map in the backward from a
 smaller saved value at all. The challenger, PyTorch's rematerialization
 partitioner (`torch/_functorch/partitioners.py`), read in full: a minimum cut
