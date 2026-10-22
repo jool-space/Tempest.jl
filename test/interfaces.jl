@@ -58,6 +58,11 @@ function private_names(files)
                     haskey(aliases, path[1]) && private_steps!(found, aliases[path[1]], path[2:end])
                 end
             end
+        elseif e.head === :const && e.args[1] isa Expr && e.args[1].head === :(=) &&
+               (path = dotted(e.args[1].args[2])) !== nothing && haskey(aliases, path[1])
+            # `const X = Tempest.Y` names `Tempest.Y` as `X` from here on.
+            private_steps!(found, aliases[path[1]], path[2:end])
+            (target = module_of(path)) isa Module && (aliases[e.args[1].args[1]] = target)
         elseif e.head === :. && (path = dotted(e)) !== nothing && haskey(aliases, path[1])
             private_steps!(found, aliases[path[1]], path[2:end])
         else
@@ -78,11 +83,13 @@ end
     @test private_names(sources(name)) == String[]
 end
 
-# The check sees through aliases, and through `import` and `using` lists.
+# The check sees through aliases, constant ones too, and through `import` and
+# `using` lists.
 @testset "what the check finds" begin
     source(code) = (f = tempname() * ".jl"; write(f, code); [f])
     @test private_names(source("Tempest.Compiler.Plan; Tempest.Compiler.Decider")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("import Tempest.Compiler as C\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
+    @test private_names(source("const C = Tempest.Compiler\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("using Tempest.Compiler: Plan, Decider")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("import Tempest.Implement: claims, REGISTERED")) == ["Tempest.Implement.REGISTERED"]
     @test private_names(source("using Tempest: CUDATarget; using Tempest.Implement")) == String[]

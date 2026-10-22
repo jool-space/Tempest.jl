@@ -6,14 +6,6 @@
 # cuTile generator's `live_steps`), as FlexAttention's block mask does, which
 # it derives from the formulas rather than by evaluating the mask on tiles.
 
-# A mask: formulas over a value's axes, each at most zero where the mask
-# holds. `a <= b` is `a - b <= 0`, `a < b` is `a - b + 1 <= 0`.
-function comparison(f, a::Affine, b::Affine, d::Domain)
-    f in (<=, <) || ((a, b) = (b, a))
-    e = add(a, scale(b, -1), d)
-    [f in (<, >) ? add(e, 1, d) : e]
-end
-
 """
     masked(graph, v) -> (mask, value) or nothing
 
@@ -45,7 +37,7 @@ function mask_of(graph::IndexGraph, v, index, d::Domain, depth = 0)
         return any(isnothing, parts) ? nothing : reduce(vcat, parts)
     end
     def.f in (<=, <, >=, >) && length(def.operands) == 2 && all(o -> o isa IndexOperand, def.operands) || return nothing
-    comparison(def.f, through(def.operands[1].expr), through(def.operands[2].expr), d)
+    comparison_mask(def.f, through(def.operands[1].expr), through(def.operands[2].expr), d)
 end
 
 # The masks of the `ifelse` definitions `v`, read at `index`, is computed
@@ -80,29 +72,5 @@ function masked_value(graph::IndexGraph, v, index, mask, d::Domain, depth)
         o = def.operands[1]
         mask_of(graph, o.value, map(through, o.index), d) == mask && return operand(def.operands[3])
     end
-    combine(def.f, val.eltype, map(operand, def.operands))
-end
-
-# `f` of arguments each a number, `:finite` or nothing (unknown): a number
-# when the numbers decide it, as a zero factor or an infinite summand does,
-# in exact arithmetic; `:finite` for sums, products and the functions here of
-# finite arguments, which an overflow could make infinite, so that a program
-# whose unmasked positions overflow computes a different nothing here.
-function combine(f, T, args)
-    any(isnothing, args) && return nothing
-    all(a -> a isa Number, args) && return f isa Cast ? convert(T, only(args)) : f === ifelse ? nothing : f(args...)
-    known = [a for a in args if a isa Number]
-    if f === (*)
-        any(iszero, known) && return zero(T)
-        return all(isfinite, known) ? :finite : nothing
-    elseif f === (+)
-        infinite = filter(isinf, known)
-        return isempty(infinite) ? :finite : length(infinite) == 1 ? convert(T, only(infinite)) : nothing
-    elseif f === (-) && length(args) == 2
-        a, b = args
-        a isa Number && isinf(a) && return b isa Number && isinf(b) ? nothing : convert(T, a)
-        b isa Number && isinf(b) && return convert(T, -b)
-        return :finite
-    end
-    f in (exp, tanh, abs, abs2, max, min) || f isa Cast ? (all(a -> a === :finite || isfinite(a), args) ? :finite : nothing) : nothing
+    masked_result(def.f, val.eltype, map(operand, def.operands))
 end

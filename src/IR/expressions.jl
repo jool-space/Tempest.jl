@@ -4,7 +4,7 @@
 # built from tuples, so `==` and `hash` are structural.
 
 public Affine, Var, Div, Mod, Indirect, Domain, isconstant, affine_range, coefficient, is_affine,
-    mentions, indirect_values
+    mentions, indirect_values, substitute
 
 abstract type Atom end
 

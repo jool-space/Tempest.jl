@@ -12,7 +12,6 @@
 # definition is read through to the formula.
 
 const IR = Tempest.IR
-const Graph = Tempest.Compiler
 
 # The mask a term is a condition for, when it conjoins comparisons of index
 # formulas (see `Tempest.Compiler.masked`).
@@ -23,7 +22,7 @@ function mask_of(t, d::Domain)
         return any(isnothing, parts) ? nothing : reduce(vcat, parts)
     end
     t.f in (<=, <, >=, >) && length(t.args) == 2 && all(a -> a isa Ix, t.args) || return nothing
-    Graph.comparison(t.f, t.args[1].expr, t.args[2].expr, d)
+    IR.comparison_mask(t.f, t.args[1].expr, t.args[2].expr, d)
 end
 
 # A loaded value's mask, over the kernel's axes: the view's, through the
@@ -73,7 +72,7 @@ function masked_value(c::Context, t, mask, d::Domain)
     end
     t isa Apply || return nothing
     t.f === ifelse && length(t.args) == 3 && mask_of(t.args[1], d) == mask && return masked_value(c, t.args[3], mask, d)
-    Graph.combine(t.f, t.eltype, map(a -> masked_value(c, a, mask, d), t.args))
+    IR.masked_result(t.f, t.eltype, map(a -> masked_value(c, a, mask, d), t.args))
 end
 
 """
