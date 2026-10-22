@@ -41,9 +41,9 @@ end
 @testset "a fold recomputed inside a sweep recomputes no other" begin
     q, k, x = data(4, 8), data(4, 8), data(6, 8)
     function f(q, k, x)
-        e = exp.(T.contract(k, q, (1, 2), (1, 3), (2, 3)))
-        d = T.contract(k, e, (1, 2), (2, 3), (1, 3))
-        T.contract(x, d, (1, 3), (2, 3), (1, 2))
+        e = exp.(C.contract(k, q, (1, 2), (1, 3), (2, 3)))
+        d = C.contract(k, e, (1, 2), (2, 3), (1, 3))
+        C.contract(x, d, (1, 3), (2, 3), (1, 2))
     end
     p = trace(f, q, k, x)
     planned = recomputing(C.lower(p))
@@ -55,9 +55,9 @@ end
 # Rewrites of sums, which change rounding: rewritten programs plan and compute
 # what they computed, and the spellings of a softmax weighting a sum plan
 # alike, one shifted sum recomputing the scores in the kernel of the sum.
-scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.125
+scores(q, k) = C.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.125
 causal(s) = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf)
-weigh(v, p) = T.contract(v, p, (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
+weigh(v, p) = C.contract(v, p, (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
 by_logsumexp(q, k, v) = (s = causal(scores(q, k)); weigh(v, exp.(s .- T.logsumexp(s; dims = 1))))
 function by_maximum(q, k, v)
     s = causal(scores(q, k))
@@ -94,7 +94,7 @@ end
     # its scores in BFloat16 and its weights and sums in Float32, rounded to
     # BFloat16 once at the end.
     function half(q, k, v)
-        s = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* BFloat16(0.125)
+        s = C.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* BFloat16(0.125)
         s = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, typemin(BFloat16))
         weigh(v, exp.(s .- T.logsumexp(s; dims = 1)))
     end
@@ -227,14 +227,14 @@ end
     unit_norm(x, w) = reshape(rmsnorm(reshape(x, 8, 1, 6), reshape(w, 8, 1)), 8, 6)
     @test same(rmsnorm, unit_norm, x, w)
     @test same_gradient((x, w) -> sum(abs2, rmsnorm(x, w)), (x, w) -> sum(abs2, unit_norm(x, w)), x, w)
-    unit_product(a, b) = reshape(T.contract(reshape(a, 5, 7, 1), reshape(b, 7, 6, 1), (1, 2, 4), (2, 3, 4), (1, 3, 4)), 5, 6)
+    unit_product(a, b) = reshape(C.contract(reshape(a, 5, 7, 1), reshape(b, 7, 6, 1), (1, 2, 4), (2, 3, 4), (1, 3, 4)), 5, 6)
     @test same((a, b, c) -> tanh.(a * b .+ c), (a, b, c) -> tanh.(unit_product(a, b) .+ reshape(c, 5, 1, 1)), a, b, c)
     @test same_gradient((a, b) -> sum(abs2, a * b), (a, b) -> sum(abs2, unit_product(a, b)), a, b)
     q, k, v, r = data(8, 3, 16, 2; scale = 0.3), data(8, 3, 16, 2; scale = 0.2), data(8, 3, 16, 2; scale = 0.1), data(8, 3, 16, 2)
     scale = Float32(1 / sqrt(8))
-    scores(q, k) = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* scale
+    scores(q, k) = C.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* scale
     causal(s) = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf)
-    written(q, k, v) = (s = causal(scores(q, k)); T.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4)))
+    written(q, k, v) = (s = causal(scores(q, k)); C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4)))
     @test same((q, k, v, r) -> Ops.attention(q, k, v; causal = true) .+ r, (q, k, v, r) -> written(q, k, v) .+ r, q, k, v, r)
 end
 

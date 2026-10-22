@@ -215,7 +215,7 @@ using PrecompileTools: @setup_workload, @compile_workload
         for T in FACTOR_TYPES]
     # A batch of products over (features, keys, heads, batch), as attention makes.
     q, k = sample(Float32, 16, 32, 2, 2), sample(Float32, 16, 32, 2, 2)
-    push!(losses, ((q, k) -> sum(abs2, Tempest.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
+    push!(losses, ((q, k) -> sum(abs2, Tempest.Compiler.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
     @compile_workload begin
         # Registered for this process alone; the package registers it when it loads.
         register!(cuBLAS, cuBLASProducts())

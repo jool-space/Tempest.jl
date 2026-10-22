@@ -16,9 +16,9 @@ function workload()
     end
     # Causal attention over (features, keys or queries, batch), written out.
     function attention(q, k, v)
-        s = contract(k, q, (1, 2, 3), (1, 4, 3), (2, 4, 3))
+        s = Compiler.contract(k, q, (1, 2, 3), (1, 4, 3), (2, 4, 3))
         s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
-        contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3), (2, 4, 3), (1, 4, 3))
+        Compiler.contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3), (2, 4, 3), (1, 4, 3))
     end
     # A mask from a counter hash of a seed and the position: a scalar function
     # of integers, with no derivative.
@@ -26,17 +26,17 @@ function workload()
     dropout(x, seed) = x .* ifelse.(keep.(reshape(seed[1:1], 1, 1), reshape(1:length(x), size(x))), 1.25f0, 0.0f0)
     # The same over (features, keys or queries, heads, batch).
     function attention4(q, k, v)
-        s = contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))
+        s = Compiler.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))
         s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
-        contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (2, 5, 3, 4), (1, 5, 3, 4))
+        Compiler.contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (2, 5, 3, 4), (1, 5, 3, 4))
     end
     # Grouped queries: two query heads per key head, the queries over five axes.
     function grouped(q, k, v)
         f, h, n, b = size(q)
         q5 = reshape(q, f, h ÷ size(k, 2), size(k, 2), n, b)
-        s = contract(k, q5, (1, 2, 3, 4), (1, 5, 2, 6, 4), (3, 6, 5, 2, 4))
+        s = Compiler.contract(k, q5, (1, 2, 3, 4), (1, 5, 2, 6, 4), (3, 6, 5, 2, 4))
         s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
-        contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 6, 5, 2, 4), (1, 6, 5, 2, 4))
+        Compiler.contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 6, 5, 2, 4), (1, 6, 5, 2, 4))
     end
     x, w, b, v = sample(8, 6), sample(4, 8), sample(4), sample(8)
     q, k = sample(4, 8, 2), sample(4, 8, 2)

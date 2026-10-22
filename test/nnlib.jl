@@ -5,7 +5,7 @@ using NNlib
 
 results(ex) = filter(!isnothing, C.leaves(outputs(execute!(ex))))
 gradients(p, args...) = filter(!isnothing, C.leaves(interpret(differentiate(p), args...)))
-batched(a, b) = T.contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
+batched(a, b) = C.contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
 
 const NNLIB = [
     ("softmax", (x, t) -> sum(NNlib.softmax(x; dims = 1) .* t),

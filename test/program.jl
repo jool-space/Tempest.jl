@@ -83,6 +83,7 @@ end
     @test same(x -> (y = copy(x); w = view(y, 2:3, :); y .= 0; w .+ 1), x)
     @test same(x -> (y = zero(x); view(y, :, 2:3) .= x[:, 1:2]; reshape(y, 6, 8)[1, :] .= 5; transpose(y)[2, 1] = 9; y), x)
     @test same(x -> (y = copy(x); w = view(y, 2:7, :); view(w, 1:2, 3)[2] = -1; (y, w)), x)
+    @test same(x -> (y = copy(x); w = PermutedDimsArray(y, (2, 1)); y .= 0; w[2, 1] = 3; (y, w .+ 1)), x)
     # `similar` holds zeros until written; Julia leaves them undefined.
     @test interpret(trace(x -> similar(x, 3, 2), x), x) == zeros(3, 2)
     # A copy is the array's contents now, in memory of its own.

@@ -16,7 +16,7 @@ end
 
 for (A, B) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (AbstractArray, TracedArray))
     @eval Einops.contract(ixs::NTuple{2, Tuple}, iout::Tuple, x::$A, y::$B; kws...) =
-        Tempest.contract(x, y, numbered(ixs, iout)...)
+        Tempest.Compiler.contract(x, y, numbered(ixs, iout)...)
 end
 
 end

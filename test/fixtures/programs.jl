@@ -7,7 +7,7 @@ T.scalar_partials(::typeof(leaky), g, y, x) = (ifelse(x > 0, g, oftype(g, 0.01) 
 rmsnorm(x, w) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0e-5) .* w
 softmax_columns(x) = exp.(x .- T.logsumexp(x; dims = 1))
 softmax_rows(x) = exp.(x .- T.logsumexp(x; dims = 2))
-batched(a, b) = T.contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
+batched(a, b) = C.contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
 function layernorm(x, w)
     m = sum(x; dims = 1) ./ size(x, 1)
     v = sum(abs2, x .- m; dims = 1) ./ size(x, 1)

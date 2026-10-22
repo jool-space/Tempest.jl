@@ -47,7 +47,7 @@ grouped(x, kv) = reshape(x, size(x, 1), size(x, 2) ÷ kv, kv, size(x, 3), size(x
 
 # Scores (n, g, h, m, b), scaled, keys after a query masked out when causal.
 function attention_scores(q, k; causal, scale)
-    s = Tempest.contract(k, grouped(q, size(k, 2)), (D_, H_, N_, B_), (D_, G_, H_, M_, B_), (N_, G_, H_, M_, B_)) .* scale
+    s = Tempest.Compiler.contract(k, grouped(q, size(k, 2)), (D_, H_, N_, B_), (D_, G_, H_, M_, B_), (N_, G_, H_, M_, B_)) .* scale
     causal || return s
     ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, typemin(eltype(s)))
 end
@@ -61,7 +61,7 @@ Attention's output and the log-sum-exp of each query's scores, of size
 function attention_forward(q, k, v; causal, scale)
     s = attention_scores(q, k; causal, scale)
     lse = Tempest.logsumexp(s; dims = 1)
-    o = Tempest.contract(v, exp.(s .- lse), (D_, H_, N_, B_), (N_, G_, H_, M_, B_), (D_, G_, H_, M_, B_))
+    o = Tempest.Compiler.contract(v, exp.(s .- lse), (D_, H_, N_, B_), (N_, G_, H_, M_, B_), (D_, G_, H_, M_, B_))
     (o = reshape(o, size(q, 1), size(q, 2), size(q, 3), size(q, 4)), lse = reshape(lse, 1, size(q, 2), size(q, 3), size(q, 4)))
 end
 

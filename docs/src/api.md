@@ -22,7 +22,6 @@ against a traced array is the index itself, a formula rather than an array),
 programs can call:
 
 ```@docs
-Tempest.contract
 Tempest.fold
 Tempest.GenericFold
 Tempest.logsumexp
@@ -30,11 +29,12 @@ Tempest.logsumexp
 
 Any other function a program calls, a batched product say, is written in
 these and lives in its own package. Where its body does not trace, an
-extension writes it on traced arrays, in these primitives, as NNlibExt does:
+extension gives it a method on traced arrays, as NNlibExt and EinopsExt do,
+with these:
 
 ```@docs
 Tempest.Compiler.TracedArray
-Tempest.Compiler.permuted
+Tempest.Compiler.contract
 ```
 
 ## Derivative rules

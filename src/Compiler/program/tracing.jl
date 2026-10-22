@@ -14,7 +14,7 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
-public contract, fold, logsumexp, TracedArray, permuted
+public fold, logsumexp, TracedArray, contract
 
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
@@ -370,15 +370,16 @@ Base.reduce(op, x::TracedArray{<:Real}; dims = :, init = nothing) = mapreduce(id
 # Products. Julia arrays among the factors are constants of the program.
 
 """
-    Tempest.contract(a, b, la, lb, lo)
+    contract(a, b, la, lb, lo)
 
 The product of `a` and `b` summed over shared axes, as an einsum: `la` and `lb`
 label the axes of `a` and `b`, `lo` those of the result, and labels of both
 factors missing from the result are summed over. Every product is one: `a * b`
-of matrices is `contract(a, b, (1, 2), (2, 3), (1, 3))`.
+of matrices is `contract(a, b, (1, 2), (2, 3), (1, 3))`, and so is each product
+of an Einops `einsum`.
 
 ```jldoctest
-julia> Tempest.contract([1.0 2; 3 4], [5.0 6; 7 8], (1, 2), (2, 3), (1, 3))
+julia> Tempest.Compiler.contract([1.0 2; 3 4], [5.0 6; 7 8], (1, 2), (2, 3), (1, 3))
 2×2 Matrix{Float64}:
  19.0  22.0
  43.0  50.0
@@ -415,8 +416,9 @@ Base.:*(a::LinearAlgebra.AdjOrTransAbsVec{<:Real}, b::TracedArray{<:Real, 1}) = 
 Base.:*(a::Transpose{T, <:AbstractVector}, b::TracedArray{T, 1}) where {T <: Real} = sum(vec(a) .* b)
 Base.:*(a::LinearAlgebra.Diagonal{<:Real}, b::TracedArray{<:Real, 1}) = a.diag .* b
 
-# Layout. As in Julia, `reshape`, `vec`, `view` and `transpose` share the
-# memory of the array they are made from; `permutedims` and `getindex` copy.
+# Layout. As in Julia, `reshape`, `vec`, `view`, `transpose` and
+# `PermutedDimsArray` share the memory of the array they are made from;
+# `permutedims` and `getindex` copy.
 
 """
 A layout of `x` that shares its memory: it reads later writes into `x`, and a
@@ -450,20 +452,15 @@ function Base.permutedims(x::TracedArray, perm)
     TracedArray(x.tape, record!(x.tape, Permute(perm), (x.id,), map(p -> size(x, p), perm), eltype(x)))
 end
 
-"""
-    permuted(x::TracedArray, perm) -> TracedArray
-
-`x` with its axes permuted, sharing its memory, as `PermutedDimsArray` does;
-`permutedims` copies.
-"""
-function permuted(x::TracedArray, perm)
+# A traced array, as a view of one is, rather than Base's wrapper.
+function Base.PermutedDimsArray(x::TracedArray, perm)
     perm = check_permutation(x, perm)
     perm == ntuple(identity, ndims(x)) ? x : layout(x, Permute(perm), (), map(p -> size(x, p), perm))
 end
 
 Base.permutedims(x::TracedArray{<:Any, 2}) = permutedims(x, (2, 1))
 Base.permutedims(x::TracedArray{<:Any, 1}) = reshape(x, (1, length(x)))
-Base.transpose(x::TracedArray{<:Real, 2}) = permuted(x, (2, 1))
+Base.transpose(x::TracedArray{<:Real, 2}) = PermutedDimsArray(x, (2, 1))
 Base.transpose(x::TracedArray{<:Real, 1}) = reshape(x, (1, length(x)))
 Base.adjoint(x::TracedArray{<:Real}) = transpose(x)
 

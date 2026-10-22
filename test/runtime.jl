@@ -245,8 +245,8 @@ C.estimate(::RecomputesOverThree{Cheap}, claim, target, g) where {Cheap} =
 @testset "recomputing a fold is a proposal, priced where its kernels are claimed" begin
     x, w = data(8, 6), data(8, 8)
     function f(x, w)
-        q = T.contract(w, x, (1, 2), (1, 3), (2, 3))
-        s = T.contract(q, q, (1, 2), (1, 3), (2, 3))
+        q = C.contract(w, x, (1, 2), (1, 3), (2, 3))
+        s = C.contract(q, q, (1, 2), (1, 3), (2, 3))
         T.logsumexp(s; dims = 1)
     end
     graph = C.lower(trace(f, x, w))
@@ -360,7 +360,7 @@ if CUDA_FUNCTIONAL
         # and half factors accumulating in Float32.
         layouts = [((a, b) -> a * b, (a, b)), ((at, b) -> transpose(at) * b, (at, b)),
             ((a, bt) -> a * transpose(bt), (a, bt)), ((at, bt) -> transpose(at) * transpose(bt), (at, bt)),
-            ((a, b) -> T.contract(a, b, (1, 2), (2, 3), (3, 1)), (a, b)), ((A, B) -> T.contract(A, B, (1, 2, 4), (2, 3, 4), (1, 3, 4)), (A, B)),
+            ((a, b) -> C.contract(a, b, (1, 2), (2, 3), (3, 1)), (a, b)), ((A, B) -> C.contract(A, B, (1, 2, 4), (2, 3, 4), (1, 3, 4)), (A, B)),
             ((a, b) -> a * b, (Float16.(a), Float16.(b))), ((a, b) -> a * b, (BFloat16.(a), BFloat16.(b)))]
         for (f, args) in layouts, target in (T.CUDATarget(cuBLAS), T.CUDATarget(cuBLAS; precision = :tf32))
             p = trace(f, args...)
@@ -526,7 +526,7 @@ function grouped_scores(q, k)
     D, H, S, B = size(q)
     G = H ÷ size(k, 2)
     shared = reshape(reshape(k, D, 1, size(k, 2), S, B) .* ones(Float32, 1, G, 1, 1, 1), D, H, S, B)
-    T.contract(shared, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 5, 2, 4))
+    C.contract(shared, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 5, 2, 4))
 end
 
 const POSITIONAL = [
@@ -688,10 +688,10 @@ if CUDA_FUNCTIONAL
         # kernel, at full precision and in TF32.
         q, k, v = single(data(16, 2, 70, 2; scale = 0.1)), single(data(16, 2, 70, 2; scale = 0.2)), single(data(16, 2, 70, 2; scale = 0.3))
         p = trace(q, k, v) do q, k, v
-            s = T.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.25f0
+            s = C.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.25f0
             s = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf32)
             e = exp.(s .- maximum(s; dims = 1))
-            T.contract(v, e ./ sum(e; dims = 1), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
+            C.contract(v, e ./ sum(e; dims = 1), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
         end
         for precision in (:full, :tf32)
             target = T.CUDATarget(cuTile; precision)
