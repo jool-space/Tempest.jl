@@ -882,4 +882,42 @@ if CUDA_FUNCTIONAL
         @test length(ex.kernels) == 1 && !(only(ex.kernels) isa C.FloorKernels)
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
     end
+
+    # Decode attention: one query per head over a cache of keys, each
+    # sequence's read up to a length the device holds, with query heads
+    # grouped over key heads as Vallmo's cache holds them, (features,
+    # positions, key heads, sequences). The length is a mask whose formula
+    # reads it, and the sweep over keys stops where it ends, whether the
+    # scores are recomputed in it or stored before.
+    @testset "attention up to lengths the device holds" begin
+        function decode(q, k, v, n)
+            g = reshape(q, size(q, 1), size(q, 2) ÷ size(k, 3), size(k, 3), size(q, 3))
+            s = C.contract(k, g, (1, 6, 3, 5), (1, 2, 3, 5), (6, 2, 3, 5)) .* 0.25f0
+            s = ifelse.(reshape(Int32(1):Int32(size(k, 2)), :, 1, 1, 1) .<= reshape(n, 1, 1, 1, :), s, -Inf32)
+            o = C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 6, 3, 5), (6, 2, 3, 5), (1, 2, 3, 5))
+            reshape(o, size(q))
+        end
+        q, k, v = single(data(16, 8, 3; scale = 0.1)), single(data(16, 200, 2, 3; scale = 0.2)), single(data(16, 200, 2, 3; scale = 0.3))
+        n = Int32[37, 200, 1]
+        p = trace(decode, q, k, v, n)
+        target = T.CUDATarget(cuTile)
+        for recompute in ((), streaming(p, target))
+            ex = prepare(p, map(CuArray, (q, k, v, n))...; target, recompute)
+            @test any(k -> occursin("masked steps skipped", string(k)), ex.kernels)
+            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, n)]; rtol = 1.0e-4)
+            # Another length is the same program.
+            bind!(ex, 4 => CuArray(Int32[200, 5, 64]))
+            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, Int32[200, 5, 64])]; rtol = 1.0e-4)
+        end
+        # With a key head per query head, the scores of one query are a product
+        # of one row, which the generator does not claim recomputed in the
+        # sweep over keys: the streaming plan runs on the floor.
+        @testset "gap: one query per key head, its scores recomputed" begin
+            k1, v1 = single(data(16, 200, 8, 3; scale = 0.2)), single(data(16, 200, 8, 3; scale = 0.3))
+            p = trace(decode, q, k1, v1, n)
+            ex = prepare(p, map(CuArray, (q, k1, v1, n))...; target, recompute = streaming(p, target))
+            @test_broken !(only(ex.kernels) isa C.FloorKernels)
+            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k1, v1, n)]; rtol = 1.0e-4)
+        end
+    end
 end

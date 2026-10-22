@@ -6,24 +6,33 @@
 # are an interval of the sweep, bounded from the block's indices by interval
 # arithmetic on the formulas, as FlexAttention's block mask skips the key
 # blocks a causal mask rules out, found here from the mask's formula rather
-# than by evaluating it on block corners. The mask may sit in the fold's own
-# term or in a value it loads, computed and stored by an earlier kernel, as
-# attention's masked scores are for its backward pass: a stored value's
-# definition is read through to the formula.
+# than by evaluating it on block corners. A formula may read an integer the
+# block shares, a sequence's length say, which the bound loads once, as
+# FlashAttention's decode bounds its keys by `cache_seqlens`. The mask may sit
+# in the fold's own term or in a value it loads, computed and stored by an
+# earlier kernel, as attention's masked scores are for its backward pass: a
+# stored value's definition is read through to the formula.
 
 const IR = Tempest.IR
 
 # The mask a term is a condition for, when it conjoins comparisons of index
 # formulas (see `Tempest.Compiler.masked`).
-function mask_of(t, d::Domain)
+function mask_of(c::Context, t, d::Domain)
     t isa Apply || return nothing
     if t.f === (&)
-        parts = map(a -> mask_of(a, d), t.args)
+        parts = map(a -> mask_of(c, a, d), t.args)
         return any(isnothing, parts) ? nothing : reduce(vcat, parts)
     end
-    t.f in (<=, <, >=, >) && length(t.args) == 2 && all(a -> a isa Ix, t.args) || return nothing
-    IR.comparison_mask(t.f, t.args[1].expr, t.args[2].expr, d)
+    t.f in (<=, <, >=, >) && length(t.args) == 2 && any(a -> a isa Ix, t.args) || return nothing
+    a, b = map(a -> compared(c, a, d), t.args)
+    a === nothing || b === nothing ? nothing : IR.comparison_mask(t.f, a, b, d)
 end
+
+# A side of a comparison with a position, as a formula: a position, or an
+# integer loaded from a value (see `Tempest.IR.held_formula`).
+compared(c::Context, t::Ix, d) = t.expr
+compared(c::Context, t::Load, d) = IR.held_formula(t.value, t.index, c.g.values[t.value].eltype, d)
+compared(c::Context, t, d) = nothing
 
 # A loaded value's mask, over the kernel's axes: the view's, through the
 # load's formula.
@@ -46,7 +55,7 @@ function mask_condition(c::Context, r)
     found = Vector{Affine}[]
     for t in subterms((body,))
         if t isa Apply && t.f === ifelse && length(t.args) == 3 && t.args[3] isa Lit
-            m = mask_of(t.args[1], d)
+            m = mask_of(c, t.args[1], d)
             m === nothing || push!(found, m)
         elseif t isa Load
             m = load_mask(c, t, d)
@@ -71,20 +80,21 @@ function masked_value(c::Context, t, mask, d::Domain)
         return m !== nothing && m[1] == mask ? m[2] : :finite
     end
     t isa Apply || return nothing
-    t.f === ifelse && length(t.args) == 3 && mask_of(t.args[1], d) == mask && return masked_value(c, t.args[3], mask, d)
+    t.f === ifelse && length(t.args) == 3 && mask_of(c, t.args[1], d) == mask && return masked_value(c, t.args[3], mask, d)
     IR.masked_result(t.f, t.eltype, map(a -> masked_value(c, a, mask, d), t.args))
 end
 
 """
-    live_steps(c, phase, p, indices, n) -> (lo, hi) or nothing
+    live_steps(k, c, phase, p, indices, n) -> (lo, hi) or nothing
 
 Int32 expressions over the block's indices bounding the steps of the sweep
 along axis `p`, of `n` steps, at which some fold of `phase` sees a position
 its mask does not rule out: the union over the folds of the steps each is
 live at, each the intersection of what its mask's comparisons allow. Nothing
-when a fold of the phase has no mask the generator can bound.
+when a fold of the phase has no mask the generator can bound. An integer a
+formula reads is an argument of kernel `k`.
 """
-function live_steps(c::Context, phase, p, indices, n)
+function live_steps(k, c::Context, phase, p, indices, n)
     # `TEMPEST_SKIP_MASKED=0` runs every step, for telling a wrong answer's cause.
     get(ENV, "TEMPEST_SKIP_MASKED", "1") == "0" && return nothing
     los, his = Any[], Any[]
@@ -93,7 +103,7 @@ function live_steps(c::Context, phase, p, indices, n)
         mask === nothing && return nothing
         lo, hi = Any[:(Int32(1))], Any[:(Int32($n))]
         for e in mask
-            bounds = step_bounds(c, e, p, indices)
+            bounds = step_bounds(k, c, e, p, indices)
             bounds === nothing && return nothing
             α, β = bounds
             # Live where α·(t − 1) + β ≤ 0.
@@ -113,11 +123,18 @@ end
 # The lowest value of formula `e` over a tile at step `t` of the sweep along
 # `p`, as `α·(t − 1) + β`: α a number, β an Int32 expression over the
 # block's indices. Nothing when a variable of `e` is not alone on its tile
-# axis, or lies on another swept axis.
-function step_bounds(c::Context, e::Affine, p, indices)
+# axis, or lies on another swept axis, or an integer it reads differs between
+# the block's lanes.
+function step_bounds(k, c::Context, e::Affine, p, indices)
     α = 0
     β = Any[:(Int32($(e.constant)))]
     for (atom, coefficient) in e.terms
+        if atom isa Indirect
+            held = block_read(k, c, atom, indices)
+            held === nothing && return nothing
+            push!(β, :(Int32($coefficient) * $held))
+            continue
+        end
         atom isa Var || return nothing
         i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
         i === nothing && continue
@@ -134,4 +151,23 @@ function step_bounds(c::Context, e::Affine, p, indices)
         coefficient < 0 && push!(β, :(Int32($(coefficient * (ax.tile - 1)))))
     end
     (α, :(+($(β...))))
+end
+
+# An integer read at an index the grid binds, as an Int32 the block loads
+# once: every variable of the index on a kept tile axis of one lane, so that
+# neither the lanes nor the sweep move it. Nothing otherwise, when the
+# integer is not stored, or when it may not fit an Int32.
+function block_read(k, c::Context, a::Indirect, indices)
+    c.g.values[a.value].stored || return nothing
+    T = c.g.values[a.value].eltype
+    typemin(Int32) <= typemin(T) && typemax(T) <= typemax(Int32) || return nothing
+    for e in a.index, (atom, _) in e.terms
+        atom isa Var || return nothing
+        i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
+        i === nothing && continue
+        c.s.tiling[i].tile == 1 && !c.s.tiling[i].reduced || return nothing
+    end
+    flat = argument!(k, ArgSpec(a.value, 0, (storage_length(c.g.values[a.value]),), (1,)))
+    at = block_scalar(c, address(c.g.values[a.value], a.index, Domain(c.g.domain)), indices)
+    :(Int32($flat[Int32(1) + $at]))
 end

@@ -216,37 +216,6 @@ positions, against `knorm_rope_append!` on the same caches; the answers
 agreeing with the interpreter; the derivative of a write unchanged; and
 what a write does where two indices name one position, stated and tested.
 
-**A length the device holds does not bound a sweep.** Decode attention
-reads each sequence's keys up to its length, which the device holds and
-which grows by one each step, from a cache allocated for the whole context
-(Vallmo's `decode_attention`, `src/kernels/attention_decode.jl`, which
-takes `lengths`). Written as array code, the length is a mask,
-`ifelse(position <= len[b], score, -Inf32)`. The planner finds masks that
-compare index formulas (`masked`, `src/Compiler/plan/masks.jl`;
-`src/IR/masks.jl`), and the generator bounds a sweep by them (`live_steps`
-and `step_bounds`, `ext/cuTileExt/mask.jl`), but this comparison is against
-a load, not a formula, so the online softmax visits every key: at 200
-tokens into a 32768-position cache, 164 times the keys and values a bounded
-sweep reads, 128 MiB per layer per token at Qwen3.5-4B's attention. The
-pieces exist: `Indirect`, an integer read from a value, is an atom of the
-index formulas (`src/IR/expressions.jl`), and the bounds `live_steps`
-computes are Int32 expressions over the block's indices, evaluated when the
-kernel runs. This is the other answer to the decode case named under
-"Sizes are constants": the extent stays the cache's, and the work follows
-the length. Challengers: FlashAttention's `flash_attn_with_kvcache`, whose
-key loop each sequence bounds by its `cache_seqlens`; FlexAttention's block
-mask (`create_block_mask`, `torch/nn/attention/flex_attention.py`), where a
-mask that reads a tensor is evaluated into the key blocks each query block
-visits before the kernel runs. Judged by Vallmo's decode attention written
-as array code, one query per head, grouped key heads, a length per sequence
-on the device, over a 32768-position cache at lengths 200, 2048 and 16384:
-its time following the length and not the cache, against
-`decode_attention`; the answers agreeing with the interpreter; and the
-masked-attention trial's table within the noise. Not judged, named:
-splitting the live keys across blocks when the heads are few, which
-`decode_attention` does (`mha_decode_split_fwd`, then a combine by the
-log-sum-exp), and which the time at 16384 will show.
-
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
@@ -269,6 +238,51 @@ on explicit refs, transparent to tracing, with its own derivative) and Exo
 to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
+
+**A length the device holds does not bound a sweep: an integer the block
+reads bounds it, and is adopted.** On trial was the generator sweeping every
+key of a cache whose keys past each sequence's length are masked,
+`ifelse(position <= len[b], score, -Inf32)`: the planner found masks only in
+comparisons of index formulas, and this one compares a position with a load.
+The challenger, FlashAttention's `flash_attn_with_kvcache`, bounds each
+sequence's key loop by its `cache_seqlens`. Here an integer read is a
+formula, a gather known to lie in its type's range (`held_formula`,
+`src/IR/masks.jl`), so the comparison is a mask as a causal one is
+(`masked`, `src/Compiler/plan/masks.jl`); where every variable of its index
+lies on a kept tile axis of one lane, the generator loads it once per block
+into the bound on the sweep (`block_read`, `ext/cuTileExt/mask.jl`). Judged
+on the GB10 at 2411 MHz, at Qwen3.5-4B's attention: 256 features, 16 query
+heads over 4 key heads, one sequence, BFloat16, a 32768-position cache in
+Vallmo's layout, one preparation bound to each length, against Vallmo's
+`decode_attention`:
+
+| length | streaming plan | the cover's plan | `decode_attention` |
+|---|---|---|---|
+| 200 | 14.8 μs | 333 μs | 52.9 μs |
+| 2048 | 93.6 μs | 389 μs | 328 μs |
+| 16384 | 737 μs | 946 μs | 654 μs |
+| 32768 | 1478 μs | 1581 μs | 729 μs |
+
+Before, the two plans took 1500 and 1325 μs at every length. The answers
+agree with plain Julia over the keys up to each length to the rounding of
+the scores to BFloat16, 2e-3 relative, and the masked-attention table holds:
+the causal forward 146 and 463 μs at 1024 and 2048 positions, the step 2.89
+and 10.77 ms. What is not judged, named. The cover stores the scores, since
+it prices both plans at the whole cache, the length being unknown when it
+plans, and the scores' product sweeps every key whatever the length; the
+streaming plan, pinned with `recompute`, is faster at every length; with a
+key head per query head, where the scores of a query are one row, the
+generator claims no streaming plan, and it runs on the floor (a gap in
+`test/runtime.jl`). At the whole cache Vallmo is twice as fast: it splits
+the keys across eight blocks per key head and combines them by the
+log-sum-exp (`mha_decode_split_fwd`), where the streaming kernel runs on 16
+blocks; its split is of the cache's extent, not of the length, so one block
+holds every live key below 4096, which is where it loses. A loop whose count
+the kernel reads costs the sweep over stored scores 27% at the whole cache
+(1288 against 1015 μs, as much with a count computed from the block's index
+as with one loaded); a constant count with the dead steps guarded off
+recovers it there (957 μs) but costs the streaming plan 30 μs at 200
+positions, so the read count stays.
 
 **The schedule search's cold cost: the staged search wins and is adopted.**
 On trial was the search over a product's tiles, every tile of every product

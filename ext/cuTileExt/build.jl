@@ -173,7 +173,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         end
         if !resident
             # Steps a mask rules out for every fold of the phase are skipped.
-            live = live_steps(c, phase, p, indices, n)
+            live = live_steps(k, c, phase, p, indices, n)
             lo, hi = live === nothing ? (:(Int32(1)), :(Int32($n))) : live
             live === nothing || (k.name *= ", masked steps skipped")
             push!(body, :(for $t in $lo:$hi
@@ -445,7 +445,7 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     scope = copy(names)
     emit_tiles!(k, loop, c, phase_roots(c, phase, sums), scope, at(t)...)
     foreach(r -> fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t)), phase)
-    live = live_steps(c, phase, p, indices, sweeps(c.s))
+    live = live_steps(k, c, phase, p, indices, sweeps(c.s))
     lo, hi = live === nothing ? (:(Int32(1)), :(Int32($(sweeps(c.s))))) : live
     live === nothing || (k.name *= ", masked steps skipped")
     push!(st, :(for $t in max($lo, (part - Int32(1)) * Int32($chunk) + Int32(1)):min($hi, part * Int32($chunk), Int32($(sweeps(c.s))))
