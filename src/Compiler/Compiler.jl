@@ -28,9 +28,9 @@ using ..Implement: REGISTERED
 export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 
 # What proposals read, until a view of the graph replaces it: the plan, and the
-# view of each of its groups; the levels between a program and its plan; and
-# how kernels are built side by side.
-public Plan, group_view, lower, plan, concurrently
+# views of its groups; the levels between a program and its plan; and how
+# kernels are built side by side.
+public Plan, group_views, lower, plan, concurrently
 
 # The program level.
 include("program/program.jl")

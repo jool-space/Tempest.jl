@@ -11,7 +11,7 @@ import Tempest
 using Tempest: CUDATarget
 @republic republic=false inherit=:public using Tempest.IR
 @republic republic=false inherit=:public import Tempest.Implement
-using Tempest.Compiler: Plan, group_view
+using Tempest.Compiler: Plan, group_views
 
 struct cuBLASProducts <: Implementation end
 
@@ -129,7 +129,7 @@ record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transposes...,
 # and each product fold it recomputes inside another's, stored by this claim.
 function candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
     found = Vector{Int}[]
-    for g in (group_view(p, group) for group in p.groups)
+    for g in group_views(p)
         g.kind === :reduction || continue
         product(r, t) = g.values[r].fold isa SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
             all(f -> factor_load(f, g) !== nothing, t.args)

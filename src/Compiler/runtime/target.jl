@@ -1,12 +1,15 @@
 # A target: where a program runs. The compiler asks a target for buffers, for
-# the floor's launches, for captured graphs, and for the device's name, rates
-# and times, through the protocol below: the public names of this file, and
-# `ScalarKernel` and `accumulate!` of the floor's code. The CPU's definitions
-# are here; a package that adds a target defines them for its type (see
-# CUDAExt).
+# the floor's launches, for captured graphs, for the device's name, rates and
+# times, and for the options it was made with (the kernel packages it uses, its
+# numerics, whether it permits rewrites that change rounding, and how it
+# classes products), through the protocol below: the public names of this
+# file, `packages`, `product_class`, and `ScalarKernel` and `accumulate!` of
+# the floor's code. The CPU's definitions are here; a package that adds a
+# target defines them for its type (see CUDAExt).
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, task_state, device_name,
-    measurable, time_launch, calibrate, capture, replay, release, floor_launch, ScalarKernel, accumulate!
+    measurable, time_launch, calibrate, capture, replay, release, floor_launch, ScalarKernel, accumulate!,
+    packages, numerics, permits_rewrites, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
 abstract type Target end

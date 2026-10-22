@@ -27,6 +27,17 @@ function group_view(p::Plan, g::Group)
         primary_axes(graph, g), values, places, group_bytes(p, g), reference)
 end
 
+"""
+    group_views(plan) -> Vector{GroupView}
+    group_views(prepared) -> Vector{GroupView}
+
+The views of a plan's groups, or of the groups of the plan a prepared program
+runs, in the plan's order: what a proposal reads of the plan it is given, and
+what a package's precompile workload claims.
+"""
+group_views(p::Plan) = [group_view(p, g) for g in p.groups]
+group_views(ex::Executable) = group_views(ex.plan)
+
 function value_view(p::Plan, v)
     val = p.graph.values[v]
     d = val.definition

@@ -34,6 +34,7 @@ with these:
 
 ```@docs
 Tempest.Compiler.TracedArray
+Tempest.Compiler.Traced
 Tempest.Compiler.contract
 ```
 
@@ -58,7 +59,7 @@ Tempest.Compiler.replay!
 Tempest.Compiler.outputs
 Tempest.Compiler.lower
 Tempest.Compiler.plan
-Tempest.Compiler.group_view
+Tempest.Compiler.group_views
 ```
 
 ### Adding a target
@@ -66,6 +67,10 @@ Tempest.Compiler.group_view
 ```@docs
 Tempest.Compiler.Target
 Tempest.Compiler.target_for
+Tempest.Compiler.packages
+Tempest.Compiler.numerics
+Tempest.Compiler.permits_rewrites
+Tempest.Compiler.product_class
 Tempest.Compiler.allocate
 Tempest.Compiler.upload
 Tempest.Compiler.bindable

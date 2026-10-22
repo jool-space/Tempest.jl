@@ -47,8 +47,7 @@ unbacked_tile_array(T, spec) = ct.TileArray(Ptr{T}(256), Int32.(spec.sizes), Int
             program = Tempest.Compiler.differentiate(Tempest.Compiler.trace(f, args...))
             ex = Tempest.Compiler.prepare(program, args...; target, build = false)
             explain(devnull, ex)
-            p = ex.plan
-            for g in map(g -> Tempest.Compiler.group_view(p, g), p.groups), claim in claims(cuTileGenerator(), target, g)
+            for g in Tempest.Compiler.group_views(ex), claim in claims(cuTileGenerator(), target, g)
                 workspaces = Dict{Any, Workspace}()
                 for k in schedule_kernels(Context(g, claim.schedule), workspaces)
                     arrays = map(k.args) do spec

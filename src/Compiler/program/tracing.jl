@@ -14,7 +14,7 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
-public fold, logsumexp, TracedArray, contract
+public fold, logsumexp, TracedArray, Traced, contract
 
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
@@ -48,6 +48,13 @@ mutable struct TracedArray{T, N} <: AbstractArray{T, N}
     const views::Vector{WeakRef}
 end
 
+"""
+A number a program computes: a stand-in for a scalar result such as `sum(x)`,
+and, inside a broadcast, for an element of an array, which the broadcast's
+function runs on, each primitive operation it performs recorded. A package
+whose scalar function does not trace, a `ccall` say, defines it on `Traced` in
+operations that do; `scalar_partials` rules receive it too.
+"""
 struct Traced{T} <: Real
     tape::Tape
     id::Int
