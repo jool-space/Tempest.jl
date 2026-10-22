@@ -166,7 +166,11 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         k === nothing || xs[k] isa Number || (referenced[k] = xs[k])
     end
     buffers = Vector{Any}(nothing, length(values))
+    # Results in an argument's storage, and folds by key over the contents they
+    # start from, take that storage, in the order values are computed.
+    taken = sort!([s.donated; s.overwrites]; by = first)
     for (id, v) in enumerate(values)
+        any(t -> first(t) == id, taken) && continue
         def = v.definition
         if def isa ConstantArray
             # Uploaded already if a claim was measured.
@@ -183,7 +187,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
             buffers[id] = allocate(target, v.eltype, storage_length(v))
         end
     end
-    foreach(((r, a),) -> buffers[r] = buffers[a], s.donated)
+    foreach(((r, a),) -> buffers[r] = buffers[a], taken)
     arguments = Any[get(buffers, get(input, k, 0), nothing) for k in eachindex(program.arguments)]
     replaced = Dict(pairs)
     results = Any[reshape(haskey(replaced, k) ? arguments[replaced[k]] : buffers[result_value(k)],
@@ -235,7 +239,7 @@ slots.
 function footprint(ex::Executable)
     graph, s = ex.plan.graph, ex.storage
     own = sum(v -> s.slots[v] == 0 && ex.buffers[v] !== nothing ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
-    own -= sum(((r, a),) -> value_bytes(graph.values[r]), s.donated; init = 0)
+    own -= sum(v -> s.slots[v] == 0 ? value_bytes(graph.values[v]) : 0, unique(first.([s.donated; s.overwrites])); init = 0)
     apart = sum(v -> s.slots[v] > 0 ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
     (bytes = own + sum(s.sizes; init = 0), apart = own + apart)
 end
@@ -425,10 +429,16 @@ end
 
 Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, " items") for k in f.kernels), " then "))
 
+# Whether fold by key `r` is in the storage of the contents it starts from:
+# `storage` put it over them.
+starts_in_place(graph, r, buffers) = graph.values[r].definition.into isa Read && buffers[graph.values[r].definition.into.value] === buffers[r]
+
 # The floor for a group on any target: its scalar kernels, each launched as
-# the target launches one (see `floor_launch`).
+# the target launches one (see `floor_launch`). A fold by key in the storage
+# of the contents it starts from starts from them there.
 function build_floor(target, p::Plan, g::Group, buffers)
-    ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g))
+    held = filter(r -> keyed(p.graph, r) && starts_in_place(p.graph, r, buffers), g.reductions)
+    ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g); held)
     launches = [floor_launch(target, k, Tuple(buffers[v] for v in k.slots)) for k in ks]
     (() -> foreach(l -> l(), launches), FloorKernels(ks))
 end

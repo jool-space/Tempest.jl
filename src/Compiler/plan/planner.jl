@@ -55,14 +55,17 @@ kept_dims(domain, axes) = ntuple(k -> k in axes ? 1 : domain[k], length(domain))
 "Whether fold `r` reduces the group's primary axes."
 primary(graph, g::Group, r) = !keyed(graph, r) && fold_axes(graph, r) == primary_axes(graph, g)
 
+"The values the key of fold by key `v` gathers from; none for any other value."
+key_reads(graph, v) = keyed(graph, v) ? reduce(vcat, map(indirect_values, graph.values[v].definition.key); init = Int[]) : Int[]
+
 """
 The values fold by key `v` reads besides its elements: those its key gathers
 from, and those of the contents it starts from; none for any other value.
 """
 function keyed_reads(graph, v)
     keyed(graph, v) || return Int[]
-    d = graph.values[v].definition
-    [reduce(vcat, map(indirect_values, d.key); init = Int[]); d.into === nothing ? Int[] : read_values(d.into)]
+    into = graph.values[v].definition.into
+    [key_reads(graph, v); into === nothing ? Int[] : read_values(into)]
 end
 
 """

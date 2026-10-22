@@ -59,11 +59,12 @@ end
 end
 
 # Values other than inputs and results share slots where their lifetimes do
-# not overlap, so training steps that keep values for their backward pass
-# store less.
+# not overlap, or where a fold by key writes over the value it starts from, so
+# training steps that keep values for their backward pass store less.
 function slots_disjoint(s::C.Storage)
     slotted = [v for v in eachindex(s.slots) if s.slots[v] > 0]
-    all(isempty(intersect(s.lifetimes[v], s.lifetimes[w])) for v in slotted for w in slotted if v < w && s.slots[v] == s.slots[w])
+    over(v, w) = (v => w) in s.overwrites || (w => v) in s.overwrites
+    all(isempty(intersect(s.lifetimes[v], s.lifetimes[w])) || over(v, w) for v in slotted for w in slotted if v < w && s.slots[v] == s.slots[w])
 end
 
 @testset "slots" begin
@@ -73,6 +74,61 @@ end
         bytes, apart = C.footprint(ex)
         @test name in ("MLP", "attention, grouped heads") ? bytes < apart : bytes <= apart
     end
+end
+
+# A write takes the storage of the contents it starts from where nothing reads
+# them after it, and writes only its positions: a cache the step replaces,
+# appended per sequence, three writes each over the last, is where the step
+# leaves it, and no kernel copies it.
+function appended(K, k, p)
+    K = copy(K)
+    for b in axes(K, 4)
+        K[:, p[b], :, b] .= k[:, :, b]
+    end
+    K
+end
+
+function check_appended_in_place(device, target)
+    K, k, p = data(4, 16, 2, 3), data(4, 2, 3), Int32[3, 16, 1]
+    program = trace(appended, K, k, p)
+    ex = prepare(program, device(K), device(k), device(p); target, replaces = (1 => 1,))
+    @test length(ex.storage.donated) == 1 && isempty(ex.storage.staged) && length(ex.storage.overwrites) == 3
+    @test pointer(ex.results[1]) == pointer(ex.arguments[1])
+    @test count("written over", sprint(explain, ex)) == 3
+    # Each kernel writes the elements of one sequence's token.
+    @test all(k -> !(k isa C.FloorKernels) || all(s -> s.items == 8, k.kernels), ex.kernels)
+    @test !any(k -> occursin("initial states", string(k)), ex.kernels)
+    expected = K
+    for positions in (p, Int32[5, 2, 9])
+        bind!(ex, 3 => device(positions))
+        reference = interpret(program, expected, k, positions)
+        @test Array(outputs(execute!(ex))) == reference
+        expected = reference
+    end
+end
+
+# A value the program computes is written over where the write is its last
+# reader; the contents are copied where the elements written read them, and
+# from an input nothing replaces, which the program never writes.
+@testset "writes in place" begin
+    check_appended_in_place(identity, T.CPUTarget())
+    f = (x, v, i) -> (y = x .* 2; y[:, i] .= v; sum(abs2, tanh.(y)))
+    args = (data(4, 9), data(4, 3), Int32[7, 2, 5])
+    for p in (trace(f, args...), differentiate(trace(f, args...)))
+        ex = prepare(p, args...)
+        @test !isempty(ex.storage.overwrites) && slots_disjoint(ex.storage)
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-10)
+    end
+    g = (x, i, j) -> (y = copy(x); y[:, i] .= x[:, j]; y)
+    args = (data(4, 9), Int32[7, 2], Int32[1, 7])
+    ex = prepare(trace(g, args...), args...; replaces = (1 => 1,))
+    @test isempty(ex.storage.overwrites) && length(ex.storage.staged) == 1
+    @test outputs(execute!(ex)) == interpret(trace(g, args...), args...)
+    x, v, i = data(4, 9), data(4, 3), Int32[7, 2, 5]
+    unwritten = copy(x)
+    ex = prepare(trace((x, v, i) -> (y = copy(x); y[:, i] .= v; y), x, v, i), x, v, i; by_reference = (1,))
+    @test isempty(ex.storage.overwrites)
+    @test outputs(execute!(ex))[:, [7, 2, 5]] == v && x == unwritten
 end
 
 # A training step as one program: an MLP's gradient, then Adam's update.
@@ -706,15 +762,8 @@ end
 # device: a token's keys appended to a cache per sequence, a column at a
 # position, and a write's gradient, at distinct positions as the interpreter
 # writes them; where elements land at one position, each position holds one
-# of them, which the device does not fix.
-function appended(K, k, p)
-    K = copy(K)
-    for b in axes(K, 4)
-        K[:, p[b], :, b] .= k[:, :, b]
-    end
-    K
-end
-
+# of them, which the device does not fix. A cache the step replaces is
+# appended in place.
 const DEVICE_WRITES = [
     ("a cache appended per sequence", appended, (data(4, 16, 2, 3), data(4, 2, 3), Int32[3, 16, 1])),
     ("a column at a position held", (K, k, p) -> (y = copy(K); y[:, p[1]] .= k; y), (data(8, 16), data(8), Int32[5])),
@@ -732,6 +781,9 @@ if CUDA_FUNCTIONAL
                 @test all(k -> (k isa C.FloorKernels) == (where == "the floor"), ex.kernels)
                 @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-5)
             end
+        end
+        @testset "a cache appended in place, $where" for (where, target) in targets
+            check_appended_in_place(CuArray, target)
         end
         x, v, i = single(data(64, 9)), single(data(64, 300)), Int32.(mod1.(1:300, 7))
         @testset "repeated positions, $where" for (where, target) in targets

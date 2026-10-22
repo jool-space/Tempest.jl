@@ -569,8 +569,10 @@ function scan_kernel(c::Context)
     k
 end
 
-function schedule_kernels(c::Context, workspaces)
-    initial = [initial_states_kernel(c, r) for r in keyed_folds(c)]
+# The kernels of a schedule; a fold by key in `held` starts from what its
+# storage holds, with no launch before its elements.
+function schedule_kernels(c::Context, workspaces; held = ())
+    initial = [initial_states_kernel(c, r) for r in keyed_folds(c) if !(r in held)]
     c.s.sketch === :pointwise && return [initial; pointwise_kernel(c)]
     c.s.sketch === :scan && return [scan_kernel(c)]
     slots = Dict{Int, Int}()
@@ -593,10 +595,13 @@ function Base.show(io::IO, b::BuiltTiles)
     print(io, "cuTile ", b.schedule, ": ", join((string(k.name, " grid ", k.grid) for k in b.kernels), "; "))
 end
 
+# A fold by key in the storage of the contents it starts from (see
+# `Tempest.Compiler.storage`) starts from them there.
 function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buffers)
     c = Context(g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
-    launch_kernels(schedule_kernels(c, workspaces), workspaces, buffers, claim.schedule, target)
+    held = filter(r -> g.values[r].into isa Load && buffers[g.values[r].into.value] === buffers[r], keyed_folds(c))
+    launch_kernels(schedule_kernels(c, workspaces; held), workspaces, buffers, claim.schedule, target)
 end
 
 function launch_kernels(kernels, workspaces, buffers, schedule, target)

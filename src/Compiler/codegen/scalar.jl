@@ -276,11 +276,11 @@ combine in no fixed order.
 accumulate!(f, buffer, i, x) = (@inbounds buffer[i] = only(fold_combine(f, (buffer[i],), fold_lift(f, x))); nothing)
 
 # A fold by key on the floor: its states set to the contents it starts from
-# or the fold's initial one, then one item per point of the group's domain,
-# which computes the element, the group's folds loaded as `fold_kernel` loads
-# them, and combines it at the position its key names. The work is the
-# elements, once each.
-function keyed_kernels(graph, g::Group, slots, r)
+# or the fold's initial one, unless its storage `held` them already, then one
+# item per point of the group's domain, which computes the element, the
+# group's folds loaded as `fold_kernel` loads them, and combines it at the
+# position its key names. The work is the elements, once each.
+function keyed_kernels(graph, g::Group, slots, r, held)
     D = g.domain
     vars = index_vars(length(D))
     c = EmitContext(graph, slots, vars, Domain(D))
@@ -304,16 +304,20 @@ function keyed_kernels(graph, g::Group, slots, r)
     names = emit_terms!(body.args, [t], c)
     at = affine_expr(address(val, placement(graph, g, r), c.domain), c)
     push!(body.args, :($accumulate!($fold, $(buffer(c, r)), $at + 1, convert($(val.eltype), $(names[t])))))
-    [states, ScalarKernel(slots, prod(D; init = 1), body)]
+    elements = ScalarKernel(slots, prod(D; init = 1), body)
+    held ? [elements] : [states, elements]
 end
 
-"The floor's launches for a group: its kernel, then those of its folds over other axes and by key."
-function scalar_kernels(graph, stored, g::Group, slots)
+"""
+The floor's launches for a group: its kernel, then those of its folds over
+other axes and by key, those in `held` starting from what their storage holds.
+"""
+function scalar_kernels(graph, stored, g::Group, slots; held = ())
     kernels = ScalarKernel[]
     any(m -> !(m in g.reductions) || primary(graph, g, m), members(g)) && push!(kernels, scalar_kernel(graph, stored, g, slots))
     for r in g.reductions
         primary(graph, g, r) && continue
-        keyed(graph, r) ? append!(kernels, keyed_kernels(graph, g, slots, r)) : push!(kernels, fold_kernel(graph, g, slots, r))
+        keyed(graph, r) ? append!(kernels, keyed_kernels(graph, g, slots, r, r in held)) : push!(kernels, fold_kernel(graph, g, slots, r))
     end
     kernels
 end
