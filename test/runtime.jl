@@ -493,23 +493,16 @@ if CUDA_FUNCTIONAL
     end
 end
 
-# A fold of the user's with a tuple state, Welford's count, mean and sum of
-# squared deviations, generated like the built-in folds under every sketch.
-function welford(a, b)
-    n = a[1] + b[1]
-    w = ifelse(n == 0, zero(n), b[1] / n)
-    d = b[2] - a[2]
-    (n, a[2] + d * w, a[3] + b[3] + d * d * a[1] * w)
-end
-const VARIANCE = T.GenericFold(; init = T -> (zero(T), zero(T), zero(T)), lift = x -> (one(x), x, zero(x)),
-    combine = welford, observe = s -> s[3] / s[1])
+# A fold of the user's with a tuple state (`VARIANCE`, in
+# fixtures/programs.jl), generated like the built-in folds under every sketch,
+# named and as Base spells it, its observe composed from the broadcast after.
 
 if CUDA_FUNCTIONAL
     @testset "a fold with a tuple state on cuTile" begin
         for (sketch, x, dims) in ((:resident, data(300, 200), 1), (:streamed, data(9000, 40), 1), (:split, data(100, 3000), 2),
-            (:full, data(512, 300), (1, 2)))
+            (:full, data(512, 300), (1, 2))), f in (x -> T.fold(VARIANCE, x; dims), x -> base_variance(x; dims))
             x = single(x)
-            p = trace(x -> T.fold(VARIANCE, x; dims), x)
+            p = trace(f, x)
             ex = prepare(p, CuArray(x); target = T.CUDATarget(cuTile))
             @test only(ex.kernels).schedule.sketch === sketch
             @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, x); rtol = 1.0e-4)

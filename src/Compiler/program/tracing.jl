@@ -237,13 +237,24 @@ operand_dims(x::Traced) = node(x).dims
 operand_dims(x::AbstractArray{<:Number}) = size(x)
 operand_dims(x) = ()
 
+"The `I`th component of a tuple."
+struct Component{I} end
+(::Component{I})(t::Tuple) where {I} = t[I]
+Base.show(io::IO, ::Component{I}) where {I} = print(io, "component ", I)
+
+# A handle is a number, and `s[1]` of a number is the number. So a tuple
+# element, a fold's state say, is the tuple of its components, each a handle,
+# and a function of it runs on them as on a tuple.
+components(a::Traced) = node(a).eltype <: Tuple ? ntuple(i -> record_map(Component{i}(), a), fieldcount(node(a).eltype)) : a
+components(a) = a
+
 # Each function of a broadcast, nested ones included, runs on handles by
 # itself, so a function that cannot be traced is recorded whole without taking
 # the functions around it along.
 function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
     mark = length(tape.nodes)
     result = try
-        f(args...)
+        f(map(components, args)...)
     catch
         resize!(tape.nodes, mark)
         nothing
@@ -356,6 +367,7 @@ end
 (c::OperatorCombine)(a, b) = (c.op(a[1], b[1]),)
 
 function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
+    init isa Tuple && return state_fold(f, op, x, init; dims)
     y = f === identity ? x : f.(x)
     builtin = builtin_fold(op)
     if builtin !== nothing
@@ -370,6 +382,34 @@ function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
 end
 
 Base.reduce(op, x::TracedArray{<:Real}; dims = :, init = nothing) = mapreduce(identity, op, x; dims, init)
+
+# A reduction whose `init` is a tuple is a fold whose state is a tuple, as
+# Base reduces it: `f` lifts an element to a state, `op` merges two, and
+# `init` is the identity. The lift runs in the fold, on the elements, so its
+# tuples are never an array, and the fold's result is the state: what the
+# program computes from it is composed into the fold (see `rewrite`), and
+# over every axis it is the tuple of its components, as Base's is a tuple.
+# The state is of the type of `init`, as Base's result is, so an `init` in
+# Float32 accumulates half-precision elements in Float32. The fold carries
+# `init` in its type, so that the fold, as its functions are, is a constant of
+# a kernel: cuTile takes no other functions to reduce with.
+function state_fold(f, op, x, init; dims)
+    S = typeof(init)
+    lift = Base.promote_op(f, eltype(x)) === S ? f : Converted{S}(f)
+    r = fold(GenericFold(; init = Initial{init}(), lift, combine = op, observe = identity), x; dims)
+    dims isa Colon ? components(r) : r
+end
+
+"The state `s`, whatever the elements' type."
+struct Initial{s} end
+(::Initial{s})(T) where {s} = s
+
+"`f`, its result converted to `S`."
+struct Converted{S, F}
+    f::F
+end
+Converted{S}(f) where {S} = Converted{S, typeof(f)}(f)
+(c::Converted{S})(x) where {S} = convert(S, c.f(x))
 
 # Products. Julia arrays among the factors are constants of the program.
 

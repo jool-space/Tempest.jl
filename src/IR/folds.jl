@@ -168,12 +168,17 @@ struct Sum
 end
 (o::Sum)(law, s) = last(split_state(law, s))[o.i]
 
-"`f` of other observes and numbers: `Composed(/, (Sum(1), Sum(2)))` is the quotient of two sums."
+"""
+`f` of other observes and numbers: `Composed(/, (Sum(1), Sum(2)))` is the
+quotient of two sums. Called with a state alone, it composes the observes of a
+`GenericFold`, functions of the state.
+"""
 struct Composed{F, A <: Tuple}
     f::F
     args::A
 end
 (o::Composed)(law, s) = o.f(map(a -> a isa Number ? a : a(law, s), o.args)...)
+(o::Composed)(s) = o.f(map(a -> a isa Number ? a : a(s), o.args)...)
 
 Base.show(io::IO, ::Statistic) = print(io, "statistic")
 Base.show(io::IO, o::Sum) = print(io, "sum ", o.i)

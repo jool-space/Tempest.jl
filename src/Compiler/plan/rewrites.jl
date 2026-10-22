@@ -380,6 +380,12 @@ shift(o, offset) = o
 # The folds may iterate over different domains, as the softmax's denominator
 # and the weighted sum of attention do: each is read over the domain of the
 # fold with the most axes.
+#
+# A pointwise function of a generic fold's result, read over the fold's own
+# domain directly or through pointwise values of it, is the fold observing
+# that function: a fold whose state is a tuple, as Base's `mapreduce` writes
+# one, is observed by the broadcast after it, which reads the state's
+# components.
 function compose_observes(graph::IndexGraph)
     live = live_values(graph)
     users = readers(graph)
@@ -388,6 +394,7 @@ function compose_observes(graph::IndexGraph)
         v = graph.values[id]
         d = v.definition
         d isa Pointwise && d.f !== tuple && all(o -> o isa Literal || o isa Read, d.operands) || return nothing
+        live[id] && (observed = observed_fold!(b, graph, id, users, live, results)) !== nothing && return observed
         reads = [relative_read(graph, o) for o in d.operands]
         folds = filter(!isnothing, reads)
         isempty(folds) && return nothing
@@ -422,6 +429,52 @@ function compose_observes(graph::IndexGraph)
         push!(b.rewrites, new => string(law_note(a.law), ": $(d.f) of folds sharing their $(statistic_name(a.law))"))
         new
     end)
+end
+
+# The generic fold the pointwise definition `d`, over `dims`, is a function
+# of, through the pointwise values over `dims` it reads, which go to
+# `between`: zero when it reads no fold, nothing when it reads anything else
+# or two folds.
+function state_source(graph, d::Pointwise, dims, between)
+    F = 0
+    for o in d.operands
+        o isa Literal && continue
+        o isa Read && o.index == identity_index(dims) && graph.values[o.value].dims == dims || return nothing
+        e = graph.values[o.value].definition
+        G = if e isa Reduction{<:GenericFold}
+            o.value
+        elseif e isa Pointwise && e.f !== tuple
+            push!(between, o.value)
+            state_source(graph, e, dims, between)
+        end
+        G === nothing && return nothing
+        F == 0 || G == 0 || F == G || return nothing
+        G == 0 || (F = G)
+    end
+    F
+end
+
+# `d` as an observe of the state of fold `F`: the fold's own observe where it
+# reads `F`.
+observing(graph, d::Pointwise, F) = Composed(d.f, map(d.operands) do o
+    o isa Literal && return o.value
+    o.value == F ? graph.values[F].definition.fold.observe : observing(graph, graph.values[o.value].definition, F)
+end)
+
+# Value `id` as the fold it is a function of, observing it, when nothing else
+# that runs reads the fold or the values between; or nothing.
+function observed_fold!(b::Builder, graph, id, users, live, results)
+    v = graph.values[id]
+    between = Int[]
+    F = state_source(graph, v.definition, v.dims, between)
+    F isa Int && F != 0 || return nothing
+    inside = Set([id; between])
+    all(u -> !(u in results) && all(w -> w in inside || !live[w], users[u]), [F; between]) || return nothing
+    r = graph.values[F].definition
+    fold = GenericFold(r.fold.init, r.fold.lift, r.fold.combine, observing(graph, v.definition, F), nothing)
+    new = add!(b, Reduction(fold, remap(r.operand, b.ids), r.iteration, r.reduced), v.dims, v.eltype, v.scalar)
+    push!(b.rewrites, new => string("a fold observing ", v.definition.f, " of its result"))
+    new
 end
 
 # An observe with its `i`th sum the `places[i]`th of a larger element; nothing

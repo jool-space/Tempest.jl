@@ -29,6 +29,19 @@ end
 # the precision of the program's inputs.
 const WEIGHTS, BATCH = data(5, 4; scale = 0.2), data(4, 3, 2; scale = 0.3)
 
+# A fold of the user's with a tuple state, Welford's count, mean and sum of
+# squared deviations: named with `GenericFold`, and as Base spells it, the
+# same lift and merge given to `mapreduce` and the observe a broadcast after.
+function welford(a, b)
+    n = a[1] + b[1]
+    w = ifelse(n == 0, zero(n), b[1] / n)
+    d = b[2] - a[2]
+    (n, a[2] + d * w, a[3] + b[3] + d * d * a[1] * w)
+end
+welford_lift(x) = (one(x), x, zero(x))
+const VARIANCE = T.GenericFold(; init = T -> (zero(T), zero(T), zero(T)), lift = welford_lift, combine = welford, observe = s -> s[3] / s[1])
+base_variance(x; dims) = (s -> s[3] / s[1]).(mapreduce(welford_lift, welford, x; dims, init = ntuple(_ -> zero(eltype(x)), 3)))
+
 const PROGRAMS = [
     ("dot product", (a, b) -> sum(a .* b), (data(32), data(32; scale = 0.3))),
     ("sum abs2 tanh", x -> sum(abs2, tanh.(x)), (data(8, 6),)),

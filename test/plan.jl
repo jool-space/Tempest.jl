@@ -140,6 +140,44 @@ relative_folds(g) = [v.definition.fold for v in g.values if v.definition isa C.R
     @test planned(by_hand) == planned(x -> T.logsumexp(x; dims = 1))
 end
 
+# A fold whose state is a tuple, as Base spells it: `mapreduce` with a lift to
+# the state, a merge and a tuple `init`, then what the state means, which reads
+# its components. It is one fold, with no tuple stored or left in the graph:
+# the lift runs in the fold, and what is computed from the state is composed
+# into the fold's observe. So it plans as the fold named with `GenericFold`.
+@testset "a fold whose state is a tuple, as Base spells it" begin
+    x = data(30, 20)
+    states(x; dims = 1) = mapreduce(welford_lift, welford, x; dims, init = (0.0, 0.0, 0.0))
+    spellings = [
+        x -> base_variance(x; dims = 1),
+        x -> (s = states(x); getindex.(s, 3) ./ getindex.(s, 1)),
+        x -> (((n, m, q),) -> sqrt(q / n)).(states(x)),
+        x -> (s = states(x; dims = :); s[3] / s[1]),
+        x -> (s -> s[3] / s[1] - (s[2] / s[1])^2).(mapreduce(e -> (one(e), e, e^2), (a, b) -> a .+ b, x; dims = 1, init = (0.0, 0.0, 0.0))),
+    ]
+    for f in spellings
+        p = trace(f, x)
+        @test interpret(p, x) == f(x)
+        g = C.rewrite(C.lower(p))
+        @test count(v -> v.definition isa C.Reduction, g.values) == 1
+        @test !any(v -> v.eltype <: Tuple, g.values)
+        @test agree(C.execute(recomputing(g), x), [f(x)])
+    end
+    planned(f) = filter(l -> !startswith(l, "rewritten:"), split(sprint(explain, recomputing(C.rewrite(C.lower(trace(f, x))))), "\n"))
+    @test planned(x -> base_variance(x; dims = 1)) == planned(x -> T.fold(VARIANCE, x; dims = 1))
+    @test planned(x -> (s = states(x; dims = :); s[3] / s[1])) == planned(x -> T.fold(VARIANCE, x))
+    # The state is of the type of `init`, as Base's result is: BFloat16
+    # elements accumulate in Float32, to its precision. Base's own reduction
+    # along `dims` merges blocks of lifts in BFloat16 first, and is off by 1%.
+    h = BFloat16.(x)
+    in_single(x) = (s -> s[3] / s[1]).(mapreduce(welford_lift, welford, x; dims = 1, init = (0.0f0, 0.0f0, 0.0f0)))
+    @test isapprox(interpret(trace(in_single, h), h), base_variance(Float64.(h); dims = 1); rtol = 1.0e-6)
+    # Base cannot carry the fold's derivative rule, GenericFold's `pullback`.
+    @testset "gap: a derivative rule for a fold Base spells" begin
+        @test_broken message(() -> differentiate(trace(x -> sum(base_variance(x; dims = 1)), x))) == ""
+    end
+end
+
 # A map read by a fold and by a later map over its domain is recomputed in
 # their kernel, as when it is written twice.
 @testset "a map one kernel reads" begin
