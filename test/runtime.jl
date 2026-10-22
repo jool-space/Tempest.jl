@@ -22,12 +22,12 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
-# The floor's scatter adds in the element type, and the reference as a sum
-# fold does, in Float32 for BFloat16. Closed by a scatter that is a sum by key.
-@testset "gap: a BFloat16 scatter on the floor adds in BFloat16" begin
+# A BFloat16 scatter on the floor sums in Float32 and rounds once, as the
+# reference does: 41 from 4096 gradients of 0.01 at one position, not 4.
+@testset "a BFloat16 scatter on the floor" begin
     E, t, g = BFloat16s.BFloat16.(fill(0.5f0, 4, 3)), Int32.(fill(2, 4096)), BFloat16s.BFloat16.(fill(0.01f0, 4, 4096))
     p = differentiate(trace((E, t, g) -> sum(E[:, t] .* g), E, t, g))
-    @test_broken outputs(execute!(prepare(p, E, t, g)))[2] == interpret(p, E, t, g)[2]
+    @test outputs(execute!(prepare(p, E, t, g)))[2] == interpret(p, E, t, g)[2]
 end
 
 # The results are a place: the same arrays every time, which each run fills
@@ -638,7 +638,7 @@ end
 # through `permutedims`, and a long one that splits; a positional embedding
 # broadcast over the batch; a table broadcast over heads and batch, as rotary
 # positions read it. The gradient of the embedding and layer norm sums over
-# the batch alone; only its scatter is on the floor.
+# the batch alone, and its scatter sums by key in the same kernel.
 const PARTIAL_COLLAPSE = [
     ("sum over the middle axis", x -> sum(x; dims = 2), (data(8, 64, 6),), false),
     ("sum over the middle axis, permuted", x -> sum(permutedims(x, (2, 1, 3)); dims = 1), (data(64, 8, 6),), false),
@@ -655,17 +655,18 @@ if CUDA_FUNCTIONAL
             args = map(single, args)
             p = training ? differentiate(trace(f, args...)) : trace(f, args...)
             ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
-            @test all(k -> (ex.kernels[k] isa C.FloorKernels) == (ex.plan.groups[k].kind === :opaque), eachindex(ex.kernels))
+            @test !any(k -> k isa C.FloorKernels, ex.kernels)
             @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-4)
         end
     end
 end
 
-# A gather's adjoint scatters on the device: one item per element scattered,
-# adding atomically, so the sums at an index selected more than once come in
-# no fixed order and differ from the interpreter's by rounding, which is the
-# order every kernel is held to. With repeated indices, two index arrays, and ranges
-# and integers beside an index array.
+# A gather's adjoint scatters on the device, a sum by key in the kernel that
+# computes its elements, on cuTile and on the floor alike: each element adds
+# atomically, so the sums at an index selected more than once come in no
+# fixed order and differ from the interpreter's by rounding, which is the
+# order every kernel is held to. With repeated indices, two index arrays, and
+# ranges and integers beside an index array.
 const SCATTERS = [
     ("embedding", (E, t, g) -> sum(E[:, t] .* g), (data(64, 109), Int32.(mod1.(37 .* (1:1024) .^ 2, 109)), data(64, 1024; scale = 0.37))),
     ("repeated indices in two arrays", (x, i, j) -> sum(abs2, x[i, j]), (data(8, 6), [3, 1, 3, 8, 3], Int32[6, 6, 1])),
@@ -675,12 +676,12 @@ const SCATTERS = [
 
 if CUDA_FUNCTIONAL
     @testset "scatters on the device" begin
-        @testset "$name" for (name, f, args) in SCATTERS
+        @testset "$name, $where" for (name, f, args) in SCATTERS, (where, target) in (("cuTile", T.CUDATarget(cuTile)), ("the floor", T.CUDATarget(:full, true, ())))
             args = map(single, args)
             p = differentiate(trace(f, args...))
-            ex = prepare(p, map(CuArray, args)...)
-            scatters = [k for (k, g) in enumerate(ex.plan.groups) if g.kind === :opaque]
-            @test !isempty(scatters) && all(k -> ex.kernels[k] isa C.FloorKernels, scatters)
+            ex = prepare(p, map(CuArray, args)...; target)
+            scatters = [k for (k, g) in enumerate(ex.plan.groups) if any(r -> ex.plan.graph.values[r].definition isa C.Keyed, g.reductions)]
+            @test !isempty(scatters) && all(k -> (ex.kernels[k] isa C.FloorKernels) == (where == "the floor"), scatters)
             reference = C.leaves(interpret(p, args...))[2:2]
             @test agree(C.leaves(outputs(execute!(ex)))[2:2], reference; rtol = 1.0e-5)
             # A scatter runs on the device, so the program can be captured.

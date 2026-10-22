@@ -36,10 +36,7 @@ end
 function run_group!(g::Group, buffers, graph)
     g.kind === :reduction && return run_reduction!(g, buffers, graph)
     g.kind === :scan && return run_scan!(g, buffers, graph)
-    g.kind === :pointwise && return run_pointwise!(g, buffers, graph)
-    # Opaque work: its one value, through the reference.
-    v = only(g.outputs)
-    buffers[v] = evaluate_value(graph.values[v].definition, graph.values[v], buffers, graph, ())
+    run_pointwise!(g, buffers, graph)
 end
 
 function run_pointwise!(g::Group, buffers, graph)
@@ -64,6 +61,7 @@ function run_reduction!(g::Group, buffers, graph)
     stats = Dict{Int, Any}()
     for r in sort(g.reductions; by = r -> (g.phase[r], r))
         val = graph.values[r]
+        val.definition isa Keyed && (buffers[r] = run_keyed(g, r, buffers, stats, graph); continue)
         fold = val.definition.fold
         axes = val.definition.reduced
         A = fold_types(fold, term_eltype(g.terms[r], graph)).accumulator
@@ -99,6 +97,23 @@ function run_reduction!(g::Group, buffers, graph)
         end
         buffers[m] = out
     end
+end
+
+# A fold by key: the points of the domain in order, each element combined at
+# its key.
+function run_keyed(g::Group, r, buffers, stats, graph)
+    val = graph.values[r]
+    d = val.definition
+    states = fill(fold_init(d.fold, val.eltype), val.dims)
+    gather = (v, i) -> buffers[v][(i .+ 1)...]
+    for I in CartesianIndices(g.domain)
+        x = Tuple(I) .- 1
+        e = evaluate_term(g.terms[r], x, nothing, buffers, stats, graph)
+        at = map(k -> evaluate_index(k, x, gather) + 1, d.key)
+        states[at...] = fold_combine(d.fold, states[at...], fold_lift(d.fold, convert(val.eltype, e)))
+    end
+    y = map(s -> fold_observe(d.fold, s), states)
+    val.scalar ? only(y) : y
 end
 
 # Each line along the scanned axes, swept in the scans' direction: at each

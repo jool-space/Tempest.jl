@@ -134,13 +134,14 @@ function Base.show(io::IO, s::TileSchedule)
 end
 
 # Which axes of the group's domain collapse into A and B, and which one the
-# schedule sweeps: the group's primary axes (those of its first fold), one run
-# of axes wherever they lie. A row reduction's kept axes after the swept ones,
-# C, are bound by the grid; nothing when the primary axes are not a run.
+# schedule sweeps: the group's primary axes (those of its first fold not by
+# key), one run of axes wherever they lie, or none where its folds are by key.
+# A row reduction's kept axes after the swept ones, C, are bound by the grid;
+# nothing when the primary axes are not a run.
 function collapse_axes(g::GroupView)
     r = length(g.domain)
     R = sort!(collect(g.primary_axes))
-    if g.kind === :pointwise
+    if g.kind === :pointwise || isempty(R)
         return (1:min(r, 1), 2:r, 0, 1:0)
     elseif R == collect(1:r)
         return (1:min(r, 1), 2:r, 3, 1:0)
@@ -214,12 +215,15 @@ positional(t::Ix) = isempty(indirect_values(t.expr)) && term_eltype(t, nothing) 
 
 # Whether the generator can express a group: tile-typed values, supported
 # folds, and positions without gathers; its loads are checked with a schedule.
+# A fold by key is a sum, which adds atomically, of 32-bit floats or integers
+# that Int32 lanes address.
 function expressible(g::GroupView)
     collapse_axes(g) === nothing && return false
     for m in members(g)
         val = g.values[m]
         val.eltype <: TILE_TYPES || return false
         m in g.reductions && !tile_fold(val.fold, term_eltype(g.terms[m], g)) && return false
+        val.keyed && !(val.fold isa SumFold && val.eltype in (Float32, Int32) && storage_length(val) < typemax(Int32)) && return false
         for t in subterms((g.terms[m],))
             t isa Recomputed && return false
             t isa Ix && !positional(t) && return false
@@ -279,7 +283,7 @@ function view_addresses(g::GroupView)
     end
     for m in members(g)
         visit(g.terms[m], g.domain)
-        g.values[m].stored && push!(found, address(g.values[m], g.placement[m], Domain(g.domain)))
+        g.values[m].stored && !g.values[m].keyed && push!(found, address(g.values[m], g.placement[m], Domain(g.domain)))
     end
     found
 end
@@ -330,10 +334,14 @@ function pieces(axes, addresses, domain, folds = ())
     (found, isempty(eligible) ? 0 : eligible[argmax(map(i -> n(found[i]), eligible))])
 end
 
-# Whether the generator can load every load of the group under a schedule, and
-# each fold over other axes than the swept ones reduces whole tile axes.
+# Whether the generator can load every load of the group under a schedule,
+# and the indices the keys of its folds by key read; and each fold over other
+# axes than the swept ones reduces whole tile axes.
 fits(c) = all(l -> loadable(c, l), (l for m in members(c.g) for l in loads(c.g.terms[m]))) &&
+    all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
     all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
+
+key_atoms(g::GroupView) = [a for r in g.reductions if g.values[r].keyed for e in g.placement[r] for a in indirect_atoms(e)]
 
 function default_tiles(extent, reduced)
     a, b = extent
@@ -409,6 +417,7 @@ function scan_claims(g::GroupView)
     R == collect(first(R):last(R)) || return Claim[]
     for r in g.reductions
         v = g.values[r]
+        v.keyed && return Claim[]
         v.fold isa InSequence && return Claim[]
         v.scan === nothing && v.reduced != g.primary_axes && return Claim[]
         v.scan !== nothing && v.scan.exclusive && return Claim[]
@@ -551,8 +560,8 @@ function applied(c, roots)
 end
 
 # A schedule's launches: each of its kernels, moving the bytes of its
-# arguments over the blocks of its grid. The first computes the group's
-# products and the folds it recomputes.
+# arguments over the blocks of its grid. The first after the folds by key's
+# initial states computes the group's products and the folds it recomputes.
 function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
     c = Context(g, s)
@@ -571,10 +580,11 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     end
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
     streaming, swept, inner = applied(c, roots)
+    main = findfirst(k -> k.name != INITIAL_STATES, kernels)
     map(enumerate(kernels)) do (i, kernel)
         bytes = sum(a -> prod(a.sizes; init = 1) * sizeof(element(a)), kernel.args; init = 0)
         blocks = prod(kernel.grid; init = 1)
-        i == 1 ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
+        i == main ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
     end
 end
 

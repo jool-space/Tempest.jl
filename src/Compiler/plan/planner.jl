@@ -18,9 +18,13 @@
 # rides the sweep, in either direction, since it need not take its elements
 # in order; it is complete only after the sweep, so nothing in the group
 # reads it.
+#
+# A fold by key joins a reduction's group over its iteration, as a fold over
+# other than the primary axes does: it combines each element at its key, is
+# complete only when the group's work is, and nothing in the group reads it.
 
 struct Group
-    kind::Symbol # :reduction, :scan, :pointwise or :opaque
+    kind::Symbol # :reduction, :scan or :pointwise
     domain::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
@@ -36,14 +40,23 @@ members(g::Group) = [g.reductions; g.outputs]
 fold_axes(graph, r) = folded_axes(graph.values[r].definition)
 folded_axes(d::Reduction) = d.reduced
 folded_axes(d::Scan) = d.axes
+folded_axes(d::Keyed) = Tuple(eachindex(d.iteration))
 
-"The axes of the group's first fold: folds over them can be read within the group."
-primary_axes(graph, g::Group) = isempty(g.reductions) ? () : fold_axes(graph, first(g.reductions))
+keyed(graph, v) = graph.values[v].definition isa Keyed
+
+"The axes of the group's first fold not by key: folds over them can be read within the group."
+function primary_axes(graph, g::Group)
+    k = findfirst(r -> !keyed(graph, r), g.reductions)
+    k === nothing ? () : fold_axes(graph, g.reductions[k])
+end
 
 kept_dims(domain, axes) = ntuple(k -> k in axes ? 1 : domain[k], length(domain))
 
 "Whether fold `r` reduces the group's primary axes."
-primary(graph, g::Group, r) = fold_axes(graph, r) == primary_axes(graph, g)
+primary(graph, g::Group, r) = !keyed(graph, r) && fold_axes(graph, r) == primary_axes(graph, g)
+
+"The values the key of fold by key `v` gathers from; none for any other value."
+key_reads(graph, v) = keyed(graph, v) ? reduce(vcat, map(indirect_values, graph.values[v].definition.key); init = Int[]) : Int[]
 
 """
 A program's plan: which values are stored, and the groups its kernels
@@ -61,13 +74,12 @@ end
 # domain: a fold of the group at the variables of the axes it keeps, any other
 # value over the whole domain or at the positions of the primary folds; or
 # nothing. A scan's group keeps everything but its folds over its whole
-# domain.
+# domain. A fold by key keeps each element at its key.
 function placement(graph, g::Group, v)
     val = graph.values[v]
     d = val.definition
+    d isa Keyed && return v in g.reductions ? d.key : nothing
     g.kind === :scan && !(d isa Reduction) && return val.dims == g.domain ? identity_index(g.domain) : nothing
-    # A result of the group's own opaque work, at the variables of its domain.
-    g.kind === :opaque && d isa Opaque && return opaque_dims(d) == g.domain ? ntuple(var, length(g.domain)) : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
     map(k -> g.domain[k], kept) == val.dims ? map(var, kept) : nothing
@@ -192,7 +204,8 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    any(m -> v in stored_reads(g.terms[m]), members(g)) && return false
+    any(m -> v in stored_reads(g.terms[m]) || v in key_reads(graph, m), members(g)) && return false
+    any(in(members(g)), key_reads(graph, v)) && return false
     candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase)
     t = try
         fold ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
@@ -201,7 +214,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
         e isa OutsideGroup || rethrow()
         return false
     end
-    reads = stored_reads(t)
+    reads = [stored_reads(t); key_reads(graph, v)]
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
     isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads) || return false
@@ -225,16 +238,16 @@ recomputed where it is read instead of stored.
 """
 function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = ())
     s = storing(graph; recompute)
-    graph, stored, live, results, running = s.graph, s.stored, s.live, s.results, s.running
+    graph, stored, live, results = s.graph, s.stored, s.live, s.results
     # A pointwise value read only by one group over its domain, at the same
     # index, is recomputed by that group: grouped again without it.
-    p = group_values(graph, copy(stored), live, results, running, fixed)
+    p = group_values(graph, copy(stored), live, results, fixed)
     users = readers(graph)
     n = length(graph.values)
     shared = filter(id -> !any(s -> id in s, fixed) && recomputable(p, users, id, live, results, s.materialized), 1:n)
     isempty(shared) && return p
     stored[shared] .= false
-    group_values(graph, stored, live, results, running, fixed)
+    group_values(graph, stored, live, results, fixed)
 end
 
 # What `plan` decides before it forms kernels: the graph with its results
@@ -265,17 +278,13 @@ function storing(graph::IndexGraph; recompute = ())
     for r in results
         counts[r] += 1
     end
-    # An opaque operation runs when its result is read, and reads its operands
-    # from storage, as a gather reads its indices.
-    running = Set(id for id in 1:n if live[id] && values[id].definition isa Opaque)
+    # A gather reads its indices from storage.
     materialized = falses(n)
     for id in 1:n
         live[id] || continue
         for o in operands(values[id].definition)
             foreach(r -> materialized[r] = true, gathered_values(o))
         end
-        values[id].definition isa Opaque || continue
-        foreach(o -> o isa Read && (materialized[o.value] = true), operands(values[id].definition))
     end
     # Maps of recomputed folds are recomputed with them: a fold recomputed
     # where it is read has no storage, so a map of it is a map of its term. A
@@ -290,7 +299,7 @@ function storing(graph::IndexGraph; recompute = ())
     stored = map(eachindex(values)) do id
         d = values[id].definition
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
-        d isa Union{Pointwise, Reduction, Scan, Opaque} && !live[id] && return false
+        d isa Union{Pointwise, Reduction, Scan, Keyed} && !live[id] && return false
         d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : true
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
@@ -300,7 +309,7 @@ function storing(graph::IndexGraph; recompute = ())
         all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
         all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
     end
-    (; graph, stored, live, results, running, materialized)
+    (; graph, stored, live, results, materialized)
 end
 
 # Whether stored pointwise value `id` is read only within one group over its
@@ -348,26 +357,14 @@ function reach!(frontier, followers, stored, from, seed)
     frontier
 end
 
-# The kernels of opaque work, and what the planner needs to form the rest: each
-# value's kernel and ancestors. Opaque work comes first, one group per
-# operation over its result's domain.
-function opaque_groups(graph, running)
-    values = graph.values
-    owner = zeros(Int, length(values))
-    groups = Group[]
-    for id in sort!(collect(running))
-        push!(groups, Group(:opaque, opaque_dims(values[id].definition)))
-        push!(groups[end].outputs, id)
-        owner[id] = length(groups)
-    end
-    Dependencies(owner, groups, ancestors(graph))
-end
+# What the planner needs to form kernels, before any is formed.
+Dependencies(graph::IndexGraph) = Dependencies(zeros(Int, length(graph.values)), Group[], ancestors(graph))
 
 # The kernels, given what is stored.
-function group_values(graph, stored, live, results, running, fixed)
+function group_values(graph, stored, live, results, fixed)
     values = graph.values
     n = length(values)
-    deps = opaque_groups(graph, running)
+    deps = Dependencies(graph)
     owner, groups, up = deps.owner, deps.groups, deps.up
     for set in fixed
         push!(groups, fixed_group(graph, stored, deps, set))
@@ -381,8 +378,10 @@ function group_values(graph, stored, live, results, running, fixed)
     end
     foreach(unique!, followers)
     # Scans first, so that a fold along a scan's axes rides its sweep, wherever
-    # it is in the graph.
-    seeds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n)]
+    # it is in the graph; folds by key last, so that they join a group over
+    # their iteration where one forms.
+    seeds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n);
+        filter(id -> values[id].definition isa Keyed, 1:n)]
     for id in seeds
         live[id] && owner[id] == 0 && stored[id] || continue
         d = values[id].definition
@@ -401,7 +400,7 @@ function group_values(graph, stored, live, results, running, fixed)
                 k += 1
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
-                added = od isa Union{Reduction, Scan} ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
+                added = od isa Union{Reduction, Scan, Keyed} ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
                     od isa Pointwise && other > id && !awaits_sweep(graph, deps, g, other) && try_add!(graph, stored, deps, g, other; fold = false)
                 added || continue
                 changed = true
@@ -466,7 +465,8 @@ over its domain, the scan in the group's direction.
 """
 function sweeps_with(graph, g::Group, v)
     d = graph.values[v].definition
-    g.kind === :reduction && return d isa Reduction && d.iteration == g.domain
+    g.kind === :reduction && return d isa Union{Reduction, Keyed} && d.iteration == g.domain
+    d isa Keyed && return false
     e = graph.values[first(g.reductions)].definition
     d isa Reduction && return d.iteration == g.domain && d.reduced == e.axes
     graph.values[v].dims == g.domain && d.axes == e.axes && d.reverse == e.reverse
@@ -505,8 +505,8 @@ function fixed_group(graph, stored, deps, set)
 end
 
 # The folds that can be recomputed where they are read, as proposals for the
-# cover (see `Recompute`): a fold that is not a result, an operand of opaque
-# work, an index of a gather, or in `kept`, whose every reader through maps is
+# cover (see `Recompute`): a fold that is not a result, an index of a gather,
+# or in `kept`, whose every reader through maps is
 # a fold over another domain (a fold over the same domain joins its group as
 # a later phase instead). A fold recomputed inside a reader's sweep, at
 # positions that move along its own reduced axes, does not recompute such a
@@ -633,7 +633,7 @@ function group_reads(graph, g::Group)
     reads = Set{Int}()
     for v in members(g)
         if haskey(g.terms, v)
-            union!(reads, stored_reads(g.terms[v]))
+            union!(reads, stored_reads(g.terms[v]), key_reads(graph, v))
         else
             for o in operands(graph.values[v].definition)
                 union!(reads, read_values(o))

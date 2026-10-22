@@ -39,9 +39,8 @@ narrow(o::Read, (index, d)) = Read(o.value, map(e -> substitute(e, index, d), o.
 narrow(o::Literal, _) = o
 narrow(o::IndexOperand{T}, (index, d)) where {T} = IndexOperand(substitute(o.expr, index, d), T)
 
-# A definition over a node of shape `dims` as one over its value's domain. An
-# opaque operation reads its operands in their own shapes.
-narrow(d::Union{Input, Opaque}, dims) = d
+# A definition over a node of shape `dims` as one over its value's domain.
+narrow(d::Input, dims) = d
 narrow(d::ConstantArray, dims) = ConstantArray(reshape(d.data, map(k -> dims[k], wide_axes(dims))))
 narrow(d::Pointwise, dims) = (n = narrowing(dims, wide_axes(dims)); Pointwise(d.f, map(o -> narrow(o, n), d.operands)))
 
@@ -53,6 +52,10 @@ function narrow(d::Reduction, dims)
     n = narrowing(s, keep)
     Reduction(d.fold, narrow(d.operand, n), n[2].extents, Tuple(j for (j, k) in enumerate(keep) if k in d.reduced))
 end
+
+# A fold by key keeps the key's formulas for its value's wide axes; its
+# iteration is narrowed where it is formed.
+narrow(d::Keyed, dims) = Keyed(d.fold, d.operand, d.iteration, map(k -> d.key[k], wide_axes(dims)))
 
 # A scan ranges over its node's wide axes, as a map does; along an axis of
 # extent one, each position is its own prefix.
@@ -175,6 +178,36 @@ function placement!(value!, op::Scatter, input, n, d)
     # A placed `true` is the mask itself.
     n.eltype === Bool && read(placed) == Literal(true) && return mask
     value!(Pointwise(ifelse, (read(mask), read(placed), Literal(zero(n.eltype)))), n)
+end
+
+# A scatter by index arrays adds each element at the position the selection
+# it is the adjoint of reads it from: a sum by key, whose key is that
+# selection's formula, over the elements' wide axes. Where the elements are a
+# value read in its storage order, the fold runs over that value's domain, so
+# that it can join the kernel computing it. Half-precision elements are summed
+# in Float32 and rounded once, after the fold.
+function scattered!(value!, op::Scatter, inputs, input_dims, n, values)
+    dims = first(input_dims)
+    d = Domain(dims)
+    held = function (i, axis, extent)
+        rank = length(input_dims[i.input])
+        (held_index(inputs[i.input], ntuple(k -> var(axis + k), rank), d, values, extent), rank)
+    end
+    index, iteration = narrowing(dims, wide_axes(dims))
+    key = map(e -> substitute(e, index, iteration), layout_index(Select(op.indices), dims, n.dims, d, held))
+    elements = narrow(operand(first(inputs), dims, d), (index, iteration))
+    if elements isa Read && values[elements.value].dims != iteration.extents &&
+       reads_storage(values[elements.value], elements.index, iteration.extents)
+        own = Domain(values[elements.value].dims)
+        at = delinearize(linear_index(own.extents, own), iteration.extents, own)
+        key = map(e -> substitute(e, at, own), key)
+        elements = Read(elements.value, identity_index(own.extents))
+        iteration = own
+    end
+    A = n.eltype <: HalfFloat ? Float32 : n.eltype
+    sums = value!(Keyed(SumFold(), elements, iteration.extents, key), n.dims, A; scalar = n.scalar)
+    A === n.eltype && return sums
+    value!(Pointwise(Cast{n.eltype}(), (operand(sums, n.dims, Domain(n.dims)),)), n)
 end
 
 # A product is a sum fold of a pointwise product: over the domain of the
@@ -324,9 +357,7 @@ function lower(p::Program)
             end
             compose(first(inputs), layout_index(op, n.dims, first(input_dims), d, held), d)
         else
-            reads = map((a, dims) -> operand(a, dims, Domain(dims)), inputs, input_dims)
-            shapes = map(i -> (nodes[i].dims, nodes[i].scalar), n.inputs)
-            value!(Opaque(n, reads, shapes), n)
+            scattered!(value!, op, inputs, input_dims, n, values)
         end
     end
     results = Operand[operand(access[r], nodes[r].dims, Domain(nodes[r].dims)) for r in p.results]

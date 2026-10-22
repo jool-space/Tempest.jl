@@ -5,8 +5,22 @@ function pointwise_kernel(c::Context)
     indices, k.grid, _, _ = block_indices!(k.body, c)
     names = emit_tiles!(k, k.body, c, [c.g.terms[m] for m in c.g.outputs], Dict{Term, Any}(), indices...)
     store_outputs!(k, k.body, c, c.g.outputs, names, indices...)
+    scatter_tiles!(k, k.body, c, keyed_folds(c), names, indices)
     [k]
 end
+
+# The values of folds by key set to their folds' initial state, a launch
+# before any element combines into them.
+function initial_states_kernel(c::Context, r)
+    val = c.g.values[r]
+    k = TileKernel(INITIAL_STATES, (cld(storage_length(val), POINTWISE_ELEMENTS),), nothing)
+    init = only(fold_init(fold_of(c, r), val.eltype))
+    push!(k.body, :($(ct.store)($(argument!(k, flat_spec(c, r))); index = ($(ct.bid)(1),),
+        tile = $(ct.broadcast_to)($(ct.Tile)($init), ($POINTWISE_ELEMENTS,)))))
+    k
+end
+
+const INITIAL_STATES = "initial states"
 
 # 1-based block id to 1-based tiles of two kept axes, grouping the first's tiles
 # so that neighbouring blocks share operand tiles in L2.
@@ -178,15 +192,17 @@ function unsplit_kernel(c::Context, workspaces, slots)
     if resident
         emit_tiles!(k, body, c, [c.g.terms[m] for m in outputs], names, at(one32)...)
         store_values!(k, body, c, outputs, names, at(one32)...)
+        scatter_tiles!(k, body, c, keyed_folds(c), names, at(one32))
         for (r, state) in tile_states!(k, body, c, partial, names, at(one32))
             combine!(body, fold_of(c, r), accumulator(c, r), held_states[r], state)
         end
-    elseif !isempty(outputs) || !isempty(partial)
+    elseif !isempty(outputs) || !isempty(partial) || !isempty(keyed_folds(c))
         t = gensym(:t)
         loop = Any[]
         scope = merge(Dict{Term, Any}(), statistics)
         emit_tiles!(k, loop, c, [c.g.terms[m] for m in outputs], scope, at(t)...)
         store_values!(k, loop, c, outputs, scope, at(t)...)
+        scatter_tiles!(k, loop, c, keyed_folds(c), scope, at(t))
         for (r, state) in tile_states!(k, loop, c, partial, scope, at(t))
             if held(r)
                 combine!(loop, fold_of(c, r), accumulator(c, r), held_states[r], state)
@@ -383,13 +399,14 @@ function split_kernels(c::Context, workspaces, slots)
     end
     outputs = full_outputs(c)
     partial = partial_folds(c)
-    if !isempty(outputs) || !isempty(partial)
+    if !isempty(outputs) || !isempty(partial) || !isempty(keyed_folds(c))
         k = TileKernel("outputs", (), nothing)
         indices, k.grid = tile_indices!(k.body, c)
         names = Dict{Term, Any}()
         load_folds!(k, k.body, c, earlier, names, indices, workspaces)
         emit_tiles!(k, k.body, c, [c.g.terms[m] for m in outputs], names, indices...)
         store_values!(k, k.body, c, outputs, names, indices...)
+        scatter_tiles!(k, k.body, c, keyed_folds(c), names, indices)
         for (r, state) in tile_states!(k, k.body, c, partial, names, indices)
             axes = fold_tiles(c, r)
             slot, slots[r] = slot_expr(indices, axes, tile_counts(c, axes))
@@ -546,12 +563,13 @@ function scan_kernel(c::Context)
 end
 
 function schedule_kernels(c::Context, workspaces)
-    c.s.sketch === :pointwise && return pointwise_kernel(c)
+    initial = [initial_states_kernel(c, r) for r in keyed_folds(c)]
+    c.s.sketch === :pointwise && return [initial; pointwise_kernel(c)]
     c.s.sketch === :scan && return [scan_kernel(c)]
     slots = Dict{Int, Int}()
     kernels = c.s.sketch in (:resident, :streamed) || (c.s.sketch === :product && c.s.splits == 1) ?
         unsplit_kernel(c, workspaces, slots) : split_kernels(c, workspaces, slots)
-    [kernels; merge_kernels(c, partial_folds(c), slots, workspaces)]
+    [initial; kernels; merge_kernels(c, partial_folds(c), slots, workspaces)]
 end
 
 function tile_array(buffer::CuArray{T}, spec::ArgSpec) where {T}

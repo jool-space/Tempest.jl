@@ -268,7 +268,7 @@ function main()
     println("trace, differentiate and prepare: ", round(seconds; digits = 1), " s; ", length(s.ex.kernels), " kernels; ",
         length(storage.donated), " results in place of their arguments, ", length(storage.staged), " staged")
     for (k, g) in zip(s.ex.kernels, s.ex.plan.groups)
-        k isa C.FloorKernels && println("  on the floor: ", g.kind === :opaque ? "a scatter" : "a $(g.kind) group", " over ", g.domain, " (", k, ")")
+        k isa C.FloorKernels && println("  on the floor: a $(g.kind) group over ", g.domain, " (", k, ")")
     end
     path = get(ENV, "TEMPEST_GPT_EXPLAIN", "")
     isempty(path) || open(io -> explain(io, s.ex), path, "w")

@@ -82,8 +82,8 @@ function Tempest.Compiler.calibrate(target::CUDATarget)
      blocks = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)))
 end
 
-# A scatter's items run at once: they add atomically.
-Tempest.Compiler.accumulate!(buffer::CUDACore.CuDeviceArray, i, v) = (CUDACore.@atomic buffer[i] += v; nothing)
+# A fold by key's items run at once: a sum's add atomically.
+Tempest.Compiler.accumulate!(::Tempest.IR.SumFold, buffer::CUDACore.CuDeviceArray, i, v) = (CUDACore.@atomic buffer[i] += v; nothing)
 
 function Tempest.Compiler.floor_launch(::CUDATarget, k::Tempest.Compiler.ScalarKernel, args)
     f = Tempest.Compiler.generated(:(function (buffers, n)

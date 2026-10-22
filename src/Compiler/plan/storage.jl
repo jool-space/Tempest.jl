@@ -101,7 +101,7 @@ axes, which complete before any output is written, or in outputs of `r`'s
 shape, which a kernel computes together before it stores any of them.
 """
 function writes_over(graph, g::Group, r, a)
-    g.kind !== :opaque && r in g.outputs || return false
+    r in g.outputs || return false
     D = Domain(g.domain)
     at = dense_address(graph.values[r].dims, placement(graph, g, r), D)
     for m in members(g), t in subterms((g.terms[m],))

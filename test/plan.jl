@@ -307,6 +307,29 @@ end
     end
 end
 
+# A scatter by index arrays is a sum by key, which joins the kernel computing
+# its elements as a fold over other than the primary axes does: an embedding's
+# gradient is the loss's one kernel, and the elements of a scatter that only
+# it reads are not stored, a `tanh` of the rows gathered, or a positional
+# embedding and layer norm's gradient at the gathered rows.
+@testset "a scatter is a sum by key in its elements' kernel" begin
+    tokens = Int32.(mod1.(7 .* (1:240), 1000))
+    for (f, args) in (((E, t, g) -> sum(E[:, t] .* g), (data(64, 109), Int32.(mod1.(37 .* (1:1024) .^ 2, 109)), data(64, 1024))),
+            ((E, t) -> sum(abs2, tanh.(E[:, t])), (data(64, 1000), tokens)),
+            ((E, t, P, w) -> sum(abs2, layernorm(E[:, t] .+ P, w)), (data(64, 1000), reshape(tokens, 80, 3), data(64, 80), data(64))))
+        p = C.plan(C.rewrite(C.lower(differentiate(trace(f, args...)))))
+        @test length(p.groups) == 1
+        g = only(p.groups)
+        scatter = only(r for r in g.reductions if p.graph.values[r].definition isa C.Keyed)
+        @test !C.primary(p.graph, g, scatter)
+        elements = prod(p.graph.values[scatter].definition.iteration)
+        results = Set(o.value for o in p.graph.results)
+        @test !any(v -> p.stored[v] && length(p.graph.values[v].dims) > 1 && prod(p.graph.values[v].dims) == elements &&
+            !(p.graph.values[v].definition isa C.Input) && !(v in results), eachindex(p.graph.values))
+        @test agree(C.execute(p, args...), filter(!isnothing, C.leaves(interpret(differentiate(trace(f, args...)), args...))))
+    end
+end
+
 # Programs that differ by axes of extent one get the same plan: reshapes that
 # insert them around pointwise work, reductions, products and their gradients,
 # and attention, whose grouped heads have such an axis with one query head per

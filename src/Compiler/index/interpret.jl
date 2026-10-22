@@ -49,9 +49,18 @@ function evaluate_value(d::Scan, v, arrays, graph, arguments)
     v.scalar ? only(y) : y
 end
 
-function evaluate_value(d::Opaque, v, arrays, graph, arguments)
-    xs = map((o, (dims, scalar)) -> materialize(o, dims, arrays, graph; scalar), d.operands, d.shapes)
-    shaped(evaluate(d.node.op, d.node, xs), v)
+# The elements in the iteration's order, each combined into the position its
+# key names.
+function evaluate_value(d::Keyed, v, arrays, graph, arguments)
+    x = materialize(d.operand, d.iteration, arrays, graph)
+    gather = (w, i) -> arrays[w][(i .+ 1)...]
+    states = fill(fold_init(d.fold, v.eltype), v.dims)
+    for I in CartesianIndices(d.iteration)
+        at = map(e -> evaluate_index(e, Tuple(I) .- 1, gather) + 1, d.key)
+        states[at...] = fold_combine(d.fold, states[at...], fold_lift(d.fold, convert(v.eltype, x[I])))
+    end
+    y = map(s -> fold_observe(d.fold, s), states)
+    v.scalar ? only(y) : y
 end
 
 """

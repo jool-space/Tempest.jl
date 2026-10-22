@@ -83,18 +83,19 @@ struct Scan{F} <: Definition
 end
 
 """
-A program-level operation realized on its operands materialized in their
-program shapes: one the index level does not model, such as a scatter by index
-arrays. Its boundary is storage.
+A fold by key, a scatter: each element of `operand`, read over `iteration`,
+combined into the value at `key`, its position as formulas over the iteration,
+one per axis of the value. The elements a position takes combine in any
+order, as a fold's do, and a position none reaches holds the fold's initial
+state. The value holds the states, in the accumulator of the operand's
+elements: the fold's state is one number, observed as itself.
 """
-struct Opaque <: Definition
-    node::Node
-    operands::Tuple{Vararg{Operand}}
-    shapes::Tuple{Vararg{Tuple{Tuple{Vararg{Int}}, Bool}}} # each operand's dims and scalar flag
+struct Keyed{F} <: Definition
+    fold::F
+    operand::Operand
+    iteration::Tuple{Vararg{Int}}
+    key::Tuple{Vararg{Affine}}
 end
-
-"The domain of opaque work's result: its node's axes wider than one."
-opaque_dims(d::Opaque) = map(k -> d.node.dims[k], wide_axes(d.node.dims))
 
 """
 A value: its definition, the extents of its domain (none of them one; see
@@ -108,7 +109,7 @@ struct Value
 end
 
 domain(v::Value) = Domain(v.dims)
-iteration_domain(v::Value) = v.definition isa Reduction ? Domain(v.definition.iteration) : domain(v)
+iteration_domain(v::Value) = v.definition isa Union{Reduction, Keyed} ? Domain(v.definition.iteration) : domain(v)
 
 function dense_address(dims, index, d::Domain)
     total = constant(0)
@@ -153,7 +154,8 @@ IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
 operands(d::Union{Reduction, Scan}) = (d.operand,)
-operands(d::Opaque) = d.operands
+# A fold by key reads its key's positions, as a gather reads its indices.
+operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempty(indirect_values(e)))...)
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
 
@@ -172,7 +174,7 @@ describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
 describe(d::Scan) = "scan($(scan_summary(d.fold, d.axes, d.reverse, d.exclusive)))"
-describe(d::Opaque) = "opaque $(op_name(d.node.op))$(op_detail(d.node.op))"
+describe(d::Keyed) = "reduce($(fold_name(d.fold)) by key [$(join(map(string, d.key), ", "))] of $(d.iteration))"
 
 show_operand(io, o::Read) = print(io, "%", o.value, "[", join(map(string, o.index), ", "), "]")
 show_operand(io, o::Literal) = print(io, repr(o.value))

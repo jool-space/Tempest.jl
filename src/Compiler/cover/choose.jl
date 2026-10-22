@@ -104,13 +104,10 @@ Base.hash(i::GroupIdentity, h::UInt) = foldl((h, f) -> hash(getfield(i, f), h), 
 group_identity(p::Plan, g::Group) = GroupIdentity(g.kind, g.domain, copy(g.reductions), copy(g.outputs),
     Any[get(g.terms, m, nothing) for m in members(g)], Bool[p.stored[m] for m in members(g)])
 
-# An opaque value without a term, as its operation computes it: the
-# operation and the values it reads.
-computed(d::Opaque) = string(op_name(d.node.op), op_detail(d.node.op), " of ", join(map(o -> "%$(o.value)", reads(d)), " "))
-
 # A fold in a group's key: its fold and axes, and a scan's direction.
 fold_key(d::Reduction) = string(fold_name(d.fold), d.reduced)
 fold_key(d::Scan) = string(fold_name(d.fold), d.axes, d.reverse ? " reversed" : "", d.exclusive ? " exclusive" : "")
+fold_key(d::Keyed) = string(fold_name(d.fold), " by key ", d.key)
 
 # A group across programs: value numbers in order of appearance, with each
 # value's type and shape.
@@ -120,7 +117,7 @@ function canonical(p::Plan, g::Group)
     for m in members(g)
         v = p.graph.values[m]
         what = m in g.reductions ? fold_key(v.definition) : "value"
-        print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", haskey(g.terms, m) ? g.terms[m] : computed(v.definition))
+        print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", g.terms[m])
     end
     numbers = Dict{String, Int}()
     text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
@@ -149,9 +146,6 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
         any(l -> l !== nothing && l.borrowed, lines), order,
         implementation === nothing ? Any[] : Any[Base.invokelatest(variants, implementation, d.target, view, claim)...])
 end
-
-# Every group has a choice but opaque work, a scatter, which only the floor runs.
-chosen(p::Plan, g::Group) = g.kind !== :opaque
 
 "Every claim on a group, cheapest estimate first; the floor when none claims it."
 function options(d::Decider, p::Plan, g::Group)
@@ -217,7 +211,7 @@ searched. Groups decided already search nothing here.
 function search!(d::Decider, p::Plan)
     d.measure in (:close, :all) || return nothing
     price_all!(d, p)
-    search!(d, [(p, g, options!(d, p, g)) for g in p.groups if chosen(p, g) && !haskey(d.decided, canonical(p, g))])
+    search!(d, [(p, g, options!(d, p, g)) for g in p.groups if !haskey(d.decided, canonical(p, g))])
     nothing
 end
 
@@ -277,7 +271,6 @@ function price_all!(d::Decider, p::Plan)
     needs = Set{Tuple{Symbol, Symbol, Any}}()
     named(f) = findfirst(((_, g),) -> g == f, APPLIED) === nothing ? (+) : f
     for g in p.groups
-        chosen(p, g) || continue
         view = group_view(p, g)
         for i in implementations(d.target), c in Base.invokelatest(claims, i, d.target, view), w in Base.invokelatest(estimate, i, c, d.target, view)
             class = product_class(d.target, w.factor)
@@ -310,7 +303,7 @@ function choose(d::Decider, os)
     (ranks[k], :measured, times[k])
 end
 
-decisions(d::Decider, p::Plan) = [chosen(p, g) ? decide(d, p, g) : nothing for g in p.groups]
+decisions(d::Decider, p::Plan) = [decide(d, p, g) for g in p.groups]
 
 """
 How a plan compares with the one before it on the groups they do not share:
@@ -331,8 +324,8 @@ cheaper(c::Comparison) = c.new < c.old
 function compare(d::Decider, b::Plan, a::Plan)
     ia = Set(group_identity(a, g) for g in a.groups)
     ib = Set(group_identity(b, g) for g in b.groups)
-    only_a = [(a, g) for g in a.groups if !(group_identity(a, g) in ib) && chosen(a, g)]
-    only_b = [(b, g) for g in b.groups if !(group_identity(b, g) in ia) && chosen(b, g)]
+    only_a = [(a, g) for g in a.groups if !(group_identity(a, g) in ib)]
+    only_b = [(b, g) for g in b.groups if !(group_identity(b, g) in ia)]
     decided(side) = [(p, g, decide(d, p, g)) for (p, g) in side]
     da, db = decided(only_a), decided(only_b)
     ea = sum(x -> x[3].choice.estimate, da; init = 0.0)
@@ -382,7 +375,7 @@ build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =
     get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, o.key)
 
 # A group's kernels: its choice, or the next claim when a build fails, and
-# the floor last. Opaque work, a scatter, runs on the floor.
+# the floor last.
 function build_group(d::Decider, p::Plan, g::Group, x, buffers)
     x === nothing && return build_floor(d.target, p, g, buffers)
     for o in [x.choice; filter(!=(x.choice), x.options)]

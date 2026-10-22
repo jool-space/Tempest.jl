@@ -67,7 +67,8 @@ end
 
 """
 The adjoint of a selection: an array of the shape `dims` of zeros, with each
-element of the first input added at the position it was selected from.
+element of the first input added at the position it was selected from, the
+elements at one position summed as a sum fold sums them.
 """
 struct Scatter <: Operation
     indices::Tuple

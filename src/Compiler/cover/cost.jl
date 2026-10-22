@@ -85,7 +85,6 @@ end
 # The floor reads every load at every point of the domain, one item a thread;
 # a fold's or a scan's item sweeps the axes it folds along.
 function floor_estimate(p::Plan, g::Group)
-    g.kind === :opaque && return [Work(group_bytes(p, g))]
     points = prod(g.domain; init = 1)
     per_point = sum(m -> sum(l -> sizeof(p.graph.values[l.value].eltype), loads(g.terms[m]); init = 0), members(g); init = 0)
     items = g.kind in (:reduction, :scan) ? prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1) : points

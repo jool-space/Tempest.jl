@@ -265,77 +265,43 @@ function fold_kernel(graph, g::Group, slots, r)
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 
-# An operand of the scatter at `index`, as a term.
-scatter_term(o::Read, index, d) = Load(o.value, map(e -> substitute(e, index, d), o.index))
-scatter_term(o::Literal, index, d) = Lit(o.value)
-scatter_term(o::IndexOperand{T}, index, d) where {T} = Ix{T}(substitute(o.expr, index, d))
-
 """
-    accumulate!(buffer, i, v)
+    accumulate!(fold, buffer, i, x)
 
-Add `v` to element `i` of a buffer: in place on the CPU, where a floor
-kernel's items run in order, and atomically on a device (see CUDAExt), where
-they run at once and the sums come in no fixed order.
+Combine element `x` into state `i` of a fold by key, in `buffer`: in place on
+the CPU, where a floor kernel's items run in order, and atomically on a device
+(see CUDAExt), where they run at once and the elements a position takes
+combine in no fixed order.
 """
-accumulate!(buffer, i, v) = (@inbounds buffer[i] += v; nothing)
+accumulate!(f, buffer, i, x) = (@inbounds buffer[i] = only(fold_combine(f, (buffer[i],), fold_lift(f, x))); nothing)
 
-# A scatter on the floor: the result zeroed, then one item per element
-# scattered, which adds the element at the position its indices name. An
-# integer or a range among the indices names the position along its axis; an
-# index array is read at the item's position among the array's own axes,
-# which are axes of the item domain, as a gather. The work is the elements
-# scattered, once each.
-function scatter_kernels(graph, g::Group, slots)
-    v = only(g.outputs)
-    d = graph.values[v].definition
-    n, op = d.node, d.node.op
-    T = n.eltype
-    slot(w) = :(buffers[$(findfirst(==(w), slots))])
-    zeroing = ScalarKernel(slots, storage_length(graph.values[v]), :(@inbounds $(slot(v))[lin + 1] = $(zero(T))))
-    # The item domain: an axis per range, and each index array's own axes.
-    extents = Int[]
-    placed = Any[]
-    for i in op.indices
-        if i isa Integer
-            push!(placed, i)
-        elseif i isa AbstractRange
-            push!(extents, length(i))
-            push!(placed, (i, length(extents)))
-        else
-            first_axis = length(extents) + 1
-            append!(extents, d.shapes[i.input][1])
-            push!(placed, (i, first_axis:length(extents)))
-        end
-    end
-    domain = Domain(Tuple(extents))
-    # Where each item's element comes from, as the scattered operand's axes,
-    # and where it lands, zero-based along each axis of the result.
-    selected = Affine[]
-    target = Affine[]
-    for (axis, entry) in enumerate(placed)
-        if entry isa Integer
-            push!(target, constant(entry - 1))
-        elseif entry[1] isa AbstractRange
-            r, j = entry
-            push!(selected, var(j))
-            push!(target, add(mul(var(j), step(r), domain), first(r) - 1, domain))
-        else
-            i, axes = entry
-            append!(selected, map(var, axes))
-            read = through(d.operands[i.input], Tuple(map(var, axes)), domain)
-            push!(target, add(normalize(0, (Indirect(read.value, read.index, 1, n.dims[axis]) => 1,), domain), -1, domain))
-        end
-    end
-    c = EmitContext(graph, slots, [gensym(:j) for _ in extents], domain)
+# A fold by key on the floor: its states set to the fold's initial one, then
+# one item per point of the group's domain, which computes the element, the
+# group's folds loaded as `fold_kernel` loads them, and combines it at the
+# position its key names. The work is the elements, once each.
+function keyed_kernels(graph, g::Group, slots, r)
+    D = g.domain
+    vars = index_vars(length(D))
+    c = EmitContext(graph, slots, vars, Domain(D))
+    val = graph.values[r]
+    fold = val.definition.fold
+    states = ScalarKernel(slots, storage_length(val), :(@inbounds $(buffer(c, r))[lin + 1] = $(only(fold_init(fold, val.eltype)))))
+    t = stored_statistics(g.terms[r], graph, g)
     body = Expr(:block)
-    delinearize_expr(body.args, :lin, 1:length(extents), extents, c.vars)
-    element = scatter_term(first(d.operands), Tuple(selected), domain)
-    names = emit_terms!(body.args, [element], c)
-    at = Tuple(target[k] for k in wide_axes(n.dims))
-    push!(body.args, :($accumulate!($(slot(v)), $(affine_expr(address(graph.values[v], at, domain), c)) + 1, $(names[element]))))
-    [zeroing, ScalarKernel(slots, prod(extents; init = 1), body)]
+    delinearize_expr(body.args, :lin, 1:length(D), D, vars)
+    names = emit_terms!(body.args, [t], c)
+    at = affine_expr(address(val, placement(graph, g, r), c.domain), c)
+    push!(body.args, :($accumulate!($fold, $(buffer(c, r)), $at + 1, convert($(val.eltype), $(names[t])))))
+    [states, ScalarKernel(slots, prod(D; init = 1), body)]
 end
 
-"The floor's launches for a group: its kernel, then one per fold over other axes; a scatter's two."
-scalar_kernels(graph, stored, g::Group, slots) = g.kind === :opaque ? scatter_kernels(graph, g, slots) :
-    [scalar_kernel(graph, stored, g, slots); [fold_kernel(graph, g, slots, r) for r in g.reductions if !primary(graph, g, r)]]
+"The floor's launches for a group: its kernel, then those of its folds over other axes and by key."
+function scalar_kernels(graph, stored, g::Group, slots)
+    kernels = ScalarKernel[]
+    any(m -> !(m in g.reductions) || primary(graph, g, m), members(g)) && push!(kernels, scalar_kernel(graph, stored, g, slots))
+    for r in g.reductions
+        primary(graph, g, r) && continue
+        keyed(graph, r) ? append!(kernels, keyed_kernels(graph, g, slots, r)) : push!(kernels, fold_kernel(graph, g, slots, r))
+    end
+    kernels
+end

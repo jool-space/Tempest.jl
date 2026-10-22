@@ -415,9 +415,30 @@ end
 
 # Folds over the swept axes complete in a block (or by merging splits) before
 # what reads them, in phases; folds over other axes complete by merging
-# partial states.
-primary_folds(c::Context) = [r for r in c.g.reductions if c.g.values[r].reduced == c.g.primary_axes]
-partial_folds(c::Context) = [r for r in c.g.reductions if c.g.values[r].reduced != c.g.primary_axes]
+# partial states; folds by key combine each element at its key as the
+# group's work reaches it, atomically.
+primary_folds(c::Context) = [r for r in c.g.reductions if !c.g.values[r].keyed && c.g.values[r].reduced == c.g.primary_axes]
+partial_folds(c::Context) = [r for r in c.g.reductions if !c.g.values[r].keyed && c.g.values[r].reduced != c.g.primary_axes]
+keyed_folds(c::Context) = [r for r in c.g.reductions if c.g.values[r].keyed]
+
+# Fold by key `r`'s values as one flat buffer, which its keys address.
+flat_spec(c::Context, r) = ArgSpec(r, 0, (storage_length(c.g.values[r]),), (1,))
+
+# Add the elements of the folds by key `rs` over the tile at block indices
+# `indices` into their values at their keys, the lanes inside the domain.
+function scatter_tiles!(k, st, c::Context, rs, names, indices)
+    isempty(rs) && return
+    emit_tiles!(k, st, c, [c.g.terms[r] for r in rs], names, indices...)
+    valid = tile_mask!(st, c, indices)
+    for r in rs
+        val = c.g.values[r]
+        x = as_accumulator(st, names[c.g.terms[r]], val.eltype, term_eltype(c.g.terms[r], c.g), tile(c))
+        at = address(val, c.g.placement[r], Domain(c.g.domain))
+        lanes = :($(ct.broadcast_to)($(index_tile(k, c, at, indices)), $(tile(c))) .+ Int32(1))
+        push!(st, :($(ct.atomic_add)($(argument!(k, flat_spec(c, r))), $lanes, $x; mask = $valid,
+            memory_order = $(ct.MemoryOrder.Relaxed))))
+    end
+end
 
 function reduction_phases(c::Context)
     folds = primary_folds(c)

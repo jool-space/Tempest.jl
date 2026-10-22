@@ -3,11 +3,10 @@ Tempest compiles traced Julia array programs into planned, fused kernels.
 
 A program is Julia array code, and what it computes reaches the compiler as
 three things: maps, folds (a scan is a fold that keeps the axis it runs
-along), and reads at index formulas. Products, reshapes, permutations,
-gathers and scatters to positions it can compute are spellings of them, and
-so is every function a program calls. A scatter by index arrays is not one
-yet: it runs whole, on stored operands. `Tempest` names only what Base cannot
-spell:
+along, a scatter one that combines each element at a position it computes),
+and reads at index formulas. Products, reshapes, permutations, gathers and
+scatters are spellings of them, and so is every function a program calls.
+`Tempest` names only what Base cannot spell:
 
 - the way in: `compile`, `explain`, `gradient` and the targets;
 - the derivative of a scalar function, which its code does not carry:

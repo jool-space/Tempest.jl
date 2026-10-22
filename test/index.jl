@@ -10,10 +10,10 @@ flat(x) = filter(!isnothing, C.leaves(x))
         for p in (trace(f, args...), differentiate(trace(f, args...)))
             graph = C.lower(p)
             @test agree(C.interpret(graph, args...), flat(interpret(p, args...)))
-            # Only a scatter by runtime indices is opaque; one by integers and
+            # A scatter by index arrays is a sum by key; one by integers and
             # ranges is a select of a read through a formula.
-            @test all(v -> !(v.definition isa C.Opaque) || v.definition.node.op isa C.Scatter &&
-                           any(i -> i isa C.IndexInput, v.definition.node.op.indices), graph.values)
+            @test all(v -> !(v.definition isa C.Keyed) || v.definition.fold isa IR.SumFold &&
+                           any(e -> !isempty(IR.indirect_values(e)), v.definition.key), graph.values)
             # Filling out to a larger shape is a formula, not a value. (A
             # call's argument is materialized for an implementation that
             # claims the call; nothing else reads it.)

@@ -38,7 +38,7 @@ that read each.
 """
 struct Around
     owned::Vector{Vector{Int}}
-    places::Vector{Union{Nothing, Tuple{Symbol, Int}}}
+    places::Vector{Tuple{Symbol, Int}}
     reading::Vector{Vector{Int}}
     followers::Vector{Vector{Int}}
 end
@@ -52,7 +52,7 @@ function Around(p::Plan, sets)
         g = p.groups[j]
         i = findfirst(s -> p.owner[first(s)] == j, sets)
         i === nothing || return (:fixed, i)
-        g.kind === :reduction ? (:fold, first(g.reductions)) : g.kind === :pointwise ? (:pointwise, minimum(owned[j])) : nothing
+        g.kind === :reduction ? (:fold, first(g.reductions)) : g.kind === :pointwise ? (:pointwise, minimum(owned[j])) : (:scan, first(g.reductions))
     end
     reading = [Int[] for _ in p.graph.values]
     for (j, g) in enumerate(p.groups), r in group_reads(p.graph, g)
@@ -127,13 +127,13 @@ function proposal_key(p::Plan, a::Around, q)
     around = Set{Int}()
     foreach(v -> union!(around, reached(p, a, v)), fixes(q))
     io = IOBuffer()
-    for j in sort!(collect(around); by = j -> something(a.places[j], (:opaque, minimum(a.owned[j]))))
+    for j in sort!(collect(around); by = j -> a.places[j])
         g = p.groups[j]
         print(io, "| ", g.kind, " ", g.domain)
         for m in members(g)
             v = p.graph.values[m]
             what = m in g.reductions ? fold_key(v.definition) : "value"
-            print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", haskey(g.terms, m) ? g.terms[m] : computed(v.definition))
+            print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", g.terms[m])
         end
     end
     q isa Join && print(io, " || join %", q.value)
@@ -157,7 +157,7 @@ function joins(p::Plan)
         g.kind in (:reduction, :pointwise) || continue
         for v in sort!(collect(group_reads(p.graph, g)))
             j = p.owner[v]
-            j == 0 || j == k || p.groups[j].kind === :opaque || push!(found, Join(v, sort!([a.owned[k]; v])))
+            j == 0 || j == k || push!(found, Join(v, sort!([a.owned[k]; v])))
         end
     end
     found
@@ -195,11 +195,11 @@ function cover(d::Decider)
             push!(proposals, (Recompute(v), nothing))
         end
     end
-    # What the starting plan stores and its opaque kernels: a set that does
-    # not form one group there, where a trial would first form it, is not
-    # tried. A set holding a pinned fold changes what is stored.
+    # What the starting plan stores: a set that does not form one group
+    # there, where a trial would first form it, is not tried. A set holding a
+    # pinned fold changes what is stored.
     start = storing(d.graph; recompute = d.pinned)
-    deps = opaque_groups(start.graph, start.running)
+    deps = Dependencies(start.graph)
     function forms(set)
         isdisjoint(set, d.pinned) || return true
         try

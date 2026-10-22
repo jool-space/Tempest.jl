@@ -106,7 +106,7 @@ map_fold_product(x, w) = (y = exp.(x); (sum(y; dims = 1), y * w))
 # The estimated time of a plan: the chosen option of each group.
 function estimated(p::C.Plan, target)
     d = C.Decider(target, p.graph; measure = false)
-    sum(g -> C.decide(d, p, g).choice.estimate, filter(g -> C.chosen(p, g), p.groups); init = 0.0)
+    sum(g -> C.decide(d, p, g).choice.estimate, p.groups; init = 0.0)
 end
 
 @testset "one rule decides fusion" begin
@@ -222,7 +222,7 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         d = C.Decider(T.CUDATarget(), C.lower(differentiate(trace(stack_loss, x, layers))); measure = false)
         p = C.generator_plan(d)
         ranked = Dict{String, Any}()
-        @test all(filter(g -> C.chosen(p, g), p.groups)) do g
+        @test all(p.groups) do g
             os = [(o.key, o.estimate) for o in C.options(d, p, g)]
             get!(ranked, C.canonical(p, g), os) == os
         end
@@ -268,7 +268,7 @@ in_sweep(c, precision) = occursin("SiLU", c.name) || occursin("softcap", c.name)
         p, considered = C.cover(d)
         timed(q, g, o) = (C.measure!(d, q, g, o); d.record[o.key])
         held = Bool[]
-        for g in filter(g -> C.chosen(p, g), p.groups)
+        for g in p.groups
             x = C.decide(d, p, g)
             x.how === :estimated && length(x.options) > 1 || continue
             push!(held, within(x.choice.estimate, timed(p, g, x.choice)))

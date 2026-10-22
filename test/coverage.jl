@@ -49,7 +49,7 @@ if CUDA_FUNCTIONAL
     prepared(c, target; recompute = ()) = prepare(c.program, map(CuArray, c.args)...; target, measure = false, recompute)
     function estimated(ex)
         d = C.Decider(ex.target, ex.plan.graph; measure = false)
-        sum(g -> C.decide(d, ex.plan, g).choice.estimate, filter(g -> C.chosen(ex.plan, g), ex.plan.groups); init = 0.0)
+        sum(g -> C.decide(d, ex.plan, g).choice.estimate, ex.plan.groups; init = 0.0)
     end
 
     @testset "coverage" begin
