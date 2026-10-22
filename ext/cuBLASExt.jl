@@ -220,7 +220,7 @@ using PrecompileTools: @setup_workload, @compile_workload
         # Registered for this process alone; the package registers it when it loads.
         register!(cuBLAS, cuBLASProducts())
         for (f, args) in losses, target in (CUDATarget(cuBLAS), CUDATarget(cuBLAS; precision = :tf32))
-            program = Tempest.Compiler.differentiate(Tempest.Compiler.trace(f, args...))
+            program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
             ex = Tempest.Compiler.prepare(program, args...; target, build = false)
             Tempest.explain(devnull, ex)
         end

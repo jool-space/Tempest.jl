@@ -4,7 +4,8 @@
 # projection and a residual) and of an MLP, and the coverage suite's
 # compositions. Kernels' own workspaces are not counted.
 #   julia --project=test test/bench/storage.jl
-using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
+using Tempest, CUDACore, cuBLAS, cuTile, Printf
+using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 import Tempest as T
 
 # Plans by estimate, as the tests make them.

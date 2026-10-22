@@ -2,7 +2,8 @@
 # earlier Tempest measured them: the minimum over SAMPLES launches of a
 # captured CUDA graph of a few milliseconds of executions.
 #   julia --project=test test/bench/guard_rails.jl [output.tsv]
-using Tempest, Tempest.Compiler, CUDACore, cuBLAS, cuTile, Printf
+using Tempest, CUDACore, cuBLAS, cuTile, Printf
+using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 import Tempest as T
 import Tempest.Compiler as C
 

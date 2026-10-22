@@ -19,7 +19,8 @@
 # TEMPEST_GPT_{HIDDEN,HEADS,KV_HEADS,FFN,LAYERS,T,B} give the shape.
 module GPT
 
-using Tempest, Tempest.Compiler, CUDACore, Random, Printf
+using Tempest, CUDACore, Random, Printf
+using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 import Tempest as T
 import Tempest.Compiler as C
 module Ops

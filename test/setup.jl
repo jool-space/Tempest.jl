@@ -2,7 +2,7 @@
 # all tests share. Programs that several tests run are in fixtures/programs.jl.
 using LinearAlgebra, BFloat16s
 import Tempest as T
-using Tempest.Compiler
+using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 import Tempest.Compiler as C
 import Tempest.IR as IR
 

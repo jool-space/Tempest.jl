@@ -44,7 +44,7 @@ unbacked_tile_array(T, spec) = ct.TileArray(Ptr{T}(256), Int32.(spec.sizes), Int
         # Registered for this process alone; the package registers it when it loads.
         register!(ct, cuTileGenerator())
         for (f, args) in losses, target in (CUDATarget(), CUDATarget(precision = :tf32))
-            program = Tempest.Compiler.differentiate(Tempest.Compiler.trace(f, args...))
+            program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
             ex = Tempest.Compiler.prepare(program, args...; target, build = false)
             explain(devnull, ex)
             for g in Tempest.Compiler.group_views(ex), claim in claims(cuTileGenerator(), target, g)

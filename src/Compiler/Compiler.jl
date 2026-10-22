@@ -1,13 +1,14 @@
 """
 How a program becomes kernels: the program, index and plan levels, the
-cover, code generation, the kernel cache, and prepared programs. Its exports are the levels
-beneath `compile`: `trace`, `differentiate` and `interpret` for programs, and
-`prepare`, `bind!`, `execute!`, `capture!`, `replay!` and `outputs` for prepared
-ones. Its other public names are the language programs are written in, which
-`Tempest` makes its own; what implementations read of a plan beyond
-`Tempest.IR`, and what they build kernels with (the kernel cache, `generated`
-and `concurrently`); and the protocol a package that adds a target defines
-(see `Target`).
+cover, code generation, the kernel cache, and prepared programs. Its public
+names are what packages outside it need: beneath `compile`, a program traced
+(`trace`) and prepared (`prepare`, `bind!`, `execute!`, `capture!`, `replay!`
+and `outputs`), for a step run in place; the language programs are written
+in, which `Tempest` makes its own, and what an extension writes traced methods
+with (`TracedArray`, `Traced`, `contract`); what implementations read of a
+plan beyond `Tempest.IR`, and what they build kernels with (the kernel cache,
+`generated` and `concurrently`); and the protocol a package that adds a
+target defines (see `Target`).
 """
 module Compiler
 
@@ -25,12 +26,12 @@ import ..IR: mentions
 @republic republic=false inherit=:public import ..Implement
 using ..Implement: REGISTERED
 
-export trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
+# Beneath `compile`: a program traced and prepared, for a step run in place.
+public trace, prepare, bind!, execute!, capture!, replay!, outputs
 
 # What proposals read, until a view of the graph replaces it: the plan, and the
-# views of its groups; the levels between a program and its plan; and how
-# kernels are built side by side.
-public Plan, group_views, lower, plan, concurrently
+# views of its groups; and how kernels are built side by side.
+public Plan, group_views, concurrently
 
 # The program level.
 include("program/program.jl")

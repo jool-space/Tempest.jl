@@ -86,7 +86,8 @@ if CUDA_FUNCTIONAL
         # unloaded: graphs that outlive their programs and are collected
         # after them, and a graph alive when the process exits.
         script = """
-            using Tempest, Tempest.Compiler, CUDACore, cuTile
+            using Tempest, CUDACore, cuTile
+            using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
             x = CUDACore.CuArray(Float32.(reshape(1:4096, 64, 64)))
             p = trace(x -> sum(abs2, x * x; dims = 1), x)
             captured() = (ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32)); replay!(capture!(ex)); ex.captured)

@@ -1,7 +1,7 @@
 using Tempest
 using Documenter
 
-DocMeta.setdocmeta!(Tempest, :DocTestSetup, :(using Tempest, Tempest.Compiler); recursive = true)
+DocMeta.setdocmeta!(Tempest, :DocTestSetup, :(using Tempest; using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs); recursive = true)
 
 makedocs(;
     modules = [Tempest],
@@ -13,8 +13,8 @@ makedocs(;
         assets = String[],
     ),
     pages = ["Home" => "index.md", "API" => "api.md"],
-    # Internal docstrings are for reading the source; the manual covers the exports.
-    checkdocs = :exports,
+    # Internal docstrings are for reading the source; the manual covers the public names.
+    checkdocs = :public,
 )
 
 deploydocs(;

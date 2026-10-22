@@ -6,7 +6,8 @@
 # apart) and the largest single value stored, a bound: attention stores no
 # value as large as its scores. A `Gap` is an expectation the plan does not
 # meet yet, with what closes it.
-using Tempest, Tempest.Compiler
+using Tempest
+using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 import Tempest as T
 import Tempest.Compiler as C
 

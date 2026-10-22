@@ -49,16 +49,12 @@ Tempest.scalar_partials
 ```@docs
 Tempest.Compiler
 Tempest.Compiler.trace
-Tempest.Compiler.differentiate
-Tempest.Compiler.interpret
 Tempest.Compiler.prepare
 Tempest.Compiler.bind!
 Tempest.Compiler.execute!
 Tempest.Compiler.capture!
 Tempest.Compiler.replay!
 Tempest.Compiler.outputs
-Tempest.Compiler.lower
-Tempest.Compiler.plan
 Tempest.Compiler.group_views
 ```
 
@@ -103,6 +99,60 @@ Tempest.Compiler.concurrently
 
 ```@docs
 Tempest.IR
+```
+
+### Index formulas
+
+```@docs
+Tempest.IR.Domain
+Tempest.IR.Var
+Tempest.IR.Affine
+Tempest.IR.Div
+Tempest.IR.Mod
+Tempest.IR.Indirect
+Tempest.IR.is_affine
+Tempest.IR.indirect_values
+Tempest.IR.substitute
+```
+
+### Layout
+
+```@docs
+Tempest.IR.storage_length
+Tempest.IR.address
+Tempest.IR.group_stride
+```
+
+### Folds
+
+```@docs
+Tempest.IR.Relative
+Tempest.IR.Exponential
+Tempest.IR.Square
+Tempest.IR.Statistic
+Tempest.IR.Sum
+Tempest.IR.Composed
+Tempest.IR.LOGSUMEXP
+Tempest.IR.fold_reduce
+Tempest.IR.product_factors
+```
+
+### Terms
+
+```@docs
+Tempest.IR.Load
+Tempest.IR.Ix
+Tempest.IR.Stat
+Tempest.IR.Recomputed
+Tempest.IR.Cast
+Tempest.IR.mentions
+```
+
+### Masks
+
+```@docs
+Tempest.IR.comparison_mask
+Tempest.IR.masked_result
 ```
 
 ## Tempest.Implement
