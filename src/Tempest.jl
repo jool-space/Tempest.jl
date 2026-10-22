@@ -9,10 +9,9 @@ one yet: it runs whole, on stored operands. `Tempest` names only what Base
 cannot spell:
 
 - the way in: `compile`, `explain`, `gradient` and the targets;
-- folds beyond an operator and its identity, which `reduce` cannot state:
-  `fold` and `GenericFold`;
-- the derivative of a scalar function, which its code does not carry:
-  `scalar_partials`.
+- derivatives the code does not carry: `scalar_partials` for a scalar
+  function, and for a fold the `pullback` of a `GenericFold`, given to `fold`.
+  A fold without one is Base's `mapreduce`, its state a tuple if need be.
 
 `logsumexp` is a fold, a spelling. The log-sum-exp written out with `maximum`
 differentiates as it does, and plans as it does where the target permits the
