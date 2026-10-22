@@ -183,6 +183,70 @@ standing for an extent rather than an index is the smallest step. Judged by
 one preparation serving every length in a bound, its time per step against
 the kernels prepared for each length, within the noise.
 
+**A write at positions the device holds is refused, and every write
+rewrites its whole array.** A decode step appends each token's key and
+value to caches it carries as state, at a position the device holds
+(Vallmo's `step!`, `knorm_rope_append!` into a cache of features,
+positions, key heads and sequences). `setindex!` at an array of integers
+throws (`src/Compiler/program/updates.jl`, `GATHERED_WRITE`). A write that
+runs, at integers and ranges or as a select against the position, is a map
+over the whole array: `update` makes it a select of two scatters, each the
+array's size, and a result that replaces an argument is written in place as
+that select, every element read and written (one column of a 16-column
+array written in place: 128 items for 8 elements). At Qwen3.5-4B's
+attention, 256 features and 4 key heads in BFloat16 over 32768 positions,
+that is 64 MiB read and 64 MiB written per cache, per layer, per token, for
+2 KiB of new contents: over a millisecond per layer at the 230 GB/s
+Vallmo's GEMV streams on the GB10. The scatter Tempest has adds, as the
+adjoint of a selection, and only the floor runs it (`Scatter`,
+`src/Compiler/program/program.jl`; `scatter_kernels`,
+`src/Compiler/codegen/scalar.jl`; the storage plan's `writes_over`,
+`src/Compiler/plan/storage.jl`). Challengers: XLA's in-place
+dynamic-update-slice and scatter, which write only the update's elements
+into an operand whose buffer the result shares
+(`CanEmitFusedDynamicUpdateSliceInPlaceForGpu`,
+`xla/service/gpu/ir_emission_utils.cc`); and as the hand-written bars,
+vLLM's `reshape_and_cache` (`csrc/cache_kernels.cu`) and FlashAttention's
+`flash_attn_with_kvcache` (`flash_attn/flash_attn_interface.py`), which
+appends at `cache_seqlens` inside the attention kernel. JAX's `.at[].set`
+leaves unspecified which update lands where two indices name one position.
+Judged by Vallmo's append written as a traced write into caches the step
+replaces: its time and bytes flat in the cache's length from 4096 to 32768
+positions, against `knorm_rope_append!` on the same caches; the answers
+agreeing with the interpreter; the derivative of a write unchanged; and
+what a write does where two indices name one position, stated and tested.
+
+**A length the device holds does not bound a sweep.** Decode attention
+reads each sequence's keys up to its length, which the device holds and
+which grows by one each step, from a cache allocated for the whole context
+(Vallmo's `decode_attention`, `src/kernels/attention_decode.jl`, which
+takes `lengths`). Written as array code, the length is a mask,
+`ifelse(position <= len[b], score, -Inf32)`. The planner finds masks that
+compare index formulas (`masked`, `src/Compiler/plan/masks.jl`;
+`src/IR/masks.jl`), and the generator bounds a sweep by them (`live_steps`
+and `step_bounds`, `ext/cuTileExt/mask.jl`), but this comparison is against
+a load, not a formula, so the online softmax visits every key: at 200
+tokens into a 32768-position cache, 164 times the keys and values a bounded
+sweep reads, 128 MiB per layer per token at Qwen3.5-4B's attention. The
+pieces exist: `Indirect`, an integer read from a value, is an atom of the
+index formulas (`src/IR/expressions.jl`), and the bounds `live_steps`
+computes are Int32 expressions over the block's indices, evaluated when the
+kernel runs. This is the other answer to the decode case named under
+"Sizes are constants": the extent stays the cache's, and the work follows
+the length. Challengers: FlashAttention's `flash_attn_with_kvcache`, whose
+key loop each sequence bounds by its `cache_seqlens`; FlexAttention's block
+mask (`create_block_mask`, `torch/nn/attention/flex_attention.py`), where a
+mask that reads a tensor is evaluated into the key blocks each query block
+visits before the kernel runs. Judged by Vallmo's decode attention written
+as array code, one query per head, grouped key heads, a length per sequence
+on the device, over a 32768-position cache at lengths 200, 2048 and 16384:
+its time following the length and not the cache, against
+`decode_attention`; the answers agreeing with the interpreter; and the
+masked-attention trial's table within the noise. Not judged, named:
+splitting the live keys across blocks when the heads are few, which
+`decode_attention` does (`mha_decode_split_fwd`, then a combine by the
+log-sum-exp), and which the time at 16384 will show.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
