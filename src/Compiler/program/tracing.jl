@@ -14,7 +14,7 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
-public fold, logsumexp, TracedArray, Traced, contract
+public logsumexp, TracedArray, Traced, contract
 
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
@@ -327,9 +327,10 @@ function reduced_axes(x, dims)
 end
 
 """
-    Tempest.fold(f::Fold, x; dims = :)
+    fold(f::Fold, x; dims = :)
 
-Reduce `x` over `dims` with the fold `f`.
+Reduce `x` over `dims` with the fold `f`: what `sum`, `maximum`, `mapreduce`
+and `logsumexp` record.
 """
 function fold(f::Fold, x::TracedArray; dims = :)
     axes = reduced_axes(x, dims)
@@ -373,6 +374,10 @@ struct OperatorCombine{O}
 end
 (c::OperatorCombine)(a, b) = (c.op(a[1], b[1]),)
 
+# A function of the user's is taken to associate and commute, up to rounding,
+# and `init` to be its identity, as a reduction groups and interleaves the
+# elements (see `Fold`). Base asks for the first and the identity, and keeps
+# the elements' order.
 function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
     init isa Tuple && return state_fold(f, op, x, init; dims)
     y = f === identity ? x : f.(x)
@@ -389,6 +394,16 @@ function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
 end
 
 Base.reduce(op, x::TracedArray{<:Real}; dims = :, init = nothing) = mapreduce(identity, op, x; dims, init)
+
+# A `GenericFold` given where the operator goes claims what Base cannot spell
+# (see `Fold`). `reduce` takes an operator's laws on trust too, so there it
+# brings a lift and an observe; `accumulate` combines an operator's elements in
+# sequence, and a `GenericFold`'s in any grouping. The methods on traced
+# arrays only settle which of these a traced array takes.
+Base.reduce(f::GenericFold, x::AbstractArray; dims = :) = fold(f, x; dims)
+Base.reduce(f::GenericFold, x::TracedArray{<:Real}; dims = :) = fold(f, x; dims)
+Base.accumulate(f::GenericFold, x::AbstractArray; dims = nothing) = scan_array(f, x, scan_axes(x, dims), false, false)
+Base.accumulate(f::GenericFold, x::TracedArray; dims = nothing) = scan(f, x, scan_axes(x, dims))
 
 # A reduction whose `init` is a tuple is a fold whose state is a tuple, as
 # Base reduces it: `f` lifts an element to a state, `op` merges two, and
@@ -604,8 +619,13 @@ end
 # Without `dims`, a vector is scanned along its axis and an array of more axes
 # along all of them in their linear order, as Base collects
 # `Iterators.accumulate`. An axis past the array's has extent one.
+scan_axes(x, dims) = dims === nothing ? Tuple(1:ndims(x)) : dims <= ndims(x) ? (Int(dims),) : ()
+
+# A function of the user's claims nothing: Base combines its elements in
+# sequence, from `init`, the state the scan starts from, and so does the scan
+# (see `InSequence`).
 function Base.accumulate(op, x::TracedArray; dims = nothing, init = nothing)
-    axes = dims === nothing ? Tuple(1:ndims(x)) : dims <= ndims(x) ? (Int(dims),) : ()
+    axes = scan_axes(x, dims)
     init isa Tuple && return state_scan(op, x, init, axes)
     builtin = builtin_fold(op)
     if builtin !== nothing
@@ -615,18 +635,19 @@ function Base.accumulate(op, x::TracedArray; dims = nothing, init = nothing)
         # which groups it apart from Base's sequence.
         return init === nothing || init === only(fold_init(builtin, eltype(x))) ? r : op.(init, r)
     end
-    init === nothing && throw(ArgumentError("accumulating a traced array by $op needs `init`, its identity"))
+    init === nothing && throw(ArgumentError("accumulating a traced array by $op needs `init`, the state the scan starts from"))
     T = promote_type(eltype(x), typeof(init))
-    scan(GenericFold(; init = (convert(T, init),), combine = OperatorCombine(op)), T.(x), axes)
+    scan(InSequence(GenericFold(; init = (convert(T, init),), combine = OperatorCombine(op))), T.(x), axes)
 end
 
 # A scan whose `init` is a tuple, as `state_fold` folds one: `op` merges the
 # elements, states of the type of `init`, into the state, the earlier first.
-# A linear recurrence `h = a h′ + b` is one, of the pairs `(a, b)`.
+# A linear recurrence `h = a h′ + b` is one, of the pairs `(a, b)`; its
+# combine associates, which a `GenericFold` of it claims.
 function state_scan(op, x, init, axes)
     S = typeof(init)
     lift = eltype(x) === S ? identity : Converted{S}(identity)
-    scan(GenericFold(; init = Initial{init}(), lift, combine = op, observe = identity), x, axes)
+    scan(InSequence(GenericFold(; init = Initial{init}(), lift, combine = op, observe = identity)), x, axes)
 end
 
 Base.cumsum(x::TracedArray; dims::Integer) = accumulate(Base.add_sum, x; dims)

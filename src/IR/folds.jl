@@ -6,11 +6,14 @@
 # interleave them, as a strided sweep does, so there `fold_combine` must be
 # associative and commutative up to rounding. A scan keeps the order of its
 # elements, so it needs associativity alone: a linear recurrence, a scan of
-# pairs of a factor and an offset, has it and does not commute. Combined in
-# sequence, as Base's `accumulate` and the floor combine them, a scan needs
-# not even that.
+# pairs of a factor and an offset, has it and does not commute. The builtin
+# folds have these laws, a `GenericFold` claims them, and a function given to
+# Base's `mapreduce` is taken to have them. A function given to Base's
+# `accumulate` claims none: Base combines its elements in sequence, from an
+# `init` that need be no identity. Its fold is `InSequence`, and only a sweep
+# that combines in sequence, as the floor's does, computes it.
 
-public Fold, SumFold, MaxFold, MinFold, ProdFold, Relative, Law, Exponential, Square, Statistic, Sum, Composed, LOGSUMEXP, GenericFold,
+public Fold, SumFold, MaxFold, MinFold, ProdFold, Relative, Law, Exponential, Square, Statistic, Sum, Composed, LOGSUMEXP, GenericFold, InSequence,
     fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, lse_shift, HalfFloat
 
 abstract type Fold end
@@ -229,8 +232,26 @@ end
 """
     GenericFold(; init, combine, lift = tuple, observe = only, pullback = nothing)
 
-A fold from functions. `init` is a state tuple or a function of the element type
-returning one. `pullback(x, y, g, axes)`, when given, is its derivative rule.
+A fold from functions, given to `reduce` or `accumulate` where the operator
+goes. `lift` maps an element to a state tuple, `combine` merges two, the
+earlier first, and `observe` maps the last state to the result; `init` is a
+state tuple or a function of the element type returning one. It claims what
+Base cannot spell: that `combine` associates and commutes, up to rounding, and
+`init` is its identity, so a reduction or a scan by it may group its elements
+in any order. A function given to `accumulate` is combined in sequence
+instead. `pullback(x, y, g, axes)`, when given, is the derivative rule of a
+reduction by it.
+
+```jldoctest
+julia> recurrence = Tempest.GenericFold(; init = E -> (1.0, 0.0), lift = identity,
+           combine = ((a1, b1), (a2, b2)) -> (a2 * a1, a2 * b1 + b2), observe = last);
+
+julia> accumulate(recurrence, [(0.5, 1.0), (0.5, 1.0), (0.5, 1.0)])
+3-element Vector{Float64}:
+ 1.0
+ 1.5
+ 1.75
+```
 """
 struct GenericFold{I, L, C, O, P} <: Fold
     init::I
@@ -252,6 +273,24 @@ const HalfFloat = Union{Float16, BFloat16}
 fold_accumulator(::Union{SumFold, ProdFold, Relative}, ::Type{<:HalfFloat}) = Float32
 fold_accumulator(::Relative, ::Type{E}) where {E <: Tuple} =
     any(S -> S <: HalfFloat, fieldtypes(E)) ? Tuple{map(S -> S <: HalfFloat ? Float32 : S, fieldtypes(E))...} : E
+
+"""
+    InSequence(fold)
+
+`fold` combined in sequence, as Base's `accumulate` combines a function it is
+given: from `init`, the state the sweep starts from, which need be no
+identity, one element after another, by a combine that claims no law.
+"""
+struct InSequence{F <: Fold} <: Fold
+    fold::F
+end
+
+fold_name(f::InSequence) = Symbol(fold_name(f.fold), " in sequence")
+fold_accumulator(f::InSequence, T) = fold_accumulator(f.fold, T)
+fold_init(f::InSequence, T) = fold_init(f.fold, T)
+fold_lift(f::InSequence, x) = fold_lift(f.fold, x)
+fold_combine(f::InSequence, a, b) = fold_combine(f.fold, a, b)
+fold_observe(f::InSequence, s) = fold_observe(f.fold, s)
 
 # Reference evaluation, through Base's reductions. Sums keep Base's pairwise
 # order; elements convert to the accumulator and the result rounds once.

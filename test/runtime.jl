@@ -500,7 +500,7 @@ end
 if CUDA_FUNCTIONAL
     @testset "a fold with a tuple state on cuTile" begin
         for (sketch, x, dims) in ((:resident, data(300, 200), 1), (:streamed, data(9000, 40), 1), (:split, data(100, 3000), 2),
-            (:full, data(512, 300), (1, 2))), f in (x -> T.fold(VARIANCE, x; dims), x -> base_variance(x; dims))
+            (:full, data(512, 300), (1, 2))), f in (x -> reduce(VARIANCE, x; dims), x -> base_variance(x; dims))
             x = single(x)
             p = trace(f, x)
             ex = prepare(p, CuArray(x); target = T.CUDATarget(cuTile))

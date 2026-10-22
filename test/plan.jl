@@ -164,8 +164,8 @@ end
         @test agree(C.execute(recomputing(g), x), [f(x)])
     end
     planned(f) = filter(l -> !startswith(l, "rewritten:"), split(sprint(explain, recomputing(C.rewrite(C.lower(trace(f, x))))), "\n"))
-    @test planned(x -> base_variance(x; dims = 1)) == planned(x -> T.fold(VARIANCE, x; dims = 1))
-    @test planned(x -> (s = states(x; dims = :); s[3] / s[1])) == planned(x -> T.fold(VARIANCE, x))
+    @test planned(x -> base_variance(x; dims = 1)) == planned(x -> reduce(VARIANCE, x; dims = 1))
+    @test planned(x -> (s = states(x; dims = :); s[3] / s[1])) == planned(x -> reduce(VARIANCE, x))
     # The state is of the type of `init`, as Base's result is: BFloat16
     # elements accumulate in Float32, to its precision. Base's own reduction
     # along `dims` merges blocks of lifts in BFloat16 first, and is off by 1%.

@@ -49,6 +49,11 @@ base_variance(x; dims) = (s -> s[3] / s[1]).(mapreduce(welford_lift, welford, x;
 # commute, from `h = 0`.
 chain((a1, b1), (a2, b2)) = (a2 * a1, a2 * b1 + b2)
 recurrence(a, b) = last.(accumulate(chain, tuple.(a, b); init = (one(eltype(a)), zero(eltype(b)))))
+# Base combines a function given to `accumulate` in sequence; a `GenericFold`
+# of the same combine claims that it associates.
+const RECURRENCE = T.GenericFold(; init = E -> (one(fieldtype(E, 1)), zero(fieldtype(E, 2))), lift = identity, combine = chain, observe = last)
+# An average running from a start that is no identity, in sequence.
+running_average(x; dims) = accumulate((s, e) -> s / 2 + e, x; dims, init = one(eltype(x)))
 # A zero, through which a product's derivative passes.
 with_zero(x) = (y = copy(x); y[2, 3] = 0; y)
 
@@ -122,6 +127,10 @@ const PROGRAMS = [
     ("running maxima and minima", x -> sum(accumulate(max, x; dims = 1) .* data(8, 6; scale = 0.3)) + sum(accumulate(min, x)),
      (data(8, 6; scale = 0.7),)),
     ("a linear recurrence", (a, b) -> sum(abs2, recurrence(a, b)), (0.9 .+ 0.1 .* data(30; scale = 0.3), data(30; scale = 0.7))),
+    ("a linear recurrence named with GenericFold", (a, b) -> sum(abs2, accumulate(RECURRENCE, tuple.(a, b))),
+     (0.9 .+ 0.1 .* data(30; scale = 0.3), data(30; scale = 0.7))),
+    ("a running average", x -> sum(abs2, running_average(x; dims = 2)), (data(8, 6),)),
     ("Welford's variance as Base spells it", x -> sum(base_variance(x; dims = 1) .* data(1, 6)), (data(8, 6),)),
+    ("Welford's variance named with GenericFold", x -> sum(reduce(VARIANCE, x; dims = 1) .* data(1, 6)), (data(8, 6),)),
 ]
 

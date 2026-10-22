@@ -158,7 +158,7 @@ end
 # tree of halves (`_reduce_jvp`), log₂ n levels each kept for the transpose;
 # two scans keep one state per element.
 function each_element_pullback(f::GenericFold, x, y, g, axes, tape)
-    state = GenericFold(f.init, f.lift, f.combine, identity, nothing)
+    state = unobserved(f)
     xn, yn = node(x), node(y)
     s = f.observe === identity ? y :
         h(tape, record!(tape, Reduce(state, axes), (x.id,), yn.dims, fold_eltype(state, xn.eltype); scalar = yn.scalar))
@@ -216,7 +216,8 @@ function scan_pullback(f::Fold, op, x, g, tape)
     S = fold_types(f, node(x).eltype).state
     k, T = fieldcount(S), promote_type(fieldtypes(S)...)
     # What each result reads of the state.
-    gs = f isa GenericFold ? f.observe === identity ? g : only(vjp!(tape, f.observe, (prefixes(tape, f, x, op),), g)) : (g,)
+    o = observer(f)
+    gs = o === nothing ? (g,) : o === identity ? g : only(vjp!(tape, o, (prefixes(tape, f, x, op),), g))
     before = prefixes(tape, f, x, op; exclusive = true)
     e = components(x)
     step(s, e) = fold_combine(f, s, fold_lift(f, e))
@@ -233,10 +234,19 @@ end
 # The states a scan of `x` by `f` reads, at each position: a tuple of handles,
 # a builtin fold's one component as it observes it.
 function prefixes(tape, f, x, op; exclusive = op.exclusive)
-    f isa GenericFold || return (scanned(tape, f, x, op.axes; op.reverse, exclusive),)
-    state = GenericFold(f.init, f.lift, f.combine, identity, nothing)
+    state = unobserved(f)
+    state === nothing && return (scanned(tape, f, x, op.axes; op.reverse, exclusive),)
     components(scanned(tape, state, x, op.axes; op.reverse, exclusive))
 end
+
+# A fold of functions observing its state as it is, and how it observes it;
+# nothing for a builtin fold.
+unobserved(f::GenericFold) = GenericFold(f.init, f.lift, f.combine, identity, nothing)
+unobserved(f::InSequence) = (s = unobserved(f.fold); s === nothing ? nothing : InSequence(s))
+unobserved(::Fold) = nothing
+observer(f::GenericFold) = f.observe
+observer(f::InSequence) = observer(f.fold)
+observer(::Fold) = nothing
 
 function pullback(op::Contract, n, id, g, tape)
     a, b = map(i -> TracedArray(tape, i), n.inputs)

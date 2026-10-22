@@ -2,16 +2,26 @@
 Tempest compiles traced Julia array programs into planned, fused kernels.
 
 A program is Julia array code, and what it computes reaches the compiler as
-three things: maps, folds, and reads at index formulas. Products, reshapes,
-permutations, gathers and scatters to positions it can compute are spellings of
-them, and so is every function a program calls. A scatter by index arrays is not
-one yet: it runs whole, on stored operands. `Tempest` names only what Base
-cannot spell:
+three things: maps, folds (a scan is a fold that keeps the axis it runs
+along), and reads at index formulas. Products, reshapes, permutations,
+gathers and scatters to positions it can compute are spellings of them, and
+so is every function a program calls. A scatter by index arrays is not one
+yet: it runs whole, on stored operands. `Tempest` names only what Base cannot
+spell:
 
 - the way in: `compile`, `explain`, `gradient` and the targets;
-- derivatives the code does not carry: `scalar_partials` for a scalar
-  function, and for a fold the `pullback` of a `GenericFold`, given to `fold`.
-  A fold without one is Base's `mapreduce`, its state a tuple if need be.
+- the derivative of a scalar function, which its code does not carry:
+  `scalar_partials`;
+- the laws of a fold's combine: `GenericFold`.
+
+A fold is Base's `mapreduce`, its state a tuple if need be, and a scan Base's
+`accumulate`; a fold's derivative comes from its combine's, through scans. A
+function given to `mapreduce` is taken to associate and commute, as a
+reduction groups and interleaves its elements; one given to `accumulate` is
+combined in sequence, as Base combines it, from an `init` that need be no
+identity. A `GenericFold`, given to `reduce` or `accumulate` where the
+function goes, claims that it associates and commutes, and so a scan by it
+may group its elements, as a sum's may.
 
 `logsumexp` is a fold, a spelling. The log-sum-exp written out with `maximum`
 differentiates as it does, and plans as it does where the target permits the
@@ -23,9 +33,12 @@ Any other function, a product by labelled axes or a batched product say, is a
 spelling and lives in its own package, as Einops's and NNlib's do; an extension
 gives it a method on traced arrays where its body does not trace.
 
-`Tempest.Compiler` is how a program becomes kernels, with the levels beneath
-`compile`. `Tempest.IR` is the vocabulary the levels share and implementations
-read, and `Tempest.Implement` the interface kernel packages implement.
+`Tempest.Compiler` is how a program becomes kernels; its public names are
+what packages beside a program need: the step beneath `compile`, what an
+extension writes traced methods with, and what kernel packages and targets
+read and define. `Tempest.IR` is the vocabulary the levels share and
+implementations read, and `Tempest.Implement` the interface kernel packages
+implement.
 """
 module Tempest
 
@@ -40,7 +53,7 @@ include("Compiler/Compiler.jl")
 
 # What programs are written with: the way in, and what Base cannot spell.
 @republic using .Compiler: compile, Compiled, gradient, explain, CPUTarget, CUDATarget,
-    fold, logsumexp, scalar_partials
+    logsumexp, scalar_partials
 @republic using .IR: GenericFold
 
 include("precompile.jl")

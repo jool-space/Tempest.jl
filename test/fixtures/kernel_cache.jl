@@ -19,7 +19,7 @@ programs = [
     ("attention training step", differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v)),
         (q, k, v), T.CUDATarget(precision = :tf32)),
     # Float64 elements, which tiles do not take.
-    ("the floor", trace(x -> T.fold(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),
+    ("the floor", trace(x -> reduce(sums, x; dims = 1), data(80, 112)), (data(80, 112),), T.CUDATarget()),
 ]
 @testset "$name" for (name, p, args, target) in programs
     results = map(1:3) do pass

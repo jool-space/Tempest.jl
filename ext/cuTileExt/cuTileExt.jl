@@ -403,10 +403,11 @@ recomputes_folds(::cuTileGenerator, target) = target isa CUDATarget
 # sketch does: a launch folds each chunk to its total, a scan of the totals
 # gives each chunk its carry, and a launch scans the chunks again from it,
 # where Futhark and CUB scan in one pass by a look-back between blocks,
-# which needs flags cuTile does not have. A blocked scan groups its elements,
-# which needs associativity: the builtin folds have it, and a combine of the
-# user's may not, since Base's `accumulate`, unlike its `reduce`, combines in
-# sequence and asks for none. Whether to group one is a decision still open.
+# which needs flags cuTile does not have. A blocked scan groups its elements
+# and pads with `init`, which needs associativity and an identity: the
+# builtin folds have them and a `GenericFold` claims them. An `InSequence`
+# fold, Base's `accumulate` by a function of the user's, claims neither, and
+# stays on the floor.
 function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind in (:pointwise, :reduction) || return Claim[]
     products = product_claims(target, g)

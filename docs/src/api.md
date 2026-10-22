@@ -17,14 +17,15 @@ Tempest.CUDATarget
 
 ## Writing programs
 
-Beyond Base's broadcasts, folds, products, indexing and ranges (a range broadcast
-against a traced array is the index itself, a formula rather than an array),
-programs can call:
+Programs are written with Base: broadcasts, folds (`mapreduce` with a tuple
+state among them), scans (`accumulate`, `cumsum`), products, indexing and
+ranges (a range broadcast against a traced array is the index itself, a
+formula rather than an array). Beyond Base, programs can call `logsumexp`,
+and claim with a `GenericFold` the laws of a combine, which Base cannot spell:
 
 ```@docs
-Tempest.fold
-Tempest.GenericFold
 Tempest.logsumexp
+Tempest.GenericFold
 ```
 
 Any other function a program calls, a batched product say, is written in
@@ -134,6 +135,7 @@ Tempest.IR.Statistic
 Tempest.IR.Sum
 Tempest.IR.Composed
 Tempest.IR.LOGSUMEXP
+Tempest.IR.InSequence
 Tempest.IR.fold_reduce
 Tempest.IR.product_factors
 ```
