@@ -6,8 +6,7 @@
 # padded lanes.
 
 public Fold, SumFold, MaxFold, MinFold, ProdFold, Relative, Law, Exponential, Square, Statistic, Sum, Composed, LOGSUMEXP, GenericFold,
-    fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, fold_eltype,
-    fold_accumulator, lse_shift, HalfFloat
+    fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, lse_shift, HalfFloat
 
 abstract type Fold end
 

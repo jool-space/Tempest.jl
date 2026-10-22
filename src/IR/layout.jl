@@ -2,7 +2,7 @@
 # it is a formula over a domain, so its position in storage is one too. A value
 # here is anything with `dims` and `scalar`: a number is stored as one element.
 
-public storage_length, address, aligned_axes, group_stride, wide_axes
+public storage_length, address, group_stride
 
 "The elements value `v` stores."
 storage_length(v) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
@@ -32,25 +32,6 @@ function address(v, index, d::Domain)
         total = add(total, scale(e, s), d)
     end
     total
-end
-
-"""
-    aligned_axes(dims, index, domain) -> axes or nothing
-
-The axes of `domain` along which an index reads a value of `dims`, one per axis
-of the value, when each axis of the value is read at one variable of the domain
-of the same extent, in the domain's order: the value is the domain's tile with
-the other axes broadcast.
-"""
-function aligned_axes(dims, index, D)
-    axes = Int[]
-    for (k, e) in enumerate(index)
-        e.constant == 0 && length(e.terms) == 1 && e.terms[1].first isa Var && e.terms[1].second == 1 || return nothing
-        n = e.terms[1].first.n
-        D[n] == dims[k] && (isempty(axes) || n > last(axes)) || return nothing
-        push!(axes, n)
-    end
-    axes
 end
 
 """
