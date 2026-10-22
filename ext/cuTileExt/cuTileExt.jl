@@ -125,7 +125,7 @@ function Base.show(io::IO, s::TileSchedule)
         return
     end
     print(io, s.sketch, " ", join(extent(s), "×"), ", tile ", join(tiles(s), "×"))
-    code(s) in (1, 2) && print(io, ", reducing axis ", code(s))
+    code(s) in (1, 2) && print(io, s.sketch === :scan ? ", scanning axis " : ", reducing axis ", code(s))
     s.splits > 1 && print(io, ", split ", s.splits, " ways")
     for ax in s.tiling
         ax.chunk > 1 && print(io, ", ", ax.chunk, " tiles per block")
@@ -388,27 +388,62 @@ const PARTIAL_BLOCKS = 256
 
 recomputes_folds(::cuTileGenerator, target) = target isa CUDATarget
 
-# A scan's group is not claimed yet: it runs on the floor, a thread per line.
-# Its realization, as designed: a block owns a tile of the kept axes and
-# sweeps the scanned axis a tile at a step, carrying each lane's state. At
-# each step it lifts the tile, padding at the identity; scans it along the
-# swept tile axis, by `accumulate` for the builtin folds (`+`, `*`, `max`,
-# `min`) and by `Intrinsics.scan` with the fold's `Pairwise` combine for a
-# tuple state, a tile per component, as `reduce_state!` folds one; combines
-# the carry before each prefix, the carry first; applies the maps after, at
-# the tile, and stores. The carry then takes the tile's fold after it. With
-# `reverse` the sweep starts at the last tile and scans with `rev = true`;
-# an exclusive scan, which only derivatives make, shifts the prefixes by a
-# lane. A long scanned axis with few kept tiles splits as the `:split`
-# sketch does: a launch folds each chunk to its total, a scan of the totals
-# gives each chunk its carry, and a launch scans the chunks again from it,
-# where Futhark and CUB scan in one pass by a look-back between blocks,
-# which needs flags cuTile does not have. A blocked scan groups its elements
-# and pads with `init`, which needs associativity and an identity: the
-# builtin folds have them and a `GenericFold` claims them. An `InSequence`
-# fold, Base's `accumulate` by a function of the user's, claims neither, and
-# stays on the floor.
+# A scan's group sweeps its scanned axes as one tile axis, the scans' linear
+# order, a block per tile of the kept axes (see `scan_kernel`). Its tiles
+# group the elements and pad with the identity, which needs associativity
+# and an identity: the builtin folds have them and a `GenericFold` claims
+# them. An `InSequence` fold, Base's `accumulate` by a function of the
+# user's, claims neither, and stays on the floor, a thread per line; so does
+# an exclusive scan, which only derivatives make, until a tile's prefixes
+# can shift by a lane. A long scanned axis with few kept tiles has few
+# blocks: it could split as the `:split` sketch does, a launch folding each
+# chunk to its total, a scan of the totals giving each chunk its carry, and
+# a launch scanning the chunks again from it, where Futhark and CUB scan in
+# one pass by a look-back between blocks, which needs flags cuTile does not
+# have.
+const SCAN_ELEMENTS = 1024
+const SCAN_KEPT_TILE = 64
+
+function scan_claims(g::GroupView)
+    R = sort!(collect(g.primary_axes))
+    R == collect(first(R):last(R)) || return Claim[]
+    for r in g.reductions
+        v = g.values[r]
+        v.fold isa InSequence && return Claim[]
+        v.scan === nothing && v.reduced != g.primary_axes && return Claim[]
+        v.scan !== nothing && v.scan.exclusive && return Claim[]
+    end
+    all(m -> g.values[m].dims == g.domain, g.outputs) || return Claim[]
+    expressible(g) || return Claim[]
+    n(axes) = prod(k -> g.domain[k], axes; init = 1)
+    maximum(n, (R, 1:(first(R) - 1), (last(R) + 1):length(g.domain))) < typemax(Int32) ÷ 2 || return Claim[]
+    c = Context(g, scan_schedule(g, R))
+    if !fits(c)
+        c = Context(g, refined(c))
+        fits(c) || return Claim[]
+    end
+    [Claim(c.s)]
+end
+
+# The scanned axes one tile axis, swept; the axes before them, which vary
+# fastest in memory, a kept tile axis, and those after them bound by the grid,
+# or the axes after them kept when none come before. The kept tile is small
+# enough to give the grid blocks, and the swept tile fills the rest of a
+# tile's elements.
+function scan_schedule(g::GroupView, R)
+    n(axes) = prod(k -> g.domain[k], axes; init = 1)
+    before, after = collect(1:(first(R) - 1)), collect((last(R) + 1):length(g.domain))
+    kept = isempty(before) ? after : before
+    tk = min(nextpow(2, n(kept)), prevpow(2, max(1, n(kept) ÷ MINIMUM_BLOCKS)), SCAN_KEPT_TILE)
+    swept = TileAxis(R, n(R), min(nextpow(2, n(R)), SCAN_ELEMENTS ÷ tk), true)
+    tiling = isempty(before) ? [swept, TileAxis(after, n(after), tk, false)] :
+        [TileAxis(before, n(before), tk, false), swept]
+    isempty(before) || isempty(after) || push!(tiling, TileAxis(after, n(after), 1, false))
+    TileSchedule(:scan, tiling, 1, nothing, 0, :full)
+end
+
 function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
+    g.kind === :scan && return scan_claims(g)
     g.kind in (:pointwise, :reduction) || return Claim[]
     products = product_claims(target, g)
     isempty(products) || return products

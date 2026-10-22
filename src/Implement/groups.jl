@@ -9,9 +9,11 @@ public GroupView, ValueView, members, product_axes
 What a view holds of a value: its element type and dims, whether it is a
 number rather than an array (stored as one element), and whether it is stored;
 for a fold, the fold and the axes of its domain it reduces, and for a scan its
-fold and none; and for a value masked by formulas over its positions,
-`masked`: the formulas, each at most zero where the mask holds, and the
-number the value is where it fails (see `Tempest.IR.comparison_mask` and
+fold, no axes, and `scan`: whether it runs from the last element down
+(`reverse`) and leaves each element out of its own prefix (`exclusive`),
+nothing for any other value; and for a value masked by formulas over its
+positions, `masked`: the formulas, each at most zero where the mask holds,
+and the number the value is where it fails (see `Tempest.IR.comparison_mask` and
 `Tempest.IR.masked_result`).
 """
 struct ValueView
@@ -21,6 +23,7 @@ struct ValueView
     stored::Bool
     fold::Union{Nothing, Fold}
     reduced::Tuple{Vararg{Int}}
+    scan::Union{Nothing, @NamedTuple{reverse::Bool, exclusive::Bool}}
     masked::Union{Nothing, Tuple{Vector{Affine}, Any}}
 end
 

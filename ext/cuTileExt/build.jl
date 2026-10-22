@@ -490,8 +490,64 @@ function merge_kernels(c::Context, rs, slots, workspaces)
     [merge_kernel(c, groups[key], key[2], workspaces) for key in sort!(collect(keys(groups)))]
 end
 
+# A scan's sweep: each block owns a tile of the kept axes and sweeps the
+# scanned axis a tile at a step, in the scans' direction, carrying each lane's
+# state. At each step every fold of the group, in phase order, lifts its
+# elements, the lanes past the extent at the identity. A scan scans them along
+# the tile and combines its carry before each prefix (see `scan_state!`), and
+# the members after it read the prefixes there; a fold along the scanned axes
+# accumulates lane by lane, as a streamed fold does, and is stored after the
+# sweep.
+function scan_kernel(c::Context)
+    g = c.g
+    k = TileKernel("scan", (), c.s.occupancy)
+    st = k.body
+    indices, k.grid, _, _ = block_indices!(st, c)
+    p = sweep_axis(c.s)
+    n = sweeps(c.s)
+    reverse = any(r -> g.values[r].scan !== nothing && g.values[r].scan.reverse, g.reductions)
+    folds = sort(g.reductions; by = r -> (g.phase[r], r))
+    scanned(r) = g.values[r].scan !== nothing
+    states = Dict(map(folds) do r
+        f, A = fold_of(c, r), accumulator(c, r)
+        acc = state_symbols(findfirst(==(r), g.reductions), f, A)
+        init_state!(st, acc, f, A, scanned(r) ? Base.setindex(tile(c), 1, p) : tile(c))
+        r => acc
+    end)
+    s, t = gensym(:s), gensym(:t)
+    loop = Any[reverse ? :($t = Int32($(n + 1)) - $s) : :($t = $s)]
+    at = step_indices(c.s, indices, t)
+    valid = valid_mask!(loop, c, t)
+    names = Dict{Term, Any}()
+    for r in folds
+        f, A, term = fold_of(c, r), accumulator(c, r), g.terms[r]
+        emit_tiles!(k, loop, c, [term], names, at...)
+        x = as_accumulator(loop, names[term], A, term_eltype(term, g), tile(c))
+        if scanned(r)
+            prefixes = scan_state!(loop, f, A, states[r], lift!(loop, f, A, x, valid), p, reverse, tile(c))
+            names[Stat(r)] = observe!(loop, f, A, g.values[r].eltype, prefixes)
+        else
+            accumulate_elements!(loop, f, A, states[r], x, valid)
+        end
+    end
+    emit_tiles!(k, loop, c, [g.terms[m] for m in g.outputs], names, at...)
+    store_values!(k, loop, c, [m for m in members(g) if g.values[m].stored && (scanned(m) || m in g.outputs)], names, at...)
+    push!(st, :(for $s in Int32(1):Int32($n)
+        $(loop...)
+    end))
+    stats = Dict{Term, Any}()
+    for r in folds
+        scanned(r) && continue
+        f, A = fold_of(c, r), accumulator(c, r)
+        stats[Stat(r)] = observe!(st, f, A, g.values[r].eltype, reduce_state!(st, f, A, states[r], p))
+    end
+    store_values!(k, st, c, [r for r in folds if !scanned(r) && g.values[r].stored], stats, step_indices(c.s, indices, :(Int32(1)))...)
+    k
+end
+
 function schedule_kernels(c::Context, workspaces)
     c.s.sketch === :pointwise && return pointwise_kernel(c)
+    c.s.sketch === :scan && return [scan_kernel(c)]
     slots = Dict{Int, Int}()
     kernels = c.s.sketch in (:resident, :streamed) || (c.s.sketch === :product && c.s.splits == 1) ?
         unsplit_kernel(c, workspaces, slots) : split_kernels(c, workspaces, slots)

@@ -285,6 +285,20 @@ struct Observe{F}
 end
 (o::Observe)(s...) = fold_observe(o.f, s)
 
+# A fold's combine as cuTile's scans call it: the components of two states
+# interleaved, the later state's first. Its `swap_pairs` notes the other
+# order, but a recurrence, whose combine does not commute, scans in this one.
+struct ScanCombine{N, F}
+    f::F
+end
+ScanCombine{N}(f::F) where {N, F} = ScanCombine{N, F}(f)
+function (c::ScanCombine{N})(x...) where {N}
+    later = ntuple(i -> x[2i - 1], Val(N))
+    earlier = ntuple(i -> x[2i], Val(N))
+    s = fold_combine(c.f, earlier, later)
+    N == 1 ? only(s) : s
+end
+
 state_symbols(r, f, A) = [Symbol(:acc_, r, :_, i) for i in eachindex(fold_init(f, A))]
 
 # Accumulators `names` at the fold's identity, over tiles of `shape`.
@@ -332,6 +346,20 @@ function reduce_state!(st, f, A, acc, dims)
         :(mapreduce(identity, $(Pairwise(f)), $(acc...); dims = $dims, init = $init))
     push!(st, :(($(names...),) = $expr))
     names
+end
+
+# States `lifted` scanned along tile axis `p`, in the sweep's direction, and
+# `carry`, the state before the tile, combined before each prefix: the
+# prefixes. The carry then takes the tile's last prefix, in that direction.
+function scan_state!(st, f, A, carry, lifted, p, reverse, shape)
+    n = length(carry)
+    scanned = [gensym(:scan) for _ in carry]
+    prefixes = [gensym(:prefix) for _ in carry]
+    push!(st, :(($(scanned...),) = $(ct.Intrinsics.scan)(($(lifted...),), $(p - 1), $(ScanCombine{n}(f)), $(fold_init(f, A)), $reverse)))
+    foreach(i -> push!(st, :($(prefixes[i]) = $(Combine{i, n}(f)).($(carry...), $(scanned...)))), 1:n)
+    last = ntuple(q -> q == p && !reverse ? shape[p] : 1, length(shape))
+    foreach((a, x) -> push!(st, :($a = $(ct.extract)($x, $last, $(Base.setindex(shape, 1, p))))), carry, prefixes)
+    prefixes
 end
 
 # A whole tile of elements folded along `dims`, lanes outside `valid` excepted.
