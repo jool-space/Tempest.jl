@@ -172,9 +172,20 @@ end
     h = BFloat16.(x)
     in_single(x) = (s -> s[3] / s[1]).(mapreduce(welford_lift, welford, x; dims = 1, init = (0.0f0, 0.0f0, 0.0f0)))
     @test isapprox(interpret(trace(in_single, h), h), base_variance(Float64.(h); dims = 1); rtol = 1.0e-6)
-    # Base cannot carry the fold's derivative rule, GenericFold's `pullback`.
-    @testset "gap: a derivative rule for a fold Base spells" begin
-        @test_broken message(() -> differentiate(trace(x -> sum(base_variance(x; dims = 1)), x))) == ""
+    # Its derivative comes from its combine: two exclusive scans give each
+    # element the fold of the rest, and the combine's own code the partials.
+    # The gradient is the variance's written with sums. Planned, the fold
+    # rides the sweep of the scan before each element, and the scan after it
+    # computes the gradient: four kernels, with the count and the loss, where
+    # the sums spelling, a fold relative to the mean, has two.
+    @testset "a derivative for a fold Base spells" begin
+        loss(x) = sum(base_variance(x; dims = 1))
+        @test message(() -> differentiate(trace(loss, x))) == ""
+        by_sums(x) = (m = sum(x; dims = 1) ./ size(x, 1); sum(sum(abs2, x .- m; dims = 1) ./ size(x, 1)))
+        @test isapprox(last(T.gradient(loss, x)), last(T.gradient(by_sums, x)); rtol = 1.0e-12)
+        p = C.plan(C.rewrite(C.lower(differentiate(trace(loss, x)))))
+        @test C.structure(p).kernels == 4 && count(g -> g.kind === :scan, p.groups) == 2
+        @test C.structure(C.plan(C.rewrite(C.lower(differentiate(trace(by_sums, x)))))).kernels == 2
     end
 end
 

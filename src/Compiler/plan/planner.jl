@@ -14,7 +14,10 @@
 # A scan's group sweeps the axes it scans along, in its direction: its scans
 # alike, and the maps over its domain. A map before a scan is its operand's
 # term, as Futhark's `scanomap` fuses one into its scan; a map after reads
-# each scan at the position the sweep has reached.
+# each scan at the position the sweep has reached. A fold along those axes
+# rides the sweep, in either direction, since it need not take its elements
+# in order; it is complete only after the sweep, so nothing in the group
+# reads it.
 
 struct Group
     kind::Symbol # :reduction, :scan, :pointwise or :opaque
@@ -57,12 +60,13 @@ end
 # Where a group keeps a value it computes, as the value's index over the
 # domain: a fold of the group at the variables of the axes it keeps, any other
 # value over the whole domain or at the positions of the primary folds; or
-# nothing. A scan's group keeps everything over its whole domain.
+# nothing. A scan's group keeps everything but its folds over its whole
+# domain.
 function placement(graph, g::Group, v)
     val = graph.values[v]
-    g.kind === :scan && return val.dims == g.domain ? identity_index(g.domain) : nothing
-    # A result of the group's own opaque work, at the variables of its domain.
     d = val.definition
+    g.kind === :scan && !(d isa Reduction) && return val.dims == g.domain ? identity_index(g.domain) : nothing
+    # A result of the group's own opaque work, at the variables of its domain.
     g.kind === :opaque && d isa Opaque && return opaque_dims(d) == g.domain ? ntuple(var, length(g.domain)) : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
@@ -85,6 +89,7 @@ function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain)
     val = graph.values[v]
     d = val.definition
     if v in g.reductions
+        g.kind === :scan && d isa Reduction && throw(OutsideGroup())
         primary(graph, g, v) && index == placement(graph, g, v) || throw(OutsideGroup())
         return Stat(v)
     end
@@ -375,13 +380,16 @@ function group_values(graph, stored, live, results, running, fixed)
         live[id] && push!(followers[r], id)
     end
     foreach(unique!, followers)
-    for id in 1:n
-        live[id] && owner[id] == 0 || continue
+    # Scans first, so that a fold along a scan's axes rides its sweep, wherever
+    # it is in the graph.
+    seeds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n)]
+    for id in seeds
+        live[id] && owner[id] == 0 && stored[id] || continue
         d = values[id].definition
-        d isa Union{Reduction, Scan} && stored[id] || continue
         g = d isa Scan ? Group(:scan, values[id].dims) : Group(:reduction, d.iteration)
+        after = d isa Scan ? 0 : id
         try_add!(graph, stored, deps, g, id; fold = true)
-        frontier = reach!(Int[], followers, stored, [members(g); (r for m in members(g) for r in stored_reads(g.terms[m]))...], id)
+        frontier = reach!(Int[], followers, stored, [members(g); (r for m in members(g) for r in stored_reads(g.terms[m]))...], after)
         # A pass visits the frontier in order; what a new member reaches above
         # the cursor is visited in this pass, the rest in the next.
         changed = true
@@ -393,12 +401,11 @@ function group_values(graph, stored, live, results, running, fixed)
                 k += 1
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
-                added = od isa Reduction ? g.kind === :reduction && od.iteration == g.domain && try_add!(graph, stored, deps, g, other; fold = true) :
-                    od isa Scan ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
-                    od isa Pointwise && try_add!(graph, stored, deps, g, other; fold = false)
+                added = od isa Union{Reduction, Scan} ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
+                    od isa Pointwise && other > id && !awaits_sweep(graph, deps, g, other) && try_add!(graph, stored, deps, g, other; fold = false)
                 added || continue
                 changed = true
-                reach!(frontier, followers, stored, [other; stored_reads(g.terms[other])], id)
+                reach!(frontier, followers, stored, [other; stored_reads(g.terms[other])], after)
                 k = searchsortedfirst(frontier, other) + 1
             end
         end
@@ -452,12 +459,24 @@ function group_values(graph, stored, live, results, running, fixed)
     Plan(graph, stored, groups[order], map(o -> o == 0 ? 0 : position[o], owner))
 end
 
-"Whether scan `v` joins the sweep of group `g`: a scan's group, over its domain, along its axes in its direction."
+"""
+Whether fold or scan `v` joins the sweep of group `g`: a fold a reduction's
+group over its iteration; a scan, or a fold along its axes, a scan's group
+over its domain, the scan in the group's direction.
+"""
 function sweeps_with(graph, g::Group, v)
-    g.kind === :scan && graph.values[v].dims == g.domain || return false
-    d, e = graph.values[v].definition, graph.values[first(g.reductions)].definition
-    d.axes == e.axes && d.reverse == e.reverse
+    d = graph.values[v].definition
+    g.kind === :reduction && return d isa Reduction && d.iteration == g.domain
+    e = graph.values[first(g.reductions)].definition
+    d isa Reduction && return d.iteration == g.domain && d.reduced == e.axes
+    graph.values[v].dims == g.domain && d.axes == e.axes && d.reverse == e.reverse
 end
+
+# Whether map `v` waits for another sweep: it reads a scan of another
+# sweep that has no kernel yet. That scan's group reads this one's values
+# from storage, so a map that reads both can join it, and not this one.
+awaits_sweep(graph, deps, g::Group, v) = g.kind === :scan &&
+    any(s -> deps.owner[s] == 0 && graph.values[s].definition isa Scan && !(s in g.reductions), findall(deps.up[v]))
 
 "A candidate whose values do not form one group."
 struct NotAGroup <: Exception

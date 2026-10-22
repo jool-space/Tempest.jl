@@ -102,37 +102,46 @@ function run_reduction!(g::Group, buffers, graph)
 end
 
 # Each line along the scanned axes, swept in the scans' direction: at each
-# position every scan folds its element, in phase order, and the outputs
-# there read the scans where the sweep has them.
+# position every scan and fold takes its element, in phase order, and the
+# outputs there read the scans where the sweep has them. The folds are
+# complete after the line.
 function run_scan!(g::Group, buffers, graph)
     D = g.domain
     first_scan = graph.values[first(g.reductions)].definition
     axes, reverse = first_scan.axes, first_scan.reverse
-    scans = sort(g.reductions; by = r -> (g.phase[r], r))
-    # Each member's values, which a `Stat` reads at the position.
-    values = Dict{Int, Any}(m => Array{graph.values[m].eltype}(undef, D) for m in members(g))
+    folds = sort(g.reductions; by = r -> (g.phase[r], r))
+    kept = ntuple(k -> k in axes ? 1 : D[k], length(D))
+    # Each member's values, which a `Stat` reads at the position; a fold's at
+    # the line.
+    values = Dict{Int, Any}(m => Array{graph.values[m].eltype}(undef, m in folds && graph.values[m].definition isa Reduction ? kept : D)
+        for m in members(g))
     along = CartesianIndices(ntuple(k -> k in axes ? D[k] : 1, length(D)))
-    for K in CartesianIndices(ntuple(k -> k in axes ? 1 : D[k], length(D)))
+    for K in CartesianIndices(kept)
         states = Dict{Int, Any}()
+        observe(r) = graph.values[r].eltype(fold_observe(graph.values[r].definition.fold, states[r]))
         for S in (reverse ? Iterators.reverse(along) : along)
             I = K + S - oneunit(S)
             x = Tuple(I) .- 1
-            for r in scans
+            for r in folds
                 d = graph.values[r].definition
-                observe(state) = graph.values[r].eltype(fold_observe(d.fold, state))
+                scan = d isa Scan
                 A = fold_types(d.fold, term_eltype(g.terms[r], graph)).accumulator
-                state = get(() -> fold_init(d.fold, A), states, r)
-                d.exclusive && (values[r][I] = observe(state))
+                haskey(states, r) || (states[r] = fold_init(d.fold, A))
+                scan && d.exclusive && (values[r][I] = observe(r))
                 e = evaluate_term(g.terms[r], x, nothing, buffers, values, graph)
-                states[r] = fold_combine(d.fold, state, fold_lift(d.fold, A(e)))
-                d.exclusive || (values[r][I] = observe(states[r]))
+                states[r] = fold_combine(d.fold, states[r], fold_lift(d.fold, A(e)))
+                scan && !d.exclusive && (values[r][I] = observe(r))
             end
             for m in g.outputs
                 values[m][I] = evaluate_term(g.terms[m], x, nothing, buffers, values, graph)
             end
         end
+        foreach(r -> graph.values[r].definition isa Reduction && (values[r][K] = observe(r)), folds)
     end
-    foreach(m -> buffers[m] = values[m], members(g))
+    for m in members(g)
+        val = graph.values[m]
+        buffers[m] = !(val.definition isa Reduction) ? values[m] : val.scalar ? only(values[m]) : reshape(values[m], val.dims)
+    end
 end
 
 """

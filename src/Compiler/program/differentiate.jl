@@ -144,8 +144,29 @@ function fold_pullback(::ProdFold, x, y, g, axes, full, tape)
 end
 
 function fold_pullback(f::GenericFold, x, y, g, axes, full, tape)
-    f.pullback === nothing && throw(ArgumentError("fold $f has no derivative rule; pass `pullback` to GenericFold"))
-    f.pullback(x, y, g, axes)
+    f.pullback === nothing || return f.pullback(x, y, g, axes)
+    each_element_pullback(f, x, y, g, axes, tape)
+end
+
+# A fold's derivative from its combine. The fold merges each element once,
+# and its combine associates and commutes, so the state is
+# `combine(lift(x), rest)`, where `rest` merges the elements before `x` and
+# those after it along the reduced axes, in their linear order: two exclusive
+# scans. The element's cotangent is the state's pulled back through that one
+# combine and the lift, traced from their own code. JAX differentiates a
+# reduction by a function of the user's through that function applied in a
+# tree of halves (`_reduce_jvp`), log₂ n levels each kept for the transpose;
+# two scans keep one state per element.
+function each_element_pullback(f::GenericFold, x, y, g, axes, tape)
+    state = GenericFold(f.init, f.lift, f.combine, identity, nothing)
+    xn, yn = node(x), node(y)
+    s = f.observe === identity ? y :
+        h(tape, record!(tape, Reduce(state, axes), (x.id,), yn.dims, fold_eltype(state, xn.eltype); scalar = yn.scalar))
+    gs = f.observe === identity ? g : only(vjp!(tape, f.observe, (components(s),), g))
+    before = scanned(tape, state, x, axes; exclusive = true)
+    after = scanned(tape, state, x, axes; reverse = true, exclusive = true)
+    rest = f.combine(components(before), components(after))
+    only(vjp!(tape, e -> f.combine(f.lift(e), rest), (components(x),), gs))
 end
 
 # Scans.

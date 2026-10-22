@@ -185,8 +185,9 @@ function scalar_kernel(graph, stored, g::Group, slots)
 end
 
 # A scan's group: an item per position of its other axes, which sweeps the
-# scanned axes in the scans' direction. At each position every scan folds its
-# element, in phase order, and the outputs there are computed and stored.
+# scanned axes in the scans' direction. At each position every scan and fold
+# takes its element, in phase order, and the outputs there are computed and
+# stored; the folds are stored after the sweep.
 function scan_kernel(graph, stored, g::Group, slots)
     D = g.domain
     vars = index_vars(length(D))
@@ -198,30 +199,34 @@ function scan_kernel(graph, stored, g::Group, slots)
     body = Expr(:block)
     s = body.args
     delinearize_expr(s, :lin, kept, D, vars)
-    scans = sort(g.reductions; by = r -> (g.phase[r], r))
-    states = Dict(r => gensym(:state) for r in scans)
-    accumulators = Dict(r => fold_types(graph.values[r].definition.fold, term_eltype(g.terms[r], graph)).accumulator for r in scans)
-    foreach(r -> push!(s, :($(states[r]) = $fold_init($(graph.values[r].definition.fold), $(accumulators[r])))), scans)
+    folds = sort(g.reductions; by = r -> (g.phase[r], r))
+    states = Dict(r => gensym(:state) for r in folds)
+    accumulators = Dict(r => fold_types(graph.values[r].definition.fold, term_eltype(g.terms[r], graph)).accumulator for r in folds)
+    foreach(r -> push!(s, :($(states[r]) = $fold_init($(graph.values[r].definition.fold), $(accumulators[r])))), folds)
     loop = Expr(:block)
     delinearize_expr(loop.args, first_scan.reverse ? :($(count - 1) - sweep) : :sweep, swept, D, vars)
     names = Dict{Term, Any}()
     # What reads a scan changes along the sweep, though no index moves it.
     moves(t) = !isempty(stats(t))
-    for r in scans
-        val = graph.values[r]
-        fold, A = val.definition.fold, accumulators[r]
-        observed = :(convert($(val.eltype), $fold_observe($fold, $(states[r]))))
-        val.definition.exclusive && push!(loop.args, :($(stat_name(c, r)) = $observed))
+    observed(r) = :(convert($(graph.values[r].eltype), $fold_observe($(graph.values[r].definition.fold), $(states[r]))))
+    for r in folds
+        d = graph.values[r].definition
+        fold, A = d.fold, accumulators[r]
+        scan = d isa Scan
+        scan && d.exclusive && push!(loop.args, :($(stat_name(c, r)) = $(observed(r))))
         emit_terms!(loop.args, [g.terms[r]], c; names, hoisted = s, swept, moves)
         push!(loop.args, :($(states[r]) = $fold_combine($fold, $(states[r]), $fold_lift($fold, convert($A, $(names[g.terms[r]]))))))
-        val.definition.exclusive || push!(loop.args, :($(stat_name(c, r)) = $observed))
-        stored[r] && push!(loop.args, store_expr(c, r, identity_index(D), stat_name(c, r)))
+        scan && !d.exclusive && push!(loop.args, :($(stat_name(c, r)) = $(observed(r))))
+        scan && stored[r] && push!(loop.args, store_expr(c, r, identity_index(D), stat_name(c, r)))
     end
     emit_terms!(loop.args, [g.terms[m] for m in g.outputs], c; names, hoisted = s, swept, moves)
     foreach(m -> push!(loop.args, store_expr(c, m, identity_index(D), names[g.terms[m]])), g.outputs)
     push!(s, :(for sweep in 0:$(count - 1)
         $loop
     end))
+    for r in folds
+        graph.values[r].definition isa Reduction && stored[r] && push!(s, store_expr(c, r, placement(graph, g, r), observed(r)))
+    end
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 

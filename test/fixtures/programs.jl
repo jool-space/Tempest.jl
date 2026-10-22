@@ -122,5 +122,6 @@ const PROGRAMS = [
     ("running maxima and minima", x -> sum(accumulate(max, x; dims = 1) .* data(8, 6; scale = 0.3)) + sum(accumulate(min, x)),
      (data(8, 6; scale = 0.7),)),
     ("a linear recurrence", (a, b) -> sum(abs2, recurrence(a, b)), (0.9 .+ 0.1 .* data(30; scale = 0.3), data(30; scale = 0.7))),
+    ("Welford's variance as Base spells it", x -> sum(base_variance(x; dims = 1) .* data(1, 6)), (data(8, 6),)),
 ]
 
