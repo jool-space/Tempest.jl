@@ -1,9 +1,11 @@
 # Masks: a value masked by formulas over its positions, `ifelse(cond, x,
 # literal)` with `cond` a conjunction of comparisons between index formulas.
-# The planner finds them on the index graph and implementations on a
-# kernel's terms, so the algebra both walk with is here.
+# A position may be compared with an integer the program reads, a length on
+# the device say, which the formula holds as a gather. The planner finds
+# masks on the index graph and implementations on a kernel's terms, so the
+# algebra both walk with is here.
 
-public comparison_mask, masked_result
+public comparison_mask, held_formula, masked_result
 
 """
     comparison_mask(f, a, b, domain) -> Vector{Affine}
@@ -16,6 +18,19 @@ function comparison_mask(f, a::Affine, b::Affine, d::Domain)
     f in (<=, <) || ((a, b) = (b, a))
     e = add(a, scale(b, -1), d)
     [f in (<, >) ? add(e, 1, d) : e]
+end
+
+"""
+    held_formula(value, index, T, domain) -> Affine or nothing
+
+The integer of type `T` that `value` holds at `index`, as a formula: a gather
+known to lie in the type's range, so that a position compared with it is a
+mask. Nothing for a type wider than 32 bits, whose range the arithmetic of
+formulas, in `Int`, could overflow.
+"""
+function held_formula(value, index, ::Type{T}, d::Domain) where {T}
+    T <: Integer && T !== Bool && sizeof(T) <= 4 || return nothing
+    normalize(0, (Indirect(value, Tuple(index), Int(typemin(T)), Int(typemax(T))) => 1,), d)
 end
 
 """

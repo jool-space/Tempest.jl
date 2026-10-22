@@ -156,6 +156,7 @@ Tempest.IR.mentions
 
 ```@docs
 Tempest.IR.comparison_mask
+Tempest.IR.held_formula
 Tempest.IR.masked_result
 ```
 

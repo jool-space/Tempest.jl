@@ -1,7 +1,8 @@
 # A value masked by formulas over its positions: `ifelse(cond, x, literal)`
-# with `cond` a conjunction of comparisons between index formulas, or a map
-# of such a value that is a known number where the mask fails, as the
-# probabilities exp(s - lse) of masked scores s are zero. An implementation
+# with `cond` a conjunction of comparisons between index formulas, a
+# position and an integer the program reads among them, or a map of such a
+# value that is a known number where the mask fails, as the probabilities
+# exp(s - lse) of masked scores s are zero. An implementation
 # that sweeps such a value skips the tiles the mask rules out entirely (the
 # cuTile generator's `live_steps`), as FlexAttention's block mask does, which
 # it derives from the formulas rather than by evaluating the mask on tiles.
@@ -36,9 +37,16 @@ function mask_of(graph::IndexGraph, v, index, d::Domain, depth = 0)
         parts = map(o -> o isa Read ? mask_of(graph, o.value, map(through, o.index), d, depth + 1) : nothing, def.operands)
         return any(isnothing, parts) ? nothing : reduce(vcat, parts)
     end
-    def.f in (<=, <, >=, >) && length(def.operands) == 2 && all(o -> o isa IndexOperand, def.operands) || return nothing
-    comparison_mask(def.f, through(def.operands[1].expr), through(def.operands[2].expr), d)
+    def.f in (<=, <, >=, >) && length(def.operands) == 2 && any(o -> o isa IndexOperand, def.operands) || return nothing
+    a, b = map(o -> compared(graph, o, through, d), def.operands)
+    a === nothing || b === nothing ? nothing : comparison_mask(def.f, a, b, d)
 end
+
+# A side of a comparison with a position, as a formula: a position, or an
+# integer read from a value (see `held_formula`).
+compared(graph, o::IndexOperand, through, d) = through(o.expr)
+compared(graph, o::Read, through, d) = held_formula(o.value, map(through, o.index), graph.values[o.value].eltype, d)
+compared(graph, o, through, d) = nothing
 
 # The masks of the `ifelse` definitions `v`, read at `index`, is computed
 # from, through the pointwise values it reads.
