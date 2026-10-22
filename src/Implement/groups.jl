@@ -11,7 +11,7 @@ number rather than an array (stored as one element), and whether it is stored;
 for a fold, the fold and the axes of its domain it reduces; and for a value
 masked by formulas over its positions, `masked`: the formulas, each at most
 zero where the mask holds, and the number the value is where it fails (see
-`Tempest.Compiler.masked`).
+`Tempest.IR.comparison_mask` and `Tempest.IR.masked_result`).
 """
 struct ValueView
     eltype::DataType

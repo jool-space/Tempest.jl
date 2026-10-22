@@ -55,6 +55,7 @@ Tempest.Compiler.execute!
 Tempest.Compiler.capture!
 Tempest.Compiler.replay!
 Tempest.Compiler.outputs
+Tempest.Compiler.Plan
 Tempest.Compiler.group_views
 ```
 

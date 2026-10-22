@@ -35,6 +35,11 @@ kept_dims(domain, axes) = ntuple(k -> k in axes ? 1 : domain[k], length(domain))
 "Whether fold `r` reduces the group's primary axes."
 primary(graph, g::Group, r) = fold_axes(graph, r) == primary_axes(graph, g)
 
+"""
+A program's plan: which values are stored, and the groups its kernels
+compute, in order. A proposal is handed one, and reads its groups through
+`group_views`.
+"""
 struct Plan
     graph::IndexGraph
     stored::Vector{Bool}

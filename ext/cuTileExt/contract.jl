@@ -1,5 +1,5 @@
 # The product sketch: tile axes for reduction groups whose sums are of
-# bilinear products, over the axes `Tempest.Compiler.product_axes` finds. The reduced
+# bilinear products, over the axes `Tempest.Implement.product_axes` finds. The reduced
 # axes (K) are swept. Tile order (M, K, N, batch) puts each factor's tile in
 # matrix order, so the fold algebra's product rule applies. M, N and the batch
 # each collapse into one tile axis where every view chains over them;
