@@ -116,6 +116,9 @@ const PROGRAMS = [
     ("a mean divided in place", x -> (r = sum(x; dims = 1); r ./= size(x, 1); sum(abs2, x .- r)), (data(8, 6),)),
     ("concatenations", (x, v) -> sum(abs2, vcat(x, v) .* data(11, 6)) + sum(hcat(x, x) .* 2), (data(8, 6), data(3, 6; scale = 0.3))),
     ("strided and reversed writes", (x, v) -> (y = copy(x); y[1:2:8, end:-2:1] = v; sum(abs2, sin.(y))), (data(8, 6), data(4, 3; scale = 0.3))),
+    ("a write at index arrays", (x, v) -> (y = copy(x); y[:, [5, 2, 6]] = v; sum(abs2, tanh.(y))), (data(8, 6), data(8, 3; scale = 0.3))),
+    ("a write at traced positions", (x, v, i) -> (y = copy(x); y[:, i] .= v; y[i[1], 1] = 2 * v[3]; sum(abs2, tanh.(y))),
+     (data(8, 6), data(8, 2; scale = 0.3), Int32[4, 1])),
     ("scalar writes in a loop", x -> (y = similar(x, 6); for i in 1:6; y[i] = sum(x[:, i]); end; sum(abs2, y)), (data(8, 6),)),
     ("a scalar written into place", (x, s) -> (y = copy(x); y[3, 2] = s * 2; sum(abs2, y)), (data(8, 6), 0.7)),
     ("permutedims! and copyto!", x -> (y = similar(x, 6, 8); permutedims!(y, x, (2, 1)); z = similar(x, 48); copyto!(z, y); sum(abs2, z .* data(48))),
@@ -132,5 +135,14 @@ const PROGRAMS = [
     ("a running average", x -> sum(abs2, running_average(x; dims = 2)), (data(8, 6),)),
     ("Welford's variance as Base spells it", x -> sum(base_variance(x; dims = 1) .* data(1, 6)), (data(8, 6),)),
     ("Welford's variance named with GenericFold", x -> sum(reduce(VARIANCE, x; dims = 1) .* data(1, 6)), (data(8, 6),)),
+]
+
+# Writes where several elements land at one position: the interpreters and
+# the CPU's floor take them in order, the last landing, and a device lands
+# any one of them, so these are checked on the CPU.
+const REPEATED_WRITES = [
+    ("a write at repeated positions", (x, v) -> (y = copy(x); y[[2, 7, 2], :] .= v; sum(abs2, sin.(y))), (data(8, 6), data(3, 6; scale = 0.3))),
+    ("a write at repeated traced positions", (x, v, i) -> (y = copy(x); y[:, i] .= v; sum(abs2, tanh.(y))),
+     (data(8, 6), data(8, 3; scale = 0.3), Int32[4, 1, 4])),
 ]
 

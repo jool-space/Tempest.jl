@@ -75,10 +75,21 @@ struct Scatter <: Operation
 end
 
 """
-An entry of a selection's or a scatter's indices: the node's `input`th input,
-an array of one-based integers, whose axes take the place of the axis it
-indexes. An index out of range is an error in the interpreters, and undefined
-in a prepared program, as under `@inbounds`.
+A write: the first input with the elements of the second at the positions
+`indices` select, a selection's indices whose index arrays are inputs from the
+third on. Where several elements land at one position, one of them does,
+unspecified which; the interpreter places them in order, the last landing,
+as Base does.
+"""
+struct Update <: Operation
+    indices::Tuple
+end
+
+"""
+An entry of a selection's, a scatter's or a write's indices: the node's
+`input`th input, an array of one-based integers, whose axes take the place of
+the axis it indexes. An index out of range is an error in the interpreters,
+and undefined in a prepared program, as under `@inbounds`.
 """
 struct IndexInput
     input::Int
@@ -140,7 +151,7 @@ scan_summary(fold, axes, reverse, exclusive) =
     string(fold_name(fold), " along ", axes, reverse ? ", reversed" : "", exclusive ? ", exclusive" : "")
 op_detail(op::Contract) = " " * string(op.a) * "·" * string(op.b) * "→" * string(op.out)
 op_detail(op::Permute) = " " * string(op.perm)
-op_detail(op::Union{Select, Scatter}) = " " * join(map(index_summary, op.indices), ", ")
+op_detail(op::Union{Select, Scatter, Update}) = " " * join(map(index_summary, op.indices), ", ")
 
 index_summary(i::Integer) = string(i)
 index_summary(i::AbstractRange) = string(i)

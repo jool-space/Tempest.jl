@@ -275,17 +275,29 @@ combine in no fixed order.
 """
 accumulate!(f, buffer, i, x) = (@inbounds buffer[i] = only(fold_combine(f, (buffer[i],), fold_lift(f, x))); nothing)
 
-# A fold by key on the floor: its states set to the fold's initial one, then
-# one item per point of the group's domain, which computes the element, the
-# group's folds loaded as `fold_kernel` loads them, and combines it at the
-# position its key names. The work is the elements, once each.
+# A fold by key on the floor: its states set to the contents it starts from
+# or the fold's initial one, then one item per point of the group's domain,
+# which computes the element, the group's folds loaded as `fold_kernel` loads
+# them, and combines it at the position its key names. The work is the
+# elements, once each.
 function keyed_kernels(graph, g::Group, slots, r)
     D = g.domain
     vars = index_vars(length(D))
     c = EmitContext(graph, slots, vars, Domain(D))
     val = graph.values[r]
-    fold = val.definition.fold
-    states = ScalarKernel(slots, storage_length(val), :(@inbounds $(buffer(c, r))[lin + 1] = $(only(fold_init(fold, val.eltype)))))
+    d = val.definition
+    fold = d.fold
+    start = Expr(:block)
+    if d.into === nothing
+        push!(start.args, :(@inbounds $(buffer(c, r))[lin + 1] = $(only(fold_init(fold, val.eltype)))))
+    else
+        own = EmitContext(graph, slots, index_vars(length(val.dims)), Domain(val.dims))
+        delinearize_expr(start.args, :lin, eachindex(val.dims), val.dims, own.vars)
+        contents = stored_term(d.into)
+        names = emit_terms!(start.args, [contents], own)
+        push!(start.args, store_expr(own, r, identity_index(val.dims), :(convert($(val.eltype), $(names[contents])))))
+    end
+    states = ScalarKernel(slots, storage_length(val), start)
     t = stored_statistics(g.terms[r], graph, g)
     body = Expr(:block)
     delinearize_expr(body.args, :lin, 1:length(D), D, vars)

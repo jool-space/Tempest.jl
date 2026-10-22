@@ -424,8 +424,10 @@ keyed_folds(c::Context) = [r for r in c.g.reductions if c.g.values[r].keyed]
 # Fold by key `r`'s values as one flat buffer, which its keys address.
 flat_spec(c::Context, r) = ArgSpec(r, 0, (storage_length(c.g.values[r]),), (1,))
 
-# Add the elements of the folds by key `rs` over the tile at block indices
-# `indices` into their values at their keys, the lanes inside the domain.
+# Combine the elements of the folds by key `rs` over the tile at block indices
+# `indices` into their values at their keys, the lanes inside the domain: a
+# sum's add atomically, a write's are stored, one of those landing at a
+# position winning.
 function scatter_tiles!(k, st, c::Context, rs, names, indices)
     isempty(rs) && return
     emit_tiles!(k, st, c, [c.g.terms[r] for r in rs], names, indices...)
@@ -435,8 +437,9 @@ function scatter_tiles!(k, st, c::Context, rs, names, indices)
         x = as_accumulator(st, names[c.g.terms[r]], val.eltype, term_eltype(c.g.terms[r], c.g), tile(c))
         at = address(val, c.g.placement[r], Domain(c.g.domain))
         lanes = :($(ct.broadcast_to)($(index_tile(k, c, at, indices)), $(tile(c))) .+ Int32(1))
-        push!(st, :($(ct.atomic_add)($(argument!(k, flat_spec(c, r))), $lanes, $x; mask = $valid,
-            memory_order = $(ct.MemoryOrder.Relaxed))))
+        flat = argument!(k, flat_spec(c, r))
+        push!(st, val.fold isa Overwrite ? :($(ct.scatter)($flat, $lanes, $x; mask = $valid)) :
+            :($(ct.atomic_add)($flat, $lanes, $x; mask = $valid, memory_order = $(ct.MemoryOrder.Relaxed))))
     end
 end
 

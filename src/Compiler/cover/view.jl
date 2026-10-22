@@ -16,7 +16,7 @@ function group_view(p::Plan, g::Group)
         t isa Union{Load, Stat, Recomputed} && push!(seen, t.value)
     end
     foreach(t -> union!(seen, stored_reads(t)), roots)
-    foreach(m -> union!(seen, key_reads(graph, m)), members(g))
+    foreach(m -> union!(seen, keyed_reads(graph, m)), members(g))
     values = Dict(v => value_view(p, v) for v in seen)
     places = Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}(m => placement(graph, g, m) for m in members(g))
     reference(target, buffers) = build_floor(target, p, g, buffers)
@@ -40,5 +40,6 @@ function value_view(p::Plan, v)
     d = val.definition
     fold, reduced = d isa Union{Reduction, Keyed} ? (d.fold, folded_axes(d)) : d isa Scan ? (d.fold, ()) : (nothing, ())
     scan = d isa Scan ? (; d.reverse, d.exclusive) : nothing
-    ValueView(val.eltype, val.dims, val.scalar, p.stored[v], fold, reduced, d isa Keyed, scan, masked(p.graph, v))
+    into = d isa Keyed && d.into !== nothing ? stored_term(d.into) : nothing
+    ValueView(val.eltype, val.dims, val.scalar, p.stored[v], fold, reduced, d isa Keyed, into, scan, masked(p.graph, v))
 end

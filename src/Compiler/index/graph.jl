@@ -83,19 +83,24 @@ struct Scan{F} <: Definition
 end
 
 """
-A fold by key, a scatter: each element of `operand`, read over `iteration`,
-combined into the value at `key`, its position as formulas over the iteration,
-one per axis of the value. The elements a position takes combine in any
-order, as a fold's do, and a position none reaches holds the fold's initial
-state. The value holds the states, in the accumulator of the operand's
-elements: the fold's state is one number, observed as itself.
+A fold by key, a scatter or a write: each element of `operand`, read over
+`iteration`, combined into the value at `key`, its position as formulas over
+the iteration, one per axis of the value. The elements a position takes
+combine in any order, as a fold's do, after `into`, an operand over the
+value's own domain, where it is given: the contents a write starts from. A
+position no element reaches holds `into` there, or the fold's initial state.
+The value holds the states, in the accumulator of the operand's elements: the
+fold's state is one number, observed as itself.
 """
 struct Keyed{F} <: Definition
     fold::F
     operand::Operand
     iteration::Tuple{Vararg{Int}}
     key::Tuple{Vararg{Affine}}
+    into::Union{Nothing, Operand}
 end
+
+Keyed(fold, operand, iteration, key) = Keyed(fold, operand, iteration, key, nothing)
 
 """
 A value: its definition, the extents of its domain (none of them one; see
@@ -154,8 +159,10 @@ IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
 operands(d::Union{Reduction, Scan}) = (d.operand,)
-# A fold by key reads its key's positions, as a gather reads its indices.
-operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempty(indirect_values(e)))...)
+# A fold by key reads its key's positions, as a gather reads its indices, and
+# the contents it starts from.
+operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempty(indirect_values(e)))...,
+    (d.into === nothing ? () : (d.into,))...)
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
 
@@ -174,7 +181,8 @@ describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
 describe(d::Scan) = "scan($(scan_summary(d.fold, d.axes, d.reverse, d.exclusive)))"
-describe(d::Keyed) = "reduce($(fold_name(d.fold)) by key [$(join(map(string, d.key), ", "))] of $(d.iteration))"
+describe(d::Keyed) = "reduce($(fold_name(d.fold)) by key [$(join(map(string, d.key), ", "))] of $(d.iteration)" *
+    (d.into === nothing ? ")" : string(" into ", sprint(show_operand, d.into), ")"))
 
 show_operand(io, o::Read) = print(io, "%", o.value, "[", join(map(string, o.index), ", "), "]")
 show_operand(io, o::Literal) = print(io, repr(o.value))

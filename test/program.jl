@@ -21,7 +21,7 @@ function finite_difference(f, args, k)
 end
 
 @testset "program level" begin
-    @testset "$name" for (name, f, args) in PROGRAMS
+    @testset "$name" for (name, f, args) in [PROGRAMS; REPEATED_WRITES]
         p = trace(f, args...)
         @test interpret(p, args...) ≈ f(args...)
         d = differentiate(p)
@@ -54,7 +54,7 @@ end
 # passed twice gets a gradient for each place.
 @testset "gradients in traced code" begin
     same(a, b) = a === nothing ? b === nothing : isapprox(a, b; rtol = 1.0e-12)
-    @testset "$name" for (name, f, args) in PROGRAMS
+    @testset "$name" for (name, f, args) in [PROGRAMS; REPEATED_WRITES]
         expected = C.leaves(interpret(differentiate(trace(f, args...)), args...))
         @test all(map(same, expected, C.leaves(interpret(trace((xs...) -> T.gradient(f, xs...), args...), args...))))
         @test all(map(same, expected, C.leaves(T.gradient(f, args...))))
@@ -146,8 +146,13 @@ end
     @test interpret(trace(x -> similar(x, 3, 2), x), x) == zeros(3, 2)
     # A copy is the array's contents now, in memory of its own.
     @test same(x -> (y = 2 .* x; z = copy(y); y[1] = 0; (y, z)), x)
-    # Writes at positions an array selects are not functional updates yet.
-    @test_throws ArgumentError trace(x -> (y = copy(x); y[[1, 3, 3]] = [1, 2, 3]; y), x)
+    # Writes at positions arrays of integers select, constant or traced, and
+    # at a traced integer: where two land at one position, the interpreter's
+    # is the last, as Base's.
+    @test same(x -> (y = copy(x); y[[1, 3, 3]] = [1, 2, 3]; y), x)
+    @test same((x, i) -> (y = copy(x); y[i, 2:3] .= 7; y[i[2], 1] = -1; view(y, :, 4)[i] .= x[i, 5]; y), x, Int32[5, 2, 5])
+    # A traced mask selects a number of elements known only when the program runs.
+    @test_throws ArgumentError trace((x, m) -> (y = copy(x); y[m] .= 0; y), x, x .> 0)
 end
 
 # The program's inputs, and anything that shares their memory, are never

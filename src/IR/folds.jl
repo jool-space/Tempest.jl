@@ -11,9 +11,13 @@
 # Base's `mapreduce` is taken to have them. A function given to Base's
 # `accumulate` claims none: Base combines its elements in sequence, from an
 # `init` that need be no identity. Its fold is `InSequence`, and only a sweep
-# that combines in sequence, as the floor's does, computes it.
+# that combines in sequence, as the floor's does, computes it. A write is a
+# fold by key whose combine keeps the later element, `Overwrite`: where several
+# land at one position one of them does, unspecified which, as in JAX, so it
+# is taken to commute there; its state starts from the array's contents.
 
-public Fold, SumFold, MaxFold, MinFold, ProdFold, Relative, Law, Exponential, Square, Statistic, Sum, Composed, LOGSUMEXP, GenericFold, InSequence,
+public Fold, SumFold, MaxFold, MinFold, ProdFold, Overwrite, Relative, Law, Exponential, Square, Statistic, Sum, Composed, LOGSUMEXP,
+    GenericFold, InSequence,
     fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, lse_shift, HalfFloat
 
 abstract type Fold end
@@ -76,6 +80,19 @@ fold_init(::ProdFold, T) = (one(T),)
 fold_lift(::ProdFold, x) = (x,)
 fold_combine(::ProdFold, a, b) = (a[1] * b[1],)
 fold_observe(::ProdFold, s) = s[1]
+
+"""
+    Overwrite()
+
+The fold of a write: its state is the element it took last. A write by key
+starts each position from the array's contents there, so its initial state,
+zero, is never observed where a write has contents.
+"""
+struct Overwrite <: Fold end
+fold_init(::Overwrite, T) = (zero(T),)
+fold_lift(::Overwrite, x) = (x,)
+fold_combine(::Overwrite, a, b) = b
+fold_observe(::Overwrite, s) = s[1]
 
 """
     Relative(law, observe)

@@ -271,6 +271,34 @@ function pullback(op::Select, n, id, g, tape)
 end
 pullback(op::Scatter, n, id, g, tape) = adjoint_selection(Select(op.indices), n, g, tape)
 
+# A write's cotangent reaches the old contents where nothing was written, and
+# each element written at its position. Where elements may land at one
+# position, an index array that may repeat, it reaches the one that landed, as
+# JAX finds it: the elements' positions are written the same way, and each
+# element reads back whether its own landed.
+function pullback(op::Update, n, id, g, tape)
+    x, v, indices... = n.inputs
+    vn = tape.nodes[v]
+    T = node(g).eltype
+    zero_v = expand(tape, h(tape, constant!(tape, zero(T))), vn.dims; scalar = vn.scalar)
+    contents = record!(tape, Update(op.indices), (g.id, zero_v.id, indices...), n.dims, T)
+    selection = Select(map(i -> i isa IndexInput ? IndexInput(i.input - 1) : i, op.indices))
+    written = record!(tape, selection, (g.id, indices...), vn.dims, T; scalar = vn.scalar)
+    if any(i -> may_repeat(tape.nodes[i]), indices)
+        positions = constant!(tape, reshape(Int32(1):Int32(prod(vn.dims)), vn.dims))
+        unwritten = expand(tape, h(tape, constant!(tape, Int32(0))), n.dims)
+        landed = record!(tape, Update(op.indices), (unwritten.id, positions, indices...), n.dims, Int32)
+        read_back = record!(tape, selection, (landed, indices...), vn.dims, Int32)
+        own = record!(tape, Map(==), (read_back, positions), vn.dims, Bool)
+        written = record!(tape, Map(ifelse), (own, written, zero_v.id), vn.dims, T)
+    end
+    (h(tape, contents), h(tape, written), map(_ -> nothing, indices)...)
+end
+
+# Whether an index array may name one position twice: one traced with more
+# than one element, or a constant with a repeated entry.
+may_repeat(n) = n.op isa Constant ? !allunique(n.op.value) : prod(n.dims; init = 1) > 1
+
 # A selection of whole axes, each by a constant permutation or as it is, has
 # the selection by the inverse permutations as its adjoint: a gather, which
 # fuses, where a scatter would not. Nothing for any other selection.
@@ -297,7 +325,7 @@ function adjoint_selection(op, n, g, tape)
 end
 
 # A layout of tuples moves their components alike.
-for L in (:Reshape, :Permute, :Select, :Scatter)
+for L in (:Reshape, :Permute, :Select, :Scatter, :Update)
     @eval function pullback(op::$L, n, id, g::Tuple, tape)
         parts = map(c -> c === nothing ? nothing : pullback(op, n, id, c, tape), g)
         ntuple(k -> map(p -> p === nothing ? nothing : p[k], parts), length(n.inputs))

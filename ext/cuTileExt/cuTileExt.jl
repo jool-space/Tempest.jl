@@ -213,17 +213,34 @@ tile_type(T) = T <: TILE_TYPES || T <: Tuple && all(tile_type, fieldtypes(T))
 # Positions computed from a formula without gathers.
 positional(t::Ix) = isempty(indirect_values(t.expr)) && term_eltype(t, nothing) <: TILE_TYPES
 
+# A fold by key the generator realizes: a sum of 32-bit floats or integers,
+# which adds atomically, or a write, which stores; its positions Int32 lanes,
+# and the contents it starts from a constant or a value it copies, laid out
+# as its own.
+function keyed_expressible(g::GroupView, r)
+    val = g.values[r]
+    val.fold isa SumFold && val.eltype in (Float32, Int32) || val.fold isa Overwrite || return false
+    storage_length(val) < typemax(Int32) || return false
+    t = val.into
+    t === nothing || t isa Lit || t isa Load && copied(g, r, t)
+end
+
+function copied(g::GroupView, r, t::Load)
+    val, from = g.values[r], g.values[t.value]
+    d = Domain(val.dims)
+    storage_length(from) == storage_length(val) && from.eltype === val.eltype &&
+        address(from, t.index, d) == address(val, ntuple(k -> Affine(0, (Var(k) => 1,)), length(val.dims)), d)
+end
+
 # Whether the generator can express a group: tile-typed values, supported
 # folds, and positions without gathers; its loads are checked with a schedule.
-# A fold by key is a sum, which adds atomically, of 32-bit floats or integers
-# that Int32 lanes address.
 function expressible(g::GroupView)
     collapse_axes(g) === nothing && return false
     for m in members(g)
         val = g.values[m]
         val.eltype <: TILE_TYPES || return false
         m in g.reductions && !tile_fold(val.fold, term_eltype(g.terms[m], g)) && return false
-        val.keyed && !(val.fold isa SumFold && val.eltype in (Float32, Int32) && storage_length(val) < typemax(Int32)) && return false
+        val.keyed && !keyed_expressible(g, m) && return false
         for t in subterms((g.terms[m],))
             t isa Recomputed && return false
             t isa Ix && !positional(t) && return false

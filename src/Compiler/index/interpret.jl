@@ -50,11 +50,12 @@ function evaluate_value(d::Scan, v, arrays, graph, arguments)
 end
 
 # The elements in the iteration's order, each combined into the position its
-# key names.
+# key names, from the contents the fold starts from.
 function evaluate_value(d::Keyed, v, arrays, graph, arguments)
     x = materialize(d.operand, d.iteration, arrays, graph)
     gather = (w, i) -> arrays[w][(i .+ 1)...]
-    states = fill(fold_init(d.fold, v.eltype), v.dims)
+    states = d.into === nothing ? fill(fold_init(d.fold, v.eltype), v.dims) :
+        map(e -> fold_lift(d.fold, convert(v.eltype, e)), materialize(d.into, v.dims, arrays, graph))
     for I in CartesianIndices(d.iteration)
         at = map(e -> evaluate_index(e, Tuple(I) .- 1, gather) + 1, d.key)
         states[at...] = fold_combine(d.fold, states[at...], fold_lift(d.fold, convert(v.eltype, x[I])))

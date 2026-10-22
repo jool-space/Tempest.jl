@@ -10,12 +10,13 @@ What a view holds of a value: its element type and dims, whether it is a
 number rather than an array (stored as one element), and whether it is stored;
 for a fold, the fold and the axes of its domain it reduces, and whether it is
 a fold by key (`keyed`), which reduces every axis and combines each element
-at its placement; for a scan its fold, no axes, and `scan`: whether it runs
-from the last element down (`reverse`) and leaves each element out of its
-own prefix (`exclusive`), nothing for any other value; and for a value masked by formulas over its
-positions, `masked`: the formulas, each at most zero where the mask holds,
-and the number the value is where it fails (see `Tempest.IR.comparison_mask` and
-`Tempest.IR.masked_result`).
+at its placement, after `into` where it is given: the contents it starts
+from, a term over its own domain; for a scan its fold, no axes, and `scan`:
+whether it runs from the last element down (`reverse`) and leaves each
+element out of its own prefix (`exclusive`), nothing for any other value; and
+for a value masked by formulas over its positions, `masked`: the formulas,
+each at most zero where the mask holds, and the number the value is where it
+fails (see `Tempest.IR.comparison_mask` and `Tempest.IR.masked_result`).
 """
 struct ValueView
     eltype::DataType
@@ -25,6 +26,7 @@ struct ValueView
     fold::Union{Nothing, Fold}
     reduced::Tuple{Vararg{Int}}
     keyed::Bool
+    into::Union{Nothing, Term}
     scan::Union{Nothing, @NamedTuple{reverse::Bool, exclusive::Bool}}
     masked::Union{Nothing, Tuple{Vector{Affine}, Any}}
 end

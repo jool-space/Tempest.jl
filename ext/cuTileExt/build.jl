@@ -9,14 +9,21 @@ function pointwise_kernel(c::Context)
     [k]
 end
 
-# The values of folds by key set to their folds' initial state, a launch
-# before any element combines into them.
+# The values of folds by key set to the contents they start from, copied, or
+# their folds' initial state: a launch before any element combines into them.
 function initial_states_kernel(c::Context, r)
     val = c.g.values[r]
     k = TileKernel(INITIAL_STATES, (cld(storage_length(val), POINTWISE_ELEMENTS),), nothing)
-    init = only(fold_init(fold_of(c, r), val.eltype))
-    push!(k.body, :($(ct.store)($(argument!(k, flat_spec(c, r))); index = ($(ct.bid)(1),),
-        tile = $(ct.broadcast_to)($(ct.Tile)($init), ($POINTWISE_ELEMENTS,)))))
+    index = :(($(ct.bid)(1),))
+    t = val.into
+    contents = if t isa Load
+        :($(ct.load)($(argument!(k, ArgSpec(t.value, 0, (storage_length(val),), (1,)))); index = $index,
+            shape = ($POINTWISE_ELEMENTS,), padding_mode = $(ct.PaddingMode.Zero)))
+    else
+        init = t isa Lit ? convert(val.eltype, t.value) : only(fold_init(fold_of(c, r), val.eltype))
+        :($(ct.broadcast_to)($(ct.Tile)($init), ($POINTWISE_ELEMENTS,)))
+    end
+    push!(k.body, :($(ct.store)($(argument!(k, flat_spec(c, r))); index = $index, tile = $contents)))
     k
 end
 

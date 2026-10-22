@@ -47,6 +47,14 @@ function evaluate(op::Scatter, n, xs)
     n.eltype.(out)
 end
 
+# A write places the elements in order, as Base does: where several land at
+# one position, the last.
+function evaluate(op::Update, n, xs)
+    out = copy(xs[1])
+    out[indices_of(op, xs)...] = xs[2]
+    out
+end
+
 # A product of half-precision operands accumulates in Float32 and rounds once.
 function evaluate(op::Contract, n, xs)
     a, b = xs

@@ -4,7 +4,7 @@
 include("fixtures/programs.jl")
 
 @testset "plans" begin
-    @testset "$name" for (name, f, args) in PROGRAMS
+    @testset "$name" for (name, f, args) in [PROGRAMS; REPEATED_WRITES]
         for p in (trace(f, args...), differentiate(trace(f, args...)))
             planned = C.plan(C.lower(p))
             @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))
@@ -19,7 +19,7 @@ recomputing(graph) = C.plan(graph; recompute = C.recomputable_folds(graph))
 # the same results, and attention's scores and logsumexp inside the one
 # kernel of the sum over keys.
 @testset "plans recomputing folds" begin
-    @testset "$name" for (name, f, args) in PROGRAMS
+    @testset "$name" for (name, f, args) in [PROGRAMS; REPEATED_WRITES]
         for p in (trace(f, args...), differentiate(trace(f, args...)))
             planned = recomputing(C.lower(p))
             @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))
@@ -73,7 +73,7 @@ function spelled_out(q, k, v)
 end
 
 @testset "rewritten sums" begin
-    @testset "$name" for (name, f, args) in PROGRAMS
+    @testset "$name" for (name, f, args) in [PROGRAMS; REPEATED_WRITES]
         for p in (trace(f, args...), differentiate(trace(f, args...)))
             planned = recomputing(C.rewrite(C.lower(p)))
             @test agree(C.execute(planned, args...), filter(!isnothing, C.leaves(interpret(p, args...))))

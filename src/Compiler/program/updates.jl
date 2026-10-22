@@ -3,10 +3,12 @@
 # operation on traced arrays) may be written: each write records the array's
 # new contents as a node and moves the array, with every array sharing its
 # memory, to it. Later reads see the latest contents; reads before a write keep
-# what they read. A write of part of an array is a select, where a scatter of
-# `true` lands, of the scatter of the values written and the old contents. So
-# the program states which elements each write replaces, and its derivative
-# masks the old contents and selects the values written.
+# what they read. A write of part of an array is an `Update`: the old contents
+# with the values written at the positions a selection by integers, ranges and
+# arrays of integers, traced or not, names. So the program states which
+# elements each write replaces, and its derivative masks the old contents and
+# selects the values written. Where several land at one position, one of them
+# does, unspecified which, as in JAX.
 #
 # The program's inputs, and the arrays sharing their memory, are never written.
 
@@ -14,9 +16,6 @@ const INPUT_WRITE = "mutation of the program's inputs is not supported: a traced
     function of its inputs, which it reads and never writes, so a write into an input, or into a view, \
     reshape or transpose of one, would change the caller's array without the program stating it. \
     Write into a copy, such as `y = copy(x)`, and return it"
-
-const GATHERED_WRITE = "a write at positions an array of integers or a mask selects is not supported: \
-    a traced write is at integers and ranges"
 
 # Allocation. Julia leaves the contents of `similar` undefined; in a traced
 # program they are zero, so reading them before a write is defined.
@@ -57,10 +56,7 @@ end
 # A layout's parent with the layout's elements replaced by node `c`.
 written_through(::Reshape, p, inputs, c) = record!(p.tape, Reshape(), (c,), p.dims, eltype(p))
 written_through(op::Permute, p, inputs, c) = record!(p.tape, Permute(Tuple(invperm(op.perm))), (c,), p.dims, eltype(p))
-function written_through(op::Select, p, inputs, c)
-    isempty(inputs) || throw(ArgumentError(GATHERED_WRITE))
-    update(p, op.indices, c)
-end
+written_through(op::Select, p, inputs, c) = update(p, op.indices, inputs, c)
 
 # The layouts made from `x` read its new contents. A layout nothing holds any
 # more is dropped.
@@ -75,23 +71,19 @@ function moved!(x::TracedArray)
 end
 
 """
-    update(x, indices, v) -> node
+    update(x, indices, inputs, v) -> node
 
-The contents of `x` with the elements that `indices`, integers and ranges as a
-selection's, select replaced by those of node `v`, an array of the selection's
-shape and the element type of `x`.
+The contents of `x` with the elements that `indices` select replaced by those
+of node `v`, an array of the selection's shape and the element type of `x`.
+`indices` are a selection's, its index arrays the nodes `inputs`.
 """
-function update(x::TracedArray, indices, v::Int)
-    full = length(indices) == ndims(x) && all(k -> indices[k] isa AbstractRange && indices[k] == 1:size(x, k), 1:ndims(x))
+function update(x::TracedArray, indices, inputs, v::Int)
+    full = isempty(inputs) && length(indices) == ndims(x) &&
+        all(k -> indices[k] isa AbstractRange && indices[k] == 1:size(x, k), 1:ndims(x))
     full && return v
-    tape, T = x.tape, eltype(x)
-    op = Scatter(Tuple(indices))
-    placed = record!(tape, op, (v,), x.dims, T)
-    yes = constant!(tape, true)
-    dims = tape.nodes[v].dims
-    isempty(dims) || (yes = record!(tape, Map(identity), (yes,), dims, Bool))
-    mask = record!(tape, op, (yes,), x.dims, Bool)
-    record!(tape, Map(ifelse), (mask, placed, x.id), x.dims, T)
+    # The write's index arrays follow the contents written among its inputs.
+    written = map(i -> i isa IndexInput ? IndexInput(i.input + 1) : i, Tuple(indices))
+    record!(x.tape, Update(written), (x.id, v, inputs...), x.dims, eltype(x))
 end
 
 # The node holding `v`, a number, a handle or an array, with element type `T`.
@@ -104,22 +96,22 @@ end
 function Base.setindex!(x::TracedArray, v, I...)
     y, indices = selection(x, I)
     indices = map(i -> i isa AbstractVector{<:Integer} && !(i isa TracedArray) ? linear_range(i) : i, indices)
-    all(i -> i isa Union{Integer, AbstractRange}, indices) || throw(ArgumentError(GATHERED_WRITE))
     for (k, i) in enumerate(indices)
-        all(j -> 1 <= j <= size(y, k), i) || throw(BoundsError(x, I))
+        i isa TracedArray || all(j -> 1 <= j <= size(y, k), i) || throw(BoundsError(x, I))
     end
-    dims = Tuple(length(i) for i in indices if !(i isa Integer))
+    dims = Tuple(n for i in indices if !(i isa Integer) for n in size(i))
     T = eltype(x)
     contents = if v isa AbstractArray
         Base.setindex_shape_check(v, map(length, indices)...)
         id = converted(x.tape, v, T)
         size(v) == dims ? id : record!(x.tape, Reshape(), (id,), dims, T)
     else
-        all(i -> i isa Integer, indices) || throw(ArgumentError("indexed assignment with a single value to possibly \
+        isempty(dims) || throw(ArgumentError("indexed assignment with a single value to possibly \
             many locations is not supported; perhaps use broadcasting `.=` instead?"))
         converted(x.tape, v, T)
     end
-    write!(y, update(y, indices, contents))
+    indices, inputs = index_inputs(x.tape, indices)
+    write!(y, update(y, indices, inputs, contents))
     x
 end
 

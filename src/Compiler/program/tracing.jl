@@ -571,6 +571,18 @@ function selection(x::TracedArray, I)
     vec(x), (selection_index(i),)
 end
 
+# Arrays of integers among a selection's indices as the inputs of its node,
+# from the second on, constants unless traced.
+function index_inputs(tape, indices)
+    inputs = Int[]
+    indices = map(indices) do i
+        i isa AbstractArray && !(i isa AbstractRange) || return i
+        push!(inputs, i isa TracedArray ? i.id : constant!(tape, i))
+        IndexInput(length(inputs) + 1)
+    end
+    (indices, inputs)
+end
+
 # With `scalar`, as `getindex`, a selection copies the elements, and one
 # element is a number; otherwise it is a view that shares their memory.
 function select(x::TracedArray, I; scalar)
@@ -582,13 +594,7 @@ function select(x::TracedArray, I; scalar)
     full = length(indices) == ndims(x) &&
         all(k -> indices[k] isa AbstractRange && indices[k] == 1:size(x, k), 1:ndims(x))
     full && !(scalar && isempty(dims)) && return scalar ? copy(x) : x
-    # Arrays of integers are inputs of the node, constants unless traced.
-    inputs = Int[]
-    indices = map(indices) do i
-        i isa AbstractArray && !(i isa AbstractRange) || return i
-        push!(inputs, i isa TracedArray ? i.id : constant!(x.tape, i))
-        IndexInput(length(inputs) + 1)
-    end
+    indices, inputs = index_inputs(x.tape, indices)
     scalar || return layout(x, Select(indices), inputs, dims)
     scalar = isempty(dims)
     id = record!(x.tape, Select(indices), (x.id, inputs...), dims, eltype(x); scalar)

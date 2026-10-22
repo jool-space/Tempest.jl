@@ -18,4 +18,9 @@ plain(x) = sprint(show, MIME"text/plain"(), x)
     @test occursin("captured: replay! runs the recording", plain(capture!(ex)))
     @test plain(ex.plan) == "Plan: 1 kernel; 1 value stored (16 bytes), 0 recomputed where read\n  explain(plan) shows each kernel"
     @test sprint(show, [ex.plan]) == "Tempest.Compiler.Plan[Plan(1 kernel)]"
+    # A scatter and a write are folds by key, described with their keys.
+    x, v, i = data(4, 9), data(4, 3), Int32[7, 2, 9]
+    written(x, v, i) = (y = copy(x); y[:, i] .= v; sum(abs2, y[:, i]))
+    words = sprint(explain, prepare(differentiate(trace(written, x, v, i)), x, v, i))
+    @test occursin("sum by key", words) && occursin("overwrite by key", words)
 end

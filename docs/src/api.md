@@ -136,6 +136,7 @@ Tempest.IR.Sum
 Tempest.IR.Composed
 Tempest.IR.LOGSUMEXP
 Tempest.IR.InSequence
+Tempest.IR.Overwrite
 Tempest.IR.fold_reduce
 Tempest.IR.product_factors
 ```

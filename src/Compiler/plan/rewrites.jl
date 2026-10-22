@@ -80,7 +80,8 @@ remap(o::IndexOperand{T}, ids) where {T} = IndexOperand{T}(remap(o.expr, ids))
 remap(d::Pointwise, ids) = Pointwise(d.f, map(o -> remap(o, ids), d.operands))
 remap(d::Reduction, ids) = Reduction(d.fold, remap(d.operand, ids), d.iteration, d.reduced)
 remap(d::Scan, ids) = Scan(d.fold, remap(d.operand, ids), d.axes, d.reverse, d.exclusive)
-remap(d::Keyed, ids) = Keyed(d.fold, remap(d.operand, ids), d.iteration, map(e -> remap(e, ids), d.key))
+remap(d::Keyed, ids) = Keyed(d.fold, remap(d.operand, ids), d.iteration, map(e -> remap(e, ids), d.key),
+    d.into === nothing ? nothing : remap(d.into, ids))
 remap(d::Union{Input, ConstantArray}, ids) = d
 
 # The values something reads: the results and what they read, inputs and

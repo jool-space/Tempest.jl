@@ -9,6 +9,8 @@ end
 
 describe_fold(d::Reduction) = string(fold_name(d.fold), " over axes ", d.reduced)
 describe_fold(d::Scan) = string("cumulative ", scan_summary(d.fold, d.axes, d.reverse, d.exclusive))
+describe_fold(d::Keyed) = string(fold_name(d.fold), " by key [", join(map(string, d.key), ", "), "]",
+    d.into === nothing ? "" : string(" into ", sprint(show_operand, d.into)))
 
 """
     Tempest.Compiler.structure(plan) -> (; kernels, stored, bytes)
@@ -67,7 +69,7 @@ function explain(io::IO, p::Plan)
         end
         for m in g.outputs
             p.stored[m] || continue
-            println(io, "  writes ", describe_value(graph, m), haskey(g.terms, m) ? string(" = ", g.terms[m]) : "")
+            println(io, "  writes ", describe_value(graph, m), " = ", g.terms[m])
         end
     end
 end

@@ -53,9 +53,11 @@ function narrow(d::Reduction, dims)
     Reduction(d.fold, narrow(d.operand, n), n[2].extents, Tuple(j for (j, k) in enumerate(keep) if k in d.reduced))
 end
 
-# A fold by key keeps the key's formulas for its value's wide axes; its
-# iteration is narrowed where it is formed.
-narrow(d::Keyed, dims) = Keyed(d.fold, d.operand, d.iteration, map(k -> d.key[k], wide_axes(dims)))
+# A fold by key keeps the key's formulas for its value's wide axes, and reads
+# the contents it starts from over them; its iteration is narrowed where it is
+# formed.
+narrow(d::Keyed, dims) = Keyed(d.fold, d.operand, d.iteration, map(k -> d.key[k], wide_axes(dims)),
+    d.into === nothing ? nothing : narrow(d.into, narrowing(dims, wide_axes(dims))))
 
 # A scan ranges over its node's wide axes, as a map does; along an axis of
 # extent one, each position is its own prefix.
@@ -147,17 +149,18 @@ fill_out(a::ValueAccess, dims, d) = ValueAccess(a.value, map(e -> substitute(e, 
 fill_out(a::LiteralAccess, dims, d) = a
 fill_out(a::IndexAccess, dims, d) = IndexAccess(substitute(a.expr, broadcast_index(dims), d), a.eltype)
 
-# A scatter by integers and ranges places its input: each element lands at
-# one position, and every other position is zero. At each position, a select
-# between the input, read where the position came from, and zero. The read
-# wraps around the input's axes, so that it stays inside them where it is not
-# selected; a scatter that covers its result is a formula.
-function placement!(value!, op::Scatter, input, n, d)
+# A scatter or a write by integers and ranges places its input: each element
+# lands at one position, and every other position is `otherwise`, zero or the
+# contents written over. At each position, a select between the input, read
+# where the position came from, and `otherwise`. The read wraps around the
+# input's axes, so that it stays inside them where it is not selected; a
+# scatter that covers its result is a formula.
+function placement!(value!, indices, input, otherwise, n, d)
     i = identity_index(n.dims)
     conditions = ValueAccess[]
     condition!(f, e, c) = push!(conditions, value!(Pointwise(f, (IndexOperand(e, Int32), Literal(Int32(c)))), n.dims, Bool))
     source = Affine[]
-    for (k, s) in enumerate(op.indices)
+    for (k, s) in enumerate(indices)
         if s isa Integer
             n.dims[k] == 1 || condition!(==, i[k], s - 1)
             continue
@@ -175,27 +178,26 @@ function placement!(value!, op::Scatter, input, n, d)
     isempty(conditions) && return placed
     read(a) = operand(a, n.dims, d)
     mask = foldl((a, b) -> value!(Pointwise(&, (read(a), read(b))), n.dims, Bool), conditions)
-    # A placed `true` is the mask itself.
-    n.eltype === Bool && read(placed) == Literal(true) && return mask
-    value!(Pointwise(ifelse, (read(mask), read(placed), Literal(zero(n.eltype)))), n)
+    # A `true` placed over `false` is the mask itself.
+    otherwise == Literal(false) && read(placed) == Literal(true) && return mask
+    value!(Pointwise(ifelse, (read(mask), read(placed), otherwise)), n)
 end
 
-# A scatter by index arrays adds each element at the position the selection
-# it is the adjoint of reads it from: a sum by key, whose key is that
-# selection's formula, over the elements' wide axes. Where the elements are a
-# value read in its storage order, the fold runs over that value's domain, so
-# that it can join the kernel computing it. Half-precision elements are summed
-# in Float32 and rounded once, after the fold.
-function scattered!(value!, op::Scatter, inputs, input_dims, n, values)
-    dims = first(input_dims)
+# The elements of a scatter or a write by index arrays, input `k` of the
+# node, each at the position a selection by `indices` reads: the elements over
+# their wide axes, and the selection's formula over them, the key. Where the
+# elements are a value read in its storage order, they are taken over that
+# value's domain, so that a fold of them can join the kernel computing it.
+function keyed_elements(indices, k, inputs, input_dims, n, values)
+    dims = input_dims[k]
     d = Domain(dims)
     held = function (i, axis, extent)
         rank = length(input_dims[i.input])
-        (held_index(inputs[i.input], ntuple(k -> var(axis + k), rank), d, values, extent), rank)
+        (held_index(inputs[i.input], ntuple(j -> var(axis + j), rank), d, values, extent), rank)
     end
     index, iteration = narrowing(dims, wide_axes(dims))
-    key = map(e -> substitute(e, index, iteration), layout_index(Select(op.indices), dims, n.dims, d, held))
-    elements = narrow(operand(first(inputs), dims, d), (index, iteration))
+    key = map(e -> substitute(e, index, iteration), layout_index(Select(indices), dims, n.dims, d, held))
+    elements = narrow(operand(inputs[k], dims, d), (index, iteration))
     if elements isa Read && values[elements.value].dims != iteration.extents &&
        reads_storage(values[elements.value], elements.index, iteration.extents)
         own = Domain(values[elements.value].dims)
@@ -204,10 +206,25 @@ function scattered!(value!, op::Scatter, inputs, input_dims, n, values)
         elements = Read(elements.value, identity_index(own.extents))
         iteration = own
     end
+    (elements, iteration.extents, key)
+end
+
+# A scatter by index arrays adds each element at the position the selection
+# it is the adjoint of reads it from: a sum by key. Half-precision elements are
+# summed in Float32 and rounded once, after the fold.
+function scattered!(value!, op::Scatter, inputs, input_dims, n, values)
+    elements, iteration, key = keyed_elements(op.indices, 1, inputs, input_dims, n, values)
     A = n.eltype <: HalfFloat ? Float32 : n.eltype
-    sums = value!(Keyed(SumFold(), elements, iteration.extents, key), n.dims, A; scalar = n.scalar)
+    sums = value!(Keyed(SumFold(), elements, iteration, key), n.dims, A; scalar = n.scalar)
     A === n.eltype && return sums
     value!(Pointwise(Cast{n.eltype}(), (operand(sums, n.dims, Domain(n.dims)),)), n)
+end
+
+# A write by index arrays places each element at the position the selection
+# reads, over the contents written: an overwrite by key into them.
+function written!(value!, op::Update, inputs, input_dims, n, values)
+    elements, iteration, key = keyed_elements(op.indices, 2, inputs, input_dims, n, values)
+    value!(Keyed(Overwrite(), elements, iteration, key, operand(inputs[1], n.dims, Domain(n.dims))), n)
 end
 
 # A product is a sum fold of a pointwise product: over the domain of the
@@ -349,7 +366,11 @@ function lower(p::Program)
         elseif op isa Contract
             contraction!(value!, op, inputs, input_dims, n)
         elseif op isa Scatter && !any(i -> i isa IndexInput, op.indices)
-            placement!(value!, op, only(inputs), n, d)
+            placement!(value!, op.indices, only(inputs), Literal(zero(n.eltype)), n, d)
+        elseif op isa Update && !any(i -> i isa IndexInput, op.indices)
+            placement!(value!, op.indices, inputs[2], operand(inputs[1], n.dims, d), n, d)
+        elseif op isa Update
+            written!(value!, op, inputs, input_dims, n, values)
         elseif op isa Union{Reshape, Permute, Select}
             held = function (i, axis, extent)
                 rank = length(input_dims[i.input])

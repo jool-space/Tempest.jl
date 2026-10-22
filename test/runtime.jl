@@ -22,6 +22,17 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
+# Writes where elements land at one position, on the CPU's floor: in order,
+# the last landing, as the interpreter places them.
+@testset "repeated writes on the CPU floor" begin
+    @testset "$name" for (name, f, args) in REPEATED_WRITES
+        for p in (trace(f, args...), differentiate(trace(f, args...)))
+            @test agree(filter(!isnothing, C.leaves(outputs(execute!(prepare(p, args...))))),
+                filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-10)
+        end
+    end
+end
+
 # A BFloat16 scatter on the floor sums in Float32 and rounds once, as the
 # reference does: 41 from 4096 gradients of 0.01 at one position, not 4.
 @testset "a BFloat16 scatter on the floor" begin
@@ -687,6 +698,47 @@ if CUDA_FUNCTIONAL
             # A scatter runs on the device, so the program can be captured.
             capture!(ex)
             @test agree(C.leaves(outputs(replay!(ex)))[2:2], reference; rtol = 1.0e-5)
+        end
+    end
+end
+
+# Writes into arrays the program holds, at positions it is given, on the
+# device: a token's keys appended to a cache per sequence, a column at a
+# position, and a write's gradient, at distinct positions as the interpreter
+# writes them; where elements land at one position, each position holds one
+# of them, which the device does not fix.
+function appended(K, k, p)
+    K = copy(K)
+    for b in axes(K, 4)
+        K[:, p[b], :, b] .= k[:, :, b]
+    end
+    K
+end
+
+const DEVICE_WRITES = [
+    ("a cache appended per sequence", appended, (data(4, 16, 2, 3), data(4, 2, 3), Int32[3, 16, 1])),
+    ("a column at a position held", (K, k, p) -> (y = copy(K); y[:, p[1]] .= k; y), (data(8, 16), data(8), Int32[5])),
+    ("a loss through a write", (x, v, i) -> (y = copy(x); y[:, i] .= v; sum(abs2, tanh.(y))), (data(4, 9), data(4, 3), Int32[7, 2, 5])),
+]
+
+if CUDA_FUNCTIONAL
+    @testset "writes on the device" begin
+        targets = (("cuTile", T.CUDATarget(cuTile)), ("the floor", T.CUDATarget(:full, true, ())))
+        @testset "$name, $where" for (name, f, args) in DEVICE_WRITES, (where, target) in targets
+            args = map(single, args)
+            traced = trace(f, args...)
+            for p in (f(args...) isa Number ? (traced, differentiate(traced)) : (traced,))
+                ex = prepare(p, map(CuArray, args)...; target)
+                @test all(k -> (k isa C.FloorKernels) == (where == "the floor"), ex.kernels)
+                @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-5)
+            end
+        end
+        x, v, i = single(data(64, 9)), single(data(64, 300)), Int32.(mod1.(1:300, 7))
+        @testset "repeated positions, $where" for (where, target) in targets
+            ex = prepare(trace((x, v, i) -> (y = copy(x); y[:, i] .= v; y), x, v, i), CuArray(x), CuArray(v), CuArray(i); target)
+            y = Array(outputs(execute!(ex)))
+            @test all(((f, j),) -> any(a -> y[f, j] == v[f, a], findall(==(j), i)), Iterators.product(1:64, 1:7))
+            @test y[:, 8:9] == x[:, 8:9]
         end
     end
 end

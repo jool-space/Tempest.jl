@@ -55,8 +55,15 @@ kept_dims(domain, axes) = ntuple(k -> k in axes ? 1 : domain[k], length(domain))
 "Whether fold `r` reduces the group's primary axes."
 primary(graph, g::Group, r) = !keyed(graph, r) && fold_axes(graph, r) == primary_axes(graph, g)
 
-"The values the key of fold by key `v` gathers from; none for any other value."
-key_reads(graph, v) = keyed(graph, v) ? reduce(vcat, map(indirect_values, graph.values[v].definition.key); init = Int[]) : Int[]
+"""
+The values fold by key `v` reads besides its elements: those its key gathers
+from, and those of the contents it starts from; none for any other value.
+"""
+function keyed_reads(graph, v)
+    keyed(graph, v) || return Int[]
+    d = graph.values[v].definition
+    [reduce(vcat, map(indirect_values, d.key); init = Int[]); d.into === nothing ? Int[] : read_values(d.into)]
+end
 
 """
 A program's plan: which values are stored, and the groups its kernels
@@ -139,6 +146,12 @@ operand_term(graph, stored, g, o::Literal, index, domain) = Lit(o.value)
 operand_term(graph, stored, g, o::IndexOperand{T}, index, domain) where {T} =
     Ix{T}(substitute(o.expr, index, domain))
 
+# An operand read from storage, as a term over its reader's domain: the
+# contents a fold by key starts from.
+stored_term(o::Read) = Load(o.value, o.index)
+stored_term(o::Literal) = Lit(o.value)
+stored_term(o::IndexOperand{T}) where {T} = Ix{T}(o.expr)
+
 # The values an operand reads: its own, and those its formulas gather from.
 gathered_values(o::Read) = reduce(vcat, map(indirect_values, o.index); init = Int[])
 gathered_values(o::IndexOperand) = indirect_values(o.expr)
@@ -204,8 +217,8 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    any(m -> v in stored_reads(g.terms[m]) || v in key_reads(graph, m), members(g)) && return false
-    any(in(members(g)), key_reads(graph, v)) && return false
+    any(m -> v in stored_reads(g.terms[m]) || v in keyed_reads(graph, m), members(g)) && return false
+    any(in(members(g)), keyed_reads(graph, v)) && return false
     candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase)
     t = try
         fold ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
@@ -214,7 +227,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
         e isa OutsideGroup || rethrow()
         return false
     end
-    reads = [stored_reads(t); key_reads(graph, v)]
+    reads = [stored_reads(t); keyed_reads(graph, v)]
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
     isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads) || return false
@@ -278,13 +291,16 @@ function storing(graph::IndexGraph; recompute = ())
     for r in results
         counts[r] += 1
     end
-    # A gather reads its indices from storage.
+    # A gather reads its indices from storage, and a fold by key the contents
+    # it starts from.
     materialized = falses(n)
     for id in 1:n
         live[id] || continue
-        for o in operands(values[id].definition)
+        d = values[id].definition
+        for o in operands(d)
             foreach(r -> materialized[r] = true, gathered_values(o))
         end
+        d isa Keyed && d.into !== nothing && foreach(r -> materialized[r] = true, read_values(d.into))
     end
     # Maps of recomputed folds are recomputed with them: a fold recomputed
     # where it is read has no storage, so a map of it is a map of its term. A
@@ -633,7 +649,7 @@ function group_reads(graph, g::Group)
     reads = Set{Int}()
     for v in members(g)
         if haskey(g.terms, v)
-            union!(reads, stored_reads(g.terms[v]), key_reads(graph, v))
+            union!(reads, stored_reads(g.terms[v]), keyed_reads(graph, v))
         else
             for o in operands(graph.values[v].definition)
                 union!(reads, read_values(o))

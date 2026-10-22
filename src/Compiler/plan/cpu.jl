@@ -100,11 +100,14 @@ function run_reduction!(g::Group, buffers, graph)
 end
 
 # A fold by key: the points of the domain in order, each element combined at
-# its key.
+# its key, from the contents the fold starts from.
 function run_keyed(g::Group, r, buffers, stats, graph)
     val = graph.values[r]
     d = val.definition
-    states = fill(fold_init(d.fold, val.eltype), val.dims)
+    states = map(CartesianIndices(val.dims)) do I
+        d.into === nothing && return fold_init(d.fold, val.eltype)
+        fold_lift(d.fold, convert(val.eltype, evaluate_term(stored_term(d.into), Tuple(I) .- 1, nothing, buffers, stats, graph)))
+    end
     gather = (v, i) -> buffers[v][(i .+ 1)...]
     for I in CartesianIndices(g.domain)
         x = Tuple(I) .- 1
