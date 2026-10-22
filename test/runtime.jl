@@ -890,12 +890,10 @@ if CUDA_FUNCTIONAL
     # reads it, and the sweep over keys stops where it ends, whether the
     # scores are recomputed in it or stored before.
     @testset "attention up to lengths the device holds" begin
-        function decode(q, k, v, n)
-            g = reshape(q, size(q, 1), size(q, 2) ÷ size(k, 3), size(k, 3), size(q, 3))
-            s = C.contract(k, g, (1, 6, 3, 5), (1, 2, 3, 5), (6, 2, 3, 5)) .* 0.25f0
-            s = ifelse.(reshape(Int32(1):Int32(size(k, 2)), :, 1, 1, 1) .<= reshape(n, 1, 1, 1, :), s, -Inf32)
-            o = C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 6, 3, 5), (6, 2, 3, 5), (1, 2, 3, 5))
-            reshape(o, size(q))
+        function decode(q, k, v, len)
+            s = Einops.@einsum(k, q, "d n h b, d (g h) b -> n g h b", h = size(k, 3)) .* 0.25f0
+            s = ifelse.((Int32(1):Int32(size(k, 2))) .<= reshape(len, 1, 1, 1, :), s, -Inf32)
+            Einops.@einsum(v, exp.(s .- T.logsumexp(s; dims = 1)), "d n h b, n g h b -> d (g h) b")
         end
         q, k, v = single(data(16, 8, 3; scale = 0.1)), single(data(16, 200, 2, 3; scale = 0.2)), single(data(16, 200, 2, 3; scale = 0.3))
         n = Int32[37, 200, 1]
