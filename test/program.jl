@@ -42,6 +42,11 @@ end
     d = differentiate(trace(x -> sum(abs2, x[[3, 4, 1, 2], :] .* data(4, 1)), data(4, 6)))
     @test !any(n -> n.op isa C.Scatter, d.nodes)
     @test any(n -> n.op isa C.Scatter, differentiate(trace(x -> sum(abs2, x[[3, 4, 1, 1], :]), data(4, 6))).nodes)
+    # What a scatter adds at one position is summed as a sum fold sums it: 4096
+    # BFloat16 gradients of 0.01 in Float32, rounded once to 41, not 4.
+    E, t, g = BFloat16s.BFloat16.(fill(0.5f0, 4, 3)), Int32.(fill(2, 4096)), BFloat16s.BFloat16.(fill(0.01f0, 4, 4096))
+    dE = interpret(differentiate(trace((E, t, g) -> sum(E[:, t] .* g), E, t, g)), E, t, g)[2]
+    @test dE[:, 2] == fill(BFloat16s.BFloat16(41), 4)
 end
 
 # A gradient in traced code is the differentiated program inlined where it is

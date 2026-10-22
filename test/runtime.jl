@@ -22,6 +22,14 @@ end
     check_prepared(identity, T.CPUTarget())
 end
 
+# The floor's scatter adds in the element type, and the reference as a sum
+# fold does, in Float32 for BFloat16. Closed by a scatter that is a sum by key.
+@testset "gap: a BFloat16 scatter on the floor adds in BFloat16" begin
+    E, t, g = BFloat16s.BFloat16.(fill(0.5f0, 4, 3)), Int32.(fill(2, 4096)), BFloat16s.BFloat16.(fill(0.01f0, 4, 4096))
+    p = differentiate(trace((E, t, g) -> sum(E[:, t] .* g), E, t, g))
+    @test_broken outputs(execute!(prepare(p, E, t, g)))[2] == interpret(p, E, t, g)[2]
+end
+
 # The results are a place: the same arrays every time, which each run fills
 # again. `execute!` launches kernel by kernel, captured or not; `replay!` runs
 # the capture.

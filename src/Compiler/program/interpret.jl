@@ -36,13 +36,15 @@ function evaluate(op::Select, n, xs)
     n.scalar ? y : y isa Number ? fill(y) : y
 end
 
+# What lands at a position is summed as a sum fold sums it: half-precision
+# elements in Float32, rounding once.
 function evaluate(op::Scatter, n, xs)
-    out = zeros(n.eltype, n.dims)
+    out = zeros(n.eltype <: HalfFloat ? Float32 : n.eltype, n.dims)
     targets = view(LinearIndices(out), indices_of(op, xs)...)
     for (t, g) in zip(targets, first(xs))
         out[t] += g
     end
-    out
+    n.eltype.(out)
 end
 
 # A product of half-precision operands accumulates in Float32 and rounds once.
