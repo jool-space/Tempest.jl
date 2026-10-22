@@ -49,6 +49,16 @@ const SCALING_FORMS = "x / n and x · (1 / n) one form under the numerics policy
     # Spellings that plan alike today.
     @test same_plan(a -> sum(a; dims = 1), a -> reduce(+, a; dims = 1), a)
     @test same_plan(a -> sum(abs2, a; dims = 1), a -> mapreduce(abs2, +, a; dims = 1), a)
+    # NNlib's maximum is `@fastmath reduce(max, x; dims, init = -Inf)`: the
+    # maximum, its `init` the identity. So NNlib's log-sum-exp, and a softmax
+    # written with NNlib's maximum, are the one-pass folds Base's spellings
+    # reach, and the log-sum-exp is the plan of Tempest's, but for the note
+    # that a rewrite reached it.
+    @test same_plan(a -> NNlib.logsumexp(a; dims = 1), a -> (m = maximum(a; dims = 1); m .+ log.(sum(exp.(a .- m); dims = 1))), a)
+    @test same_plan(a -> (e = exp.(a .- NNlib.fast_maximum(a; dims = 1)); e ./ sum(e; dims = 1)),
+        a -> (e = exp.(a .- maximum(a; dims = 1)); e ./ sum(e; dims = 1)), a)
+    @test C.structure(chosen(a -> NNlib.logsumexp(a; dims = 1), a)) == C.structure(chosen(a -> T.logsumexp(a; dims = 1), a))
+    @test C.structure(chosen(a -> exp.(a .- NNlib.logsumexp(a; dims = 1)), a)) == C.structure(chosen(a -> NNlib.softmax(a; dims = 1), a))
     @test same_plan(a -> sum(a[1:4, :]; dims = 1), a -> sum(view(a, 1:4, :); dims = 1), a)
     @test same_plan(a -> mean(a; dims = 1), a -> sum(a; dims = 1) ./ 8, a)
     @test same_plan((a, b) -> a .+ b, (a, b) -> b .+ a, a, b)

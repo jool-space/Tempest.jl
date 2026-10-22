@@ -342,10 +342,12 @@ Base.prod(f, x::TracedArray; dims = :) = prod(f.(x); dims)
 """
 logsumexp(x::AbstractArray; dims = :) = fold(Relative(Exponential(), LOGSUMEXP), x; dims)
 
-builtin_fold(::Union{typeof(+), typeof(Base.add_sum)}) = SumFold()
-builtin_fold(::Union{typeof(*), typeof(Base.mul_prod)}) = ProdFold()
-builtin_fold(::typeof(max)) = MaxFold()
-builtin_fold(::typeof(min)) = MinFold()
+# The fast-math operators are the operators: what they permit, a fold
+# grouping its elements in any order, every fold does (see `Fold`).
+builtin_fold(::Union{typeof(+), typeof(Base.add_sum), typeof(Base.FastMath.add_fast)}) = SumFold()
+builtin_fold(::Union{typeof(*), typeof(Base.mul_prod), typeof(Base.FastMath.mul_fast)}) = ProdFold()
+builtin_fold(::Union{typeof(max), typeof(Base.FastMath.max_fast)}) = MaxFold()
+builtin_fold(::Union{typeof(min), typeof(Base.FastMath.min_fast)}) = MinFold()
 builtin_fold(op) = nothing
 
 struct OperatorCombine{O}
@@ -358,7 +360,9 @@ function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
     builtin = builtin_fold(op)
     if builtin !== nothing
         r = fold(builtin, y; dims)
-        return init === nothing ? r : op.(init, r)
+        # An `init` that is the fold's identity, of the elements' type, changes
+        # nothing: NNlib's `-Inf` for a maximum, say.
+        return init === nothing || init === only(fold_init(builtin, eltype(y))) ? r : op.(init, r)
     end
     init === nothing && throw(ArgumentError("reducing a traced array by $op needs `init`, its identity"))
     T = promote_type(eltype(y), typeof(init))
