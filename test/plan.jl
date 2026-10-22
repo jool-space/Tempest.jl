@@ -178,6 +178,34 @@ end
     end
 end
 
+# The log-sum-exp written out differentiates as `logsumexp` does: its maximum
+# gets no cotangent, the loss being the same at every shift, and the rules
+# read the log-sum-exp alone, at the shift where the sum of exponentials is
+# one, so that the maximum and the sum are one fold again. A plain loss, a
+# softmax-weighted sum and causal attention plan their gradients alike, the
+# notes aside.
+@testset "a log-sum-exp written out differentiates as the fold" begin
+    planned(f, args...) = filter(l -> !startswith(l, "rewritten:"),
+        split(sprint(explain, recomputing(C.rewrite(C.lower(differentiate(trace(f, args...)))))), "\n"))
+    x, s = data(8, 6), data(6, 2, 5, 2; scale = 0.4)
+    q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
+    losses = [
+        (lse -> x -> sum(lse(x; dims = 1)), (x,)),
+        (lse -> (v, s) -> sum(weigh(v, exp.(s .- lse(s; dims = 1)))), (v, s)),
+        (lse -> (q, k, v) -> (s = causal(scores(q, k)); sum(abs2, weigh(v, exp.(s .- lse(s; dims = 1))))), (q, k, v)),
+    ]
+    for (loss, args) in losses
+        @test planned(loss(written_logsumexp), args...) == planned(loss(T.logsumexp), args...)
+    end
+    # Written with the maximum, a softmax reads the maximum and the sum apart
+    # in the forward, and they stay two folds.
+    @testset "gap: the rewrites read a softmax's maximum and sum through their log-sum-exp" begin
+        t = data(8, 6; scale = 0.7)
+        by_maximum(x) = (m = maximum(x; dims = 1); e = exp.(x .- m); sum(e ./ sum(e; dims = 1) .* t))
+        @test_broken planned(by_maximum, x) == planned(x -> sum(softmax_columns(x) .* t), x)
+    end
+end
+
 # A map read by a fold and by a later map over its domain is recomputed in
 # their kernel, as when it is written twice.
 @testset "a map one kernel reads" begin

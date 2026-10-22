@@ -82,7 +82,7 @@ end
 function pullback(op::Map, n, id, g, tape)
     xs = map(i -> rule_argument(tape, i), n.inputs)
     contributions = scalar_partials(op.f, g, h(tape, id), xs...)
-    map((c, i) -> c isa Traced && !(tape.nodes[i].op isa Constant) ? c : nothing, contributions, n.inputs)
+    map(c -> c isa Traced ? c : nothing, contributions)
 end
 
 reduce_handle(tape, x, axes; scalar) =
@@ -205,6 +205,161 @@ function unbroadcast(tape, c::Traced, input)
     node(c).eltype === target.eltype ? c : cast(target.eltype, c)
 end
 
+## Shifts a loss does not depend on.
+#
+# The log-sum-exp written out, `m + log(Σ exp(x - m))`, is the same for every
+# `m` constant along the sum, the maximum or any other, and so is a softmax
+# written with one, `exp(x - m) / Σ exp(x - m)`. So a value read only as such
+# a shift has no derivative there, though the rules would compute one, and
+# the maximum's own derivative after it: contributions that sum to zero. What
+# a loss does as `m` moves by `c` is found from the nodes between them, by the
+# exponential law of relative folds (see `Relative`): `exp` turns a shift into
+# a factor and `log` a factor into a shift; shifts add, factors multiply; a
+# sum along axes `c` is constant along keeps a factor, a maximum or a
+# log-sum-exp a shift. Where the loss stays, `m` gets nothing from the nodes
+# between, as JAX's `logsumexp` stops the gradient of its maximum, without a
+# function written to stop it.
+#
+# The derivatives of the nodes between are the same at every shift too, so
+# their rules read them at the normal shift, `m + log(s)` for `s` the sum of
+# `exp(y - m)`, where `s` is one. Then the rules read `y` and the log-sum-exp
+# alone, as a named log-sum-exp's rule does, and nothing reads the maximum and
+# the sum apart: the rewrites make them one fold (see `rewrite`).
+
+"How a value moves as `m` moves by `c`: by `k c`, or by the factor `exp(k c)`."
+struct Shift
+    k::Int
+end
+struct Factor
+    k::Int
+end
+const STILL = Shift(0)
+
+factor(k) = iszero(k) ? STILL : Factor(k)
+shift_of(r::Shift) = r.k
+shift_of(r) = nothing
+factor_of(r::Factor) = r.k
+factor_of(r::Shift) = iszero(r.k) ? 0 : nothing
+factor_of(r) = nothing
+
+# Under each map, how its value moves as its inputs move, or nothing for a
+# move the laws do not say.
+function moved(op::Map, rs, mdims)
+    f = op.f
+    # Rounding to an integer is not a shift: its derivative is zero.
+    (f === identity || f isa Cast{<:AbstractFloat}) && return only(rs)
+    if f === (+) || f === (-)
+        ks = map(shift_of, rs)
+        any(isnothing, ks) && return nothing
+        return Shift(f(ks...))
+    elseif f === (*) || f === (/)
+        ks = map(factor_of, rs)
+        any(isnothing, ks) && return nothing
+        return factor(f === (*) ? +(ks...) : -(ks...))
+    elseif f === exp
+        k = shift_of(only(rs))
+        return k === nothing ? nothing : factor(k)
+    elseif f === log
+        k = factor_of(only(rs))
+        return k === nothing ? nothing : Shift(k)
+    end
+    nothing
+end
+
+# A fold moves as its operand does only along axes `c` is constant along.
+function moved(op::Reduce, rs, mdims)
+    all(a -> get(mdims, a, 1) == 1, op.axes) || return nothing
+    r = only(rs)
+    op.fold isa SumFold && return factor_of(r) === nothing ? nothing : r
+    op.fold isa Union{MaxFold, MinFold} && return shift_of(r) === nothing ? nothing : r
+    op.fold == Relative(Exponential(), LOGSUMEXP) && return shift_of(r) === nothing ? nothing : r
+    nothing
+end
+
+moved(op, rs, mdims) = nothing
+
+# How the nodes between `m` and the loss move as `m` moves, through the
+# readers `readers` lists for each node, when the loss stays; nothing when it
+# does not. A move the laws do not say reaches the loss, since every node that
+# moves is read on the way to it.
+function moves_from(tape, loss, m, readers)
+    mdims = tape.nodes[m].dims
+    moves = Dict{Int, Union{Shift, Factor}}(m => Shift(1))
+    pending = BitSet(readers[m])
+    while !isempty(pending)
+        id = popfirst!(pending)
+        n = tape.nodes[id]
+        r = moved(n.op, map(i -> get(moves, i, STILL), n.inputs), mdims)
+        r === nothing && return nothing
+        moves[id] = r
+        r === STILL || union!(pending, readers[id])
+    end
+    get(moves, loss, STILL) === STILL ? moves : nothing
+end
+
+# The sum of `exp(y - m)` among the nodes `moves` lists, shaped as `m` is, for
+# a `y` that stays: the sum the normal shift makes one. Nothing without one.
+function shifted_sum(tape, m, moves)
+    shape = (tape.nodes[m].dims, tape.nodes[m].scalar)
+    for id in sort!(collect(keys(moves)))
+        n = tape.nodes[id]
+        n.op isa Reduce && n.op.fold isa SumFold && (n.dims, n.scalar) == shape || continue
+        e = tape.nodes[only(n.inputs)]
+        e.op isa Map && e.op.f === exp || continue
+        d = tape.nodes[only(e.inputs)]
+        d.op isa Map && d.op.f === (-) && length(d.inputs) == 2 && d.inputs[2] == m &&
+            get(moves, d.inputs[1], STILL) === STILL && return id
+    end
+    nothing
+end
+
+# The nodes `moves` lists recorded anew at the normal shift: each node's id,
+# and the id it is read at. Nothing without a sum to normalize.
+function normal_shift!(tape, m, moves)
+    s = shifted_sum(tape, m, moves)
+    s === nothing && return nothing
+    # A number filling the node's shape, as the node's value.
+    filling(n, x) = record!(tape, Constant(convert(n.eltype, x)), (), n.dims, n.eltype; scalar = n.scalar)
+    at = Dict(m => (h(tape, m) + log(h(tape, s))).id, s => filling(tape.nodes[s], 1))
+    for id in sort!(collect(keys(moves)))
+        haskey(at, id) && continue
+        n = tape.nodes[id]
+        inputs = map(i -> get(at, i, i), n.inputs)
+        at[id] = if n.op isa Map
+            # Constants fold, and identities simplify, as when traced: the
+            # sum's log is zero, and a quotient by it the dividend.
+            xs = map(i -> rule_argument(tape, i), inputs)
+            any(x -> x isa Traced, xs) ? record_map(n.op.f, xs...).id : filling(n, n.op.f(xs...))
+        else
+            record!(tape, n.op, inputs, n.dims, n.eltype; scalar = n.scalar)
+        end
+    end
+    at
+end
+
+# The shifts among `range` the loss does not depend on, and the nodes their
+# rules read anew, at the normal shift. A node between two shifts is read as
+# it is.
+function cancelled_shifts!(tape, loss, range, keep)
+    readers = [Int[] for _ in tape.nodes]
+    for id in range
+        keep[id] || continue
+        foreach(i -> push!(readers[i], id), tape.nodes[id].inputs)
+    end
+    shifts = BitSet()
+    at = Dict{Int, Int}()
+    for m in range
+        keep[m] && m != loss && tape.nodes[m].eltype <: AbstractFloat || continue
+        moves = moves_from(tape, loss, m, readers)
+        moves === nothing && continue
+        push!(shifts, m)
+        any(id -> haskey(at, id), keys(moves)) && continue
+        normal = normal_shift!(tape, m, moves)
+        normal === nothing || merge!(at, normal)
+    end
+    shifts, at
+end
+
 # The reverse pass from the scalar node `loss` over the nodes `range` of the
 # tape, recorded into the tape: the cotangent of each node it reaches. Nodes
 # before `range` are constants to it.
@@ -219,12 +374,17 @@ function reverse_pass_nodes!(tape, loss, range)
     cotangents = Dict{Int, Traced}()
     cotangents[loss] = h(tape, constant!(tape, one(tape.nodes[loss].eltype)))
     keep = live(tape.nodes, [loss])
+    shifts, at = cancelled_shifts!(tape, loss, range, keep)
     for id in reverse(range)
         n = tape.nodes[id]
         (keep[id] && haskey(cotangents, id)) || continue
-        contributions = pullback(n.op, n, id, cotangents[id], tape)
+        # The rule reads the node and its inputs where they are read anew.
+        read = Node(n.op, map(i -> get(at, i, i), n.inputs), n.dims, n.eltype, n.scalar)
+        contributions = pullback(n.op, read, get(at, id, id), cotangents[id], tape)
         for (input, c) in zip(n.inputs, contributions)
-            c === nothing && continue
+            (c === nothing || input in shifts) && continue
+            # A constant operand has no cotangent.
+            tape.nodes[input].op isa Constant && continue
             tape.nodes[input].eltype <: AbstractFloat || continue
             c = unbroadcast(tape, c, input)
             cotangents[input] = haskey(cotangents, input) ? cotangents[input] + c : c

@@ -65,6 +65,22 @@ end
     @test g.w ≈ 2 .* (w * x .+ b) * x' && g.b ≈ vec(sum(2 .* (w * x .+ b); dims = 2))
 end
 
+# A shift the loss does not depend on gets no cotangent. The log-sum-exp
+# written out is the same for every `m` constant along its sum, so the rule of
+# the maximum, which compares each element with it, never runs, and the
+# gradient is the named log-sum-exp's; read elsewhere too, the maximum gets
+# its cotangent from there. A softmax of `x .+ b` does not depend on `b` at
+# all: its gradient is zero, not the rounding of terms that cancel.
+@testset "a shift the loss does not depend on" begin
+    x, w, b, t = data(8, 6), data(1, 6), data(1, 6; scale = 0.3), data(8, 6; scale = 0.7)
+    compares(p) = any(n -> n.op isa C.Map && n.op.f === (==), p.nodes)
+    d = differentiate(trace(x -> sum(written_logsumexp(x; dims = 1) .* w), x))
+    @test !compares(d)
+    @test last(interpret(d, x)) ≈ last(T.gradient(x -> sum(T.logsumexp(x; dims = 1) .* w), x))
+    @test compares(differentiate(trace(x -> (m = maximum(x; dims = 1); sum(m .+ log.(sum(exp.(x .- m); dims = 1))) + sum(m)), x)))
+    @test T.gradient((x, b) -> sum(softmax_columns(x .+ b) .* t), x, b)[3] == zero(b)
+end
+
 # Writes into arrays a program allocates are functional updates: each write
 # makes a new version of the array, later reads see the latest version, reads
 # before a write keep what they read, and layouts share their array's memory.

@@ -7,6 +7,8 @@ T.scalar_partials(::typeof(leaky), g, y, x) = (ifelse(x > 0, g, oftype(g, 0.01) 
 rmsnorm(x, w) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0e-5) .* w
 softmax_columns(x) = exp.(x .- T.logsumexp(x; dims = 1))
 softmax_rows(x) = exp.(x .- T.logsumexp(x; dims = 2))
+# The log-sum-exp written out, with the maximum that keeps it finite.
+written_logsumexp(x; dims) = (m = maximum(x; dims); m .+ log.(sum(exp.(x .- m); dims)))
 batched(a, b) = C.contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))
 function layernorm(x, w)
     m = sum(x; dims = 1) ./ size(x, 1)
@@ -47,6 +49,9 @@ const PROGRAMS = [
     ("sum abs2 tanh", x -> sum(abs2, tanh.(x)), (data(8, 6),)),
     ("full logsumexp", x -> T.logsumexp(x), (data(8, 6),)),
     ("maximum and shifted sum", x -> sum(exp.(x .- maximum(x))), (data(8, 6),)),
+    ("log-sum-exp written out", x -> sum(written_logsumexp(x; dims = 1) .* data(1, 6)), (data(8, 6),)),
+    ("softmax by the maximum, the maximum read", (x, t) -> (m = maximum(x; dims = 1); e = exp.(x .- m); sum(e ./ sum(e; dims = 1) .* t) + sum(m)),
+     (data(8, 6), data(8, 6; scale = 0.7))),
     ("x .- mean", x -> sum(abs2, x .- sum(x) / length(x)), (data(8, 6),)),
     ("column maxima", x -> sum(maximum(x; dims = 1) .* data(1, 6)), (data(8, 6),)),
     ("row minima", x -> sum(minimum(x; dims = 2)), (data(8, 6),)),

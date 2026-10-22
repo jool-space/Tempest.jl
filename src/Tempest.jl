@@ -14,10 +14,11 @@ cannot spell:
 - the derivative of a scalar function, which its code does not carry:
   `scalar_partials`.
 
-`logsumexp` is a fold, a spelling, named here until the log-sum-exp written
-out differentiates as it does: its value does not depend on the maximum that
-keeps it finite, and the derivative of a spelling with `maximum` goes through
-the maximum still.
+`logsumexp` is a fold, a spelling. The log-sum-exp written out with `maximum`
+differentiates as it does, and plans as it does where the target permits the
+rewrites of sums (see `Compiler.rewrite`); it is named still because where a
+target keeps the rounding as written, the spelling is two passes, the maximum
+and then the sum, and `logsumexp` one.
 
 Any other function, a product by labelled axes or a batched product say, is a
 spelling and lives in its own package, as Einops's and NNlib's do; an extension
