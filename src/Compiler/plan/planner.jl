@@ -10,9 +10,14 @@
 # nothing reads it; its operand, often a value the group already computes, is
 # never written. Which axes a schedule sweeps, and which folds it completes in
 # a block and which by merging partial states, is the schedule's choice.
+#
+# A scan's group sweeps the axes it scans along, in its direction: its scans
+# alike, and the maps over its domain. A map before a scan is its operand's
+# term, as Futhark's `scanomap` fuses one into its scan; a map after reads
+# each scan at the position the sweep has reached.
 
 struct Group
-    kind::Symbol # :reduction, :pointwise or :opaque
+    kind::Symbol # :reduction, :scan, :pointwise or :opaque
     domain::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
@@ -24,8 +29,10 @@ Group(kind, domain) = Group(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{
 
 members(g::Group) = [g.reductions; g.outputs]
 
-"The axes a fold reduces."
-fold_axes(graph, r) = graph.values[r].definition.reduced
+"The axes a fold reduces, or a scan folds along."
+fold_axes(graph, r) = folded_axes(graph.values[r].definition)
+folded_axes(d::Reduction) = d.reduced
+folded_axes(d::Scan) = d.axes
 
 "The axes of the group's first fold: folds over them can be read within the group."
 primary_axes(graph, g::Group) = isempty(g.reductions) ? () : fold_axes(graph, first(g.reductions))
@@ -50,9 +57,10 @@ end
 # Where a group keeps a value it computes, as the value's index over the
 # domain: a fold of the group at the variables of the axes it keeps, any other
 # value over the whole domain or at the positions of the primary folds; or
-# nothing.
+# nothing. A scan's group keeps everything over its whole domain.
 function placement(graph, g::Group, v)
     val = graph.values[v]
+    g.kind === :scan && return val.dims == g.domain ? identity_index(g.domain) : nothing
     # A result of the group's own opaque work, at the variables of its domain.
     d = val.definition
     g.kind === :opaque && d isa Opaque && return opaque_dims(d) == g.domain ? ntuple(var, length(g.domain)) : nothing
@@ -277,7 +285,7 @@ function storing(graph::IndexGraph; recompute = ())
     stored = map(eachindex(values)) do id
         d = values[id].definition
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
-        d isa Union{Pointwise, Reduction, Opaque} && !live[id] && return false
+        d isa Union{Pointwise, Reduction, Scan, Opaque} && !live[id] && return false
         d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : true
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
@@ -312,7 +320,7 @@ function recomputable(p::Plan, users, id, live, results, materialized)
     end
     length(groups) == 1 || return false
     k = only(groups)
-    k != 0 && k != p.owner[id] && p.groups[k].kind in (:reduction, :pointwise) && p.groups[k].domain == v.dims
+    k != 0 && k != p.owner[id] && p.groups[k].kind in (:reduction, :scan, :pointwise) && p.groups[k].domain == v.dims
 end
 
 # Insert into the sorted `frontier` the stored values after `seed` that read
@@ -370,8 +378,8 @@ function group_values(graph, stored, live, results, running, fixed)
     for id in 1:n
         live[id] && owner[id] == 0 || continue
         d = values[id].definition
-        d isa Reduction && stored[id] || continue
-        g = Group(:reduction, d.iteration)
+        d isa Union{Reduction, Scan} && stored[id] || continue
+        g = d isa Scan ? Group(:scan, values[id].dims) : Group(:reduction, d.iteration)
         try_add!(graph, stored, deps, g, id; fold = true)
         frontier = reach!(Int[], followers, stored, [members(g); (r for m in members(g) for r in stored_reads(g.terms[m]))...], id)
         # A pass visits the frontier in order; what a new member reaches above
@@ -385,7 +393,8 @@ function group_values(graph, stored, live, results, running, fixed)
                 k += 1
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
-                added = od isa Reduction ? od.iteration == g.domain && try_add!(graph, stored, deps, g, other; fold = true) :
+                added = od isa Reduction ? g.kind === :reduction && od.iteration == g.domain && try_add!(graph, stored, deps, g, other; fold = true) :
+                    od isa Scan ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
                     od isa Pointwise && try_add!(graph, stored, deps, g, other; fold = false)
                 added || continue
                 changed = true
@@ -431,7 +440,7 @@ function group_values(graph, stored, live, results, running, fixed)
         primary(graph, g, r) || (external[s] = true)
     end
     for g in groups
-        g.kind in (:reduction, :pointwise) || continue
+        g.kind in (:reduction, :scan, :pointwise) || continue
         for m in members(g)
             external[m] && continue
             stored[m] = false
@@ -441,6 +450,13 @@ function group_values(graph, stored, live, results, running, fixed)
     order = order_groups(graph, groups, owner)
     position = invperm(order)
     Plan(graph, stored, groups[order], map(o -> o == 0 ? 0 : position[o], owner))
+end
+
+"Whether scan `v` joins the sweep of group `g`: a scan's group, over its domain, along its axes in its direction."
+function sweeps_with(graph, g::Group, v)
+    g.kind === :scan && graph.values[v].dims == g.domain || return false
+    d, e = graph.values[v].definition, graph.values[first(g.reductions)].definition
+    d.axes == e.axes && d.reverse == e.reverse
 end
 
 "A candidate whose values do not form one group."

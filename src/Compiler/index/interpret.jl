@@ -44,6 +44,11 @@ function evaluate_value(d::Reduction, v, arrays, graph, arguments)
     v.scalar ? only(y) : shaped(y, v)
 end
 
+function evaluate_value(d::Scan, v, arrays, graph, arguments)
+    y = scan_array(d.fold, materialize(d.operand, v.dims, arrays, graph), d.axes, d.reverse, d.exclusive)
+    v.scalar ? only(y) : y
+end
+
 function evaluate_value(d::Opaque, v, arrays, graph, arguments)
     xs = map((o, (dims, scalar)) -> materialize(o, dims, arrays, graph; scalar), d.operands, d.shapes)
     shaped(evaluate(d.node.op, d.node, xs), v)

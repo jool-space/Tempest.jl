@@ -388,6 +388,25 @@ const PARTIAL_BLOCKS = 256
 
 recomputes_folds(::cuTileGenerator, target) = target isa CUDATarget
 
+# A scan's group is not claimed yet: it runs on the floor, a thread per line.
+# Its realization, as designed: a block owns a tile of the kept axes and
+# sweeps the scanned axis a tile at a step, carrying each lane's state. At
+# each step it lifts the tile, padding at the identity; scans it along the
+# swept tile axis, by `accumulate` for the builtin folds (`+`, `*`, `max`,
+# `min`) and by `Intrinsics.scan` with the fold's `Pairwise` combine for a
+# tuple state, a tile per component, as `reduce_state!` folds one; combines
+# the carry before each prefix, the carry first; applies the maps after, at
+# the tile, and stores. The carry then takes the tile's fold after it. With
+# `reverse` the sweep starts at the last tile and scans with `rev = true`;
+# an exclusive scan, which only derivatives make, shifts the prefixes by a
+# lane. A long scanned axis with few kept tiles splits as the `:split`
+# sketch does: a launch folds each chunk to its total, a scan of the totals
+# gives each chunk its carry, and a launch scans the chunks again from it,
+# where Futhark and CUB scan in one pass by a look-back between blocks,
+# which needs flags cuTile does not have. A blocked scan groups its elements,
+# which needs associativity: the builtin folds have it, and a combine of the
+# user's may not, since Base's `accumulate`, unlike its `reduce`, combines in
+# sequence and asks for none. Whether to group one is a decision still open.
 function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind in (:pointwise, :reduction) || return Claim[]
     products = product_claims(target, g)

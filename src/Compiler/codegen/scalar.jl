@@ -79,11 +79,13 @@ end
 
 # Statements computing `roots`, each subterm once; returns the names. With
 # `hoisted`, the subterms that do not depend on the variables `swept` go to
-# `hoisted` instead, computed once before the loop of `statements`.
-function emit_terms!(statements, roots, c; names = Dict{Term, Any}(), hoisted = nothing, swept = ())
+# `hoisted` instead, computed once before the loop of `statements`, unless
+# `moves` says they change along the loop all the same, as a scan read where
+# the sweep has it does.
+function emit_terms!(statements, roots, c; names = Dict{Term, Any}(), hoisted = nothing, swept = (), moves = t -> false)
     for t in subterms(roots)
         haskey(names, t) && continue
-        if hoisted !== nothing && !any(k -> mentions(t, k), swept)
+        if hoisted !== nothing && !any(k -> mentions(t, k), swept) && !moves(t)
             emit_terms!(hoisted, [t], c; names)
             continue
         end
@@ -111,6 +113,7 @@ store_expr(c, v, index, value) =
     :(@inbounds $(buffer(c, v))[$(affine_expr(address(c.graph.values[v], index, c.domain), c)) + 1] = $value)
 
 function scalar_kernel(graph, stored, g::Group, slots)
+    g.kind === :scan && return scan_kernel(graph, stored, g, slots)
     D = g.domain
     vars = index_vars(length(D))
     c = EmitContext(graph, slots, vars, Domain(D))
@@ -178,6 +181,47 @@ function scalar_kernel(graph, stored, g::Group, slots)
             $loop
         end))
     end
+    ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
+end
+
+# A scan's group: an item per position of its other axes, which sweeps the
+# scanned axes in the scans' direction. At each position every scan folds its
+# element, in phase order, and the outputs there are computed and stored.
+function scan_kernel(graph, stored, g::Group, slots)
+    D = g.domain
+    vars = index_vars(length(D))
+    c = EmitContext(graph, slots, vars, Domain(D))
+    first_scan = graph.values[first(g.reductions)].definition
+    swept = collect(first_scan.axes)
+    kept = [k for k in 1:length(D) if !(k in swept)]
+    count = prod(k -> D[k], swept; init = 1)
+    body = Expr(:block)
+    s = body.args
+    delinearize_expr(s, :lin, kept, D, vars)
+    scans = sort(g.reductions; by = r -> (g.phase[r], r))
+    states = Dict(r => gensym(:state) for r in scans)
+    accumulators = Dict(r => fold_types(graph.values[r].definition.fold, term_eltype(g.terms[r], graph)).accumulator for r in scans)
+    foreach(r -> push!(s, :($(states[r]) = $fold_init($(graph.values[r].definition.fold), $(accumulators[r])))), scans)
+    loop = Expr(:block)
+    delinearize_expr(loop.args, first_scan.reverse ? :($(count - 1) - sweep) : :sweep, swept, D, vars)
+    names = Dict{Term, Any}()
+    # What reads a scan changes along the sweep, though no index moves it.
+    moves(t) = !isempty(stats(t))
+    for r in scans
+        val = graph.values[r]
+        fold, A = val.definition.fold, accumulators[r]
+        observed = :(convert($(val.eltype), $fold_observe($fold, $(states[r]))))
+        val.definition.exclusive && push!(loop.args, :($(stat_name(c, r)) = $observed))
+        emit_terms!(loop.args, [g.terms[r]], c; names, hoisted = s, swept, moves)
+        push!(loop.args, :($(states[r]) = $fold_combine($fold, $(states[r]), $fold_lift($fold, convert($A, $(names[g.terms[r]]))))))
+        val.definition.exclusive || push!(loop.args, :($(stat_name(c, r)) = $observed))
+        stored[r] && push!(loop.args, store_expr(c, r, identity_index(D), stat_name(c, r)))
+    end
+    emit_terms!(loop.args, [g.terms[m] for m in g.outputs], c; names, hoisted = s, swept, moves)
+    foreach(m -> push!(loop.args, store_expr(c, m, identity_index(D), names[g.terms[m]])), g.outputs)
+    push!(s, :(for sweep in 0:$(count - 1)
+        $loop
+    end))
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 

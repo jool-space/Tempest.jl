@@ -1,6 +1,9 @@
 # Reverse-mode differentiation at the program level. Derivative rules are
 # ordinary Julia on handles: each records its nodes into the same tape, so the
-# backward graph is program code, planned together with the forward.
+# backward graph is program code, planned together with the forward. The
+# cotangent of a node of tuples is the tuple of its components' cotangents,
+# each a handle or `nothing`, as a tuple element is the tuple of its
+# components (see `components`).
 
 public gradient, scalar_partials
 
@@ -82,12 +85,25 @@ end
 function pullback(op::Map, n, id, g, tape)
     xs = map(i -> rule_argument(tape, i), n.inputs)
     contributions = scalar_partials(op.f, g, h(tape, id), xs...)
-    map(c -> c isa Traced ? c : nothing, contributions)
+    map(c -> c isa Union{Traced, Tuple} ? c : nothing, contributions)
 end
+
+# A component's cotangent is its tuple's there, and a tuple's are its
+# components'.
+pullback(::Map{Component{I}}, n, id, g, tape) where {I} =
+    (ntuple(k -> k == I ? g : nothing, fieldcount(tape.nodes[only(n.inputs)].eltype)),)
+pullback(::Map{typeof(tuple)}, n, id, g, tape) = g
+
+# Cotangents summed, a tuple's component by component.
+plus(a, b) = a === nothing ? b : b === nothing ? a : a isa Tuple ? map(plus, a, b) : a + b
+
+"Whether elements of `T` have cotangents: floating-point numbers, and tuples with one among them."
+differentiable(T) = T <: AbstractFloat || T <: Tuple && any(differentiable, fieldtypes(T))
 
 reduce_handle(tape, x, axes; scalar) =
     h(tape, record!(tape, Reduce(SumFold(), axes), (x.id,), scalar ? () : ntuple(d -> d in axes ? 1 : node(x).dims[d], length(node(x).dims)), node(x).eltype; scalar))
 
+expand(tape, g::Tuple, dims; scalar = false) = map(c -> c === nothing ? nothing : expand(tape, c, dims; scalar), g)
 function expand(tape, g, dims; scalar = false)
     n = node(g)
     n.dims == dims && n.scalar == scalar && return g
@@ -130,6 +146,75 @@ end
 function fold_pullback(f::GenericFold, x, y, g, axes, full, tape)
     f.pullback === nothing && throw(ArgumentError("fold $f has no derivative rule; pass `pullback` to GenericFold"))
     f.pullback(x, y, g, axes)
+end
+
+# Scans.
+
+"Handle `x` scanned by the fold `f` along `axes` (see `Accumulate`)."
+scanned(tape, f, x, axes; reverse = false, exclusive = false) = h(tape, record!(tape, Accumulate(f, Tuple(axes), reverse, exclusive),
+    (x.id,), node(x).dims, fold_eltype(f, node(x).eltype); scalar = node(x).scalar))
+
+"""
+The scan of a linear recurrence of vectors of `K` numbers, `v = M v′ + b`.
+Its elements are the affine maps `v′ ↦ M v′ + b`, each the tuple of `M`'s
+entries, column by column, then `b`'s; two compose the earlier first, and the
+state is observed as its `b`, the recurrence from `v = 0`. A scan's
+derivative is one, run the other way.
+"""
+struct Recurrence{K} <: Fold end
+
+IR.fold_init(::Recurrence{K}, E) where {K} =
+    ntuple(j -> j <= K * K && (j - 1) % K == (j - 1) ÷ K ? one(fieldtype(E, j)) : zero(fieldtype(E, j)), Val(K * K + K))
+IR.fold_lift(::Recurrence, e) = e
+function IR.fold_combine(::Recurrence{K}, a, b) where {K}
+    entry(t, r, c) = t[(c - 1) * K + r]
+    product = ntuple(j -> sum(l -> entry(b, (j - 1) % K + 1, l) * entry(a, l, (j - 1) ÷ K + 1), 1:K), Val(K * K))
+    offset = ntuple(r -> sum(l -> entry(b, r, l) * a[K * K + l], 1:K) + b[K * K + r], Val(K))
+    (product..., offset...)
+end
+IR.fold_observe(::Recurrence{K}, s) where {K} = ntuple(r -> s[K * K + r], Val(K))
+
+pullback(op::Accumulate, n, id, g, tape) = (scan_pullback(op.fold, op, h(tape, only(n.inputs)), g, tape),)
+
+# A sum's prefixes: each element enters every prefix after it, so its
+# cotangent is the sum of theirs, the scan of the cotangent the other way.
+scan_pullback(::SumFold, op, x, g, tape) = scanned(tape, SumFold(), g, op.axes; reverse = !op.reverse, op.exclusive)
+
+# Any other scan steps `s = combine(s′, lift(x))`, whose partials by the
+# state before, `J`, and by the element are traced from the combine's own
+# code at the exclusive prefix: `J` by one pullback per component of the
+# state, the element's by one of the state's cotangent. That cotangent
+# gathers what each result reads of its state and, through `J`, the next
+# state's: a linear recurrence run the other way, the scan of `Recurrence`.
+# Taken as `J` times the cotangent, its maps read no `J` of the next
+# position. So a product's derivative is the prefix before each element
+# times a recurrence by the elements, and a zero divides nothing; a
+# maximum's passes where the prefix or the element holds it, the prefix on
+# ties, as `max` does; and a linear recurrence's is a linear recurrence.
+function scan_pullback(f::Fold, op, x, g, tape)
+    S = fold_types(f, node(x).eltype).state
+    k, T = fieldcount(S), promote_type(fieldtypes(S)...)
+    # What each result reads of the state.
+    gs = f isa GenericFold ? f.observe === identity ? g : only(vjp!(tape, f.observe, (prefixes(tape, f, x, op),), g)) : (g,)
+    before = prefixes(tape, f, x, op; exclusive = true)
+    e = components(x)
+    step(s, e) = fold_combine(f, s, fold_lift(f, e))
+    unit = h(tape, constant!(tape, one(T)))
+    columns = map(c -> first(vjp!(tape, step, (before, e), ntuple(j -> j == c ? unit : nothing, k))), 1:k)
+    entry(c) = c === nothing ? zero(T) : cast(T, c)
+    M = [entry(columns[c][r]) for c in 1:k for r in 1:k]
+    gy = map(entry, gs)
+    b = op.exclusive ? gy : ntuple(r -> sum(c -> M[(c - 1) * k + r] * gy[c], 1:k), k)
+    later = components(scanned(tape, Recurrence{k}(), record_map(tuple, M..., b...), op.axes; reverse = !op.reverse, exclusive = true))
+    last(vjp!(tape, step, (before, e), op.exclusive ? later : map(+, gy, later)))
+end
+
+# The states a scan of `x` by `f` reads, at each position: a tuple of handles,
+# a builtin fold's one component as it observes it.
+function prefixes(tape, f, x, op; exclusive = op.exclusive)
+    f isa GenericFold || return (scanned(tape, f, x, op.axes; op.reverse, exclusive),)
+    state = GenericFold(f.init, f.lift, f.combine, identity, nothing)
+    components(scanned(tape, state, x, op.axes; op.reverse, exclusive))
 end
 
 function pullback(op::Contract, n, id, g, tape)
@@ -180,12 +265,31 @@ function adjoint_selection(op, n, g, tape)
     (h(tape, record!(tape, op, (g.id, indices...), xn.dims, node(g).eltype; scalar = xn.scalar)), map(_ -> nothing, indices)...)
 end
 
+# A layout of tuples moves their components alike.
+for L in (:Reshape, :Permute, :Select, :Scatter)
+    @eval function pullback(op::$L, n, id, g::Tuple, tape)
+        parts = map(c -> c === nothing ? nothing : pullback(op, n, id, c, tape), g)
+        ntuple(k -> map(p -> p === nothing ? nothing : p[k], parts), length(n.inputs))
+    end
+end
+
 pullback(::Union{Constant, Argument}, n, id, g, tape) = map(_ -> nothing, n.inputs)
 
 # Undo broadcasting: sum a contribution over the axes its input was broadcast
 # along, and give it the input's shape and element type.
 function unbroadcast(tape, c::Traced, input)
     target = tape.nodes[input]
+    fitted(tape, c, (; target.dims, target.scalar, target.eltype))
+end
+
+function unbroadcast(tape, c::Tuple, input)
+    target = tape.nodes[input]
+    map(c, fieldtypes(target.eltype)) do x, T
+        x === nothing || !differentiable(T) ? nothing : fitted(tape, x, (; target.dims, target.scalar, eltype = T))
+    end
+end
+
+function fitted(tape, c, target)
     cn = node(c)
     if cn.dims != target.dims || (cn.scalar != target.scalar)
         if target.scalar || isempty(target.dims)
@@ -371,10 +475,16 @@ function reverse_pass!(tape, loss, range)
 end
 
 function reverse_pass_nodes!(tape, loss, range)
-    cotangents = Dict{Int, Traced}()
+    cotangents = Dict{Int, Any}()
     cotangents[loss] = h(tape, constant!(tape, one(tape.nodes[loss].eltype)))
     keep = live(tape.nodes, [loss])
     shifts, at = cancelled_shifts!(tape, loss, range, keep)
+    pull!(tape, cotangents, range, keep, shifts, at)
+end
+
+# The cotangents in `cotangents` pulled back through the nodes `range` that
+# `keep` holds, to every node they read.
+function pull!(tape, cotangents, range, keep, shifts = BitSet(), at = Dict{Int, Int}())
     for id in reverse(range)
         n = tape.nodes[id]
         (keep[id] && haskey(cotangents, id)) || continue
@@ -385,12 +495,38 @@ function reverse_pass_nodes!(tape, loss, range)
             (c === nothing || input in shifts) && continue
             # A constant operand has no cotangent.
             tape.nodes[input].op isa Constant && continue
-            tape.nodes[input].eltype <: AbstractFloat || continue
-            c = unbroadcast(tape, c, input)
-            cotangents[input] = haskey(cotangents, input) ? cotangents[input] + c : c
+            differentiable(tape.nodes[input].eltype) || continue
+            cotangents[input] = plus(get(cotangents, input, nothing), unbroadcast(tape, c, input))
         end
     end
     cotangents
+end
+
+"""
+    vjp!(tape, f, inputs, g) -> cotangents
+
+The cotangents of `inputs`, each a handle or a tuple of handles, through
+`f(inputs...)` recorded into the tape, given `g`, the cotangent of its result:
+a handle, or for a tuple a tuple of handles and `nothing`. Rules that pull
+back through code of the user's, a scan's combine say, call it.
+"""
+function vjp!(tape, f, inputs, g)
+    start = length(tape.nodes) + 1
+    result = f(inputs...)
+    cotangents = Dict{Int, Any}()
+    seed!(tape, cotangents, result, g)
+    pull!(tape, cotangents, start:length(tape.nodes), trues(length(tape.nodes)))
+    cotangent(x::Traced) = get(cotangents, x.id, nothing)
+    map(x -> x isa Tuple ? map(cotangent, x) : cotangent(x), inputs)
+end
+
+# The cotangent of `result`, filled out to its shape; a number has none.
+function seed!(tape, cotangents, result, g)
+    g === nothing && return
+    result isa Tuple && return foreach((r, c) -> seed!(tape, cotangents, r, c), result, g)
+    result isa Traced || return
+    c = expand(tape, g, node(result).dims; scalar = node(result).scalar)
+    cotangents[result.id] = plus(get(cotangents, result.id, nothing), c)
 end
 
 # The cotangent of node `id`: zero where the pass did not reach it, and

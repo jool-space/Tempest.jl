@@ -108,6 +108,10 @@ group_identity(p::Plan, g::Group) = GroupIdentity(g.kind, g.domain, copy(g.reduc
 # operation and the values it reads.
 computed(d::Opaque) = string(op_name(d.node.op), op_detail(d.node.op), " of ", join(map(o -> "%$(o.value)", reads(d)), " "))
 
+# A fold in a group's key: its fold and axes, and a scan's direction.
+fold_key(d::Reduction) = string(fold_name(d.fold), d.reduced)
+fold_key(d::Scan) = string(fold_name(d.fold), d.axes, d.reverse ? " reversed" : "", d.exclusive ? " exclusive" : "")
+
 # A group across programs: value numbers in order of appearance, with each
 # value's type and shape.
 function canonical(p::Plan, g::Group)
@@ -115,7 +119,7 @@ function canonical(p::Plan, g::Group)
     print(io, g.kind, " ", g.domain)
     for m in members(g)
         v = p.graph.values[m]
-        what = m in g.reductions ? string(fold_name(v.definition.fold), v.definition.reduced) : "value"
+        what = m in g.reductions ? fold_key(v.definition) : "value"
         print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", haskey(g.terms, m) ? g.terms[m] : computed(v.definition))
     end
     numbers = Dict{String, Int}()

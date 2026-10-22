@@ -67,6 +67,22 @@ struct Reduction{F} <: Definition
 end
 
 """
+A fold of `operand` along the `axes` of the value's domain that keeps them:
+at each position, the fold of the operand at the positions up to it along
+those axes, in their linear order (the first fastest), the other axes fixed;
+from the last position down with `reverse`, and without the position itself
+with `exclusive`. The operand is read over the value's domain. Its elements
+combine in order, the earlier state first, so its fold need not commute.
+"""
+struct Scan{F} <: Definition
+    fold::F
+    operand::Operand
+    axes::Tuple{Vararg{Int}}
+    reverse::Bool
+    exclusive::Bool
+end
+
+"""
 A program-level operation realized on its operands materialized in their
 program shapes: one the index level does not model, such as a scatter by index
 arrays. Its boundary is storage.
@@ -136,7 +152,7 @@ IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int
 
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
-operands(d::Reduction) = (d.operand,)
+operands(d::Union{Reduction, Scan}) = (d.operand,)
 operands(d::Opaque) = d.operands
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
@@ -155,6 +171,7 @@ describe(d::Input) = "input $(d.argument)"
 describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
+describe(d::Scan) = "scan($(scan_summary(d.fold, d.axes, d.reverse, d.exclusive)))"
 describe(d::Opaque) = "opaque $(op_name(d.node.op))$(op_detail(d.node.op))"
 
 show_operand(io, o::Read) = print(io, "%", o.value, "[", join(map(string, o.index), ", "), "]")

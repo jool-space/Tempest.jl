@@ -79,6 +79,7 @@ remap(o::Literal, ids) = o
 remap(o::IndexOperand{T}, ids) where {T} = IndexOperand{T}(remap(o.expr, ids))
 remap(d::Pointwise, ids) = Pointwise(d.f, map(o -> remap(o, ids), d.operands))
 remap(d::Reduction, ids) = Reduction(d.fold, remap(d.operand, ids), d.iteration, d.reduced)
+remap(d::Scan, ids) = Scan(d.fold, remap(d.operand, ids), d.axes, d.reverse, d.exclusive)
 remap(d::Opaque, ids) = Opaque(d.node, map(o -> remap(o, ids), d.operands), d.shapes)
 remap(d::Union{Input, ConstantArray}, ids) = d
 
@@ -91,7 +92,7 @@ function live_values(graph::IndexGraph)
     end
     for id in length(graph.values):-1:1
         d = graph.values[id].definition
-        live[id] |= !(d isa Union{Pointwise, Reduction})
+        live[id] |= !(d isa Union{Pointwise, Reduction, Scan})
         live[id] || continue
         foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(d))
     end

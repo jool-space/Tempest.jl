@@ -178,6 +178,26 @@ end
     end
 end
 
+# A scan is the sweep of a kernel along the axes it scans: a map before it is
+# its operand, and a map after reads it where the sweep has it, so both fuse
+# into its kernel and only the result is stored. Scans along the same axes in
+# the same direction share the sweep; along another axis, a scan is another.
+@testset "scans fuse the maps around them" begin
+    x = data(8, 6)
+    planned(f, args...) = C.plan(C.lower(trace(f, args...)))
+    fused(x) = exp.(cumsum(sin.(x); dims = 1)) .* 2
+    for (f, args) in ((fused, (x,)), (x -> cumsum(cumprod(x; dims = 2); dims = 2) .+ x, (x,)),
+            (recurrence, (0.9 .+ 0.1 .* data(30; scale = 0.3), data(30; scale = 0.7))))
+        p = planned(f, args...)
+        @test C.structure(p).kernels == 1 && only(p.groups).kind === :scan
+        @test length(C.structure(p).stored) == 1
+        @test agree(C.execute(p, args...), [f(args...)])
+        args = map(single, args)
+        @test agree(C.execute(planned(f, args...), args...), [f(args...)]; rtol = 1.0e-5)
+    end
+    @test C.structure(planned(x -> cumsum(x; dims = 1) .+ cumsum(x; dims = 2), x)).kernels == 2
+end
+
 # The log-sum-exp written out differentiates as `logsumexp` does: its maximum
 # gets no cotangent, the loss being the same at every shift, and the rules
 # read the log-sum-exp alone, at the shift where the sum of exponentials is

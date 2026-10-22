@@ -23,6 +23,19 @@ struct Reduce{F} <: Operation
 end
 
 """
+A fold of the input along `axes` that keeps them, as Base's `accumulate`:
+each element is the fold of the elements up to it in the axes' linear order,
+the first fastest; from the last down with `reverse`, and without the element
+itself with `exclusive`.
+"""
+struct Accumulate{F} <: Operation
+    fold::F
+    axes::Tuple{Vararg{Int}}
+    reverse::Bool
+    exclusive::Bool
+end
+
+"""
 A product summed over shared axes, as an einsum: `a` and `b` label the axes of
 the two inputs and `out` those of the result. Labels in both inputs but not in
 the result are summed over.
@@ -119,6 +132,11 @@ op_detail(op::Operation) = ""
 op_detail(op::Constant) = op.value isa AbstractRange ? " " * repr(op.value) : op.value isa AbstractArray ? " array" : " " * repr(op.value)
 op_detail(op::Map) = " " * string(op.f)
 op_detail(op::Reduce) = " " * string(fold_name(op.fold)) * " over " * string(op.axes)
+op_detail(op::Accumulate) = " " * scan_summary(op.fold, op.axes, op.reverse, op.exclusive)
+
+# A scan in words: its fold, its axes, and its direction where it is not the plain one.
+scan_summary(fold, axes, reverse, exclusive) =
+    string(fold_name(fold), " along ", axes, reverse ? ", reversed" : "", exclusive ? ", exclusive" : "")
 op_detail(op::Contract) = " " * string(op.a) * "·" * string(op.b) * "→" * string(op.out)
 op_detail(op::Permute) = " " * string(op.perm)
 op_detail(op::Union{Select, Scatter}) = " " * join(map(index_summary, op.indices), ", ")

@@ -44,6 +44,14 @@ welford_lift(x) = (one(x), x, zero(x))
 const VARIANCE = T.GenericFold(; init = T -> (zero(T), zero(T), zero(T)), lift = welford_lift, combine = welford, observe = s -> s[3] / s[1])
 base_variance(x; dims) = (s -> s[3] / s[1]).(mapreduce(welford_lift, welford, x; dims, init = ntuple(_ -> zero(eltype(x)), 3)))
 
+# A linear recurrence `h = a h′ + b`, as Base spells its scan: pairs of a
+# factor and an offset, merged by a combine that associates and does not
+# commute, from `h = 0`.
+chain((a1, b1), (a2, b2)) = (a2 * a1, a2 * b1 + b2)
+recurrence(a, b) = last.(accumulate(chain, tuple.(a, b); init = (one(eltype(a)), zero(eltype(b)))))
+# A zero, through which a product's derivative passes.
+with_zero(x) = (y = copy(x); y[2, 3] = 0; y)
+
 const PROGRAMS = [
     ("dot product", (a, b) -> sum(a .* b), (data(32), data(32; scale = 0.3))),
     ("sum abs2 tanh", x -> sum(abs2, tanh.(x)), (data(8, 6),)),
@@ -109,5 +117,10 @@ const PROGRAMS = [
      (data(8, 6),)),
     ("embedding lookup and layer norm", (E, P, t, w) -> sum(abs2, layernorm(E[:, t] .+ P, w)),
      (data(8, 10; scale = 0.3), data(8, 3; scale = 0.2), Int32[3 1; 10 3; 7 7], data(8; scale = 0.1))),
+    ("cumulative sums", x -> sum(cumsum(x; dims = 1) .* data(8, 6; scale = 0.3)) + sum(abs2, cumsum(x[:, 2])), (data(8, 6),)),
+    ("cumulative products through a zero", x -> sum(cumprod(x; dims = 2) .* data(5, 4)), (with_zero(data(5, 4; scale = 0.4)),)),
+    ("running maxima and minima", x -> sum(accumulate(max, x; dims = 1) .* data(8, 6; scale = 0.3)) + sum(accumulate(min, x)),
+     (data(8, 6; scale = 0.7),)),
+    ("a linear recurrence", (a, b) -> sum(abs2, recurrence(a, b)), (0.9 .+ 0.1 .* data(30; scale = 0.3), data(30; scale = 0.7))),
 ]
 

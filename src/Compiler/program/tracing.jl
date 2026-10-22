@@ -592,11 +592,47 @@ LinearAlgebra.tril(x::TracedArray{<:Any, 2}, k::Integer = 0) =
 LinearAlgebra.triu(x::TracedArray{<:Any, 2}, k::Integer = 0) =
     ifelse.(reshape(1:size(x, 1), :, 1) .- reshape(1:size(x, 2), 1, :) .<= -k, x, zero(eltype(x)))
 
-# A scan is an ordered fold, which the language does not have.
-const SCAN = "a scan (cumsum, cumprod, accumulate) is an ordered fold, which Tempest does not trace"
-Base.cumsum(x::TracedArray; dims = :) = throw(ArgumentError(SCAN))
-Base.cumprod(x::TracedArray; dims = :) = throw(ArgumentError(SCAN))
-Base.accumulate(op, x::TracedArray; dims = :, kws...) = throw(ArgumentError(SCAN))
+# Scans: folds that keep the axes they fold along, as Base's `accumulate`
+# defines them, each element the fold of the elements up to it.
+
+"`x` scanned by the fold `f` along `axes` (see `Accumulate`)."
+function scan(f::Fold, x::TracedArray, axes; reverse = false, exclusive = false)
+    op = Accumulate(f, Tuple(axes), reverse, exclusive)
+    TracedArray(x.tape, record!(x.tape, op, (x.id,), size(x), fold_eltype(f, eltype(x))))
+end
+
+# Without `dims`, a vector is scanned along its axis and an array of more axes
+# along all of them in their linear order, as Base collects
+# `Iterators.accumulate`. An axis past the array's has extent one.
+function Base.accumulate(op, x::TracedArray; dims = nothing, init = nothing)
+    axes = dims === nothing ? Tuple(1:ndims(x)) : dims <= ndims(x) ? (Int(dims),) : ()
+    init isa Tuple && return state_scan(op, x, init, axes)
+    builtin = builtin_fold(op)
+    if builtin !== nothing
+        r = scan(builtin, x, axes)
+        # As in `mapreduce`: an `init` that is the fold's identity changes
+        # nothing, and another combines with each element after the scan,
+        # which groups it apart from Base's sequence.
+        return init === nothing || init === only(fold_init(builtin, eltype(x))) ? r : op.(init, r)
+    end
+    init === nothing && throw(ArgumentError("accumulating a traced array by $op needs `init`, its identity"))
+    T = promote_type(eltype(x), typeof(init))
+    scan(GenericFold(; init = (convert(T, init),), combine = OperatorCombine(op)), T.(x), axes)
+end
+
+# A scan whose `init` is a tuple, as `state_fold` folds one: `op` merges the
+# elements, states of the type of `init`, into the state, the earlier first.
+# A linear recurrence `h = a h′ + b` is one, of the pairs `(a, b)`.
+function state_scan(op, x, init, axes)
+    S = typeof(init)
+    lift = eltype(x) === S ? identity : Converted{S}(identity)
+    scan(GenericFold(; init = Initial{init}(), lift, combine = op, observe = identity), x, axes)
+end
+
+Base.cumsum(x::TracedArray; dims::Integer) = accumulate(Base.add_sum, x; dims)
+Base.cumsum(x::TracedArray{<:Any, 1}) = cumsum(x; dims = 1)
+Base.cumprod(x::TracedArray; dims::Integer) = accumulate(Base.mul_prod, x; dims)
+Base.cumprod(x::TracedArray{<:Any, 1}) = cumprod(x; dims = 1)
 
 # `map` over arrays of one shape is a broadcast, and `dot` a sum of products,
 # rather than loops over their elements.

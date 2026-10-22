@@ -1,9 +1,14 @@
 # Folds: reductions described without a schedule. A fold maps each element to a
-# state tuple (`fold_lift`), merges states (`fold_combine`) and maps the final
-# state to the result (`fold_observe`); `fold_init(f, T)` is the identity state.
-# Implementations group elements in any fixed order, so `fold_combine` must be
-# associative and commutative up to rounding, and `fold_init` exact: it masks
-# padded lanes.
+# state tuple (`fold_lift`), merges states (`fold_combine`, the earlier state
+# first) and maps the final state to the result (`fold_observe`);
+# `fold_init(f, T)` is the identity state, exact: it masks padded lanes.
+# Implementations of a reduction group its elements in any fixed order and
+# interleave them, as a strided sweep does, so there `fold_combine` must be
+# associative and commutative up to rounding. A scan keeps the order of its
+# elements, so it needs associativity alone: a linear recurrence, a scan of
+# pairs of a factor and an offset, has it and does not commute. Combined in
+# sequence, as Base's `accumulate` and the floor combine them, a scan needs
+# not even that.
 
 public Fold, SumFold, MaxFold, MinFold, ProdFold, Relative, Law, Exponential, Square, Statistic, Sum, Composed, LOGSUMEXP, GenericFold,
     fold_init, fold_lift, fold_combine, fold_observe, fold_reduce, fold_types, lse_shift, HalfFloat
@@ -263,3 +268,36 @@ function fold_elements(f::Fold, x, axes)
 end
 
 fold_elements(::SumFold, x, axes) = sum(x; dims = axes)
+
+# A scan, the same keeping `axes`: each element the fold of those up to it in
+# the axes' linear order, the first fastest; from the last down with
+# `reverse`, and without the element itself with `exclusive`.
+function scan_array(f::Fold, x::AbstractArray, axes::Tuple, reverse::Bool, exclusive::Bool)
+    T = eltype(x)
+    (; accumulator, result) = fold_types(f, T)
+    y = scan_elements(f, accumulator === T ? x : accumulator.(x), axes, reverse, exclusive)
+    result.(y)
+end
+
+scan_elements(f::Fold, x, axes, reverse, exclusive) = in_sequence(f, x, axes, reverse, exclusive)
+
+# A sum along one axis keeps Base's `cumsum`, which sums a vector pairwise.
+scan_elements(f::SumFold, x, axes, reverse, exclusive) = length(axes) == 1 && !reverse && !exclusive ?
+    cumsum(x; dims = only(axes)) : in_sequence(f, x, axes, reverse, exclusive)
+
+# Elements combined one after another, as Base's `accumulate` combines them.
+function in_sequence(f::Fold, x, axes, reverse, exclusive)
+    A = eltype(x)
+    y = Array{fold_types(f, A).observed}(undef, size(x))
+    along = CartesianIndices(ntuple(k -> k in axes ? size(x, k) : 1, ndims(x)))
+    for K in CartesianIndices(ntuple(k -> k in axes ? 1 : size(x, k), ndims(x)))
+        state = fold_init(f, A)
+        for S in (reverse ? Iterators.reverse(along) : along)
+            I = K + S - oneunit(S)
+            exclusive && (y[I] = fold_observe(f, state))
+            state = fold_combine(f, state, fold_lift(f, x[I]))
+            exclusive || (y[I] = fold_observe(f, state))
+        end
+    end
+    y
+end

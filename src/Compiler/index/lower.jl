@@ -54,6 +54,14 @@ function narrow(d::Reduction, dims)
     Reduction(d.fold, narrow(d.operand, n), n[2].extents, Tuple(j for (j, k) in enumerate(keep) if k in d.reduced))
 end
 
+# A scan ranges over its node's wide axes, as a map does; along an axis of
+# extent one, each position is its own prefix.
+function narrow(d::Scan, dims)
+    keep = wide_axes(dims)
+    n = narrowing(dims, keep)
+    Scan(d.fold, narrow(d.operand, n), Tuple(j for (j, k) in enumerate(keep) if k in d.axes), d.reverse, d.exclusive)
+end
+
 # Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
 # broadcasts: axes of extent one, and missing trailing axes, read index zero.
 broadcast_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
@@ -303,6 +311,8 @@ function lower(p::Program)
         elseif op isa Reduce
             parent = only(input_dims)
             value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
+        elseif op isa Accumulate
+            value!(Scan(op.fold, operand(only(inputs), only(input_dims), d), op.axes, op.reverse, op.exclusive), n)
         elseif op isa Contract
             contraction!(value!, op, inputs, input_dims, n)
         elseif op isa Scatter && !any(i -> i isa IndexInput, op.indices)

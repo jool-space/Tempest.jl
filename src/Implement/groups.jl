@@ -8,10 +8,11 @@ public GroupView, ValueView, members, product_axes
 """
 What a view holds of a value: its element type and dims, whether it is a
 number rather than an array (stored as one element), and whether it is stored;
-for a fold, the fold and the axes of its domain it reduces; and for a value
-masked by formulas over its positions, `masked`: the formulas, each at most
-zero where the mask holds, and the number the value is where it fails (see
-`Tempest.IR.comparison_mask` and `Tempest.IR.masked_result`).
+for a fold, the fold and the axes of its domain it reduces, and for a scan its
+fold and none; and for a value masked by formulas over its positions,
+`masked`: the formulas, each at most zero where the mask holds, and the
+number the value is where it fails (see `Tempest.IR.comparison_mask` and
+`Tempest.IR.masked_result`).
 """
 struct ValueView
     eltype::DataType
@@ -29,7 +30,9 @@ end
 A group of the plan as implementations see it. A group computes its members
 over one domain: `reductions`, its folds, and `outputs`, its other values, each
 defined by its term in `terms`. An `:opaque` group computes one value that the
-index level does not model, such as a scatter. Folds over `primary_axes`, the
+index level does not model, such as a scatter. A `:scan` group's
+`reductions` are scans along its `primary_axes` in one direction, which its
+members read at the position its sweep has reached. Folds over `primary_axes`, the
 axes its first fold reduces, can be read within the group, and `phase` counts the folds each member waits for. `values` describes every
 value the group computes or reads, `placement` where it keeps each member (its
 index over the domain, or nothing), and `bytes` what it reads from storage and

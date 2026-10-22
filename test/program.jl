@@ -81,6 +81,31 @@ end
     @test T.gradient((x, b) -> sum(softmax_columns(x .+ b) .* t), x, b)[3] == zero(b)
 end
 
+# Base's scans trace as folds that keep the axes they fold along, and compute
+# what eager Julia does in its order: a vector's cumulative sum pairwise,
+# every other scan in sequence. A linear recurrence is a scan of pairs. A
+# cumulative sum's derivative is a cumulative sum the other way, and any
+# other scan's a linear recurrence the other way.
+@testset "scans" begin
+    x, v = data(8, 6), data(300)
+    a, b = 0.9 .+ 0.1 .* data(300; scale = 0.3), data(300; scale = 0.7)
+    same(f, args...) = interpret(trace(f, args...), args...) == f(args...)
+    scans = [(cumsum, (v,)), (x -> cumsum(x; dims = 1), (x,)), (x -> cumprod(x; dims = 2), (x,)), (cumprod, (v,)),
+        (x -> accumulate(max, x; dims = 1), (x,)), (x -> accumulate(min, x), (x,)), (recurrence, (a, b))]
+    for (f, args) in scans
+        @test same(f, args...)
+        @test same(f, map(single, args)...)
+    end
+    # An `init` other than the fold's identity combines after the scan, as
+    # after a fold, and a combine of the user's needs its identity.
+    @test interpret(trace(x -> accumulate(+, x; dims = 2, init = 1.0), x), x) ≈ accumulate(+, x; dims = 2, init = 1.0)
+    @test occursin("needs `init`, its identity", message(() -> trace(x -> accumulate((p, q) -> p * q + q, x; dims = 1), x)))
+    backward(f, args...) = [n.op.fold for n in differentiate(trace(f, args...)).nodes if n.op isa C.Accumulate && n.op.reverse]
+    @test backward(x -> sum(cumsum(x; dims = 1) .* x), x) == [IR.SumFold()]
+    @test backward(x -> sum(cumprod(x; dims = 1) .* x), x) == [C.Recurrence{1}()]
+    @test backward((a, b) -> sum(abs2, recurrence(a, b)), a, b) == [C.Recurrence{2}()]
+end
+
 # Writes into arrays a program allocates are functional updates: each write
 # makes a new version of the array, later reads see the latest version, reads
 # before a write keep what they read, and layouts share their array's memory.

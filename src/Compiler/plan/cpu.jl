@@ -13,7 +13,7 @@ evaluate_term(t::Ix{T}, x, k, buffers, stats, graph) where {T} =
 # A fold's value at the domain index `x`: at the axes it keeps.
 function evaluate_term(t::Stat, x, k, buffers, stats, graph)
     s = stats[t.value]
-    s isa Number && return s
+    s isa AbstractArray || return s
     d = graph.values[t.value].definition
     axes = d isa Reduction ? d.reduced : ()
     s[(x[i] + 1 for i in eachindex(x) if !(i in axes))...]
@@ -35,6 +35,7 @@ end
 
 function run_group!(g::Group, buffers, graph)
     g.kind === :reduction && return run_reduction!(g, buffers, graph)
+    g.kind === :scan && return run_scan!(g, buffers, graph)
     g.kind === :pointwise && return run_pointwise!(g, buffers, graph)
     # Opaque work: its one value, through the reference.
     v = only(g.outputs)
@@ -98,6 +99,40 @@ function run_reduction!(g::Group, buffers, graph)
         end
         buffers[m] = out
     end
+end
+
+# Each line along the scanned axes, swept in the scans' direction: at each
+# position every scan folds its element, in phase order, and the outputs
+# there read the scans where the sweep has them.
+function run_scan!(g::Group, buffers, graph)
+    D = g.domain
+    first_scan = graph.values[first(g.reductions)].definition
+    axes, reverse = first_scan.axes, first_scan.reverse
+    scans = sort(g.reductions; by = r -> (g.phase[r], r))
+    # Each member's values, which a `Stat` reads at the position.
+    values = Dict{Int, Any}(m => Array{graph.values[m].eltype}(undef, D) for m in members(g))
+    along = CartesianIndices(ntuple(k -> k in axes ? D[k] : 1, length(D)))
+    for K in CartesianIndices(ntuple(k -> k in axes ? 1 : D[k], length(D)))
+        states = Dict{Int, Any}()
+        for S in (reverse ? Iterators.reverse(along) : along)
+            I = K + S - oneunit(S)
+            x = Tuple(I) .- 1
+            for r in scans
+                d = graph.values[r].definition
+                observe(state) = graph.values[r].eltype(fold_observe(d.fold, state))
+                A = fold_types(d.fold, term_eltype(g.terms[r], graph)).accumulator
+                state = get(() -> fold_init(d.fold, A), states, r)
+                d.exclusive && (values[r][I] = observe(state))
+                e = evaluate_term(g.terms[r], x, nothing, buffers, values, graph)
+                states[r] = fold_combine(d.fold, state, fold_lift(d.fold, A(e)))
+                d.exclusive || (values[r][I] = observe(states[r]))
+            end
+            for m in g.outputs
+                values[m][I] = evaluate_term(g.terms[m], x, nothing, buffers, values, graph)
+            end
+        end
+    end
+    foreach(m -> buffers[m] = values[m], members(g))
 end
 
 """

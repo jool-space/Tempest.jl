@@ -7,6 +7,9 @@ function describe_value(graph, v)
     string("%", v, " ", val.eltype, val.scalar ? "" : string(val.dims))
 end
 
+describe_fold(d::Reduction) = string(fold_name(d.fold), " over axes ", d.reduced)
+describe_fold(d::Scan) = string("cumulative ", scan_summary(d.fold, d.axes, d.reverse, d.exclusive))
+
 """
     Tempest.Compiler.structure(plan) -> (; kernels, stored, bytes)
 
@@ -60,8 +63,7 @@ function explain(io::IO, p::Plan)
         print(io, "kernel ", k, ": ", g.kind, " over ", g.domain)
         println(io, isempty(reads) ? "" : string(", reads ", join(map(r -> "%$r", reads), " ")))
         for r in sort(g.reductions; by = r -> (g.phase[r], r))
-            println(io, "  phase ", g.phase[r], ": ", describe_value(graph, r), " = ",
-                fold_name(graph.values[r].definition.fold), " over axes ", fold_axes(graph, r), " of ", g.terms[r])
+            println(io, "  phase ", g.phase[r], ": ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r])
         end
         for m in g.outputs
             p.stored[m] || continue

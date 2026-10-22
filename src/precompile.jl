@@ -52,6 +52,7 @@ function workload()
         ((q, k) -> sum(abs2, grouped(q, k, k)), (sample(4, 4, 8, 2), sample(4, 2, 8, 2))),
         ((x, s) -> sum(abs2, dropout(permutedims(x), s)), (x, Int32[1])),
         (x -> sum(abs2, Float16.(reshape(x, 6, 8))), (x,)),
+        (x -> sum(abs2, exp.(cumsum(x; dims = 1)) .- accumulate(max, x; dims = 2)), (x,)),
         (x -> (y = copy(x); y[2:3, :] .= 0; sum(abs2, vcat(y, x))), (x,)),
     ]
     for (f, args) in losses

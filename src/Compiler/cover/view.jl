@@ -41,6 +41,6 @@ group_views(ex::Executable) = group_views(ex.plan)
 function value_view(p::Plan, v)
     val = p.graph.values[v]
     d = val.definition
-    fold, reduced = d isa Reduction ? (d.fold, d.reduced) : (nothing, ())
+    fold, reduced = d isa Reduction ? (d.fold, d.reduced) : d isa Scan ? (d.fold, ()) : (nothing, ())
     ValueView(val.eltype, val.dims, val.scalar, p.stored[v], fold, reduced, masked(p.graph, v))
 end

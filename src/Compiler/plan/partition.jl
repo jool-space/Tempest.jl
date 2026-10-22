@@ -6,8 +6,8 @@
 # the source feeds every value that may not be recomputed, with infinite
 # capacity, and every value the backward reads drains into the sink. A cut
 # then saves the cheapest set of values from which the backward can be
-# computed, recomputing the rest, which the objective counts as free: folds
-# and opaque work may not be recomputed, maps may. The planner recomputes a
+# computed, recomputing the rest, which the objective counts as free: folds,
+# scans and opaque work may not be recomputed, maps may. The planner recomputes a
 # map the cut does not save in the backward kernels that read it, and stores
 # what the cut saves, since two kernels read it.
 #
@@ -39,7 +39,7 @@ function partition(graph::IndexGraph)
     for v in forward
         d = values[v].definition
         free = d isa Union{Input, ConstantArray}
-        banned = free || d isa Opaque || materialized[v] || d isa Reduction && 4 * value_bytes(values[v]) < reduced_bytes(graph, v) ||
+        banned = free || d isa Union{Opaque, Scan} || materialized[v] || d isa Reduction && 4 * value_bytes(values[v]) < reduced_bytes(graph, v) ||
             factor_of_backward_product(graph, users, live, v)
         alone = d isa Pointwise && count(u -> live[u] && !graph.backward[u], users[v]) == 1
         edge!(flow, inside(v), outside(v), free ? 0.0 : value_bytes(values[v]) * (alone ? 2.0 : 1.0))

@@ -20,6 +20,8 @@ function evaluate(op::Reduce, n, xs)
     n.scalar ? only(y) : y
 end
 
+evaluate(op::Accumulate, n, xs) = scan_array(op.fold, only(xs), op.axes, op.reverse, op.exclusive)
+
 function evaluate(::Reshape, n, xs)
     x = only(xs)
     n.scalar && return x isa Number ? x : only(x)

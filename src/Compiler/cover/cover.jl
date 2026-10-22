@@ -132,7 +132,7 @@ function proposal_key(p::Plan, a::Around, q)
         print(io, "| ", g.kind, " ", g.domain)
         for m in members(g)
             v = p.graph.values[m]
-            what = m in g.reductions ? string(fold_name(v.definition.fold), v.definition.reduced) : "value"
+            what = m in g.reductions ? fold_key(v.definition) : "value"
             print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", haskey(g.terms, m) ? g.terms[m] : computed(v.definition))
         end
     end
