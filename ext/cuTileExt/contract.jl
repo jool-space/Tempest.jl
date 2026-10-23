@@ -18,7 +18,9 @@
 # tinygrad's BEAM search at width one, and the tile is found there and kept
 # in the tuning record, not chosen here. The set is what is searched:
 # full-precision Float32 products on cuTile run far below the tensor cores'
-# rates and favour small tiles; TF32 and half products large ones; a product
+# rates and favour small tiles; TF32 and half products large ones, and a
+# product of few columns, a decoding step's projection, steps 128 deep as
+# Vallmo's kernel does, reading the weights at the memory's rate; a product
 # whose factor recomputes a fold (attention's scores, inside the sum over
 # keys) does that work once per step and per block, so its rows stay in one
 # tile when they fit, and the depth of its steps is its own question.
@@ -31,7 +33,7 @@ full_precision(target, T) = T === Float32 && target.precision === :full
 
 product_outputs(target, T; recomputing) = recomputing ? ((128, 128), (64, 128)) :
     full_precision(target, T) ? ((64, 64), (128, 64), (64, 128), (32, 64)) : ((128, 128), (128, 64), (64, 128), (64, 64))
-product_depths(target, T; recomputing) = full_precision(target, T) ? (16, 32) : recomputing ? (16, 32, 64) : (32, 64)
+product_depths(target, T; recomputing) = full_precision(target, T) ? (16, 32) : recomputing ? (16, 32, 64) : (32, 64, 128)
 
 # A tile within a product's extents.
 fitted((tm, tn, tk), m, n, k) = (min(tm, nextpow(2, m)), min(tn, nextpow(2, n)), min(tk, nextpow(2, k)))
