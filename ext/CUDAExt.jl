@@ -50,7 +50,10 @@ end
 Tempest.Compiler.replay(::CUDATarget, g::Graph) = CUDACore.launch(g.exec)
 Tempest.Compiler.release(::CUDATarget, g::Graph) = finalize(g)
 
-__init__() = atexit(() -> foreach(finalize, collect(keys(GRAPHS))))
+# Iterated rather than collected: `collect` sizes its result first, and a
+# graph the collector freed meanwhile, which iteration skips, left a slot
+# of it undefined.
+__init__() = atexit(() -> foreach(finalize, keys(GRAPHS)))
 
 # Device seconds of one launch: the minimum over samples of a captured graph
 # of about a millisecond of launches.
