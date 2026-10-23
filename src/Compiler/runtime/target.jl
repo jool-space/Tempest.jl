@@ -166,8 +166,10 @@ measurable(::Target) = false
 """
     time_launch(target, launch) -> seconds
 
-The seconds one call of `launch()` takes on the device, as the cover times
-claims. Only a `measurable` target defines it.
+The seconds one call of `launch()` takes on the device among the launches of
+a captured graph, its data in memory rather than in the cache, as the cover
+times claims: a step reads its weights once, and finds them in memory. Only
+a `measurable` target defines it.
 """
 function time_launch end
 
@@ -177,7 +179,8 @@ function time_launch end
 The device's rates, measured once and kept in its rates file (see `Rates`):
 a named tuple of `launch`, the seconds between launches in a captured graph;
 `cached` and `bandwidth`, bytes per second for a launch that moves what the
-cache holds and for one that moves more; `cache`, its bytes; and `blocks`,
-the blocks that fill the device. Only a `measurable` target defines it.
+cache holds and for one that moves more, each from memory, as `time_launch`
+times; `cache`, its bytes; and `blocks`, the blocks that fill the device.
+Only a `measurable` target defines it.
 """
 function calibrate end

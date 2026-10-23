@@ -239,6 +239,66 @@ to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
 
+**Claims are timed from the cache: timed from memory instead, adopted.** On
+trial was how the cover times a claim (`time_launch`, `ext/CUDAExt.jl`): a
+captured graph of a millisecond of its launches, replayed back to back, so
+that a launch whose data fit the 24 MiB cache was timed from it. A step
+reads its weights once, from memory. The challengers, nvbench's cold
+measurement and Triton's `do_bench` (`triton/testing.py`), clear the cache
+before each sample by writing a buffer and time each launch with events.
+Written, the buffer leaves the cache dirty, and the launch is timed writing
+it back; read through instead, it leaves it clean. Each sample is now the
+launch's graph replayed alone between events after a buffer twice the
+cache's size is read through, twenty enqueued before one wait, the minimum
+taken, less what timing one replay alone adds over its place among a
+graph's launches (an empty kernel's 2.5 μs on the GB10, against 0.43 in a
+graph). A decoding step's output projection on the GB10 at 2411 MHz,
+4096×2560 BFloat16 weights, 21 MB, against the truth: the same launch over
+copies of the weights, rotated so that every launch reads memory:
+
+| output projection | truth | from the cache | cleared by writing | cleared by reading |
+|---|---|---|---|---|
+| one token, step 32 | 106.1 μs | 69.9 μs | 174.8 μs | 106.9 μs |
+| one token, step 128 | 92.6 μs | 25.6 μs | 159.6 μs | 91.1 μs |
+| 16 tokens, depth 32 | 105.8 μs | 27.5 μs | 173.6 μs | 101.5 μs |
+| 16 tokens, depth 128 | 93.5 μs | 22.8 μs | 161.3 μs | 93.3 μs |
+
+From the cache the 16-token projections chose depth 32, at 107 μs in use;
+they now choose 128, at 98.5, against Vallmo's 96.8. The other judged, each
+from an empty record, before and after:
+
+| case | from the cache | from memory |
+|---|---|---|
+| Qwen3.5-4B's decode projections per token, one token | 36.90 ms | 36.95 ms |
+| the same, 16 tokens | 37.89 ms | 37.80 ms |
+| decode attention, trial 2's, lengths 200 to 32768 | 15.5 to 1478 μs | 15.3 to 1478 μs |
+| guard rails, 36 cases | 8998 μs | 8915 μs |
+| GPT step at TF32, device time, four runs | 1.250 to 1.261 ms | 1.240 to 1.257 ms |
+| its preparation from an empty record, kernels compiled | 23.1 s | 20.3 s |
+| claims it times, and the seconds timing them | 190, 1.44 s | 143, 1.30 s |
+
+Six guard rails are 9 to 26% faster (Float16 column sums, row sums, softmax
+down columns at 1024×4096), one 6% slower (Float16 `sum(abs2)`), timed by a
+benchmark that replays from the cache itself. Over ten repeats a timing
+spreads ±0.1 μs at 4.3 μs and ±0.27 at 93, and takes 5 to 7 ms. Graphs of
+a clearing and a launch less graphs of the clearings alone, which keep the
+launch's place in a graph without the correction, spread ±2.9 μs at 94 and
+cost 70 ms a timing: not adopted. The first preparation after the change
+compiled the claims its search newly reached, 10 s more on the GPT step;
+the table's is the next. The rates are timed alike, so the estimates price
+from memory too: the projection above is estimated at 83 to 101 μs, where
+it was priced at the cache's rate. The record's and the rates' files are
+named for the timing (`record_path`, `src/Compiler/cover/record.jl`), so
+that times taken from the cache are not compared with these. Timed from
+memory, one estimate that decides misses by more than the close-call
+factor: cuBLAS's 256×512·384 product at full precision, 9.1 μs against
+14.0 (11.8 from the cache), a launch of one wave whose loads and products
+add where the cost model overlaps them (a gap in `test/decisions.jl`).
+What is not judged, named: a value a launch writes stays in the cache, its
+write to memory left to the launches after it, and one that reads it just
+after finds it there; timed here, the write is free and the read is from
+memory, the one charged in place of the other.
+
 **A length the device holds does not bound a sweep: an integer the block
 reads bounds it, and is adopted.** On trial was the generator sweeping every
 key of a cache whose keys past each sequence's length are masked,

@@ -24,8 +24,11 @@ end
 
 device_file(target, suffix) = (dir = tuning_directory(); dir === nothing ? nothing :
     joinpath(dir, replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * suffix))
-record_path(target) = device_file(target, ".tsv")
-rates_path(target) = device_file(target, ".rates.tsv")
+# Times taken with each launch's data in memory, the cache cleared before it
+# (see `time_launch`), in files named so: the files before them hold times
+# taken from the cache, which are not to be compared with these.
+record_path(target) = device_file(target, ".cold.tsv")
+rates_path(target) = device_file(target, ".cold.rates.tsv")
 
 function load_record(path)
     record = Dict{String, Float64}()

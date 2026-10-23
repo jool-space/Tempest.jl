@@ -6,9 +6,9 @@
 
 """
 A device's rates for estimates: seconds per launch in a captured graph, bytes
-per second for a launch that moves at most `cache` bytes (which a replayed
-launch finds in the cache) and for one that moves more, the blocks that fill
-the device, and the relative margin within which two measurements tie.
+per second from memory for a launch that moves at most `cache` bytes and for
+one that moves more, the blocks that fill the device, and the relative margin
+within which two measurements tie.
 """
 struct Rates
     launch::Float64

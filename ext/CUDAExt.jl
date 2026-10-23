@@ -55,13 +55,93 @@ Tempest.Compiler.release(::CUDATarget, g::Graph) = finalize(g)
 # of it undefined.
 __init__() = atexit(() -> foreach(finalize, keys(GRAPHS)))
 
-# Device seconds of one launch: the minimum over samples of a captured graph
-# of about a millisecond of launches.
-function Tempest.Compiler.time_launch(target::CUDATarget, launch; samples = 5, milliseconds = 1.0)
+# Device seconds of one launch among a captured graph's, its data in memory
+# rather than in the cache, as a step finds the weights it reads once: the
+# minimum over samples of its graph replayed alone after the cache is
+# cleared, less what timing a replay alone adds (`replay_overhead`).
+# Replayed back to back instead, as it was, a launch whose data fit the
+# cache was timed from it: on GB10, a decoding step's output projection, 21
+# MB of weights, at 25 μs where reading them from memory takes 93, and its
+# tiles were ranked at the cache's rate.
+function Tempest.Compiler.time_launch(target::CUDATarget, launch)
     launch()
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
-    repetitions = clamp(round(Int, 1.0e-3 * milliseconds / max(once, 1.0e-6)), 1, 100)
+    g = Tempest.Compiler.capture(target, () -> launch(), launch)
+    t = cleared(target, g; samples = clamp(round(Int, 1.0e-2 / max(once, 1.0e-6)), 3, 20))
+    Tempest.Compiler.release(target, g)
+    t - replay_overhead(target)
+end
+
+# The minimum over samples of graph `g` replayed after the cache is cleared,
+# each between events, all enqueued before waiting once, as Triton's
+# `do_bench` times them.
+function cleared(target, g; samples = 20)
+    events = [(CUDACore.CuEvent(), CUDACore.CuEvent()) for _ in 1:samples]
+    for (start, stop) in events
+        clear_cache!()
+        CUDACore.record(start)
+        Tempest.Compiler.replay(target, g)
+        CUDACore.record(stop)
+    end
+    CUDACore.synchronize(last(last(events)))
+    minimum(((start, stop),) -> CUDACore.elapsed(start, stop), events)
+end
+
+# Read the `n` words of `a`, storing their fold only where zeros could not
+# give it, so that the reads are kept. It has a floor kernel's arguments, so
+# that it is compiled once and kept in the kernel cache (`floor_function`),
+# not compiled in each session, which cost the first timing 6 s.
+function read_through((a, sink), n)
+    i = (CUDACore.blockIdx().x - 1) * CUDACore.blockDim().x + CUDACore.threadIdx().x
+    stride = CUDACore.gridDim().x * CUDACore.blockDim().x
+    s = UInt32(0)
+    while i <= n
+        s ⊻= @inbounds a[i]
+        i += stride
+    end
+    s == typemax(UInt32) && (@inbounds sink[1] = s)
+    return
+end
+
+# The launch that clears the cache and its buffers, made on first need.
+const CLEARING = Ref{Any}(nothing)
+
+# Clear the cache, reading a buffer twice its size through it. Nvbench and
+# Triton's `do_bench` clear it by writing one, which leaves it dirty: a
+# launch is then timed writing it back, the output projection at 160 μs.
+function clear_cache!()
+    if CLEARING[] === nothing
+        bytes = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
+        a, sink = CUDACore.zeros(UInt32, 2bytes ÷ 4), CUDACore.zeros(UInt32, 1)
+        args = CUDACore.cudaconvert((a, sink))
+        CLEARING[] = (FloorLaunch(floor_function(read_through, args, length(a))..., (args, length(a)), 1024, 256), a, sink)
+    end
+    first(CLEARING[])()
+end
+
+# What timing one replay alone adds to the seconds of its launch among a
+# graph's: an empty kernel's replay timed so, 2.5 μs on GB10, less its
+# seconds in a graph of a millisecond of them, 0.43. Measured once a
+# session.
+const OVERHEAD = Ref(NaN)
+
+function replay_overhead(target)
+    isnan(OVERHEAD[]) || return OVERHEAD[]
+    empty = blank_launch()
+    g = Tempest.Compiler.capture(target, () -> empty(), empty)
+    alone = cleared(target, g)
+    Tempest.Compiler.release(target, g)
+    OVERHEAD[] = alone - batched(target, empty)
+end
+
+# Device seconds of one launch in a captured graph of about a millisecond of
+# them, replayed: the minimum over samples.
+function batched(target, launch; samples = 5)
+    launch()
+    CUDACore.synchronize()
+    once = CUDACore.@elapsed launch()
+    repetitions = clamp(round(Int, 1.0e-3 / max(once, 1.0e-6)), 1, 100)
     g = Tempest.Compiler.capture(target, () -> foreach(_ -> launch(), 1:repetitions), launch)
     Tempest.Compiler.replay(target, g)
     t = minimum(_ -> CUDACore.@elapsed(Tempest.Compiler.replay(target, g)), 1:samples) / repetitions
@@ -69,17 +149,19 @@ function Tempest.Compiler.time_launch(target::CUDATarget, launch; samples = 5, m
     t
 end
 
-# Nothing, launched to time the gap between launches.
-blank() = nothing
+# Nothing, launched to time the gap between launches; a floor kernel, as
+# `read_through` is.
+blank(_, _) = nothing
 
-# The gap between launches of an empty kernel, copies of 4 MiB (found in the
-# cache when replayed) and 256 MiB (not), the cache's size and the
-# multiprocessors.
+blank_launch() = FloorLaunch(floor_function(blank, (), 1)..., ((), 1), 1, 1)
+
+# The gap between launches of an empty kernel in a captured graph, copies of
+# 4 MiB (what the cache holds) and 256 MiB (more), from memory, the cache's
+# size and the multiprocessors.
 function Tempest.Compiler.calibrate(target::CUDATarget)
     device = CUDACore.device()
-    kernel = CUDACore.@cuda launch = false blank()
     copying(n) = (a = CUDACore.zeros(UInt8, n); b = similar(a); 2n / Tempest.Compiler.time_launch(target, () -> copyto!(b, a)))
-    (launch = Tempest.Compiler.time_launch(target, () -> kernel(; threads = 1, blocks = 1)),
+    (launch = batched(target, blank_launch()),
      cached = copying(4 << 20), bandwidth = copying(256 << 20),
      cache = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)),
      blocks = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)))
