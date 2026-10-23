@@ -17,6 +17,12 @@ function group_view(p::Plan, g::Group)
     end
     foreach(t -> union!(seen, stored_reads(t)), roots)
     foreach(m -> union!(seen, keyed_reads(graph, m)), members(g))
+    # The integers a value's mask reads, as a length the device holds, where
+    # they are inputs: a kernel may read them without running after another.
+    for v in collect(seen)
+        mask = masked(graph, v)
+        mask === nothing || union!(seen, (u for e in first(mask) for u in indirect_values(e) if p.owner[u] == 0))
+    end
     values = Dict(v => value_view(p, v) for v in seen)
     places = Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}(m => placement(graph, g, m) for m in members(g))
     reference(target, buffers) = build_floor(target, p, g, buffers)

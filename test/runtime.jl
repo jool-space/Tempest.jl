@@ -926,6 +926,16 @@ if CUDA_FUNCTIONAL
             bind!(ex, 4 => CuArray(Int32[200, 5, 64]))
             @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, Int32[200, 5, 64])]; rtol = 1.0e-4)
         end
+        # Over a BFloat16s.BFloat16 cache, the probabilities rounded to it
+        # before their product, as Vallmo's decode rounds them: the product
+        # reads the length only through their mask.
+        half(q, k, v, len) = (s = Einops.@einsum(k, q, "d n h b, d (g h) b -> n g h b", h = size(k, 3)) .* 0.25f0;
+            s = ifelse.((Int32(1):Int32(size(k, 2))) .<= reshape(len, 1, 1, 1, :), s, -Inf32);
+            Einops.@einsum(v, BFloat16s.BFloat16.(exp.(s .- T.logsumexp(s; dims = 1))), "d n h b, n g h b -> d (g h) b"))
+        qh, kh, vh = BFloat16s.BFloat16.(q), BFloat16s.BFloat16.(k), BFloat16s.BFloat16.(v)
+        p = trace(half, qh, kh, vh, n)
+        ex = prepare(p, map(CuArray, (qh, kh, vh, n))...; target)
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, qh, kh, vh, n)]; rtol = 1.0e-2)
         # With a key head per query head, the scores of one query are a product
         # of one row, which the generator does not claim recomputed in the
         # sweep over keys: the streaming plan runs on the floor.
