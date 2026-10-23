@@ -254,24 +254,31 @@ into the bound on the sweep (`block_read`, `ext/cuTileExt/mask.jl`). Judged
 on the GB10 at 2411 MHz, at Qwen3.5-4B's attention: 256 features, 16 query
 heads over 4 key heads, one sequence, BFloat16, a 32768-position cache in
 Vallmo's layout, one preparation bound to each length, against Vallmo's
-`decode_attention`:
+`decode_attention`, the tuning record empty:
 
 | length | streaming plan | the cover's plan | `decode_attention` |
 |---|---|---|---|
-| 200 | 14.8 μs | 333 μs | 52.9 μs |
-| 2048 | 93.6 μs | 389 μs | 328 μs |
-| 16384 | 737 μs | 946 μs | 654 μs |
-| 32768 | 1478 μs | 1581 μs | 729 μs |
+| 200 | 14.8 μs | 15.5 μs | 52.9 μs |
+| 2048 | 94.5 μs | 94.5 μs | 329 μs |
+| 16384 | 729 μs | 741 μs | 653 μs |
+| 32768 | 1478 μs | 1478 μs | 722 μs |
 
 Before, the two plans took 1500 and 1325 μs at every length. The answers
 agree with plain Julia over the keys up to each length to the rounding of
 the scores to BFloat16, 2e-3 relative, and the masked-attention table holds:
 the causal forward 146 and 463 μs at 1024 and 2048 positions, the step 2.89
-and 10.77 ms. What is not judged, named. The cover stores the scores, since
-it prices both plans at the whole cache, the length being unknown when it
-plans, and the scores' product sweeps every key whatever the length; the
-streaming plan, pinned with `recompute`, is faster at every length; with a
-key head per query head, where the scores of a query are one row, the
+and 10.77 ms. Corrected after the close: the table first held only through
+the tuning record. The cover timed its claims on buffers of ones, so the
+length bounded every timed sweep to one key; on an empty record the 16-key
+tile measured best there and took 25.1 and 3243 μs at 200 and 32768
+positions, twice the 64-key tile's time. The entries that hid it were
+measured before the length bounded anything, under keys that did not change
+with the generator; the cover's plan, storing the scores (333 to 1581 μs),
+was chosen on those entries, where it was the faster. Now a bound compared
+with positions is timed at the far end of them, and an index spread over
+its axis (`held_integers`, `src/Compiler/cover/choose.jl`): the cover
+chooses the streaming plan itself, and its tile. What is not judged, named.
+With a key head per query head, where the scores of a query are one row, the
 generator claims no streaming plan, and it runs on the floor (a gap in
 `test/runtime.jl`). At the whole cache Vallmo is twice as fast: it splits
 the keys across eight blocks per key head and combines them by the

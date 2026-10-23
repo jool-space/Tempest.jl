@@ -354,15 +354,73 @@ function buffers!(d::Decider, p::Plan, g::Group)
         val = p.graph.values[v]
         def = val.definition
         d.buffers[v] = def isa ConstantArray ? upload(d.target, vec(collect(def.data))) :
-            filled!(allocate(d.target, val.eltype, storage_length(val)))
+            val.eltype <: Integer ? upload(d.target, held_integers(p.graph, v, val.eltype, storage_length(val))) :
+            zeroed!(allocate(d.target, val.eltype, storage_length(val)))
     end
     d.buffers
 end
 
-# A kernel timed on a buffer reads it as data, and as an index if it is an
-# integer: zero is outside every axis and one is inside any, so integers are
-# ones and the rest zeros.
-filled!(x) = eltype(x) <: Integer ? fill!(x, one(eltype(x))) : (fill!(reinterpret(UInt8, x), 0x00); x)
+zeroed!(x) = (fill!(reinterpret(UInt8, x), 0x00); x)
+
+# A kernel timed on a buffer reads it as data, and an integer as the program
+# does. A bound compared with positions is at the far end of them, so that
+# the sweep it bounds runs whole, as the estimate prices it: at one, a
+# decoding step's length bounded its sweep to the first key, and the tile
+# fastest there was chosen for every length. An index into an axis is
+# spread over the axis, so that a gather reads and a scatter writes in as
+# many places as it has elements rather than in one. Both lie in every axis
+# the integer indexes; any other integer is one, inside any axis.
+function held_integers(graph::IndexGraph, v, T, n)
+    axes, bounds = integer_uses(graph, v)
+    lo = maximum(first, axes; init = typemin(T))
+    hi = minimum(last, axes; init = typemax(T))
+    isempty(bounds) || return fill(T(clamp(first(bounds), lo, hi)), n)
+    isempty(axes) && return fill(one(T), n)
+    spread(T, lo, hi, n)
+end
+
+# The ranges of the axes integer value `u` indexes, and the integers at which
+# each comparison of positions with it holds at every position.
+function integer_uses(graph::IndexGraph, u)
+    axes, bounds = Tuple{Int, Int}[], Int[]
+    indexes!(e::Affine) = foreach(((a, _),) -> indexes!(a), e.terms)
+    indexes!(a::Union{Div, Mod}) = indexes!(a.e)
+    indexes!(::Var) = nothing
+    function indexes!(a::Indirect)
+        a.value == u && push!(axes, (a.lo, a.hi))
+        foreach(indexes!, a.index)
+    end
+    for val in graph.values, (k, o) in enumerate(operands(val.definition))
+        o isa Read && foreach(indexes!, o.index)
+        o isa IndexOperand && indexes!(o.expr)
+        o isa Read && o.value == u || continue
+        b = holding_bound(val.definition, k, Domain(val.dims))
+        b === nothing || push!(bounds, b)
+    end
+    axes, bounds
+end
+
+# The integer at which comparison `def`, its `k`th operand that integer and
+# the other a position, holds at every position: the far end of them.
+function holding_bound(def, k, d::Domain)
+    def isa Pointwise && def.f in (<=, <, >=, >) && length(def.operands) == 2 && def.operands[3 - k] isa IndexOperand || return nothing
+    lo, hi = affine_range(def.operands[3 - k].expr, d)
+    holds(c) = all(x -> k == 1 ? def.f(c, x) : def.f(x, c), (lo, hi))
+    ends = (hi, lo, hi + 1, lo - 1)
+    ends[findfirst(holds, ends)]
+end
+
+# `n` integers spread over `lo:hi`, each once while there are as many as it
+# holds: a stride coprime with its length, near the golden share of it, as
+# Fibonacci hashing spreads keys.
+function spread(T, lo, hi, n)
+    m = hi - lo + 1
+    s = max(1, round(Int, 0.618 * m))
+    while gcd(s, m) != 1
+        s += 1
+    end
+    [T(lo + mod((k - 1) * s, m)) for k in 1:n]
+end
 
 # Build a choice on `buffers`.
 build_choice(target, p::Plan, g::Group, o::Choice, buffers) =

@@ -359,8 +359,11 @@ if CUDA_FUNCTIONAL
     end
     # Claims are timed on buffers of their own, which a kernel reads as data:
     # an integer array is an index there, and zero is outside every axis. The
-    # buffers hold ones, so that timing every option of a gather (the floor
-    # too, with bounds checked as under `Pkg.test`) reads in bounds.
+    # buffers hold integers spread over the axes they index, so that timing
+    # every option of a gather (the floor too, with bounds checked as under
+    # `Pkg.test`) reads in bounds, and a gather or a scatter reads or writes
+    # as many places as it has indices: the arguments here are indices, and
+    # no two of an argument's entries are alike.
     @testset "timed on trial buffers, a gather reads in bounds" begin
         @testset "$name" for (name, f, args) in filter(((_, _, args),) -> any(a -> a isa AbstractArray{<:Integer}, args), PROGRAMS)
             for p in (trace(f, args...), differentiate(trace(f, args...)))
@@ -370,6 +373,8 @@ if CUDA_FUNCTIONAL
                 foreach(g -> C.buffers!(d, planned, g), planned.groups)
                 indices = [b for (v, b) in zip(graph.values, d.buffers) if b !== nothing && v.eltype <: Integer && !(v.definition isa C.ConstantArray)]
                 @test !isempty(indices) && all(b -> all(>=(1), Array(b)), indices)
+                held = [d.buffers[a] for a in graph.arguments if graph.values[a].eltype <: Integer && d.buffers[a] !== nothing]
+                @test !isempty(held) && all(b -> allunique(Array(b)), held)
                 reference = filter(!isnothing, C.leaves(interpret(p, args...)))
                 ex = prepare(p, map(x -> x isa AbstractArray ? CuArray(x) : x, args)...; target = T.CUDATarget(), measure = :all)
                 @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), reference)
@@ -926,6 +931,13 @@ if CUDA_FUNCTIONAL
             bind!(ex, 4 => CuArray(Int32[200, 5, 64]))
             @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, Int32[200, 5, 64])]; rtol = 1.0e-4)
         end
+        # Its claims are timed at the cache's length, so that the sweep runs
+        # whole, as it is priced, whatever lengths it is prepared with.
+        graph = C.lower(p)
+        planned = C.plan(graph)
+        d = C.Decider(target, graph; measure = false)
+        foreach(g -> C.buffers!(d, planned, g), planned.groups)
+        @test Array(d.buffers[only(i for i in graph.arguments if graph.values[i].eltype === Int32)]) == fill(Int32(200), 3)
         # Over a BFloat16s.BFloat16 cache, the probabilities rounded to it
         # before their product, as Vallmo's decode rounds them: the product
         # reads the length only through their mask.
