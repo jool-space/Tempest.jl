@@ -730,12 +730,14 @@ end
 
 # A gather's adjoint scatters on the device, a sum by key in the kernel that
 # computes its elements, on cuTile and on the floor alike: each element adds
-# atomically, so the sums at an index selected more than once come in no
-# fixed order and differ from the interpreter's by rounding, which is the
-# order every kernel is held to. With repeated indices, two index arrays, and
-# ranges and integers beside an index array.
+# atomically, or on cuTile each box of a row's elements, so the sums at an
+# index selected more than once come in no fixed order and differ from the
+# interpreter's by rounding, which is the order every kernel is held to. With
+# rows narrower than a tile and fewer tokens than one, repeated indices, two
+# index arrays, and ranges and integers beside an index array.
 const SCATTERS = [
     ("embedding", (E, t, g) -> sum(E[:, t] .* g), (data(64, 109), Int32.(mod1.(37 .* (1:1024) .^ 2, 109)), data(64, 1024; scale = 0.37))),
+    ("embedding of short rows", (E, t, g) -> sum(E[:, t] .* g), (data(4, 5), Int32[2, 5, 1, 2, 3, 5, 5], data(4, 7))),
     ("repeated indices in two arrays", (x, i, j) -> sum(abs2, x[i, j]), (data(8, 6), [3, 1, 3, 8, 3], Int32[6, 6, 1])),
     ("a strided range and an integer beside index arrays", x -> sum(abs2, x[2:2:8, [1, 4, 4]]) + sum(abs2, x[3, [2, 2]]), (data(8, 6),)),
     ("a reversed range", x -> sum(abs2, x[8:-3:1, [2, 2, 5]]), (data(8, 6),)),
@@ -749,6 +751,11 @@ if CUDA_FUNCTIONAL
             ex = prepare(p, map(CuArray, args)...; target)
             scatters = [k for (k, g) in enumerate(ex.plan.groups) if any(r -> ex.plan.graph.values[r].definition isa C.Keyed, g.reductions)]
             @test !isempty(scatters) && all(k -> (ex.kernels[k] isa C.FloorKernels) == (where == "the floor"), scatters)
+            # An embedding's rows add on cuTile as boxes, a TMA reduction each.
+            if where == "cuTile" && name == "embedding"
+                ext = Base.get_extension(Tempest, :cuTileExt)
+                @test all(k -> any(t -> occursin("atomic_store_add", string(ext.source(t))), ex.kernels[k].kernels), scatters)
+            end
             reference = C.leaves(interpret(p, args...))[2:2]
             @test agree(C.leaves(outputs(execute!(ex)))[2:2], reference; rtol = 1.0e-5)
             # A scatter runs on the device, so the program can be captured.

@@ -426,8 +426,8 @@ flat_spec(c::Context, r) = ArgSpec(r, 0, (storage_length(c.g.values[r]),), (1,))
 
 # Combine the elements of the folds by key `rs` over the tile at block indices
 # `indices` into their values at their keys, the lanes inside the domain: a
-# sum's add atomically, a write's are stored, one of those landing at a
-# position winning.
+# sum's add atomically, box by box where it can, a write's are stored, one of
+# those landing at a position winning.
 function scatter_tiles!(k, st, c::Context, rs, names, indices)
     isempty(rs) && return
     emit_tiles!(k, st, c, [c.g.terms[r] for r in rs], names, indices...)
@@ -435,11 +435,70 @@ function scatter_tiles!(k, st, c::Context, rs, names, indices)
     for r in rs
         val = c.g.values[r]
         x = as_accumulator(st, names[c.g.terms[r]], val.eltype, term_eltype(c.g.terms[r], c.g), tile(c))
+        dense = box_axes(c, r)
+        dense === nothing || (add_boxes!(k, st, c, r, x, valid, dense, indices); continue)
         at = address(val, c.g.placement[r], Domain(c.g.domain))
         lanes = :($(ct.broadcast_to)($(index_tile(k, c, at, indices)), $(tile(c))) .+ Int32(1))
         flat = argument!(k, flat_spec(c, r))
         push!(st, val.fold isa Overwrite ? :($(ct.scatter)($flat, $lanes, $x; mask = $valid)) :
             :($(ct.atomic_add)($flat, $lanes, $x; mask = $valid, memory_order = $(ct.MemoryOrder.Relaxed))))
+    end
+end
+
+# A sum by key adds a box at a time, a TMA reduction, rather than an atomic
+# per element, where each axis of its value is either read at a tile axis of
+# one domain axis as it is, the box spanning that tile axis, or keyed by a
+# formula that moves along none of those: one box per lane of the other tile
+# axes, which unroll. `dense[d]` is the tile axis of value axis `d`, or
+# nothing for a keyed one; nothing when the fold does not add so.
+const BOX_LANES = 16
+
+function box_axes(c::Context, r)
+    val = c.g.values[r]
+    val.fold isa SumFold && !val.scalar && 1 <= length(val.dims) <= 5 || return nothing
+    P = c.g.placement[r]
+    dense = map(P) do e
+        e.constant == 0 && length(e.terms) == 1 && e.terms[1].first isa Var && e.terms[1].second == 1 || return nothing
+        findfirst(ax -> ax.axes == [e.terms[1].first.n], c.s.tiling)
+    end
+    spanned = [i for i in dense if i !== nothing]
+    allunique(spanned) && issorted(spanned) || return nothing
+    prod(i -> i in spanned ? 1 : c.s.tiling[i].tile, eachindex(c.s.tiling); init = 1) <= BOX_LANES || return nothing
+    moves(e) = any(i -> any(n -> coefficient(e, n) != 0, c.s.tiling[i].axes), spanned)
+    any(d -> dense[d] === nothing && moves(P[d]), eachindex(P)) && return nothing
+    dense
+end
+
+# Fold by key `r`'s elements `x` added box by box. A box's elements are the
+# tile masked to its lane and summed over the unrolled axes: an extracted
+# slice adds zeros below 256 bytes in tileiras 13.4. A key outside the value
+# drops its elements and is clamped into it, since a box at a negative
+# position traps; lanes outside the domain add zeros.
+function add_boxes!(k, st, c::Context, r, x, valid, dense, indices)
+    val = c.g.values[r]
+    shape = tile(c)
+    n = length(shape)
+    keys = Dict(d => gensym(:key) for d in eachindex(dense) if dense[d] === nothing)
+    kept = valid
+    for (d, key) in keys
+        push!(st, :($key = $(ct.broadcast_to)($(index_tile(k, c, c.g.placement[r][d], indices)), $shape)))
+        kept = :($kept .& ($key .>= Int32(0)) .& ($key .< Int32($(val.dims[d]))))
+    end
+    elements = gensym(:x)
+    push!(st, :($elements = ifelse.($kept, $x, $(zero(val.eltype)))))
+    arr = argument!(k, ArgSpec(r, 0, val.dims, Tuple(cumprod([1; collect(val.dims[1:(end - 1)])]))))
+    box = Tuple(i === nothing ? 1 : shape[i] for i in dense)
+    unrolled = [i for i in 1:n if !(i in dense) && shape[i] > 1]
+    for lane in Iterators.product((1:shape[i] for i in unrolled)...)
+        point = ntuple(i -> i in unrolled ? lane[findfirst(==(i), unrolled)] : 1, n)
+        part = isempty(unrolled) ? elements : begin
+            mask = foldl((a, b) -> :($a .& $b), (:(reshape($(ct.arange)($(shape[i])), $(ntuple(q -> q == i ? shape[i] : 1, n))) .== Int32($(point[i]))) for i in unrolled))
+            :(sum(ifelse.($mask, $elements, $(zero(val.eltype))); dims = $(Tuple(unrolled))))
+        end
+        index = map(eachindex(dense)) do d
+            dense[d] === nothing ? :(clamp($(keys[d])[$(point...)], Int32(0), Int32($(val.dims[d] - 1))) + Int32(1)) : indices[dense[d]]
+        end
+        push!(st, :($(ct.atomic_store_add)($arr, ($(index...),), reshape($part, $box))))
     end
 end
 
