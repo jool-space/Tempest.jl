@@ -498,8 +498,13 @@ function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     [Claim(s)]
 end
 
-"The variants of a product claim: its other depths and its split (see `product_variants`)."
-variants(::cuTileGenerator, target::CUDATarget, g::GroupView, c::Claim) = product_variants(target, g, c)
+"""
+The variants of a product claim, its other depths and its split (see
+`product_variants`); of a matrix-vector product's, its longer steps along the
+sum (see `vector_product_variants`).
+"""
+variants(::cuTileGenerator, target::CUDATarget, g::GroupView, c::Claim) =
+    [product_variants(target, g, c); vector_product_variants(g, c)]
 
 # The positions at which a kernel of schedule `s` computes term `t`: every
 # position of the tiles it moves along, once per tile of the kept axes it does

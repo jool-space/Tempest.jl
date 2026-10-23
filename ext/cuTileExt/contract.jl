@@ -145,6 +145,32 @@ function product_variants(target, g::GroupView, c::Claim)
     found
 end
 
+# A product of a matrix and one column, a matrix-vector product, has no kept
+# axis that only the column reads, so it is not a product (`product_axes`)
+# but the streamed reduction of its sum. That kernel steps 32 along the sum,
+# 64 bytes of each row of a half-precision matrix stored along the sum, as a
+# checkpoint stores its weights: on GB10 it reads such a matrix at 205 GB/s
+# where Vallmo's decode kernel, stepping 128, reads it at 233. Its longer
+# steps are offered as a product's depths are, and measured.
+const VECTOR_PRODUCT_STEPS = (64, 128)
+
+function vector_product_variants(g::GroupView, c::Claim)
+    s = c.schedule
+    s.sketch === :streamed || return Claim[]
+    all(r -> g.values[r].fold isa SumFold && product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions) || return Claim[]
+    p = sweep_axis(s)
+    ax = s.tiling[p]
+    found = Claim[]
+    for step in VECTOR_PRODUCT_STEPS
+        step > ax.tile && cld(ax.extent, step) > 1 || continue
+        tiling = copy(s.tiling)
+        tiling[p] = TileAxis(ax.axes, ax.extent, step, true, ax.chunk)
+        x = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
+        fits(Context(g, x)) && push!(found, Claim(x))
+    end
+    found
+end
+
 # Whether a fold accumulates in a product's sweep: a sum of a bilinear
 # product, or an exponential fold whose sums are products or sums of its
 # weights alone; and whether it has a product among them.

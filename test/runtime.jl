@@ -521,6 +521,25 @@ if CUDA_FUNCTIONAL
                 map(tile, every.options))
         end
     end
+    @testset "a matrix-vector product searches its step along the sum" begin
+        # A matrix stored along its sum times one column is the streamed
+        # reduction of the sum, and the cover tries its longer steps. Rows
+        # enough for 64 blocks, so that the sum streams rather than splits.
+        w, x = single(data(512, 4096; scale = 0.1)), single(data(512, 1))
+        p = trace((w, x) -> Einops.@einsum(w, x, "k m, k n -> m n"), w, x)
+        target = T.CUDATarget(cuTile)
+        dir = mktempdir()
+        rates = C.rates_path(target)
+        isfile(rates) && (mkpath(joinpath(dir, "tuning")); cp(rates, joinpath(dir, "tuning", basename(rates))))
+        ext = Base.get_extension(Tempest, :cuTileExt)
+        step(o) = (s = o.claim.schedule; s.tiling[ext.sweep_axis(s)].tile)
+        withenv("TEMPEST_CACHE" => dir) do
+            ex = prepare(p, CuArray(w), CuArray(x); target)
+            d = only(d for d in ex.decisions if d !== nothing && d.choice.implementation isa ext.cuTileGenerator)
+            @test sort([step(o) for o in d.options if o.implementation isa ext.cuTileGenerator]) == [32, 64, 128]
+            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, x)]; rtol = 1.0e-4)
+        end
+    end
     @testset "implementation sets" begin
         w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
         p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
