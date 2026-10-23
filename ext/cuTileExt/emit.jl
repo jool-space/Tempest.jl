@@ -16,6 +16,26 @@ end
 compact(spans, xs) = Tuple(x for (s, x) in zip(spans, xs) if s)
 storage_order(v) = sortperm(collect(compact(v.spans, v.strides)))
 
+# Kernels read and write memory through these. A Bool buffer reaches a kernel
+# as bytes (`tile_array`), a 0 or 1 each as Julia stores a Bool, compared with
+# zero where it is loaded: tileiras 13.4 (13.4.46 to 13.4.92) miscompiles a
+# product's sweep of two or more steps 128 deep whose operand a Bool tile
+# loaded from memory selects, its sums wrong and differing between launches,
+# and is right on the bytes. No kernel's tile is otherwise of bytes
+# (`TILE_TYPES`).
+const Bytes = ct.TileArray{UInt8}
+tile_load(a; kws...) = ct.load(a; kws...)
+tile_load(a::Bytes; kws...) = ct.load(a; kws...) .!= UInt8(0)
+tile_gather(a, lanes; kws...) = ct.gather(a, lanes; kws...)
+tile_gather(a::Bytes, lanes; kws...) = ct.gather(a, lanes; kws...) .!= UInt8(0)
+tile_store(a; index, tile) = ct.store(a; index, tile)
+tile_store(a::Bytes; index, tile) = ct.store(a; index, tile = convert(ct.Tile{UInt8}, tile))
+tile_scatter(a, lanes, x; kws...) = ct.scatter(a, lanes, x; kws...)
+tile_scatter(a::Bytes, lanes, x; kws...) = ct.scatter(a, lanes, convert(ct.Tile{UInt8}, x); kws...)
+
+# The element type a buffer reaches kernels as.
+kernel_eltype(T) = T === Bool ? UInt8 : T
+
 # A view's offset per block, if it has one, is one more axis of unit stride
 # after the others, loaded at that offset with extent one.
 function spec(v, extents)
@@ -29,10 +49,10 @@ end
 function load_nd(sym, v, tiles, indices, at = nothing)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     extra, one = v.dynamic === nothing ? ((), ()) : ((at,), (1,))
-    any(v.spans) || return :(reshape($(ct.load)($sym; index = (Int32(1), $(extra...)), shape = (1, $(one...))), $full))
+    any(v.spans) || return :(reshape($(tile_load)($sym; index = (Int32(1), $(extra...)), shape = (1, $(one...))), $full))
     order = storage_order(v)
     shape, index = compact(v.spans, tiles), compact(v.spans, indices)
-    loaded = :($(ct.load)($sym; index = ($(index[order]...), $(extra...)), shape = $((shape[order]..., one...)),
+    loaded = :($(tile_load)($sym; index = ($(index[order]...), $(extra...)), shape = $((shape[order]..., one...)),
         padding_mode = $(ct.PaddingMode.Zero)))
     isempty(one) || (loaded = :(reshape($loaded, $(shape[order]))))
     order == 1:length(order) || (loaded = :(permutedims($loaded, $(Tuple(invperm(order))))))
@@ -45,12 +65,12 @@ tile_of(x) = x isa Number ? :($(ct.Tile)($x)) : x
 function store_nd(sym, v, tiles, indices, value)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     tile = :($(ct.broadcast_to)($(tile_of(value)), $full))
-    any(v.spans) || return :($(ct.store)($sym; index = (Int32(1),), tile = reshape($tile, (1,))))
+    any(v.spans) || return :($(tile_store)($sym; index = (Int32(1),), tile = reshape($tile, (1,))))
     order = storage_order(v)
     shape, index = compact(v.spans, tiles), compact(v.spans, indices)
     shape == full || (tile = :(reshape($tile, $shape)))
     order == 1:length(order) || (tile = :(permutedims($tile, $(Tuple(order)))))
-    :($(ct.store)($sym; index = ($(index[order]...),), tile = $tile))
+    :($(tile_store)($sym; index = ($(index[order]...),), tile = $tile))
 end
 
 struct Workspace
@@ -151,7 +171,7 @@ function load_tile(k::TileKernel, c::Context, t::Load, indices)
     lanes = :($(ct.broadcast_to)($(index_tile(k, c, linear, indices)), $shape) .+ Int32(1))
     axes = findall(>(1), shape)
     mask = isempty(axes) ? nothing : :($(ct.broadcast_to)($(inside(c, axes, indices)), $shape))
-    :($(ct.gather)($flat, $lanes; mask = $mask))
+    :($(tile_gather)($flat, $lanes; mask = $mask))
 end
 
 gathers(t::Load) = any(e -> !isempty(indirect_values(e)), t.index)
@@ -198,10 +218,10 @@ offset_at(c::Context, v::View, indices) = v.dynamic === nothing ? nothing : :(In
 function load_expr(sym, spans, ta, tb, ia, ib)
     shape = (spans[1] ? ta : 1, spans[2] ? tb : 1)
     index = (spans[1] ? ia : :(Int32(1)), spans[2] ? ib : :(Int32(1)))
-    :($(ct.load)($sym; index = ($(index...),), shape = $shape, padding_mode = $(ct.PaddingMode.Zero)))
+    :($(tile_load)($sym; index = ($(index...),), shape = $shape, padding_mode = $(ct.PaddingMode.Zero)))
 end
 
-store_expr(sym, spans, ta, tb, ia, ib, value) = :($(ct.store)(
+store_expr(sym, spans, ta, tb, ia, ib, value) = :($(tile_store)(
     $sym;
     index = ($(spans[1] ? ia : :(Int32(1))), $(spans[2] ? ib : :(Int32(1)))),
     tile = $(ct.broadcast_to)($(tile_of(value)), $((spans[1] ? ta : 1, spans[2] ? tb : 1))),
@@ -440,7 +460,7 @@ function scatter_tiles!(k, st, c::Context, rs, names, indices)
         at = address(val, c.g.placement[r], Domain(c.g.domain))
         lanes = :($(ct.broadcast_to)($(index_tile(k, c, at, indices)), $(tile(c))) .+ Int32(1))
         flat = argument!(k, flat_spec(c, r))
-        push!(st, val.fold isa Overwrite ? :($(ct.scatter)($flat, $lanes, $x; mask = $valid)) :
+        push!(st, val.fold isa Overwrite ? :($(tile_scatter)($flat, $lanes, $x; mask = $valid)) :
             :($(ct.atomic_add)($flat, $lanes, $x; mask = $valid, memory_order = $(ct.MemoryOrder.Relaxed))))
     end
 end
@@ -563,7 +583,7 @@ function store_partial!(k, st, c::Context, r, state, indices, slot, slots, works
     for (i, s) in enumerate(state)
         sym = argument!(k, partial_spec!(c, r, i, slots, workspaces))
         value = :(reshape($(ct.broadcast_to)($s, $(fold_tile_shape(c, r))), $shape))
-        push!(st, :($(ct.store)($sym; index = ($(index...),), tile = $value)))
+        push!(st, :($(tile_store)($sym; index = ($(index...),), tile = $value)))
     end
 end
 

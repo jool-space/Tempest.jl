@@ -936,6 +936,17 @@ if CUDA_FUNCTIONAL
         p = trace(half, qh, kh, vh, n)
         ex = prepare(p, map(CuArray, (qh, kh, vh, n))...; target)
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, qh, kh, vh, n)]; rtol = 1.0e-2)
+        # Scores whose query a mask in memory chooses lane by lane, as a
+        # rotation's stored mask does, stepping 128 deep along the features:
+        # tileiras 13.4 gets the product wrong when the mask is loaded as Bool,
+        # so it is loaded as bytes.
+        chosen(q, k, m) = Einops.@einsum(k, BFloat16s.BFloat16.(ifelse.(m, q, -q)), "d n h b, d (g h) b -> n g h b", h = size(k, 3))
+        q2, k2 = single(data(256, 8, 1; scale = 0.1)), BFloat16s.BFloat16.(single(data(256, 128, 2, 1; scale = 0.2)))
+        m = isodd.(reshape(1:length(q2), size(q2)) .÷ 3)
+        p = trace(chosen, q2, k2, m)
+        ex = withenv(() -> prepare(p, map(CuArray, (q2, k2, m))...; target), "TEMPEST_PRODUCT_TILE" => "128,4,128")
+        @test occursin("tile 128×4×128", string(only(ex.kernels)))
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q2, k2, m)]; rtol = 1.0e-2)
         # With a key head per query head, the scores of one query are a product
         # of one row, which the generator does not claim recomputed in the
         # sweep over keys: the streaming plan runs on the floor.

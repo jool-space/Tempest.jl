@@ -17,13 +17,13 @@ function initial_states_kernel(c::Context, r)
     index = :(($(ct.bid)(1),))
     t = val.into
     contents = if t isa Load
-        :($(ct.load)($(argument!(k, ArgSpec(t.value, 0, (storage_length(val),), (1,)))); index = $index,
+        :($(tile_load)($(argument!(k, ArgSpec(t.value, 0, (storage_length(val),), (1,)))); index = $index,
             shape = ($POINTWISE_ELEMENTS,), padding_mode = $(ct.PaddingMode.Zero)))
     else
         init = t isa Lit ? convert(val.eltype, t.value) : only(fold_init(fold_of(c, r), val.eltype))
         :($(ct.broadcast_to)($(ct.Tile)($init), ($POINTWISE_ELEMENTS,)))
     end
-    push!(k.body, :($(ct.store)($(argument!(k, flat_spec(c, r))); index = $index, tile = $contents)))
+    push!(k.body, :($(tile_store)($(argument!(k, flat_spec(c, r))); index = $index, tile = $contents)))
     k
 end
 
@@ -488,7 +488,7 @@ function merge_kernel(c::Context, rs, slots, workspaces)
         loaded = map(eachindex(acc)) do j
             name = gensym(:part)
             sym = argument!(k, partial_spec!(c, r, j, slots, workspaces))
-            push!(loop, :($name = $(ct.load)($sym; index = ($(idx...), $t), shape = $shape, padding_mode = $(ct.PaddingMode.Zero))))
+            push!(loop, :($name = $(tile_load)($sym; index = ($(idx...), $t), shape = $shape, padding_mode = $(ct.PaddingMode.Zero))))
             name
         end
         combine!(loop, f, A, acc, loaded, valid)
@@ -582,7 +582,8 @@ function schedule_kernels(c::Context, workspaces; held = ())
 end
 
 function tile_array(buffer::CuArray{T}, spec::ArgSpec) where {T}
-    ptr = reinterpret(Ptr{T}, pointer(buffer)) + spec.offset * sizeof(T)
+    S = kernel_eltype(T)
+    ptr = reinterpret(Ptr{S}, pointer(buffer)) + spec.offset * sizeof(S)
     ct.TileArray(ptr, Int32.(spec.sizes), Int32.(spec.strides))
 end
 

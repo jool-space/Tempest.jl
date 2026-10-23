@@ -7,7 +7,7 @@
 using PrecompileTools: @setup_workload, @compile_workload
 
 # A tile array over no memory, enough to name a kernel.
-unbacked_tile_array(T, spec) = ct.TileArray(Ptr{T}(256), Int32.(spec.sizes), Int32.(spec.strides))
+unbacked_tile_array(T, spec) = ct.TileArray(Ptr{kernel_eltype(T)}(256), Int32.(spec.sizes), Int32.(spec.strides))
 
 @setup_workload begin
     sample(dims...) = Float32.(reshape(sin.(1:prod(dims)), dims))
