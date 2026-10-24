@@ -135,6 +135,9 @@ const PROGRAMS = [
     ("a running average", x -> sum(abs2, running_average(x; dims = 2)), (data(8, 6),)),
     ("Welford's variance as Base spells it", x -> sum(base_variance(x; dims = 1) .* data(1, 6)), (data(8, 6),)),
     ("Welford's variance named with GenericFold", x -> sum(reduce(VARIANCE, x; dims = 1) .* data(1, 6)), (data(8, 6),)),
+    ("extremes and where they are", x -> sum(findmax(x; dims = 1)[1] .* data(1, 6)) + sum(getindex.(argmin(x; dims = 2), 2)) + x[argmax(x)] +
+        argmin(abs, x) + sum(last.(extrema(x; dims = 2)) .* data(8)), (data(8, 6),)),
+    ("the extremes of a vector", v -> v[argmax(v)] * findmin(v)[2] + sum(extrema(v)) + findmax(abs2, v)[1], (data(30),)),
 ]
 
 # Writes where several elements land at one position: the interpreters and
@@ -146,3 +149,21 @@ const REPEATED_WRITES = [
      (data(8, 6), data(8, 3; scale = 0.3), Int32[4, 1, 4])),
 ]
 
+# Extremes and where they are, as Base finds them, exactly: the first of
+# equals, a NaN found by `findmax` and `findmin` alike, 0.0 above -0.0, an
+# index into a matrix a `CartesianIndex`.
+# A tuple, which keeps each array's element type.
+const EXTREMES = (
+    Float32[1 5 2; 3 -5 7; 0 4 -1; 2 2 9], Float32[3 5 1; 3 5 1; 1 5 1; 3 0 1], Float32[1 NaN 2; NaN 4 NaN; 3 NaN 1; 0 1 NaN],
+    Float32[0.0 -0.0 1; -0.0 0.0 -1; 0.0 -0.0 -1; -0.0 -0.0 1], Float32[-Inf -Inf Inf; -Inf 2 Inf; -Inf -Inf 1; NaN -Inf Inf],
+    Int32[4 -2 9; 4 7 -9; 1 7 0; -3 7 9], Bool[0 1 0; 1 1 0; 0 0 0; 1 0 0],
+)
+const FOUND = [
+    findmax, findmin, x -> findmax(x; dims = 1), x -> findmin(x; dims = 2), x -> findmax(x; dims = (1, 2)), x -> findmin(x; dims = 3),
+    argmax, x -> argmin(x; dims = 1), x -> argmax(x[:, 2]), x -> findmin(x[:, 3]; dims = 1), x -> getindex.(argmax(x; dims = 1), 1),
+    x -> Tuple.(argmin(x; dims = 2)), x -> x[argmax(x; dims = 1)], x -> x[argmin(x)], extrema, x -> extrema(x; dims = 1),
+    x -> findmax(abs2, x; dims = 1), x -> argmin(abs, x), x -> extrema(abs, x; dims = 2),
+]
+# A result's parts, a number standing for an array of no dimensions.
+found(x::Tuple) = reduce(vcat, map(found, x); init = Any[])
+found(x) = Any[on_host(x)]

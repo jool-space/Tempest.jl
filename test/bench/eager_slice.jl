@@ -154,13 +154,19 @@ case!("Base", "zero(x) .+ x", x -> zero(x) .+ x, x)
 
 scalar(r) = r isa AbstractArray && ndims(r) == 0 ? r[] : r
 
+# Numbers agree to a tolerance; indices, and the tuples of elements such as
+# `extrema` finds, element by element.
+near(e::Number, t::Number) = isapprox(e, t; rtol = 1.0e-4, atol = 1.0e-5)
+near(e::Tuple, t::Tuple) = length(e) == length(t) && all(map(near, e, t))
+near(e, t) = isequal(e, t)
+
 function agree(eager, traced)
-    es, ts = C.leaves(eager), map(scalar, C.leaves(traced))
+    # A result of no dimensions is its element, as eager Julia returns it.
+    es, ts = C.leaves(eager), reduce(vcat, map(t -> C.leaves(scalar(t)), C.leaves(traced)); init = Any[])
     length(es) == length(ts) || return false
     all(zip(es, ts)) do (e, t)
-        e isa Number && t isa Number && return isapprox(e, t; rtol = 1.0e-4, atol = 1.0e-5)
-        e isa AbstractArray && t isa AbstractArray && size(e) == size(t) || return false
-        all(isapprox.(e, t; rtol = 1.0e-4, atol = 1.0e-5))
+        e isa AbstractArray && t isa AbstractArray && return size(e) == size(t) && all(near.(e, t))
+        near(e, t)
     end
 end
 

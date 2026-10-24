@@ -33,6 +33,14 @@ end
     end
 end
 
+# Extremes prepared on the CPU find what Base finds, exactly (`EXTREMES` and
+# `FOUND` in fixtures/programs.jl).
+@testset "extremes on the CPU" begin
+    @testset "$(eltype(x)) $i" for (i, x) in enumerate(EXTREMES), f in FOUND
+        @test isequal(found(outputs(execute!(prepare(trace(f, x), x)))), found(f(x)))
+    end
+end
+
 # A BFloat16 scatter on the floor sums in Float32 and rounds once, as the
 # reference does: 41 from 4096 gradients of 0.01 at one position, not 4.
 @testset "a BFloat16 scatter on the floor" begin
@@ -605,6 +613,31 @@ if CUDA_FUNCTIONAL
             ex = prepare(p, CuArray(x); target = T.CUDATarget(cuTile))
             @test only(ex.kernels).schedule.sketch === sketch
             @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, x); rtol = 1.0e-4)
+        end
+    end
+end
+
+# Extremes on cuTile find what Base finds: the first of equals, a NaN, 0.0
+# above -0.0, within a block's tile and among the blocks a long column splits
+# into, in Float32, BFloat16s.BFloat16 and Int32. Where they are along a
+# vector or one axis, taken as integers, is a fold on tiles; a
+# `CartesianIndex` is no tile's element, and is made on the floor.
+if CUDA_FUNCTIONAL
+    @testset "extremes on cuTile" begin
+        x = Float32.(sin.(reshape(1:(50000 * 3), 50000, 3)) .* 100)
+        x[777, 1] = x[40000, 1] = 500
+        x[123, 2] = x[9000, 2] = NaN
+        x[:, 3] .= .-abs.(x[:, 3]) .- 1
+        x[5, 3], x[6, 3], x[9, 3] = 0.0f0, -0.0f0, 0.0f0
+        on_tiles = (x -> getindex.(argmax(x; dims = 1), 1), x -> argmax(x[:, 1]))
+        found_in_floats(r) = map(v -> v isa Union{BFloat16s.BFloat16, AbstractArray{BFloat16s.BFloat16}} ? Float32.(v) : v, found(r))
+        @testset "$(eltype(x))" for x in (x, BFloat16s.BFloat16.(x), Int32.(replace(round.(x), NaN => 0)))
+            reference = x isa AbstractArray{BFloat16s.BFloat16} ? Float32.(x) : x
+            for f in (on_tiles..., x -> findmax(x; dims = 1), x -> findmin(x[1:1000, :]; dims = 2), argmin, x -> extrema(x; dims = 1))
+                ex = prepare(trace(f, x), CuArray(x); target = T.CUDATarget(cuTile))
+                f in on_tiles && @test !any(k -> k isa C.FloorKernels, ex.kernels)
+                @test isequal(found_in_floats(outputs(execute!(ex))), found(f(reference)))
+            end
         end
     end
 end

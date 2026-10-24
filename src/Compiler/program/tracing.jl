@@ -255,6 +255,14 @@ Base.show(io::IO, ::Component{I}) where {I} = print(io, "component ", I)
 components(a::Traced) = node(a).eltype <: Tuple ? ntuple(i -> record_map(Component{i}(), a), fieldcount(node(a).eltype)) : a
 components(a) = a
 
+# A component of a tuple made by `tuple` is the operand it was made from.
+function simplify(::Component{I}, t::Traced) where {I}
+    n = node(t)
+    n.op isa Map{typeof(tuple)} || return nothing
+    a = t.tape.nodes[n.inputs[I]]
+    a.dims == n.dims && a.scalar == n.scalar ? Traced(t.tape, n.inputs[I]) : nothing
+end
+
 # Each function of a broadcast, nested ones included, runs on handles by
 # itself, so a function that cannot be traced is recorded whole without taking
 # the functions around it along.
@@ -268,6 +276,8 @@ function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
     end
     result isa Traced && return result
     result isa Number && return Traced(tape, constant!(tape, result))
+    # A tuple of handles is the tuple of its components, each traced.
+    result isa Tuple && all(r -> r isa Union{Traced, Number}, result) && any(r -> r isa Traced, result) && return record_map(tuple, result...)
     # The function did not run on handles: record it whole, with its arguments
     # that are neither traced nor numbers bound into it.
     result === nothing || resize!(tape.nodes, mark)
@@ -433,6 +443,103 @@ end
 Converted{S}(f) where {S} = Converted{S, typeof(f)}(f)
 (c::Converted{S})(x) where {S} = convert(S, c.f(x))
 
+# Extremes and where they are, as Base finds them: `findmax` compares by
+# `isless` and `findmin` by Base's `isgreater`, so that either finds a NaN,
+# and both the first of equals. The fold sees each element with its linear
+# index and keeps the better pair, the earlier among equals: an order on the
+# pairs, so that any grouping finds what Base's loop finds. An index into a
+# vector is an integer, into an array of more axes a `CartesianIndex`, as
+# into a Julia array.
+Base.findmax(x::TracedArray; dims = :) = extreme(x, true, dims)
+Base.findmin(x::TracedArray; dims = :) = extreme(x, false, dims)
+Base.findmax(f, x::TracedArray; dims = :) = findmax(f.(x); dims)
+Base.findmin(f, x::TracedArray; dims = :) = findmin(f.(x); dims)
+Base.argmax(x::TracedArray; dims = :) = last(findmax(x; dims))
+Base.argmin(x::TracedArray; dims = :) = last(findmin(x; dims))
+Base.argmax(f, x::TracedArray) = x[last(findmax(f, x))]
+Base.argmin(f, x::TracedArray) = x[last(findmin(f, x))]
+Base.extrema(x::TracedArray; dims = :) = dims isa Colon ? (minimum(x), maximum(x)) : tuple.(minimum(x; dims), maximum(x; dims))
+Base.extrema(f, x::TracedArray; dims = :) = extrema(f.(x); dims)
+
+function extreme(x::TracedArray, largest, dims)
+    isempty(x) && throw(ArgumentError(dims isa Colon ? "reducing over an empty collection is not allowed; consider supplying `init` to the reducer" :
+        "collection slices must be non-empty"))
+    T = eltype(x)
+    pairs = tuple.(x, reshape(1:length(x), size(x)))
+    init = Initial{(largest ? typemin(T) : typemax(T), typemax(Int))}()
+    where = GenericFold(; init, lift = identity, combine = Better{largest}(), observe = last)
+    # Along no axis, each element is its own extreme.
+    found(observe) = isempty(reduced_axes(x, dims)) ? observe.(pairs) :
+        reduce(GenericFold(; init, lift = identity, combine = Better{largest}(), observe, pullback = AtFound(where)), pairs; dims)
+    index = found(last)
+    found(first), ndims(x) == 1 ? index : cartesian(index, size(x))
+end
+
+"""
+The derivative of an extreme: the cotangent at the element found, by the
+fold `where` that finds its index, and none at the others, equals among them.
+"""
+struct AtFound{F}
+    where::F
+end
+function (r::AtFound)(x, y, g, axes)
+    index = Traced(x.tape, record!(x.tape, Reduce(r.where, axes), (x.id,), node(y).dims, Int; scalar = node(y).scalar))
+    (cast(node(g).eltype, components(x)[2] == index) * g, nothing)
+end
+
+"Of two (element, linear index) pairs, the one an extreme keeps: the larger or the smaller, the earlier of equals."
+struct Better{largest} end
+function (::Better{largest})(a, b) where {largest}
+    precedes, follows = largest ? (lesser(a[1], b[1]), lesser(b[1], a[1])) : (greater(a[1], b[1]), greater(b[1], a[1]))
+    t = precedes | (!follows & (b[2] < a[2]))
+    (ifelse(t, b[1], a[1]), ifelse(t, b[2], a[2]))
+end
+
+# Base's `isless`, in which NaN is the greatest, and its `isgreater`, the
+# order `findmin` keeps, in which NaN is the least; -0.0 precedes 0.0 in
+# both. Written in comparisons alone, -0.0 told from 0.0 by its reciprocal,
+# so that a kernel's tiles and the derivative's handles run them: `isless`
+# casts a float's bits and `isgreater` branches, which neither can.
+lesser(x, y) = ifelse(x != x, false, (y != y) | (x < y) | ((x == y) & (inv(x) < inv(y))))
+greater(x, y) = ifelse(x != x, false, (y != y) | (y < x) | ((x == y) & (inv(y) < inv(x))))
+lesser(x::Integer, y::Integer) = x < y
+greater(x::Integer, y::Integer) = y < x
+# BFloat16s compares through the bits, which a kernel's tiles cannot: in
+# Float32, which holds each exactly.
+lesser(x::BFloat16, y::BFloat16) = lesser(Float32(x), Float32(y))
+greater(x::BFloat16, y::BFloat16) = greater(Float32(x), Float32(y))
+
+"The Cartesian index into an array of size `dims` at a linear index."
+struct CartesianAt{dims} end
+(::CartesianAt{dims})(i::Integer) where {dims} = CartesianIndices(dims)[i]
+Base.show(io::IO, ::CartesianAt{dims}) where {dims} = print(io, "CartesianIndices(", dims, ")[·]")
+
+cartesian(i::Traced, dims) = record_map(CartesianAt{dims}(), i)
+cartesian(i::TracedArray, dims) = TracedArray(i.tape, cartesian(handle(i), dims).id)
+
+# A Cartesian index is its components. One made from a linear index has them
+# as formulas of it, so that taking them leaves no index of another type.
+function Base.getindex(c::Traced{CartesianIndex{N}}, d::Integer) where {N}
+    op = node(c).op
+    op isa Map{<:CartesianAt} || return record_map(Component{d}(), c)
+    dims = typeof(op.f).parameters[1]
+    i = Traced(c.tape, only(node(c).inputs)) - 1
+    stride = prod(dims[1:(d - 1)]; init = 1)
+    i = stride == 1 ? i : fld(i, stride)
+    (d == N ? i : mod(i, dims[d])) + 1
+end
+Base.Tuple(c::Traced{CartesianIndex{N}}) where {N} = ntuple(d -> c[d], N)
+Base.length(::Traced{CartesianIndex{N}}) where {N} = N
+(::Component{I})(c::CartesianIndex) where {I} = c[I]
+
+# The linear index into an array of size `dims` a Cartesian index names.
+function linear_at(c::Traced{CartesianIndex{N}}, dims) where {N}
+    op = node(c).op
+    op isa Map{CartesianAt{dims}} && return Traced(c.tape, only(node(c).inputs))
+    foldl((i, d) -> i + (c[d] - 1) * prod(dims[1:(d - 1)]), 2:N; init = c[1])
+end
+linear_at(c::TracedArray{CartesianIndex{N}}, dims) where {N} = TracedArray(c.tape, linear_at(handle(c), dims).id)
+
 # Products. Julia arrays among the factors are constants of the program.
 
 """
@@ -543,6 +650,10 @@ selection_index(i) = throw(ArgumentError("unsupported index $(typeof(i)) into a 
 
 index_array(i) = i
 index_array(i::Traced{T}) where {T <: Integer} = TracedArray{T, 0}(i.tape, i.id, ())
+
+# A traced Cartesian index is an index along each axis.
+index_components(i::Traced{<:CartesianIndex}) = Tuple(i)
+index_components(i) = (i,)
 index_array(::Traced{Bool}) = mask_error()
 index_array(::TracedArray{Bool}) = mask_error()
 mask_error() = throw(ArgumentError("a traced mask selects a number of elements known only when the program runs"))
@@ -563,10 +674,11 @@ arrays of integers. A linear integer is its Cartesian index, and an array of
 Cartesian indices the linear indices it holds.
 """
 function selection(x::TracedArray, I)
-    I = Base.to_indices(x, map(index_array, I))
+    I = Base.to_indices(x, map(index_array, Tuple(Iterators.flatten(map(index_components, I)))))
     length(I) == 1 && ndims(x) != 1 || return x, map(selection_index, I)
     i = only(I)
     i isa Integer && return (checkbounds(x, i); (x, Tuple(CartesianIndices(x)[i])))
+    i isa TracedArray{<:CartesianIndex} && (i = linear_at(i, size(x)))
     i isa AbstractArray{<:CartesianIndex} && (i = linear_range(LinearIndices(x)[i]))
     vec(x), (selection_index(i),)
 end

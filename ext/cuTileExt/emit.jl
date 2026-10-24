@@ -285,13 +285,20 @@ end
 struct Lift{I, F}
     f::F
 end
-Lift{I}(f::F) where {I, F} = Lift{I, F}(f)
+Lift{I}(f) where {I} = (g = combining(f); Lift{I, typeof(g)}(g))
+
+# What lifting and combining need of a fold: a generic fold without its
+# observe, into which the plan composes what is computed from the fold's
+# result, numbers among it, and without its derivative. cuTile reduces and
+# scans only with functions of no size.
+combining(f) = f
+combining(f::GenericFold) = GenericFold(f.init, f.lift, f.combine, identity, nothing)
 (l::Lift{I})(x...) where {I} = fold_lift(l.f, length(x) == 1 ? only(x) : x)[I]
 
 struct Combine{I, N, F}
     f::F
 end
-Combine{I, N}(f::F) where {I, N, F} = Combine{I, N, F}(f)
+Combine{I, N}(f) where {I, N} = (g = combining(f); Combine{I, N, typeof(g)}(g))
 (c::Combine{I, N})(x...) where {I, N} = fold_combine(c.f, ntuple(i -> x[i], Val(N)), ntuple(i -> x[N + i], Val(N)))[I]
 
 struct Pairwise{F}
@@ -311,7 +318,7 @@ end
 struct ScanCombine{N, F}
     f::F
 end
-ScanCombine{N}(f::F) where {N, F} = ScanCombine{N, F}(f)
+ScanCombine{N}(f) where {N} = (g = combining(f); ScanCombine{N, typeof(g)}(g))
 function (c::ScanCombine{N})(x...) where {N}
     later = ntuple(i -> x[2i - 1], Val(N))
     earlier = ntuple(i -> x[2i], Val(N))
@@ -362,8 +369,8 @@ function reduce_state!(st, f, A, acc, dims)
     folder = fold_reduce(f)
     init = fold_init(f, A)
     expr = folder !== nothing ? :($folder(($(acc...),), $dims)) : length(acc) == 1 ?
-        :((reduce($(Pairwise(f)), $(only(acc)); dims = $dims, init = $(only(init))),)) :
-        :(mapreduce(identity, $(Pairwise(f)), $(acc...); dims = $dims, init = $init))
+        :((reduce($(Pairwise(combining(f))), $(only(acc)); dims = $dims, init = $(only(init))),)) :
+        :(mapreduce(identity, $(Pairwise(combining(f))), $(acc...); dims = $dims, init = $init))
     push!(st, :(($(names...),) = $expr))
     names
 end
