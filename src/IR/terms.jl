@@ -25,11 +25,16 @@ end
 
 # `f` is untyped: terms are data to plan and emit, and an `Apply{typeof(f)}` would
 # compile every method that handles terms again for each function applied.
+# Its hash is computed once, from its parts' (see `Recomputed`).
 struct Apply <: Term
     f::Any
     args::Tuple{Vararg{Term}}
     eltype::DataType
+    hash::UInt
+    Apply(f, args, eltype) = new(f, args, eltype, hash(f, hash(args, hash(eltype, 0x5d3e7a6b1c4f9e21))))
 end
+
+Base.hash(t::Apply, h::UInt) = hash(t.hash, h)
 
 "A conversion to `T`, as a primitive with its own derivative rule."
 struct Cast{T} end
@@ -51,7 +56,15 @@ struct Recomputed <: Term
     index::Tuple{Vararg{Affine}}
     extents::Tuple{Vararg{Int}}
     body::Term
+    # Computed once, from its parts' hashes: a term hashed by its fields is
+    # hashed whole at every lookup, and a fold recomputed at each read puts
+    # its body in every reader's term, so that planning Qwen3.5-4B's step
+    # with a projection recomputed took 23 s, most of it hashing.
+    hash::UInt
+    Recomputed(value, index, extents, body) = new(value, index, extents, body, hash((value, index, extents, body), 0x2b8f4c1d7e6a3095))
 end
+
+Base.hash(t::Recomputed, h::UInt) = hash(t.hash, h)
 
 term_eltype(t::Load, graph) = graph.values[t.value].eltype
 term_eltype(t::Lit, graph) = typeof(t.value)

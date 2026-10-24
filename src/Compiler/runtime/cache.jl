@@ -230,6 +230,17 @@ function canonical(c::Canonical, @nospecialize(x))
     print(c.io, ")")
 end
 
+# A term's fields but its hash, which is the session's.
+function canonical(c::Canonical, t::Union{Apply, Recomputed})
+    canonical_type(c, typeof(t))
+    print(c.io, "(")
+    for i in 1:(nfields(t) - 1)
+        i > 1 && print(c.io, ", ")
+        canonical(c, getfield(t, i))
+    end
+    print(c.io, ")")
+end
+
 function canonical_type(c::Canonical, @nospecialize(T::DataType))
     source = generated_source(T)
     if source !== nothing

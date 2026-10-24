@@ -146,6 +146,24 @@ rewrites dispatch on; the walkers of the arguments' nested structures,
 0.3 s; the build's instances on device types, 3 s, which no workload can
 run; and the cover's loop, 3.6 s of work.
 
+Taken next, the warm preparation of Qwen3.5-4B's decoding step, 5038 nodes
+and 440 kernels: 52 to 59 s in a new process, 31.8 s of it work once Julia
+has compiled. The cover's trials, planned side by side, waited 24 s on two
+of the 23 it plans: the down projection's fold and an attention layer's
+output projection, each recomputed where it is read, planned in 24 and 22 s
+where every other took under a second, on one thread as on twelve. Most of
+it was hashing: a term was hashed by its fields, so each lookup of a term in
+`subterms` hashed its whole subtree, and a projection recomputed puts its
+body in every reader's term. Now `Apply` and `Recomputed` keep a hash
+computed once from their parts' (`src/IR/terms.jl`), which the kernel
+cache's text leaves out: that trial 23.0 to 3.6 s; the 4B step's preparation
+in a new process 52.4 and 58.7 to 33.8 and 42.9 s, and 31.8 to 12.2 s once
+compiled, with the same kernels and tokens; the GPT step's warm preparation
+24.8 to 17.9 s, its device time and the guard rails' within the noise. Still
+open: a trial that cannot win, a projection recomputed at every element its
+readers read, is planned whole before it is priced, 3.6 s of the trials'
+wall; and the 4B step's Julia compilation, 20 to 30 s.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
