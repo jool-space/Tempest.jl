@@ -157,24 +157,20 @@ a message pass over an index array, which is indirection in formulas; and a
 convolution written as array code, where im2col must become a formula and
 not a copy. Judged by whether each runs with no package loaded, by its
 kernels against the floor and against a hand-written kernel, and by the
-entries it opens.
-
-**Scans are refused.** `cumsum`, `cumprod` and `accumulate` throw
-(`src/Compiler/program/tracing.jl`, `SCAN`): the fold algebra has no
-ordered fold, and the eager slice (`test/bench/eager_slice.jl`) counts them
-among what does not run. Challenger: Futhark, whose `scanomap` is the fused
-form of a map into a scan and whose segmented scans are the implementation
-(`futhark/src/Futhark/IR/SOACS`, and `SegScan` in the GPU backend), with
-the fold's `fold_combine` as the operator. Judged by a cumulative sum and a
-linear recurrence running on the CPU and on CUDA, their answers agreeing
-with the interpreter, and their time against a hand loop. Nothing measured
-needs this yet; it is on the docket so that it is not refused by
-forgetting.
+entries it opens. Standing: the scan and the recurrence run on the CPU and
+on cuTile, and a segment sum is a sum by key, on cuTile where its key moves
+only by gathers (both decided below); a convolution through NNlib does not
+trace, since `conv` writes into a typed buffer, and none written as array
+code has been judged. The eager slice (`test/bench/eager_slice.jl`): 113 of
+its 136 cases trace and agree, Base's 59 of 67.
 
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/IR/expressions.jl`), a kernel's grid and tiles are chosen for it, and
-a program for a new size is a new preparation; decode, where a length grows
-by one each step, would prepare at every step. Challenger: tinygrad's
+a program for a new size is a new preparation. Decode escapes it, its cache
+of a fixed extent and its length held on the device, which bounds the sweep
+(decided below), so Qwen3.5-4B's step prepares once for every token; a
+prefill, whose extent is the prompt's length, prepares for each length.
+Challenger: tinygrad's
 symbolic shapes (`Variable` in `tinygrad/shape/shapetracker.py`), a bound
 dimension as a runtime argument of one kernel; Futhark's incremental
 flattening, several kernel versions chosen by size when the program runs.
@@ -182,39 +178,6 @@ Tempest's formulas are quasi-affine in integer variables already; a variable
 standing for an extent rather than an index is the smallest step. Judged by
 one preparation serving every length in a bound, its time per step against
 the kernels prepared for each length, within the noise.
-
-**A write at positions the device holds is refused, and every write
-rewrites its whole array.** A decode step appends each token's key and
-value to caches it carries as state, at a position the device holds
-(Vallmo's `step!`, `knorm_rope_append!` into a cache of features,
-positions, key heads and sequences). `setindex!` at an array of integers
-throws (`src/Compiler/program/updates.jl`, `GATHERED_WRITE`). A write that
-runs, at integers and ranges or as a select against the position, is a map
-over the whole array: `update` makes it a select of two scatters, each the
-array's size, and a result that replaces an argument is written in place as
-that select, every element read and written (one column of a 16-column
-array written in place: 128 items for 8 elements). At Qwen3.5-4B's
-attention, 256 features and 4 key heads in BFloat16 over 32768 positions,
-that is 64 MiB read and 64 MiB written per cache, per layer, per token, for
-2 KiB of new contents: over a millisecond per layer at the 230 GB/s
-Vallmo's GEMV streams on the GB10. The scatter Tempest has adds, as the
-adjoint of a selection, and only the floor runs it (`Scatter`,
-`src/Compiler/program/program.jl`; `scatter_kernels`,
-`src/Compiler/codegen/scalar.jl`; the storage plan's `writes_over`,
-`src/Compiler/plan/storage.jl`). Challengers: XLA's in-place
-dynamic-update-slice and scatter, which write only the update's elements
-into an operand whose buffer the result shares
-(`CanEmitFusedDynamicUpdateSliceInPlaceForGpu`,
-`xla/service/gpu/ir_emission_utils.cc`); and as the hand-written bars,
-vLLM's `reshape_and_cache` (`csrc/cache_kernels.cu`) and FlashAttention's
-`flash_attn_with_kvcache` (`flash_attn/flash_attn_interface.py`), which
-appends at `cache_seqlens` inside the attention kernel. JAX's `.at[].set`
-leaves unspecified which update lands where two indices name one position.
-Judged by Vallmo's append written as a traced write into caches the step
-replaces: its time and bytes flat in the cache's length from 4096 to 32768
-positions, against `knorm_rope_append!` on the same caches; the answers
-agreeing with the interpreter; the derivative of a write unchanged; and
-what a write does where two indices name one position, stated and tested.
 
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
@@ -238,6 +201,73 @@ on explicit refs, transparent to tracing, with its own derivative) and Exo
 to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
+
+**A write at positions the device holds is refused: writes by key, in
+place, adopted.** On trial was a write at an array of integers, refused
+where the array was traced, and every write a select over its whole array:
+an append to a decode step's cache rewrote the cache, at Qwen3.5-4B's
+attention over 32768 positions 64 MiB read and 64 MiB written per cache,
+per layer, per token, for 2 KiB of new contents
+(`src/Compiler/program/updates.jl`). The challengers, XLA's in-place
+dynamic-update-slice and scatter, which write only the update's elements
+into an operand whose buffer the result shares
+(`CanEmitFusedDynamicUpdateSliceInPlaceForGpu`,
+`xla/service/gpu/ir_emission_utils.cc`), with vLLM's `reshape_and_cache`
+and FlashAttention's `flash_attn_with_kvcache` as the hand-written bars. A
+write at index arrays, a traced integer among them, is now a fold by key
+that overwrites (`Overwrite`, `src/IR/folds.jl`), starting from the old
+contents, and a scatter a sum by key in the kernel computing its elements;
+a fold by key whose contents nothing reads after it takes their storage, so
+the floor and cuTile skip the copy, as XLA's scatter emitter does
+(`overwrites`, `src/Compiler/plan/storage.jl`). Judged by Vallmo's append
+written as a traced write, k-norm and partial RoPE at the position the
+device holds and keys and values into caches the step replaces, one
+sequence, captured on the GB10: 4.11 μs per step at 4096 positions and 4.19
+at 32768, 4 KiB stored beyond the inputs, against `knorm_rope_append!`'s
+4.14 and 4.11. Where several elements land at one position, one of them
+does, unspecified which, as in JAX; the reference and the CPU's floor write
+in order and the last lands, as Base does, and those are checked on the CPU
+(`REPEATED_WRITES`, `test/fixtures/programs.jl`). The derivative masks the
+old contents' gradient where the write lands and gathers the values' there,
+and where positions may repeat keeps the gradient of the element that
+landed, as JAX does. On cuTile, a sum by key whose key moves only along
+gathered axes adds a box at a time by a TMA reduction (`atomic_store_add`):
+the RMSNorm backward over gathered rows 150 to 14.5 μs, the GPT step 2.127
+to 2.09 ms. What is not judged, named: a write at ranges the host holds is
+still a mask over its whole array; the cover prices the copy an in-place
+fold skips, so the whole 4B step's two cache writes per attention layer are
+estimated at 443 and 1760 μs where their timings bound them below 70 and
+14; and sums by key are not bitwise reproducible.
+
+**Scans are refused: Base's scans trace as ordered folds, adopted.** On
+trial was `cumsum`, `cumprod` and `accumulate` throwing
+(`src/Compiler/program/tracing.jl`): the fold algebra had no ordered fold.
+The challenger, Futhark's `scanomap`, the fused form of a map into a scan,
+and its segmented scans (`futhark/src/Futhark/IR/SOACS`, and `SegScan` in
+the GPU backend). A scan is now a fold that keeps the axes it folds along
+(`Accumulate`, `src/Compiler/program/program.jl`), as Base's `accumulate`
+defines it, forward or reversed, inclusive or exclusive, and a linear
+recurrence is `accumulate` over pairs by their combine. A reduction's
+combine must associate and commute; a scan's need only associate, which the
+recurrence's does without commuting. A scan's group is one kernel sweeping
+the scanned axes, the map before it its operand's term and the maps after
+it reading the scan where the sweep has it, as `scanomap` fuses them; on
+cuTile a block per tile of the kept axes sweeps the scanned ones
+(`scan_kernel`, `ext/cuTileExt/build.jl`). A cumulative sum's derivative is
+a cumulative sum the other way, any other scan's a linear recurrence the
+other way from its combine's partials. Judged by a cumulative sum and a
+linear recurrence agreeing with eager Julia, exactly in the interpreter in
+Float64 and Float32, and by their time against a hand loop. On the CPU's
+floor over 2^20 elements: the cumulative sum 568 μs against the hand loop's
+569, the recurrence 1378 against 1389, a map, a scan and a map fused 5661
+against 6343. On the GB10 against the floor: a cumulative sum down
+4096×1024 147 μs against 1828, across 1024×4096 205 against 1599, the
+recurrence down 4096×256 16 against 1015. What is not judged, named: a
+vector's scan runs in one block, 2^20 elements in 655 μs against the
+floor's 34 ms, where Futhark splits it by chunks; Base's `accumulate` by a
+function of the user's, which claims no law, and an exclusive scan, which
+only derivatives make, stay on the floor; and no hand-written device scan
+(CUB's) was timed.
 
 **Claims are timed from the cache: timed from memory instead, adopted.** On
 trial was how the cover times a claim (`time_launch`, `ext/CUDAExt.jl`): a
