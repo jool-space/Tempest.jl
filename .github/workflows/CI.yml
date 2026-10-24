@@ -71,5 +71,5 @@ jobs:
         run: |
           using Documenter: DocMeta, doctest
           using Tempest
-          DocMeta.setdocmeta!(Tempest, :DocTestSetup, :(using Tempest, Tempest.Compiler); recursive=true)
+          DocMeta.setdocmeta!(Tempest, :DocTestSetup, :(using Tempest; using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs); recursive = true)
           doctest(Tempest)
