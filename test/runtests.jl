@@ -8,7 +8,7 @@ using ParallelTestRunner
 using Tempest
 import CUDACore
 
-const CUDA_FUNCTIONAL = CUDACore.functional()
+const CUDA_FUNCTIONAL = CUDACore.functional(true)
 CUDA_FUNCTIONAL || @warn "CUDA unavailable; GPU tests skipped"
 
 testsuite = find_tests(@__DIR__)
