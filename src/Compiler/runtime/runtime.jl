@@ -119,28 +119,30 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     pairs = replacements(program, replaces)
     input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
     pinned = Set{Int}(recompute)
-    if partition
-        # The forward's maps the backward recomputes rather than reads (see
-        # `partition`), but for a map reading an argument a result replaces:
-        # recomputed in the kernel that writes the result, it would read the
-        # argument where the result is written, and the result would be
-        # copied there instead (see `writes_over`).
-        replaced = Set(input[a] for (_, a) in pairs)
-        saved, recomputed = Compiler.partition(graph)
-        # Reads directly, or through maps, which may be recomputed with it.
-        function reads_replaced(v)
-            d = graph.values[v].definition
-            any(operands(d)) do o
-                any(read_values(o)) do r
-                    r in replaced || graph.values[r].definition isa Pointwise && reads_replaced(r)
-                end
+    # A value reading an argument a result replaces is not recomputed:
+    # recomputed in the kernel that writes the result, it would read the
+    # argument where the result is written, and the result would be copied
+    # there instead (see `writes_over`). It reads it directly, or through
+    # maps, which may be recomputed with it.
+    replaced = Set(input[a] for (_, a) in pairs)
+    function reads_replaced(v)
+        d = graph.values[v].definition
+        any(operands(d)) do o
+            any(read_values(o)) do r
+                r in replaced || graph.values[r].definition isa Pointwise && reads_replaced(r)
             end
         end
+    end
+    kept = Set(v for (v, val) in enumerate(graph.values) if val.definition isa Reduction && !(v in pinned) && reads_replaced(v))
+    if partition
+        # The forward's maps the backward recomputes rather than reads (see
+        # `partition`).
+        saved, recomputed = Compiler.partition(graph)
         filter!(!reads_replaced, recomputed)
         foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
         union!(pinned, recomputed)
     end
-    d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned)
+    d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept)
     p, considered = cover(d)
     search!(d, p)
     ds = decisions(d, p)

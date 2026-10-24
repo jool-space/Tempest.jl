@@ -178,7 +178,8 @@ are one edit in identical layers: priced once, and taken together. A proposal
 is priced again in the current plan when an edit taken already changed a
 group around it. Each trial plans the whole graph, and is compared with the
 plan it changes on the groups that differ. Every proposal compared is
-returned, taken or not. Folds the decider pins are recomputed in every plan.
+returned, taken or not. Folds the decider pins are recomputed in every plan,
+and those it keeps are not proposed.
 """
 function cover(d::Decider)
     base = generator_plan(d)
@@ -191,7 +192,7 @@ function cover(d::Decider)
         any(x -> fixes(x[1]) == q.group, proposals) || push!(proposals, (q, nothing))
     end
     if any_recomputes_folds(d.target)
-        for v in sort!(collect(recomputable_folds(d.graph, d.pinned)))
+        for v in sort!(collect(recomputable_folds(d.graph, union(d.pinned, d.kept))))
             push!(proposals, (Recompute(v), nothing))
         end
     end

@@ -929,6 +929,14 @@ if CUDA_FUNCTIONAL
         ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
         @test all(d -> !(d isa C.FloorKernels), ex.kernels)
         @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+        # Its streaming plan, as FlashAttention's backward: the scores and
+        # their gradient recomputed in every kernel that reads them, the
+        # log-sum-exp in a sweep over keys of its own, and nothing the size of
+        # the scores stored.
+        ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile), recompute = streaming(d, T.CUDATarget(cuTile)))
+        @test all(d -> !(d isa C.FloorKernels), ex.kernels)
+        @test all(v -> !ex.plan.stored[v] || prod(ex.plan.graph.values[v].dims) < 70 * 70, eachindex(ex.plan.graph.values))
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
         # With grouped heads, the products into the key and value gradients sum
         # over the query heads of a group and the queries, which no strided
         # axis spans: the queries are tiled and the heads swept in turn.
@@ -1016,14 +1024,12 @@ if CUDA_FUNCTIONAL
         @test occursin("tile 128×4×128", string(only(ex.kernels)))
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q2, k2, m)]; rtol = 1.0e-2)
         # With a key head per query head, the scores of one query are a product
-        # of one row, which the generator does not claim recomputed in the
-        # sweep over keys: the streaming plan runs on the floor.
-        @testset "gap: one query per key head, its scores recomputed" begin
-            k1, v1 = single(data(16, 200, 8, 3; scale = 0.2)), single(data(16, 200, 8, 3; scale = 0.3))
-            p = trace(decode, q, k1, v1, n)
-            ex = prepare(p, map(CuArray, (q, k1, v1, n))...; target, recompute = streaming(p, target))
-            @test_broken !(only(ex.kernels) isa C.FloorKernels)
-            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k1, v1, n)]; rtol = 1.0e-4)
-        end
+        # of one row, no product of tiles: its sweep over keys is a fold that
+        # recomputes them, generated as one.
+        k1, v1 = single(data(16, 200, 8, 3; scale = 0.2)), single(data(16, 200, 8, 3; scale = 0.3))
+        p = trace(decode, q, k1, v1, n)
+        ex = prepare(p, map(CuArray, (q, k1, v1, n))...; target, recompute = streaming(p, target))
+        @test !(only(ex.kernels) isa C.FloorKernels)
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k1, v1, n)]; rtol = 1.0e-4)
     end
 end

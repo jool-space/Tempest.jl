@@ -55,8 +55,10 @@ mutable struct Decider
     applied::Dict{Tuple{Symbol, Symbol, Any}, Float64}
     record::Dict{String, Float64}
     record_path::Union{Nothing, String}
-    # Folds pinned to be recomputed where they are read, in every plan.
+    # Folds pinned to be recomputed where they are read, in every plan, and
+    # folds the cover keeps stored.
     pinned::Set{Int}
+    kept::Set{Int}
     buffers::Vector{Any}
     built::Dict{String, Any}
     # The choice for each group alike (by `canonical`): its rank among the
@@ -68,13 +70,13 @@ mutable struct Decider
     options::Dict{Any, Vector{Choice}}
 end
 
-function Decider(target, graph; measure = :close, recompute = ())
+function Decider(target, graph; measure = :close, recompute = (), keep = ())
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     calibration = load_record(calibration_path)
     r = dry ? rates(target) : device_rates!(target, calibration, calibration_path)
     Decider(target, graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
-        Set{Int}(recompute), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
+        Set{Int}(recompute), Set{Int}(keep), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
         Dict{Any, Vector{Choice}}())
 end
 

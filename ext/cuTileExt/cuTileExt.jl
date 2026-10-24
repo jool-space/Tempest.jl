@@ -242,7 +242,6 @@ function expressible(g::GroupView)
         m in g.reductions && !tile_fold(val.fold, term_eltype(g.terms[m], g)) && return false
         val.keyed && !keyed_expressible(g, m) && return false
         for t in subterms((g.terms[m],))
-            t isa Recomputed && return false
             t isa Ix && !positional(t) && return false
             t isa Apply && !tile_type(t.eltype) && return false
             t isa Lit && t.value isa Float64 && return false
@@ -440,7 +439,7 @@ function scan_claims(g::GroupView)
         v.scan !== nothing && v.scan.exclusive && return Claim[]
     end
     all(m -> g.values[m].dims == g.domain, g.outputs) || return Claim[]
-    expressible(g) || return Claim[]
+    expressible(g) && !recomputing(g) || return Claim[]
     n(axes) = prod(k -> g.domain[k], axes; init = 1)
     maximum(n, (R, 1:(first(R) - 1), (last(R) + 1):length(g.domain))) < typemax(Int32) ÷ 2 || return Claim[]
     c = Context(g, scan_schedule(g, R))
@@ -468,6 +467,40 @@ function scan_schedule(g::GroupView, R)
     TileSchedule(:scan, tiling, 1, nothing, 0, :full)
 end
 
+# A fold whose term recomputes a product, as the log-sum-exp over keys of the
+# scores a training step's backward recomputes, does a product's work at each
+# step of its sweep: its kept tile takes a product's columns and its steps a
+# product's depth, so the fold it recomputes is a product of tiles (see
+# `fold_context`). The generator claims it under each such tile, and the cover
+# measures them.
+const RECOMPUTING_TILES = ((32, 64), (64, 64), (32, 128), (64, 128))
+
+recomputing(g::GroupView) = any(m -> any(t -> t isa Recomputed, subterms((g.terms[m],))), members(g))
+
+function recomputing_claims(target, g::GroupView, A, B, C, reduced)
+    reduced in (1, 2) || return Claim[]
+    n(axes) = prod(k -> g.domain[k], axes; init = 1)
+    swept, kept = reduced == 1 ? (A, B) : (B, A)
+    found = Claim[]
+    for (ts, tk) in unique((min(ts, nextpow(2, n(swept))), min(tk, nextpow(2, n(kept)))) for (ts, tk) in RECOMPUTING_TILES)
+        axes = [TileAxis(collect(swept), n(swept), ts, true), TileAxis(collect(kept), n(kept), tk, false)]
+        tiling = reduced == 1 ? axes : reverse(axes)
+        isempty(C) || push!(tiling, TileAxis(collect(C), n(C), 1, false))
+        c = Context(g, TileSchedule(ts >= n(swept) ? :resident : :streamed, tiling, 1, nothing, 0, target.precision))
+        recomputing_fits(c) || (c = Context(g, refined(c)); recomputing_fits(c)) || continue
+        push!(found, Claim(c.s))
+    end
+    found
+end
+
+# Whether the generator can lower every term under a schedule, the folds it
+# recomputes over the tiling they extend, and the indices the keys of its folds
+# by key read; and each fold over other axes than the swept ones reduces whole
+# tile axes (`fits`, whose loads are the group's own).
+recomputing_fits(c) = all(m -> terms_expressible(c, (c.g.terms[m],); stats = true), members(c.g)) &&
+    all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
+    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
+
 function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind === :scan && return scan_claims(g)
     g.kind in (:pointwise, :reduction) || return Claim[]
@@ -476,6 +509,7 @@ function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     expressible(g) || return Claim[]
     A, B, reduced, C = collapse_axes(g)
     maximum(axes -> prod(k -> g.domain[k], axes; init = 1), (A, B, C)) < typemax(Int32) ÷ 2 || return Claim[]
+    recomputing(g) && return recomputing_claims(target, g, A, B, C, reduced)
     s = default_schedule(g, A, B, C, reduced)
     c = Context(g, s)
     if !fits(c)
