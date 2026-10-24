@@ -627,13 +627,30 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     workspaces = Dict{Any, Workspace}()
     kernels = schedule_kernels(c, workspaces; held = [r for r in keyed_folds(c) if g.values[r].into isa Load])
     roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
-    recomputed = recomputed_flops(c, roots)
+    # A fold whose mask skips steps of its sweep (`live_steps`) does its sums,
+    # and the folds it recomputes, and loads what it reads along the sweep, in
+    # the share of the steps it takes; folds alike in their masks share what
+    # they recompute.
+    live = Dict(r => live_fraction(c, r) for r in g.reductions)
+    classes = Dict{String, Vector{Int}}()
+    foreach(r -> push!(get!(classes, string(mask_condition(c, r)), Int[]), r), g.reductions)
+    recomputed = recomputed_flops(c, [g.terms[m] for m in members(g) if haskey(g.terms, m) && !(m in g.reductions)]) +
+        sum(rs -> live[first(rs)] * recomputed_flops(c, [g.terms[r] for r in rs]), values(classes); init = 0.0)
+    swept_axes = [a for ax in s.tiling if ax.reduced for a in ax.axes]
+    function share(v)
+        f = 0.0
+        for m in members(g), t in (haskey(g.terms, m) ? loads(g.terms[m]) : Load[])
+            t.value == v || continue
+            f = max(f, m in g.reductions && any(a -> mentions(t, a), swept_axes) ? live[m] : 1.0)
+        end
+        f == 0.0 ? 1.0 : f
+    end
     flops, factor = if s.sketch === :product
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
         r = g.reductions[findfirst(r -> product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)]
         t = first(product_factors(g.values[r].fold, g.terms[r]))
-        2.0 * m * n * k * b * length(g.reductions), term_eltype(t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t, g)
+        2.0 * m * n * k * b * sum(r -> live[r], g.reductions), term_eltype(t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t, g)
     else
         0.0, Float32
     end
@@ -643,7 +660,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     combined(r) = (g.values[r].fold isa Overwrite ? 1 : 2) * prod(k -> g.domain[k], g.values[r].reduced; init = 1)
     elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) : prod(a.sizes; init = 1)
     map(enumerate(kernels)) do (i, kernel)
-        bytes = sum(a -> elements(kernel, a) * sizeof(element(a)), kernel.args; init = 0)
+        bytes = sum(a -> elements(kernel, a) * sizeof(element(a)) * (i == main && a.buffer isa Int ? share(a.buffer) : 1.0), kernel.args; init = 0.0)
         blocks = prod(kernel.grid; init = 1)
         i == main ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
     end

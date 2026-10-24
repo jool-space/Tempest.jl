@@ -119,6 +119,47 @@ function live_steps(k, c::Context, phase, p, indices, n)
 end
 
 """
+    live_fraction(c, r) -> Float64
+
+The share of the pairs of a block and a step of the sweep that fold `r`
+takes, each tile's lowest of its mask's formulas bounding it as `live_steps`
+does: what an estimate prices of a sweep whose masked steps are skipped. One
+when the fold has no such mask, its tile is resident, a variable shares its
+tile axis or lies on another swept one, or a formula reads an integer the
+device holds, which a kernel is timed at the far end of (`held_integers`).
+"""
+function live_fraction(c::Context, r)
+    sweeps(c.s) > 1 || return 1.0
+    mask = mask_condition(c, r)
+    mask === nothing && return 1.0
+    p = sweep_axis(c.s)
+    axes = Int[]
+    for e in mask, (atom, _) in e.terms
+        atom isa Var || return 1.0
+        i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
+        i === nothing && continue
+        ax = c.s.tiling[i]
+        ax.axes == [atom.n] && (i == p || !ax.reduced) || return 1.0
+        i in axes || push!(axes, i)
+    end
+    counts = [cld(c.s.tiling[i].extent, c.s.tiling[i].tile) for i in axes]
+    total = prod(counts; init = 1)
+    total <= 1 << 20 || return 1.0
+    # The lowest of formula `e` over the tiles at `at`, one per axis of `axes`.
+    function lowest(e, at)
+        x = e.constant
+        for (atom, coefficient) in e.terms
+            i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
+            i === nothing && continue
+            tile = c.s.tiling[i].tile
+            x += coefficient * tile * (at[findfirst(==(i), axes)] - 1) + min(coefficient, 0) * (tile - 1)
+        end
+        x
+    end
+    count(at -> all(e -> lowest(e, at) <= 0, mask), Iterators.product((1:n for n in counts)...)) / total
+end
+
+"""
     ruled_out(k, c, stored, indices) -> Expr or nothing
 
 An Int32 expression over the block's indices, above zero when each value of
