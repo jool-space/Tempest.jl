@@ -150,6 +150,11 @@ function unsplit_kernel(c::Context, workspaces, slots)
     # product's operands pad with zeros instead.
     elementwise(phase) = any(r -> bilinear(c, r) === nothing, phase)
     valid1 = resident && any(elementwise, reduction_phases(c)) ? valid_mask!(body, c, at(one32)[p]) : nothing
+    # A block whose tile the masks of everything it stores rule out sweeps
+    # nothing, and stores their literals.
+    writes = unique([[r for r in c.g.reductions if c.g.values[r].stored]; c.g.outputs])
+    ruled = resident || length(reduction_phases(c)) != 1 ? nothing : ruled_out(k, c, writes, indices)
+    ruled === nothing || (k.name *= ", masked tiles skipped")
     for phase in reduction_phases(c)
         sums = Dict(r => fold_sums(c, r) for r in phase)
         # Folds of a resident tile that do not sum fold it directly.
@@ -176,8 +181,14 @@ function unsplit_kernel(c::Context, workspaces, slots)
             live = live_steps(k, c, phase, p, indices, n)
             lo, hi = live === nothing ? (:(Int32(1)), :(Int32($n))) : live
             live === nothing || (k.name *= ", masked steps skipped")
-            push!(body, :(for $t in $lo:$hi
+            sweep = :(for $t in $lo:$hi
                 $(loop...)
+            end)
+            # Guarded rather than counted: with a count the block reads, the
+            # kernels of Qwen3.5-4B's decoding step over a cache of 32768
+            # positions took 10.1 ms at the whole cache, against 4.7.
+            push!(body, ruled === nothing ? sweep : :(if $ruled <= Int32(0)
+                $sweep
             end))
         end
         any(r -> fold_of(c, r) isa Relative{Exponential}, phase) && (k.name *= ", online softmax")

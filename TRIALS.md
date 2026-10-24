@@ -202,6 +202,46 @@ to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
 
+**Scores past the length the device holds are computed: a tile every mask
+rules out is skipped, adopted.** On trial was Qwen3.5-4B's whole decoding
+step over a cache of 32768 positions, prepared once and run at lengths 512
+to 32256 (prompts the first tokens of Julia's `HISTORY.md`), against
+Vallmo's captured step over the same cache. The sum over keys skipped the
+steps past the length; the product into the scores did not, since the
+positions are among its outputs, and the mask comes after it, one buffer
+the layers share: every token read the whole key cache, 64 MiB per layer.
+The challengers, FlexAttention's block mask, which skips the blocks of both
+products a mask rules out, and FlashAttention's decode, which bounds both
+by `cache_seqlens`; Vallmo's split kernel (`mha_decode_split_fwd`) the bar.
+Now a block whose tile the masks of everything its kernel stores rule out
+skips its sweep and stores their literal (`ruled_out`,
+`ext/cuTileExt/mask.jl`), the tile found from the masks' formulas as a
+sweep's steps are. Only sums are skipped, a sum over nothing being the
+finite statistic a mask's literal takes a fold to be. The sweep is guarded,
+not counted: with a count the block reads, the step's kernels over the
+cache took 10.1 ms at the whole cache against 4.7.
+
+| ms per token, captured, GB10 | 512 | 4096 | 16384 | 32256 |
+|---|---|---|---|---|
+| before | 41.37 | 41.57 | 42.40 | 43.72 |
+| after | 39.27 | 39.78 | 41.54 | 43.59 |
+| Vallmo | 39.69 | 43.96 | 44.36 | 44.87 |
+
+The kernels over the cache take 0.58 ms at 512 positions, against 2.37
+before. Tokens: 63 of 63 agree with Vallmo's at 512, 16384 and 32256; at
+4096 the fifth is a three-way near-tie, logits 16.354, 16.303 and 16.264,
+which Tempest takes the other way, its logits the same bit for bit with no
+step skipped. Over a cache of 4096, 38.79 to 38.47 ms, 63 of 63 tokens; the
+GPT step 1.230 and 1.247 to 1.255 and 1.243 ms; the guard rails 8992 and
+8987 to 8994 and 8995 μs; GPT preparation the same once the changed kernels
+are compiled (42.3 and 41.6 to 41.9 and 42.0 s). Vallmo loses from 4096
+positions on by its design: its eight splits are of the cache's extent, so
+one block sweeps the first 4096 keys. What is not judged, named: a split
+sum's partial states and a resident kernel skip nothing; and the skip needs
+the masked scores stored, as a mask the layers share makes them, where a
+mask written as a formula may let the plan store the scores bare and mask
+them where they are read, and then every tile is computed.
+
 **A write at positions the device holds is refused: writes by key, in
 place, adopted.** On trial was a write at an array of integers, refused
 where the array was traced, and every write a select over its whole array:

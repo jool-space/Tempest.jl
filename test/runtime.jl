@@ -978,6 +978,22 @@ if CUDA_FUNCTIONAL
         d = C.Decider(target, graph; measure = false)
         foreach(g -> C.buffers!(d, planned, g), planned.groups)
         @test Array(d.buffers[only(i for i in graph.arguments if graph.values[i].eltype === Int32)]) == fill(Int32(200), 3)
+        # Scores stored with their mask, as a step whose layers share one mask
+        # stores them: a block whose positions all lie past the length sweeps
+        # no features and stores minus infinity.
+        scored(q, k, v, len) = (s = Einops.@einsum(k, q, "d n h b, d (g h) b -> n g h b", h = size(k, 3)) .* 0.25f0;
+            s = ifelse.((Int32(1):Int32(size(k, 2))) .<= reshape(len, 1, 1, 1, :), s, -Inf32);
+            (Einops.@einsum(v, exp.(s .- T.logsumexp(s; dims = 1)), "d n h b, n g h b -> d (g h) b"), s))
+        q3, k3, v3 = single(data(64, 8, 3; scale = 0.1)), single(data(64, 200, 2, 3; scale = 0.2)), single(data(64, 200, 2, 3; scale = 0.3))
+        p = trace(scored, q3, k3, v3, n)
+        ex = withenv(() -> prepare(p, map(CuArray, (q3, k3, v3, n))...; target), "TEMPEST_PRODUCT_TILE" => "64,4,16")
+        @test any(k -> occursin("masked tiles skipped", string(k)), ex.kernels)
+        for m in (n, Int32[200, 5, 64])
+            bind!(ex, 4 => CuArray(m))
+            (o, s), (o′, s′) = map(Array, C.leaves(outputs(execute!(ex)))), interpret(p, q3, k3, v3, m)
+            @test agree([o], [o′]; rtol = 1.0e-4)
+            @test isinf.(s) == isinf.(s′) && agree([s[isfinite.(s)]], [s′[isfinite.(s′)]]; rtol = 1.0e-4)
+        end
         # Over a BFloat16s.BFloat16 cache, the probabilities rounded to it
         # before their product, as Vallmo's decode rounds them: the product
         # reads the length only through their mask.
