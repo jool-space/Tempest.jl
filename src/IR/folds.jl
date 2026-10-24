@@ -318,8 +318,13 @@ function fold_array(f::Fold, x::AbstractArray, axes::Tuple)
     result.(y)
 end
 
+# Along every axis, the left fold Base's `dims = :` is: along `dims` Base's
+# loop is `@simd`, and its result changes with how the code is compiled (with
+# coverage, say).
 function fold_elements(f::Fold, x, axes)
-    states = mapreduce(e -> fold_lift(f, e), (a, b) -> fold_combine(f, a, b), x; dims = axes, init = fold_init(f, eltype(x)))
+    lift, combine, init = e -> fold_lift(f, e), (a, b) -> fold_combine(f, a, b), fold_init(f, eltype(x))
+    states = all(in(axes), 1:ndims(x)) ? fill(mapreduce(lift, combine, x; init), map(_ -> 1, size(x))) :
+        mapreduce(lift, combine, x; dims = axes, init)
     map(s -> fold_observe(f, s), states)
 end
 
