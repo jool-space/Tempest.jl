@@ -352,8 +352,10 @@ end
 
 # Whether the generator can load every load of the group under a schedule,
 # and the indices the keys of its folds by key read; and each fold over other
-# axes than the swept ones reduces whole tile axes.
-fits(c) = all(l -> loadable(c, l), (l for m in members(c.g) for l in loads(c.g.terms[m]))) &&
+# axes than the swept ones reduces whole tile axes. The loads of a fold the
+# group recomputes are over the tiling it extends (`recomputing_fits`).
+fits(c) = recomputing(c.g) ? recomputing_fits(c) :
+    all(l -> loadable(c, l), (l for m in members(c.g) for l in loads(c.g.terms[m]))) &&
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
     all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
 
@@ -496,7 +498,7 @@ end
 # Whether the generator can lower every term under a schedule, the folds it
 # recomputes over the tiling they extend, and the indices the keys of its folds
 # by key read; and each fold over other axes than the swept ones reduces whole
-# tile axes (`fits`, whose loads are the group's own).
+# tile axes.
 recomputing_fits(c) = all(m -> terms_expressible(c, (c.g.terms[m],); stats = true), members(c.g)) &&
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
     all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))

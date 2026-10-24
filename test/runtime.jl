@@ -958,6 +958,18 @@ if CUDA_FUNCTIONAL
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
     end
 
+    # A layer's gradient whose sums recompute the hidden product they read:
+    # generated as folds that recompute it, stepping at a product's depths.
+    @testset "sums that recompute a product, generated" begin
+        x, w1, b1 = single(data(64, 256; scale = 0.5)), single(data(256, 64; scale = 0.05)), single(data(256; scale = 0.1))
+        w2, b2 = single(data(64, 256; scale = 0.05)), single(data(64; scale = 0.1))
+        d = differentiate(trace((x, w1, b1, w2, b2) -> sum(abs2, w2 * tanh.(w1 * x .+ b1) .+ b2), x, w1, b1, w2, b2))
+        target = T.CUDATarget(cuTile)
+        ex = prepare(d, map(CuArray, (x, w1, b1, w2, b2))...; target, recompute = streaming(d, target))
+        @test all(k -> !(k isa C.FloorKernels), ex.kernels)
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, x, w1, b1, w2, b2))); rtol = 1.0e-4)
+    end
+
     # Decode attention: one query per head over a cache of keys, each
     # sequence's read up to a length the device holds, with query heads
     # grouped over key heads as Vallmo's cache holds them, (features,

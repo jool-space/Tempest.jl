@@ -158,7 +158,8 @@ const VECTOR_PRODUCT_STEPS = (64, 128)
 
 function vector_product_variants(g::GroupView, c::Claim)
     s = c.schedule
-    s.sketch === :streamed || return Claim[]
+    # A sum that recomputes a product steps at a product's depths already.
+    s.sketch === :streamed && !recomputing(g) || return Claim[]
     all(r -> g.values[r].fold isa SumFold && product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions) || return Claim[]
     p = sweep_axis(s)
     ax = s.tiling[p]
