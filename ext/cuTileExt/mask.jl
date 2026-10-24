@@ -13,8 +13,6 @@
 # earlier kernel, as attention's masked scores are for its backward pass: a
 # stored value's definition is read through to the formula.
 
-const IR = Tempest.IR
-
 # The mask a term is a condition for, when it conjoins comparisons of index
 # formulas (see `Tempest.Compiler.masked`).
 function mask_of(c::Context, t, d::Domain)

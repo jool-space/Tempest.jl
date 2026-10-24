@@ -54,8 +54,11 @@ function private_names(files)
                     private_steps!(found, aliases[path[1]], path[2:end])
                     aliases[a.args[2]] = module_of(path)
                 else
+                    # `using Tempest.Y` names `Tempest.Y` as `Y` from here on.
                     path = dotted(a)
-                    haskey(aliases, path[1]) && private_steps!(found, aliases[path[1]], path[2:end])
+                    haskey(aliases, path[1]) || continue
+                    private_steps!(found, aliases[path[1]], path[2:end])
+                    (target = module_of(path)) isa Module && (aliases[last(path)] = target)
                 end
             end
         elseif e.head === :const && e.args[1] isa Expr && e.args[1].head === :(=) &&
@@ -90,6 +93,7 @@ end
     @test private_names(source("Tempest.Compiler.Plan; Tempest.Compiler.Decider")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("import Tempest.Compiler as C\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("const C = Tempest.Compiler\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
+    @test private_names(source("using Tempest.Compiler\nCompiler.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("using Tempest.Compiler: Plan, Decider")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("import Tempest.Implement: claims, REGISTERED")) == ["Tempest.Implement.REGISTERED"]
     @test private_names(source("using Tempest: CUDATarget; using Tempest.Implement")) == String[]
