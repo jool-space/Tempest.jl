@@ -584,11 +584,14 @@ end
 # A schedule's launches: each of its kernels, moving the bytes of its
 # arguments over the blocks of its grid. The first after the folds by key's
 # initial states computes the group's products and the folds it recomputes.
+# A fold by key that starts from contents in storage is priced in place, as
+# the plan's bytes are: no launch copies the contents, and a kernel moves the
+# elements it combines, a sum reading them too.
 function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
     c = Context(g, s)
     workspaces = Dict{Any, Workspace}()
-    kernels = schedule_kernels(c, workspaces)
+    kernels = schedule_kernels(c, workspaces; held = [r for r in keyed_folds(c) if g.values[r].into isa Load])
     roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
     recomputed = recomputed_flops(c, roots)
     flops, factor = if s.sketch === :product
@@ -603,8 +606,10 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
     streaming, swept, inner = applied(c, roots)
     main = findfirst(k -> k.name != INITIAL_STATES, kernels)
+    combined(r) = (g.values[r].fold isa Overwrite ? 1 : 2) * prod(k -> g.domain[k], g.values[r].reduced; init = 1)
+    elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) : prod(a.sizes; init = 1)
     map(enumerate(kernels)) do (i, kernel)
-        bytes = sum(a -> prod(a.sizes; init = 1) * sizeof(element(a)), kernel.args; init = 0)
+        bytes = sum(a -> elements(kernel, a) * sizeof(element(a)), kernel.args; init = 0)
         blocks = prod(kernel.grid; init = 1)
         i == main ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
     end

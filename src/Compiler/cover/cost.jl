@@ -75,11 +75,29 @@ rates(::Target) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE)
 
 value_bytes(v::Value) = sizeof(v.eltype) * storage_length(v)
 
+# A fold by key that starts from contents in storage is priced in place, as
+# XLA prices a dynamic-update-slice and a scatter (`HloCostAnalysis`): it moves
+# the elements it combines, a write writing them and a sum reading them too,
+# and none of the contents it starts from.
+starts_from_storage(graph, v) = keyed(graph, v) && graph.values[v].definition.into isa Read
+
+function combined_bytes(val::Value)
+    d = val.definition
+    (d.fold isa Overwrite ? 1 : 2) * sizeof(val.eltype) * prod(d.iteration; init = 1)
+end
+
 "Bytes a group moves: what it reads from storage once, and what it writes."
 function group_bytes(p::Plan, g::Group)
-    reads = sum(v -> value_bytes(p.graph.values[v]), group_reads(p.graph, g); init = 0)
-    writes = sum(v -> p.stored[v] ? value_bytes(p.graph.values[v]) : 0, members(g); init = 0)
-    Float64(reads + writes)
+    graph = p.graph
+    reads = group_reads(graph, g)
+    loaded(a) = any(m -> haskey(g.terms, m) && a in stored_reads(g.terms[m]) || a in key_reads(graph, m), members(g))
+    for v in members(g)
+        starts_from_storage(graph, v) || continue
+        a = graph.values[v].definition.into.value
+        loaded(a) || delete!(reads, a)
+    end
+    written(v) = !p.stored[v] ? 0 : starts_from_storage(graph, v) ? combined_bytes(graph.values[v]) : value_bytes(graph.values[v])
+    Float64(sum(v -> value_bytes(graph.values[v]), reads; init = 0) + sum(written, members(g); init = 0))
 end
 
 # The floor reads every load at every point of the domain, one item a thread;

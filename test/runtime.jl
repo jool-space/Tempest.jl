@@ -106,6 +106,13 @@ function check_appended_in_place(device, target)
     # Each kernel writes the elements of one sequence's token.
     @test all(k -> !(k isa C.FloorKernels) || all(s -> s.items == 8, k.kernels), ex.kernels)
     @test !any(k -> occursin("initial states", string(k)), ex.kernels)
+    # Each write is priced by the elements it writes: into a longer cache it
+    # moves no more bytes and takes no longer.
+    longer = data(4, 256, 2, 3)
+    ey = prepare(trace(appended, longer, k, p), device(longer), device(k), device(p); target, replaces = (1 => 1,))
+    estimates(e) = [d.choice.estimate for d in e.decisions if d !== nothing]
+    @test map(v -> v.bytes, C.group_views(ey)) == map(v -> v.bytes, C.group_views(ex))
+    @test estimates(ey) == estimates(ex)
     expected = K
     for positions in (p, Int32[5, 2, 9])
         bind!(ex, 3 => device(positions))
