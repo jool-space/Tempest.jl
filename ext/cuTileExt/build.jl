@@ -165,16 +165,23 @@ function unsplit_kernel(c::Context, workspaces, slots)
         scope = resident ? names : merge(Dict{Term, Any}(), statistics)
         roots = phase_roots(c, phase, sums)
         resident || hoist_folds!(k, body, c, roots, scope, at(one32))
-        emit_tiles!(k, loop, c, roots, scope, at(t)...)
+        # Folds whose masks rule out different steps each take theirs alone.
+        classes = resident ? nothing : mask_classes(k, c, phase, p, indices, n)
+        classes === nothing || (k.name *= ", folds stepping by their masks")
         states = Dict{Int, Vector{Any}}()
-        for r in phase
-            if haskey(accumulators, r)
-                fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t))
-            else
-                f, A = fold_of(c, r), accumulator(c, r)
-                x = as_accumulator(loop, scope[c.g.terms[r]], A, term_eltype(c.g.terms[r], c.g), tile(c))
-                states[r] = direct_state!(loop, f, A, x, valid1, p)
+        if classes === nothing
+            emit_tiles!(k, loop, c, roots, scope, at(t)...)
+            for r in phase
+                if haskey(accumulators, r)
+                    fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t))
+                else
+                    f, A = fold_of(c, r), accumulator(c, r)
+                    x = as_accumulator(loop, scope[c.g.terms[r]], A, term_eltype(c.g.terms[r], c.g), tile(c))
+                    states[r] = direct_state!(loop, f, A, x, valid1, p)
+                end
             end
+        else
+            class_steps!(k, loop, c, classes, sums, accumulators, scope, valid, at(t), t)
         end
         if !resident
             # Steps a mask rules out for every fold of the phase are skipped.
@@ -245,6 +252,35 @@ function unsplit_kernel(c::Context, workspaces, slots)
         store_partial!(k, st, c, r, held_states[r], bases, slot, slots[r], workspaces)
     end
     [k]
+end
+
+# The folds of a phase by the steps their masks leave live, when they differ:
+# each class of folds, and its first and last step. The sweep runs over the
+# steps any class takes, and each class steps only in its own, as a causal
+# attention's backward computes the key gradients over the queries after each
+# key and the query gradients over the keys before each query in one sweep,
+# every step in one of them. Nothing when one class has every fold, or a fold
+# has no mask.
+function mask_classes(k, c::Context, phase, p, indices, n)
+    length(phase) > 1 || return nothing
+    bounds = [live_steps(k, c, [r], p, indices, n) for r in phase]
+    any(isnothing, bounds) && return nothing
+    found = unique(bounds)
+    length(found) > 1 || return nothing
+    [([r for (r, b) in zip(phase, bounds) if b == x], x) for x in found]
+end
+
+# Step `t` of each class's folds, in the steps the class takes alone: its
+# tiles computed in the step, apart from the other classes'.
+function class_steps!(k, loop, c::Context, classes, sums, accumulators, scope, valid, indices, t)
+    for (rs, (lo, hi)) in classes
+        step, inner = Any[], merge(Dict{Term, Any}(), scope)
+        emit_tiles!(k, step, c, phase_roots(c, rs, sums), inner, indices...)
+        foreach(r -> fold_step!(k, step, c, r, sums[r], accumulators[r], inner, valid, indices), rs)
+        push!(loop, :(if $lo <= $t && $t <= $hi
+            $(step...)
+        end))
+    end
 end
 
 # Recomputed folds that do not move along the swept axis are computed once,
@@ -454,8 +490,14 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     loop = Any[]
     valid = any(r -> bilinear(c, r) === nothing, phase) ? valid_mask!(loop, c, at(t)[p]) : nothing
     scope = copy(names)
-    emit_tiles!(k, loop, c, phase_roots(c, phase, sums), scope, at(t)...)
-    foreach(r -> fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t)), phase)
+    classes = mask_classes(k, c, phase, p, indices, sweeps(c.s))
+    if classes === nothing
+        emit_tiles!(k, loop, c, phase_roots(c, phase, sums), scope, at(t)...)
+        foreach(r -> fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t)), phase)
+    else
+        k.name *= ", folds stepping by their masks"
+        class_steps!(k, loop, c, classes, sums, accumulators, scope, valid, at(t), t)
+    end
     live = live_steps(k, c, phase, p, indices, sweeps(c.s))
     lo, hi = live === nothing ? (:(Int32(1)), :(Int32($(sweeps(c.s))))) : live
     live === nothing || (k.name *= ", masked steps skipped")

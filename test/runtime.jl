@@ -932,10 +932,13 @@ if CUDA_FUNCTIONAL
         # Its streaming plan, as FlashAttention's backward: the scores and
         # their gradient recomputed in every kernel that reads them, the
         # log-sum-exp in a sweep over keys of its own, and nothing the size of
-        # the scores stored.
+        # the scores stored. The key gradients sum over the queries after each
+        # key and the query gradients over the keys before each query, in one
+        # sweep, each fold stepping where its mask leaves it work.
         ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile), recompute = streaming(d, T.CUDATarget(cuTile)))
         @test all(d -> !(d isa C.FloorKernels), ex.kernels)
         @test all(v -> !ex.plan.stored[v] || prod(ex.plan.graph.values[v].dims) < 70 * 70, eachindex(ex.plan.graph.values))
+        @test any(d -> occursin("folds stepping by their masks", string(d)), ex.kernels)
         @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
         # With grouped heads, the products into the key and value gradients sum
         # over the query heads of a group and the queries, which no strided
