@@ -31,3 +31,9 @@ agree(a, b; rtol = 1.0e-10) = all(map((x, y) -> isapprox(on_host(x), on_host(y);
 
 # What `f` throws, in words, or "" when it throws nothing.
 message(f) = try f(); "" catch err; sprint(showerror, err) end
+
+# The plan that recomputes every fold that can be: what the cover proposes.
+recomputing(graph) = C.plan(graph; recompute = C.recomputable_folds(graph))
+
+# The proposals the cover took.
+taken(ex) = [c.proposal for c in ex.considered if c.accepted]

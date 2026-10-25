@@ -1,6 +1,6 @@
 # The coverage suite's cases: compositions nobody wrote code for, each with the
-# structure recorded for its streaming plan. test/coverage.jl checks them and
-# test/bench/coverage.jl times them.
+# structure recorded for its streaming plan. test/cuda/coverage.jl checks them
+# and test/bench/coverage.jl times them.
 #
 # A structure is the number of kernels, the bytes stored (inputs and constants
 # apart) and the largest single value stored, a bound: attention stores no

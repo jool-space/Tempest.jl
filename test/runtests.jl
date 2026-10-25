@@ -1,18 +1,32 @@
-# Each file in test/ runs as its own test, in parallel worker processes:
+# Each file under test/ runs as its own test, in parallel worker processes:
 # `julia --project=test test/runtests.jl [--jobs=N] [--list] [name prefixes...]`,
-# as in `julia --project=test test/runtests.jl plan` for one. setup.jl is
-# evaluated in every test's module; fixtures/ holds programs that several tests
-# include, and bench/ the scripts that time Tempest; neither runs as a test.
-# Tests on CUDA skip themselves when no GPU is functional.
+# as in `julia --project=test test/runtests.jl plan/` for the planner's tests.
+# A file covers one subject, in a directory named for the part of src/Compiler
+# it exercises: program/, index/, plan/, cover/, codegen/ and runtime/.
+# extensions/ holds NNlib's and Einops's functions on traced arrays, and cuda/
+# what runs only on CUDA; decisions.jl, interfaces.jl and show.jl span the
+# parts. setup.jl is evaluated in every test's module; fixtures/ holds
+# programs that several tests include, and bench/ the scripts that time
+# Tempest; neither runs as a test.
 using ParallelTestRunner
 using Tempest
 import CUDACore
 
-const CUDA_FUNCTIONAL = CUDACore.functional(true)
-CUDA_FUNCTIONAL || @warn "CUDA unavailable; GPU tests skipped"
+# `functional(true)` throws the reason CUDA is not functional. On CI, whose
+# runners have a GPU, that fails the run; elsewhere the warning names it.
+const CUDA_FUNCTIONAL = try
+    CUDACore.functional(true)
+catch err
+    haskey(ENV, "CI") && rethrow()
+    @warn "CUDA unavailable; GPU tests skipped" reason = sprint(showerror, err)
+    false
+end
 
 testsuite = find_tests(@__DIR__)
 filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/") && !startswith(name, "bench/"), testsuite)
+# Without CUDA, cuda/ is dropped whole, and the tests elsewhere skip their
+# cases on CUDA.
+CUDA_FUNCTIONAL || filter!(((name, _),) -> !startswith(name, "cuda/"), testsuite)
 
 # The device's rates are measured here, once and alone: workers share the GPU
 # and would measure badly. Each copies the file into its own tuning directory.

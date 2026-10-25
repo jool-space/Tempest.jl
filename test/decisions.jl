@@ -73,7 +73,7 @@ const SCALING_FORMS = "x / n and x · (1 / n) one form under the numerics policy
     permuted_sum(x) = permutedims(sum(reshape(x, 2, 4, 6); dims = 2), (3, 1, 2))
     @test agree(C.execute(chosen(transposed_product, a, b), a, b), C.leaves(transposed_product(a, b)))
     @test agree(C.execute(chosen(permuted_sum, a), a), C.leaves(permuted_sum(a)))
-    # Reshapes around size-1 axes are checked in plan.jl, "axes of extent one".
+    # Reshapes around size-1 axes are checked in plan/layout.jl, "axes of extent one".
     # Spellings that differ in the order of a kernel's domain do the same work.
     @test same_work(a -> sum(permutedims(a, (2, 1)); dims = 2), a -> permutedims(sum(a; dims = 1), (2, 1)), a)
     @test same_work(a -> tanh.(reshape(a, 48)), a -> reshape(tanh.(a), 48), a)

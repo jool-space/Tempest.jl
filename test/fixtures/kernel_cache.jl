@@ -1,10 +1,10 @@
-# The kernel cache from an empty store: cache.jl runs this in a child process
-# with `JULIA_OBJCACHE_PATH` naming a fresh directory, since a process opens its
-# object cache once. Each program compiles its kernels when first prepared and
-# loads them all when prepared again, with the same results. Prepared again in
-# the same session it loads nothing, since the session keeps what it resolved;
-# the last pass forgets that and reads what the first wrote (the store before
-# Julia 1.14 commits at once).
+# The kernel cache from an empty store: cuda/cache.jl runs this in a child
+# process with `JULIA_OBJCACHE_PATH` naming a fresh directory, since a process
+# opens its object cache once. Each program compiles its kernels when first
+# prepared and loads them all when prepared again, with the same results.
+# Prepared again in the same session it loads nothing, since the session keeps
+# what it resolved; the last pass forgets that and reads what the first wrote
+# (the store before Julia 1.14 commits at once).
 using Tempest, Test, NNlib, CUDACore
 import cuBLAS, cuTile
 include(joinpath(@__DIR__, "..", "setup.jl"))
