@@ -82,9 +82,11 @@ const ATTENTION = [
         (q, k, v), (kernels = 2, bytes = O + LSE, largest = O)),
     # The streaming plan recomputes the scores in the backward pass too, so no
     # value as large as them is stored; the cover stores them at this size,
-    # measured faster.
+    # measured faster. The softmax backward's Σ p·dp is a sum over the output's
+    # features (FlashAttention-2's identity), recomputed where it is read, so
+    # the log-sum-exp is the one statistic stored.
     Composition("the function, a training step", training((q, k, v) -> sum(abs2, attend(q, k, v)), q, k, v), (q, k, v),
-        (bytes = 5O + 2LSE + 4, largest = O)),
+        (bytes = 5O + LSE + 4, largest = O)),
     Composition("written out, a training step", training((q, k, v) -> sum(abs2, written(q, k, v)), q, k, v), (q, k, v),
         (largest = O,)),
 ]

@@ -111,6 +111,20 @@ end
     @test length(C.rewrite(C.lower(trace((q, k, v) -> Ops.attention(q, k, v; causal = true), qh, kh, vh))).rewrites) == 1
 end
 
+# FlashAttention-2's identity: the softmax backward's Σ_j p·dp, dp = Σ_d v·dO,
+# is Σ_d dO·o, o = Σ_j p·v the forward's output. Its gradient sums over the
+# head's features, reading o, and not over the keys.
+@testset "a sum over a sum's product reads a sum computed already" begin
+    q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
+    p = differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v))
+    g = C.rewrite(C.lower(p))
+    exchanged = [id for (id, note) in g.rewrites if startswith(note, "sums exchanged")]
+    @test length(exchanged) == 1
+    d = g.values[only(exchanged)].definition
+    @test map(k -> d.iteration[k], d.reduced) == (4,)
+    @test agree(C.execute(recomputing(g), q, k, v), filter(!isnothing, C.leaves(interpret(p, q, k, v))))
+end
+
 # The laws are data: the same rules that make a softmax one fold relative to
 # the maximum make a variance one fold relative to the mean (Welford), and a
 # log-sum-exp written by hand the fold `logsumexp` records.

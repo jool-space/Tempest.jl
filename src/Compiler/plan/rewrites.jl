@@ -10,16 +10,22 @@
 # folds over the same `y`, and of the statistic, is one fold observing that
 # function. So the spellings of a softmax, `exp(s - logsumexp(s))` and
 # `exp(s - maximum(s)) / sum(exp(s - maximum(s)))`, weighted and summed, reach
-# the same fold, and the two-pass variance reaches Welford's.
+# the same fold, and the two-pass variance reaches Welford's. Before them, a
+# sum over another sum's product exchanges the two where the sum it moves
+# inside is one the program computes (see `exchanged_sums`).
 
 """
     rewrite(graph) -> IndexGraph
 
-The graph with its sums relative to a statistic made relative folds, and
+The graph with its sums over a sum's product exchanged where that reads a sum
+it computes, then its sums relative to a statistic made relative folds, and
 pointwise functions of them composed into the folds' observes, until neither
 finds anything. The graph's `rewrites` notes each, and `explain` prints them.
 """
 function rewrite(graph::IndexGraph)
+    # A sum is found by its factors before the online rewrite makes it a
+    # relative fold.
+    graph = exchanged_sums(graph)
     # Each rewrite can make another possible. Compositions nest, `m + log(s)`
     # over `log(s)`, and each pass composes one level; a log-sum-exp written
     # out is a statistic only once composed, and a sum weighted by its
@@ -183,6 +189,125 @@ function aligned(graph, F, index, axes, d::Domain)
     all(j -> def.iteration[def.reduced[j]] == d.extents[axes[j]], eachindex(axes)) || return nothing
     any(e -> any(k -> mentions(e, k), axes), index) && return nothing
     iteration_index(def, index, map(k -> identity_index(d.extents)[k], axes))
+end
+
+# Σ_R a·(Σ_K b) is Σ_K Σ_R a·b, and the sum over R moves inside past the
+# factors constant along R. Where the sum it moves inside is a sum the
+# program computes, read at some index, it is that sum, and the sum over R is
+# not computed at all: FlashAttention-2's identity, where the softmax
+# backward's Σ_j p·dp, dp = Σ_d v·dO, is Σ_d dO·o, o = Σ_j p·v the forward's
+# output. Only where the exchanged sum runs over no more elements than the
+# sum it replaces.
+function exchanged_sums(graph::IndexGraph)
+    sums = Pair{Int, Vector{Tuple{Operand, Int}}}[]
+    found = Dict{Int, Any}()
+    for (r, v) in enumerate(graph.values)
+        v.definition isa Reduction{SumFold} || continue
+        e = exchange(graph, r, sums)
+        e === nothing || (found[r] = e)
+        v.scalar || push!(sums, r => factors(graph, v.definition.operand, Domain(v.definition.iteration), v.eltype))
+    end
+    isempty(found) && return graph
+    first(rebuild((b, r) -> haskey(found, r) ? exchanged!(b, graph, r, found[r]) : nothing, graph))
+end
+
+# The exchange of sum `r` over a factor that is a sum, where the sum it moves
+# inside is among `sums`, the factors of the sums before `r`: whether `r`
+# negates its product, the factors left outside over the exchanged domain,
+# the sum read, that domain and its axes the outer sum keeps. Or nothing.
+function exchange(graph, r, sums)
+    v = graph.values[r]
+    d = v.definition
+    n, domain = length(d.iteration), Domain(d.iteration)
+    x, negated = d.operand, false
+    if applies(graph, x, -) && length(graph.values[x.value].definition.operands) == 1
+        x, negated = only(inner(graph, x, domain)), true
+    end
+    T = v.eltype
+    eltype_of(graph, x) === T || return nothing
+    fs = factors(graph, x, domain, T)
+    for (j, (f, power)) in enumerate(fs)
+        power == 1 && f isa Read && graph.values[f.value].definition isa Reduction{SumFold} && graph.values[f.value].eltype === T || continue
+        F = graph.values[f.value].definition
+        extents = (d.iteration..., map(k -> F.iteration[k], F.reduced)...)
+        wide = Domain(extents)
+        index = iteration_index(F, f.index, map(m -> var(n + m), Tuple(eachindex(F.reduced))))
+        spread = [fs[1:end .!= j]; factors(graph, through(F.operand, index, wide), wide, T)]
+        along = [any(k -> mentions(o, k), d.reduced) for (o, _) in spread]
+        kept = Tuple(k for k in eachindex(extents) if !(k in d.reduced))
+        prod(k -> extents[k], kept; init = 1) <= prod(d.iteration; init = 1) || continue
+        s = computed_sum(graph, sums, spread[along], extents, d.reduced, kept, T)
+        s === nothing && continue
+        return (; negated, outside = spread[.!along], sum = s, extents, kept)
+    end
+    nothing
+end
+
+# A sum among `sums` that is the sum over `reduced` of the product of `fs`,
+# operands of type `T` over `extents`: read at its index over the axes `kept`.
+function computed_sum(graph, sums, fs, extents, reduced, kept, T)
+    for (V, gs) in sums
+        S = graph.values[V].definition
+        graph.values[V].eltype === T && length(gs) == length(fs) && length(S.reduced) == length(reduced) || continue
+        σ = matched_axes(gs, fs, S.iteration, extents)
+        σ !== nothing && Set(σ[k] for k in S.reduced) == Set(reduced) || continue
+        values = Tuple(k for k in eachindex(S.iteration) if !(k in S.reduced))
+        return Read(V, map(k -> var(findfirst(==(σ[k]), kept)), values))
+    end
+    nothing
+end
+
+# The axes of `extents` that a sum's iteration axes are, such that its
+# factors `gs`, read over them, are the factors `fs` in some order; nothing
+# when no order makes them so. Each axis is matched where a factor reads it
+# alone along one of its own axes.
+function matched_axes(gs, fs, iteration, extents)
+    sole(e) = e.constant == 0 && length(e.terms) == 1 && e.terms[1].second == 1 && e.terms[1].first isa Var ? e.terms[1].first.n : 0
+    function match(i, σ, used)
+        if i > length(gs)
+            all(!iszero, σ) && allunique(σ) && all(k -> iteration[k] == extents[σ[k]], eachindex(σ)) || return nothing
+            index = map(var, Tuple(σ))
+            pairs = zip(gs, (fs[j] for j in used))
+            return all(((g, f),) -> g[2] == f[2] && through(g[1], index, Domain(extents)) == f[1], pairs) ? σ : nothing
+        end
+        (g, p) = gs[i]
+        for (j, (f, q)) in enumerate(fs)
+            (j in used || p != q || typeof(g) != typeof(f)) && continue
+            τ = copy(σ)
+            if g isa Read
+                g.value == f.value || continue
+                ok = true
+                for (a, b) in zip(g.index, f.index)
+                    k, l = sole(a), sole(b)
+                    k == 0 && continue
+                    l == 0 || τ[k] == 0 || τ[k] == l || (ok = false; break)
+                    l == 0 || (τ[k] = l)
+                end
+                ok || continue
+            end
+            found = match(i + 1, τ, [used; j])
+            found === nothing || return found
+        end
+        nothing
+    end
+    match(1, zeros(Int, length(iteration)), Int[])
+end
+
+# Sum `r` exchanged: the factors left outside and the sum read, over the
+# exchanged domain's kept axes, summed over those the inner sum reduced.
+function exchanged!(b::Builder, graph, r, e)
+    v = graph.values[r]
+    dims = map(k -> e.extents[k], e.kept)
+    domain = Domain(dims)
+    renumber = ntuple(k -> (p = findfirst(==(k), e.kept)) === nothing ? constant(0) : var(p), length(e.extents))
+    outside = new_factors(b, [(through(o, renumber, domain), power) for (o, power) in e.outside])
+    fs = sort([outside; (remap(e.sum, b.ids), 1)]; by = f -> -f[2])
+    g = product!(b, fs, dims, v.eltype)
+    reduced = Tuple((length(v.dims) + 1):length(dims))
+    id = add!(b, Reduction(v.definition.fold, g, dims, reduced), v.dims, v.eltype, v.scalar)
+    push!(b.rewrites, id => "sums exchanged: Σ a·(Σ b) is Σ (Σ a·b), a sum computed already")
+    e.negated || return id
+    add!(b, Pointwise(-, (Read(id, identity_index(v.dims)),)), v.dims, v.eltype, v.scalar)
 end
 
 """
