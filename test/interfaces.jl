@@ -4,7 +4,10 @@
 # `Tempest.Compiler.IR`, the plan names and the traced arrays public in
 # `Tempest.Compiler`.
 const ROOT = joinpath(@__DIR__, "..")
-const EXTENSIONS = sort!(map(n -> replace(n, r"\.jl$" => ""), readdir(joinpath(ROOT, "ext"))))
+# An extension is ext/Name.jl or ext/Name/; a run with coverage writes .cov
+# files beside them.
+const EXTENSIONS = sort!([replace(n, r"\.jl$" => "") for n in readdir(joinpath(ROOT, "ext"))
+    if endswith(n, ".jl") || isdir(joinpath(ROOT, "ext", n))])
 
 # The source files of an extension: ext/Name.jl, or every file in ext/Name/.
 function sources(name)
