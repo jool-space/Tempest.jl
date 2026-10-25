@@ -266,6 +266,14 @@ in_sweep(c, precision) = occursin("SiLU", c.name) || occursin("softcap", c.name)
 # where it is estimated at 9, timed from memory (11.8 from the cache).
 const ONE_WAVE = "a launch of one wave from memory, its loads and its products added rather than overlapped (`OVERLAP`, src/Compiler/cover/cost.jl)"
 one_wave(c, precision) = c.name == "linear, bias, GELU" && precision === :full
+# A launch's bytes are priced at the bandwidth its reads are fit on, writes
+# too; timed from memory, writes that fit the cache land there and reach
+# memory after it. Attention's backward with its scores and dp stored writes
+# p and ds from the log-sum-exp's kernel, where Δ no longer waits for it:
+# 4.2 MB read and 4.2 MB written, estimated at 35 μs and timed at 19, what
+# the reads take.
+const CACHED_WRITES = "a launch's writes priced at the bandwidth of its reads, where timed from memory they land in the cache (`fit_memory!`, src/Compiler/cover/calibrate.jl)"
+cached_writes(c, precision) = c.name in ("the function, a training step", "written out, a training step") && precision === :tf32
 
 @testset "estimates that decide are within the close-call factor, or measured" begin
     @test !hasfield(Tempest.Compiler.Implement.Work, :rate)
@@ -295,6 +303,11 @@ one_wave(c, precision) = c.name == "linear, bias, GELU" && precision === :full
             end
         elseif one_wave(c, precision)
             @testset "gap: $ONE_WAVE" begin
+                @test all(stands)
+                @test_skip all(held)
+            end
+        elseif cached_writes(c, precision)
+            @testset "gap: $CACHED_WRITES" begin
                 @test all(stands)
                 @test_skip all(held)
             end
