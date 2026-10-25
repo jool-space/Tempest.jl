@@ -168,7 +168,7 @@ function Tempest.Compiler.calibrate(target::CUDATarget)
 end
 
 # A fold by key's items run at once: a sum's add atomically.
-Tempest.Compiler.accumulate!(::Tempest.IR.SumFold, buffer::CUDACore.CuDeviceArray, i, v) = (CUDACore.@atomic buffer[i] += v; nothing)
+Tempest.Compiler.accumulate!(::Tempest.Compiler.IR.SumFold, buffer::CUDACore.CuDeviceArray, i, v) = (CUDACore.@atomic buffer[i] += v; nothing)
 
 function Tempest.Compiler.floor_launch(::CUDATarget, k::Tempest.Compiler.ScalarKernel, args)
     f = Tempest.Compiler.generated(:(function (buffers, n)

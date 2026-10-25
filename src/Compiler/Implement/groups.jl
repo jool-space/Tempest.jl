@@ -16,7 +16,8 @@ whether it runs from the last element down (`reverse`) and leaves each
 element out of its own prefix (`exclusive`), nothing for any other value; and
 for a value masked by formulas over its positions, `masked`: the formulas,
 each at most zero where the mask holds, and the number the value is where it
-fails (see `Tempest.IR.comparison_mask` and `Tempest.IR.masked_result`).
+fails (see `Tempest.Compiler.IR.comparison_mask` and
+`Tempest.Compiler.IR.masked_result`).
 """
 struct ValueView
     eltype::DataType

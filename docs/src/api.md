@@ -97,86 +97,86 @@ Tempest.Compiler.generated
 Tempest.Compiler.concurrently
 ```
 
-## Tempest.IR
+## Tempest.Compiler.IR
 
 ```@docs
-Tempest.IR
+Tempest.Compiler.IR
 ```
 
 ### Index formulas
 
 ```@docs
-Tempest.IR.Domain
-Tempest.IR.Var
-Tempest.IR.Affine
-Tempest.IR.Div
-Tempest.IR.Mod
-Tempest.IR.Indirect
-Tempest.IR.is_affine
-Tempest.IR.indirect_values
-Tempest.IR.substitute
+Tempest.Compiler.IR.Domain
+Tempest.Compiler.IR.Var
+Tempest.Compiler.IR.Affine
+Tempest.Compiler.IR.Div
+Tempest.Compiler.IR.Mod
+Tempest.Compiler.IR.Indirect
+Tempest.Compiler.IR.is_affine
+Tempest.Compiler.IR.indirect_values
+Tempest.Compiler.IR.substitute
 ```
 
 ### Layout
 
 ```@docs
-Tempest.IR.storage_length
-Tempest.IR.address
-Tempest.IR.group_stride
+Tempest.Compiler.IR.storage_length
+Tempest.Compiler.IR.address
+Tempest.Compiler.IR.group_stride
 ```
 
 ### Folds
 
 ```@docs
-Tempest.IR.Relative
-Tempest.IR.Exponential
-Tempest.IR.Square
-Tempest.IR.Statistic
-Tempest.IR.Sum
-Tempest.IR.Composed
-Tempest.IR.LOGSUMEXP
-Tempest.IR.InSequence
-Tempest.IR.Overwrite
-Tempest.IR.fold_reduce
-Tempest.IR.product_factors
+Tempest.Compiler.IR.Relative
+Tempest.Compiler.IR.Exponential
+Tempest.Compiler.IR.Square
+Tempest.Compiler.IR.Statistic
+Tempest.Compiler.IR.Sum
+Tempest.Compiler.IR.Composed
+Tempest.Compiler.IR.LOGSUMEXP
+Tempest.Compiler.IR.InSequence
+Tempest.Compiler.IR.Overwrite
+Tempest.Compiler.IR.fold_reduce
+Tempest.Compiler.IR.product_factors
 ```
 
 ### Terms
 
 ```@docs
-Tempest.IR.Load
-Tempest.IR.Ix
-Tempest.IR.Stat
-Tempest.IR.Recomputed
-Tempest.IR.Cast
-Tempest.IR.mentions
+Tempest.Compiler.IR.Load
+Tempest.Compiler.IR.Ix
+Tempest.Compiler.IR.Stat
+Tempest.Compiler.IR.Recomputed
+Tempest.Compiler.IR.Cast
+Tempest.Compiler.IR.mentions
 ```
 
 ### Masks
 
 ```@docs
-Tempest.IR.comparison_mask
-Tempest.IR.held_formula
-Tempest.IR.masked_result
+Tempest.Compiler.IR.comparison_mask
+Tempest.Compiler.IR.held_formula
+Tempest.Compiler.IR.masked_result
 ```
 
-## Tempest.Implement
+## Tempest.Compiler.Implement
 
 ```@docs
-Tempest.Implement
-Tempest.Implement.Implementation
-Tempest.Implement.register!
-Tempest.Implement.GroupView
-Tempest.Implement.ValueView
-Tempest.Implement.members
-Tempest.Implement.product_axes
-Tempest.Implement.claims
-Tempest.Implement.variants
-Tempest.Implement.estimate
-Tempest.Implement.Work
-Tempest.Implement.build_claim
-Tempest.Implement.candidates
-Tempest.Implement.record_name
-Tempest.Implement.recomputes_folds
-Tempest.Implement.in_place
+Tempest.Compiler.Implement
+Tempest.Compiler.Implement.Implementation
+Tempest.Compiler.Implement.register!
+Tempest.Compiler.Implement.GroupView
+Tempest.Compiler.Implement.ValueView
+Tempest.Compiler.Implement.members
+Tempest.Compiler.Implement.product_axes
+Tempest.Compiler.Implement.claims
+Tempest.Compiler.Implement.variants
+Tempest.Compiler.Implement.estimate
+Tempest.Compiler.Implement.Work
+Tempest.Compiler.Implement.build_claim
+Tempest.Compiler.Implement.candidates
+Tempest.Compiler.Implement.record_name
+Tempest.Compiler.Implement.recomputes_folds
+Tempest.Compiler.Implement.in_place
 ```

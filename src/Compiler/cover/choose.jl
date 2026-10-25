@@ -22,7 +22,7 @@ struct Choice
     key::String
     borrowed::Bool # priced on another package's line, which bounds a time only from below
     order::Int # the claim's place among its implementation's claims on the group, its own ranking of them; a variant's is past its parent's
-    variants::Vector{Any} # the claims its implementation offers once it measures best (see `Tempest.Implement.variants`)
+    variants::Vector{Any} # the claims its implementation offers once it measures best (see `Tempest.Compiler.Implement.variants`)
 end
 
 "What was chosen for a group, how, and the time measured for it, if any."

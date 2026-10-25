@@ -6,9 +6,14 @@ names are what packages outside it need: beneath `compile`, a program traced
 and `outputs`), for a step run in place; the language programs are written
 in, which `Tempest` makes its own, and what an extension writes traced methods
 with (`TracedArray`, `Traced`, `contract`); what implementations read of a
-plan beyond `Tempest.IR`, and what they build kernels with (the kernel cache,
+plan beyond `IR`, and what they build kernels with (the kernel cache,
 `generated` and `concurrently`); and the protocol a package that adds a
 target defines (see `Target`).
+
+Its submodules are `IR`, the vocabulary its levels share and implementations
+read, and `Implement`, the interface kernel packages implement. Their public
+names are what kernel packages read; the compiler also uses what they keep
+to themselves, such as the arithmetic that builds index expressions.
 """
 module Compiler
 
@@ -16,15 +21,20 @@ using LinearAlgebra
 using BFloat16s: BFloat16
 using Republic: @republic
 
+public IR, Implement
+
+include("IR/IR.jl")
+include("Implement/Implement.jl")
+
 # The vocabulary, and the arithmetic that builds expressions in it.
-@republic republic=false inherit=:public using ..IR
-using ..IR: constant, var, add, scale, mul, normalize, fdiv, fmod, evaluate_index, affine_key, isconstant,
+@republic republic=false inherit=:public using .IR
+using .IR: constant, var, add, scale, mul, normalize, fdiv, fmod, evaluate_index, affine_key, isconstant,
     wide_axes, fold_array, scan_array, fold_name, fold_eltype, law_function, statistic_name, stats, stored_reads
-import ..IR: mentions
+import .IR: mentions
 
 # The protocol of implementations, which the cover calls and the generator implements.
-@republic republic=false inherit=:public import ..Implement
-using ..Implement: REGISTERED
+@republic republic=false inherit=:public import .Implement
+using .Implement: REGISTERED
 
 # Beneath `compile`: a program traced and prepared, for a step run in place.
 public trace, prepare, bind!, execute!, capture!, replay!, outputs

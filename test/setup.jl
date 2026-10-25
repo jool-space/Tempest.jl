@@ -4,7 +4,7 @@ using LinearAlgebra, BFloat16s
 import Tempest as T
 using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
 import Tempest.Compiler as C
-import Tempest.IR as IR
+import Tempest.Compiler.IR as IR
 
 # Attention and dropout as a user writes them, on Tempest's primitives.
 module Ops

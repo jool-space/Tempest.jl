@@ -1,13 +1,13 @@
 # The product sketch: tile axes for reduction groups whose sums are of
-# bilinear products, over the axes `Tempest.Implement.product_axes` finds. The reduced
-# axes (K) are swept. Tile order (M, K, N, batch) puts each factor's tile in
-# matrix order, so the fold algebra's product rule applies. M, N and the batch
-# each collapse into one tile axis where every view chains over them;
-# otherwise the longest axis of M and of N is tiled and every other kept axis
-# is a grid axis of its own. K collapses likewise, or its longest piece that
-# chains is tiled and each other piece is swept an index per step, as grouped
-# heads and queries are in attention's backward pass. Everything else is the
-# ordinary resident or streamed reduction kernel.
+# bilinear products, over the axes `Tempest.Compiler.Implement.product_axes`
+# finds. The reduced axes (K) are swept. Tile order (M, K, N, batch) puts each
+# factor's tile in matrix order, so the fold algebra's product rule applies.
+# M, N and the batch each collapse into one tile axis where every view chains
+# over them; otherwise the longest axis of M and of N is tiled and every other
+# kept axis is a grid axis of its own. K collapses likewise, or its longest
+# piece that chains is tiled and each other piece is swept an index per step,
+# as grouped heads and queries are in attention's backward pass. Everything
+# else is the ordinary resident or streamed reduction kernel.
 
 # The tiles a product may take: its output tile's rows and columns, the depth
 # of each step of its sum, and whether its sum is split among blocks. The

@@ -27,7 +27,7 @@ function mask_of(c::Context, t, d::Domain)
 end
 
 # A side of a comparison with a position, as a formula: a position, or an
-# integer loaded from a value (see `Tempest.IR.held_formula`).
+# integer loaded from a value (see `Tempest.Compiler.IR.held_formula`).
 compared(c::Context, t::Ix, d) = t.expr
 compared(c::Context, t::Load, d) = IR.held_formula(t.value, t.index, c.g.values[t.value].eltype, d)
 compared(c::Context, t, d) = nothing

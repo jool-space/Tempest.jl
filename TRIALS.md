@@ -155,7 +155,7 @@ where every other took under a second, on one thread as on twelve. Most of
 it was hashing: a term was hashed by its fields, so each lookup of a term in
 `subterms` hashed its whole subtree, and a projection recomputed puts its
 body in every reader's term. Now `Apply` and `Recomputed` keep a hash
-computed once from their parts' (`src/IR/terms.jl`), which the kernel
+computed once from their parts' (`src/Compiler/IR/terms.jl`), which the kernel
 cache's text leaves out: that trial 23.0 to 3.6 s; the 4B step's preparation
 in a new process 52.4 and 58.7 to 33.8 and 42.9 s, and 31.8 to 12.2 s once
 compiled, with the same kernels and tokens; the GPT step's warm preparation
@@ -183,10 +183,10 @@ code has been judged. The eager slice (`test/bench/eager_slice.jl`): 113 of
 its 136 cases trace and agree, Base's 59 of 67.
 
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
-`src/IR/expressions.jl`), a kernel's grid and tiles are chosen for it, and
-a program for a new size is a new preparation. Decode escapes it, its cache
-of a fixed extent and its length held on the device, which bounds the sweep
-(decided below), so Qwen3.5-4B's step prepares once for every token; a
+`src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
+it, and a program for a new size is a new preparation. Decode escapes it, its
+cache of a fixed extent and its length held on the device, which bounds the
+sweep (decided below), so Qwen3.5-4B's step prepares once for every token; a
 prefill, whose extent is the prompt's length, prepares for each length.
 Challenger: tinygrad's
 symbolic shapes (`Variable` in `tinygrad/shape/shapetracker.py`), a bound
@@ -273,7 +273,7 @@ into an operand whose buffer the result shares
 `xla/service/gpu/ir_emission_utils.cc`), with vLLM's `reshape_and_cache`
 and FlashAttention's `flash_attn_with_kvcache` as the hand-written bars. A
 write at index arrays, a traced integer among them, is now a fold by key
-that overwrites (`Overwrite`, `src/IR/folds.jl`), starting from the old
+that overwrites (`Overwrite`, `src/Compiler/IR/folds.jl`), starting from the old
 contents, and a scatter a sum by key in the kernel computing its elements;
 a fold by key whose contents nothing reads after it takes their storage, so
 the floor and cuTile skip the copy, as XLA's scatter emitter does
@@ -395,7 +395,7 @@ comparisons of index formulas, and this one compares a position with a load.
 The challenger, FlashAttention's `flash_attn_with_kvcache`, bounds each
 sequence's key loop by its `cache_seqlens`. Here an integer read is a
 formula, a gather known to lie in its type's range (`held_formula`,
-`src/IR/masks.jl`), so the comparison is a mask as a causal one is
+`src/Compiler/IR/masks.jl`), so the comparison is a mask as a causal one is
 (`masked`, `src/Compiler/plan/masks.jl`); where every variable of its index
 lies on a kept tile axis of one lane, the generator loads it once per block
 into the bound on the sweep (`block_read`, `ext/cuTileExt/mask.jl`). Judged
@@ -448,7 +448,7 @@ challenger, the staged form of the same search, which tinygrad's BEAM
 output tile at the class's default depth first, then the variants of the
 tile that measured best, its other depths and its sum split the other way,
 and so on until the best has no variant left. Now an implementation may
-stage its claims (`Tempest.Implement.variants`), and the cover searches
+stage its claims (`Tempest.Compiler.Implement.variants`), and the cover searches
 every group's options in stages, all groups in each: a stage's kernels
 compile side by side and are timed one at a time, and every measured option
 within the noise of the best is expanded (`search!`, `expand!`); the record

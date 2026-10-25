@@ -4,7 +4,7 @@ plan as kernels: it claims the groups it can realize, estimates the launches of
 each claim, and builds them. It may also propose groups of its own. A package
 makes its implementations available with `register!` when it loads, and a
 target decides which of them it uses. Claims read a `GroupView` of the group,
-in the vocabulary of `Tempest.IR`.
+in the vocabulary of `Tempest.Compiler.IR`.
 """
 module Implement
 

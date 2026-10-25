@@ -268,7 +268,7 @@ const ONE_WAVE = "a launch of one wave from memory, its loads and its products a
 one_wave(c, precision) = c.name == "linear, bias, GELU" && precision === :full
 
 @testset "estimates that decide are within the close-call factor, or measured" begin
-    @test !hasfield(Tempest.Implement.Work, :rate)
+    @test !hasfield(Tempest.Compiler.Implement.Work, :rate)
     CUDA_FUNCTIONAL && @testset "$(c.name), $precision" for precision in (:full, :tf32), c in Coverage.COMPOSITIONS
         d = C.Decider(T.CUDATarget(; precision), C.rewrite(C.lower(c.program)); measure = :close)
         p, considered = C.cover(d)
@@ -327,6 +327,6 @@ relative(graph) = [v.definition.fold for v in graph.values if v.definition isa C
     @testset "gap: $REVERSED_VIEW" begin
         p = C.plan(C.lower(trace(x -> reverse(x; dims = 1) .* 2, x)))
         view = C.group_view(p, only(p.groups))
-        @test_broken !isempty(Tempest.Implement.claims(Base.get_extension(Tempest, :cuTileExt).cuTileGenerator(), T.CUDATarget(), view))
+        @test_broken !isempty(Tempest.Compiler.Implement.claims(Base.get_extension(Tempest, :cuTileExt).cuTileGenerator(), T.CUDATarget(), view))
     end
 end

@@ -35,8 +35,8 @@ gives it a method on traced arrays where its body does not trace.
 `Tempest.Compiler` is how a program becomes kernels; its public names are
 what packages beside a program need: the step beneath `compile`, what an
 extension writes traced methods with, and what kernel packages and targets
-read and define. `Tempest.IR` is the vocabulary the levels share and
-implementations read, and `Tempest.Implement` the interface kernel packages
+read and define. `Compiler.IR` is the vocabulary its levels share and
+implementations read, and `Compiler.Implement` the interface kernel packages
 implement.
 """
 module Tempest
@@ -44,16 +44,14 @@ module Tempest
 using Republic: @republic
 
 export compile, explain
-public Compiler, IR, Implement
+public Compiler
 
-include("IR/IR.jl")
-include("Implement/Implement.jl")
 include("Compiler/Compiler.jl")
 
 # What programs are written with: the way in, and what Base cannot spell.
 @republic using .Compiler: compile, Compiled, gradient, explain, CPUTarget, CUDATarget,
     logsumexp, scalar_partials
-@republic using .IR: GenericFold
+@republic using .Compiler.IR: GenericFold
 
 include("precompile.jl")
 

@@ -1,7 +1,8 @@
 # Extensions are written against Tempest's public names, as packages of their
-# own would be: what they implement is `Tempest.Implement` or the target
-# protocol public in `Tempest.Compiler`, and what they read is `Tempest.IR`,
-# the plan names and the traced arrays public in `Tempest.Compiler`.
+# own would be: what they implement is `Tempest.Compiler.Implement` or the
+# target protocol public in `Tempest.Compiler`, and what they read is
+# `Tempest.Compiler.IR`, the plan names and the traced arrays public in
+# `Tempest.Compiler`.
 const ROOT = joinpath(@__DIR__, "..")
 const EXTENSIONS = sort!(map(n -> replace(n, r"\.jl$" => ""), readdir(joinpath(ROOT, "ext"))))
 
@@ -77,7 +78,7 @@ function private_names(files)
 end
 
 @testset "public names are defined" begin
-    for m in (Tempest, T.IR, T.Compiler, T.Implement)
+    for m in (Tempest, T.Compiler, IR, C.Implement)
         @test filter(n -> !isdefined(m, n), names(m)) == Symbol[]
     end
 end
@@ -95,6 +96,6 @@ end
     @test private_names(source("const C = Tempest.Compiler\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("using Tempest.Compiler\nCompiler.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("using Tempest.Compiler: Plan, Decider")) == ["Tempest.Compiler.Decider"]
-    @test private_names(source("import Tempest.Implement: claims, REGISTERED")) == ["Tempest.Implement.REGISTERED"]
-    @test private_names(source("using Tempest: CUDATarget; using Tempest.Implement")) == String[]
+    @test private_names(source("import Tempest.Compiler.Implement: claims, REGISTERED")) == ["Tempest.Compiler.Implement.REGISTERED"]
+    @test private_names(source("using Tempest: CUDATarget; using Tempest.Compiler.Implement")) == String[]
 end
