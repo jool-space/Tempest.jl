@@ -353,8 +353,9 @@ function lower(p::Program)
             LiteralAccess(convert(n.eltype, op.f(map(a -> a.value, inputs)...)))
         elseif op isa Map && (arithmetic = index_arithmetic(op.f, inputs, input_dims, n, d)) !== nothing
             arithmetic
-        elseif op isa Map && op.f === identity && nodes[only(n.inputs)].eltype === n.eltype
-            # Filling out to a larger shape is a formula, as a layout is.
+        elseif op isa Map && op.f isa Union{typeof(identity), typeof(stopgrad)} && nodes[only(n.inputs)].eltype === n.eltype
+            # Filling out to a larger shape is a formula, as a layout is. A
+            # stopped gradient is its input once the program is differentiated.
             fill_out(only(inputs), only(input_dims), d)
         elseif op isa Map
             value!(map_definition(op.f, map((a, dims) -> operand(a, dims, d), inputs, input_dims), n.eltype), n)

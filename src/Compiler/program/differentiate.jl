@@ -5,7 +5,7 @@
 # each a handle or `nothing`, as a tuple element is the tuple of its
 # components (see `components`).
 
-public gradient, scalar_partials
+public gradient, scalar_partials, stopgrad
 
 const Handle = Union{Traced, TracedArray}
 
@@ -683,3 +683,22 @@ function gradient(f, args...)
     end
     (value, gradients...)
 end
+
+"""
+    Tempest.stopgrad(x) -> x
+
+`x` itself, through which no gradient flows: a constant to every derivative
+taken of the code it is in, of any order. `x` is a number, an array, or a
+struct or tuple of them. Where `x` is used elsewhere, the gradient flows there.
+A straight-through rounding is
+
+    x .+ Tempest.stopgrad(round.(x) .- x)
+
+rounded in value and the identity in derivative.
+"""
+stopgrad(x::Traced) = record_map(stopgrad, x)
+stopgrad(x::TracedArray) = stopgrad.(x)
+# Anything not traced is a constant already.
+stopgrad(x) = rebuild(y -> y isa Handle ? stopgrad(y) : y, x)
+
+scalar_partials(::typeof(stopgrad), g, y, x) = (nothing,)

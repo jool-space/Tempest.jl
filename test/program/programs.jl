@@ -70,6 +70,29 @@ end
     @test g.w ≈ 2 .* (w * x .+ b) * x' && g.b ≈ vec(sum(2 .* (w * x .+ b); dims = 2))
 end
 
+# A stopped gradient is its input in value and a constant to every derivative:
+# the gradient flows through the input's other uses, a straight-through
+# rounding is the identity in derivative, a struct is stopped leaf by leaf, a
+# derivative of a derivative keeps the stop, and the lowered program holds no
+# value for it.
+@testset "stopped gradients" begin
+    x = data(8, 6)
+    @test T.stopgrad(x) === x
+    @test last(T.gradient(x -> sum(x .* T.stopgrad(x)), x)) ≈ x
+    @test last(T.gradient(x -> sum(T.stopgrad(x)), x)) == zero(x)
+    @test last(T.gradient(x -> sum(x) * T.stopgrad(sum(x)), x)) ≈ fill(sum(x), size(x))
+    d = differentiate(trace(x -> sum(abs2, x .+ T.stopgrad(round.(x) .- x)), x))
+    loss, g = interpret(d, x)
+    @test loss ≈ sum(abs2, round.(x)) && g ≈ 2 .* round.(x)
+    graph = C.lower(d)
+    @test !any(v -> v.definition isa C.Pointwise && v.definition.f === T.stopgrad, graph.values)
+    @test agree(C.interpret(graph, x), (loss, g))
+    loss, g = interpret(trace(x -> T.gradient(a -> sum(a .* T.stopgrad((; s = a)).s), x), x), x)
+    @test g ≈ x
+    inner(a) = sum(a .^ 3 .* T.stopgrad(a))
+    @test last(T.gradient(x -> sum(last(T.gradient(inner, x))), x)) ≈ 6 .* x .^ 2
+end
+
 # A shift the loss does not depend on gets no cotangent. The log-sum-exp
 # written out is the same for every `m` constant along its sum, so the rule of
 # the maximum, which compares each element with it, never runs, and the

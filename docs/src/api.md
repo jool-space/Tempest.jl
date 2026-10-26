@@ -43,6 +43,7 @@ Tempest.Compiler.contract
 
 ```@docs
 Tempest.scalar_partials
+Tempest.stopgrad
 ```
 
 ## Tempest.Compiler
