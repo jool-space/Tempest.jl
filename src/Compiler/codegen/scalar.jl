@@ -1,19 +1,55 @@
 # Scalar code for a kernel: the floor that realizes any group, one item at a
 # time. An item is an element of a pointwise group's domain, or a position
-# along a reduction group's kept axes, whose reductions run sequentially. The
-# same code runs on the CPU in a loop and on CUDA one thread per item.
+# along a reduction group's kept axes, whose reductions run sequentially,
+# unless the target splits them among lanes (see `Split`). The same code runs
+# on the CPU in a loop and on CUDA one thread per item, or per lane of a split
+# item.
+
+"""
+    Split(parts, lanes, side = 1)
+
+How the floor deals the positions each item folds among lanes, where items
+alone would leave a device idle: `parts` parts of `lanes` lanes each, as the
+target asks for it (see `floor_split`). Each lane folds every `parts * lanes`th
+position from its own, the lanes of a part merge their states
+(`merge_lanes`), and a part keeps its state in a workspace, which the next
+launch merges with the item's other parts'. So a split group is a launch per
+phase of its folds, and one after them that stores them and sweeps what reads
+them, its positions dealt among the lanes as the folds' were. On CUDA a part
+is a block and its lanes threads, the same part of `side` neighbouring items
+in one block, side by side; on the CPU a part has one lane.
+"""
+struct Split
+    parts::Int
+    lanes::Int
+    side::Int
+end
+
+Split(parts, lanes) = Split(parts, lanes, 1)
+
+"The states a split fold's parts keep between launches: one of type `state` for each part of each item, `length` in all."
+struct Workspace
+    fold::Int
+    state::DataType
+    length::Int
+end
 
 """
 A kernel of the floor: `body` computes item `lin`, zero-based, of `items`,
-over the buffers of the values `slots`, dense and one-dimensional, which the
-function generated from the body receives as a tuple in that order (see
-`floor_launch`).
+over the buffers of the values `slots`, dense and one-dimensional, and then
+those of its `workspaces`, which the function generated from the body
+receives as a tuple in that order (see `floor_launch`). A kernel with a
+`split` computes one lane of a part of each item.
 """
 struct ScalarKernel
     slots::Vector{Int}
     items::Int
     body::Expr # computes item `lin` (zero-based)
+    split::Union{Nothing, Split}
+    workspaces::Vector{Workspace}
 end
+
+ScalarKernel(slots, items, body) = ScalarKernel(slots, items, body, nothing, Workspace[])
 
 index_vars(n) = [Symbol(:i, k) for k in 1:n]
 
@@ -184,6 +220,102 @@ function scalar_kernel(graph, stored, g::Group, slots)
     ScalarKernel(slots, prod(k -> D[k], kept; init = 1), body)
 end
 
+# The positions a lane of a split item folds: every `parts * lanes`th, from its
+# own place among the item's lanes, so that neighbouring lanes read
+# neighbouring positions.
+lane_positions(count) = :((part * lanes + lane):(parts * lanes):$(count - 1))
+
+# The buffer of fold `r`'s workspace among `spaces`, which follow the slots.
+space(c::EmitContext, spaces, r) = :(buffers[$(length(c.slots) + findfirst(w -> w.fold == r, spaces))])
+
+# Statements merging the states every part of the item kept for fold `r`:
+# the part's lanes share them out and merge what they took. Returns the
+# state's name.
+function merge_parts!(s, c::EmitContext, spaces, fold, A, r)
+    state, j, w = gensym(:state), gensym(:part), space(c, spaces, r)
+    push!(s, :($state = $fold_init($fold, $A)))
+    push!(s, :(for $j in lane:lanes:(parts - 1)
+        $state = $fold_combine($fold, $state, @inbounds $w[lin * parts + $j + 1])
+    end))
+    push!(s, :($state = $merge_lanes($fold, $state, $w)))
+    state
+end
+
+"""
+The kernels of folds `folds` when the target splits their items (see
+`Split`): over the group's domain, with `reduced` the axes they fold, each
+fold of `terms[r]`. A launch per phase, whose lanes fold their positions, the
+earlier phases merged from their workspaces first; then one that merges every
+fold, stores `stores` and `statistics`, the outputs at the folds'
+placements, from the first lane of an item's first part, and sweeps
+`outputs`, those over the whole domain, by the same lanes. That last launch is
+left out when it has nothing to do.
+"""
+function split_kernels(graph, g::Group, slots, split::Split, folds, terms, phase, reduced; stores = folds, statistics = Int[], outputs = Int[])
+    D = g.domain
+    vars = index_vars(length(D))
+    kept = [k for k in 1:length(D) if !(k in reduced)]
+    count = prod(k -> D[k], reduced; init = 1)
+    items = prod(k -> D[k], kept; init = 1)
+    fold(r) = graph.values[r].definition.fold
+    types(r) = fold_types(fold(r), term_eltype(terms[r], graph))
+    spaces = [Workspace(r, types(r).state, items * split.parts) for r in folds]
+    observed(r, state) = :(convert($(graph.values[r].eltype), $fold_observe($(fold(r)), $state)))
+    kernels = ScalarKernel[]
+    phases = sort!(unique(phase(r) for r in folds))
+    last_launch = !isempty(stores) || !isempty(statistics) || !isempty(outputs)
+    for p in (last_launch ? [phases; nothing] : phases)
+        c = EmitContext(graph, slots, vars, Domain(D))
+        body = Expr(:block)
+        s = body.args
+        delinearize_expr(s, :lin, kept, D, vars)
+        for r in folds
+            p === nothing || phase(r) < p || continue
+            push!(s, :($(stat_name(c, r)) = $(observed(r, merge_parts!(s, c, spaces, fold(r), types(r).accumulator, r)))))
+        end
+        if p === nothing
+            once = Expr(:block)
+            foreach(k -> push!(once.args, :($(vars[k]) = 0)), reduced)
+            foreach(r -> push!(once.args, store_expr(c, r, placement(graph, g, r), stat_name(c, r))), stores)
+            names = emit_terms!(once.args, [g.terms[m] for m in statistics], c)
+            foreach(m -> push!(once.args, store_expr(c, m, placement(graph, g, m), names[g.terms[m]])), statistics)
+            push!(s, :(if part == 0 && lane == 0
+                $once
+            end))
+            if !isempty(outputs)
+                loop = Expr(:block)
+                delinearize_expr(loop.args, :sweep, reduced, D, vars)
+                names = emit_terms!(loop.args, [g.terms[m] for m in outputs], c)
+                foreach(m -> push!(loop.args, store_expr(c, m, identity_index(D), names[g.terms[m]])), outputs)
+                push!(s, :(for sweep in $(lane_positions(count))
+                    $loop
+                end))
+            end
+        else
+            current = [r for r in folds if phase(r) == p]
+            states = Dict(r => gensym(:state) for r in current)
+            foreach(r -> push!(s, :($(states[r]) = $fold_init($(fold(r)), $(types(r).accumulator)))), current)
+            loop = Expr(:block)
+            delinearize_expr(loop.args, :sweep, reduced, D, vars)
+            names = emit_terms!(loop.args, [terms[r] for r in current], c; hoisted = s, swept = reduced)
+            for r in current
+                f, A = fold(r), types(r).accumulator
+                push!(loop.args, :($(states[r]) = $fold_combine($f, $(states[r]), $fold_lift($f, convert($A, $(names[terms[r]]))))))
+            end
+            push!(s, :(for sweep in $(lane_positions(count))
+                $loop
+            end))
+            for r in current
+                w = space(c, spaces, r)
+                push!(s, :($(states[r]) = $merge_lanes($(fold(r)), $(states[r]), $w)))
+                push!(s, :(lane == 0 && (@inbounds $w[lin * parts + part + 1] = $(states[r]))))
+            end
+        end
+        push!(kernels, ScalarKernel(slots, items, body, split, spaces))
+    end
+    kernels
+end
+
 # A scan's group: an item per position of its other axes, which sweeps the
 # scanned axes in the scans' direction. At each position every scan and fold
 # takes its element, in phase order, and the outputs there are computed and
@@ -309,15 +441,80 @@ function keyed_kernels(graph, g::Group, slots, r, held)
 end
 
 """
+    merge_lanes(fold, state, workspace) -> state
+
+The merge of `state` over the lanes of a part of a split item (see `Split`),
+which each lane gets. The fold's `workspace` names the target, as the buffer
+of `accumulate!` does: on the CPU, where a part has one lane, the merge is
+`state` itself; on a device the lanes merge their states (see CUDAExt).
+"""
+merge_lanes(fold, state, workspace) = state
+
+"""
+Whether a fold's elements may be grouped and interleaved, as a split sweeps
+them: those of every fold but one combined in sequence (`InSequence`).
+"""
+interleaves(::Fold) = true
+interleaves(::InSequence) = false
+
+# Whether neighbouring items of a fold that reduces `axes` of `domain` are
+# neighbours in memory: values are laid out first axis fastest, so they are
+# when the first axis of more than one position is one the fold keeps.
+function adjacent_items(domain, axes)
+    k = findfirst(>(1), domain)
+    k !== nothing && !(k in axes)
+end
+
+# How the floor splits the items of a fold that reduces `axes` of `domain`,
+# when `split(items, positions, adjacent)` asks for it.
+split_fold(split, domain, axes) =
+    split(prod(kept_dims(domain, axes); init = 1), prod(k -> domain[k], axes; init = 1), adjacent_items(domain, axes))
+
+"""
+    group_split(graph, g, split) -> Split or nothing
+
+How the floor splits the items of reduction group `g`, its primary folds',
+when `split(items, positions, adjacent)` asks for it: nothing when it has
+none, or a fold must combine in sequence.
+"""
+function group_split(graph, g::Group, split)
+    g.kind === :reduction || return nothing
+    folds = [r for r in g.reductions if primary(graph, g, r)]
+    !isempty(folds) && all(r -> interleaves(graph.values[r].definition.fold), folds) || return nothing
+    split_fold(split, g.domain, primary_axes(graph, g))
+end
+
+"""
 The floor's launches for a group: its kernel, then those of its folds over
 other axes and by key, those in `held` starting from what their storage holds.
+`split(items, positions, adjacent)` is how the target splits the items of a
+fold (see `floor_split`); by default it does not.
 """
-function scalar_kernels(graph, stored, g::Group, slots; held = ())
+function scalar_kernels(graph, stored, g::Group, slots; held = (), split = (items, positions, adjacent) -> nothing)
     kernels = ScalarKernel[]
-    any(m -> !(m in g.reductions) || primary(graph, g, m), members(g)) && push!(kernels, scalar_kernel(graph, stored, g, slots))
+    if any(m -> !(m in g.reductions) || primary(graph, g, m), members(g))
+        s = group_split(graph, g, split)
+        if s === nothing
+            push!(kernels, scalar_kernel(graph, stored, g, slots))
+        else
+            D = g.domain
+            folds = [r for r in g.reductions if primary(graph, g, r)]
+            append!(kernels, split_kernels(graph, g, slots, s, folds, g.terms, r -> g.phase[r], collect(primary_axes(graph, g));
+                stores = filter(r -> stored[r], folds),
+                statistics = [m for m in g.outputs if graph.values[m].dims != D],
+                outputs = [m for m in g.outputs if graph.values[m].dims == D]))
+        end
+    end
     for r in g.reductions
         primary(graph, g, r) && continue
-        keyed(graph, r) ? append!(kernels, keyed_kernels(graph, g, slots, r, r in held)) : push!(kernels, fold_kernel(graph, g, slots, r))
+        if keyed(graph, r)
+            append!(kernels, keyed_kernels(graph, g, slots, r, r in held))
+            continue
+        end
+        d = graph.values[r].definition
+        s = interleaves(d.fold) ? split_fold(split, g.domain, d.reduced) : nothing
+        s === nothing ? push!(kernels, fold_kernel(graph, g, slots, r)) :
+            append!(kernels, split_kernels(graph, g, slots, s, [r], Dict(r => stored_statistics(g.terms[r], graph, g)), _ -> 1, collect(d.reduced)))
     end
     kernels
 end

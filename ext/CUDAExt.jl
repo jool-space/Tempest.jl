@@ -1,5 +1,5 @@
 # The CUDA target: buffers are device arrays, and the generated floor runs one
-# thread per item.
+# thread per item, or a block per part of an item it splits.
 module CUDAExt
 
 using Tempest
@@ -115,7 +115,7 @@ function clear_cache!()
         bytes = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
         a, sink = CUDACore.zeros(UInt32, 2bytes ÷ 4), CUDACore.zeros(UInt32, 1)
         args = CUDACore.cudaconvert((a, sink))
-        CLEARING[] = (FloorLaunch(floor_function(read_through, args, length(a))..., (args, length(a)), 1024, 256), a, sink)
+        CLEARING[] = (FloorLaunch(floor_function(read_through, (args, length(a)))..., (args, length(a)), 1024, 256), a, sink)
     end
     first(CLEARING[])()
 end
@@ -153,7 +153,7 @@ end
 # `read_through` is.
 blank(_, _) = nothing
 
-blank_launch() = FloorLaunch(floor_function(blank, (), 1)..., ((), 1), 1, 1)
+blank_launch() = FloorLaunch(floor_function(blank, ((), 1))..., ((), 1), 1, 1)
 
 # The gap between launches of an empty kernel in a captured graph, copies of
 # 4 MiB (what the cache holds) and 256 MiB (more), from memory, the cache's
@@ -171,6 +171,7 @@ end
 Tempest.Compiler.accumulate!(::Tempest.Compiler.IR.SumFold, buffer::CUDACore.CuDeviceArray, i, v) = (CUDACore.@atomic buffer[i] += v; nothing)
 
 function Tempest.Compiler.floor_launch(::CUDATarget, k::Tempest.Compiler.ScalarKernel, args)
+    k.split === nothing || return split_launch(k, args)
     f = Tempest.Compiler.generated(:(function (buffers, n)
         lin = ($(CUDACore.blockIdx)().x - 1) * $(CUDACore.blockDim)().x + $(CUDACore.threadIdx)().x - 1
         lin < n || return
@@ -179,15 +180,92 @@ function Tempest.Compiler.floor_launch(::CUDATarget, k::Tempest.Compiler.ScalarK
     end))
     args = CUDACore.cudaconvert(args)
     threads = min(THREADS, k.items)
-    FloorLaunch(floor_function(f, args, k.items)..., (args, k.items), cld(k.items, threads), threads)
+    FloorLaunch(floor_function(f, (args, k.items))..., (args, k.items), cld(k.items, threads), threads)
+end
+
+# A split kernel's launch: a block per part of `side` neighbouring items, a
+# thread per lane of each, the items along the block's first axis, so that a
+# warp's threads read neighbouring elements whether the items or the positions
+# are neighbours. No thread returns early, since a part's lanes merge their
+# states together.
+function split_launch(k, args)
+    f = Tempest.Compiler.generated(:(function (buffers, n, parts)
+        block, part = divrem(Int($(CUDACore.blockIdx)().x) - 1, parts)
+        lin = block * Int($(CUDACore.blockDim)().x) + Int($(CUDACore.threadIdx)().x) - 1
+        lane, lanes = Int($(CUDACore.threadIdx)().y) - 1, Int($(CUDACore.blockDim)().y)
+        $(k.body)
+        return
+    end))
+    args = CUDACore.cudaconvert(args)
+    arguments = (args, k.items, k.split.parts)
+    FloorLaunch(floor_function(f, arguments)..., arguments, (k.items ÷ k.split.side) * k.split.parts, (k.split.side, k.split.lanes))
+end
+
+# Lanes that keep a multiprocessor busy, by GB10's measure: a fold split over
+# fewer moves its bytes more slowly, and over more merges more parts.
+const RESIDENT_LANES = 1024
+
+# Positions an item's thread folds alone however few the items: a split's
+# merges and its launch per phase cost more than so short a sweep, the 32
+# positions of each of 8192 columns 18 μs where a thread per column takes 4.
+const SHORT_FOLD = 64
+
+# Parts an item splits into at most, so that the launch after merges their
+# states in a few loads per lane.
+const MAXIMUM_PARTS = 1024
+
+# Items a block holds side by side at most: a warp's, whose threads then read
+# neighbouring items' elements at once.
+const SIDE = 32
+
+# The multiprocessors of each device, asked once.
+const MULTIPROCESSORS = Dict{CUDACore.CuDevice, Int}()
+
+multiprocessors() = get!(() -> CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT), MULTIPROCESSORS, CUDACore.device())
+
+# Items too few to keep the device busy, one thread each, have their positions
+# dealt among the lanes that would: as many as they have positions to fold
+# four or more each, a part's lanes a power of two, so that they merge by
+# halves, and a block of at most `THREADS`. Neighbouring items in memory are
+# side by side in a block, as many of a warp's as divide them, so that a warp
+# reads neighbouring elements; otherwise a block is one item's part, a warp of
+# lanes at least, which read neighbouring positions.
+function Tempest.Compiler.floor_split(::CUDATarget, items, positions, adjacent)
+    resident = RESIDENT_LANES * multiprocessors()
+    (items == 0 || items >= resident || positions <= SHORT_FOLD) && return nothing
+    wanted = min(cld(resident, items), cld(positions, 4))
+    side = adjacent ? gcd(items, SIDE) : 1
+    lanes = clamp(prevpow(2, wanted), cld(SIDE, side), THREADS ÷ side)
+    Tempest.Compiler.Split(clamp(wanted ÷ lanes, 1, MAXIMUM_PARTS), lanes, side)
+end
+
+# A part's lanes merge their states through shared memory, the first half of
+# those holding one merging the second's at each step, until the first lane
+# holds the part's; then every lane reads it. Items side by side merge apart.
+function Tempest.Compiler.merge_lanes(fold, state::S, ::CUDACore.CuDeviceArray) where {S}
+    shared = CUDACore.CuStaticSharedArray(S, THREADS)
+    side, item, lane = CUDACore.blockDim().x, CUDACore.threadIdx().x, CUDACore.threadIdx().y
+    at(lane) = (lane - 1) * side + item
+    holding = CUDACore.blockDim().y
+    @inbounds shared[at(lane)] = state
+    while holding > 1
+        CUDACore.sync_threads()
+        holding >>= 1
+        lane <= holding && (@inbounds shared[at(lane)] = Tempest.Compiler.IR.fold_combine(fold, shared[at(lane)], shared[at(lane + holding)]))
+    end
+    CUDACore.sync_threads()
+    merged = @inbounds shared[item]
+    # The next merge writes where this one is read.
+    CUDACore.sync_threads()
+    merged
 end
 
 # A floor kernel and its exception slot, from the kernel cache or compiled and
 # kept. A kernel that refers to Julia values in the session (relocations) is
 # compiled once a session and kept out of the cache.
-function floor_function(@nospecialize(f), @nospecialize(args), n)
+function floor_function(@nospecialize(f), @nospecialize(arguments::Tuple))
     Base.issingletontype(typeof(f)) || error("a floor kernel captures values, which its launch does not pass")
-    tt = Tuple{typeof(args), typeof(n)}
+    tt = Tuple{map(typeof, arguments)...}
     device = CUDACore.device()
     key = Tempest.Compiler.content_key("CUDA kernel", f, tt, CUDACore.capability(device), CUDACore.GPUCompiler,
         CUDACore.CUDA_Compiler_jll, Base.libllvm_version)
@@ -216,19 +294,19 @@ struct FloorLaunch
     boxes::Vector{Any}
     pointers::Vector{Ptr{Cvoid}}
     blocks::Int
-    threads::Int
+    threads::Tuple{Int, Int}
 end
 
 function FloorLaunch(fun, exceptions, @nospecialize(args::Tuple), blocks, threads)
     state = Base.RefValue(CUDACore.KernelState(exceptions, UInt32(0)))
     boxes = Any[state; [Base.RefValue{typeof(a)}(a) for a in args]]
-    FloorLaunch(fun, exceptions, state, boxes, Ptr{Cvoid}[pointer_from_objref(b) for b in boxes], blocks, threads)
+    FloorLaunch(fun, exceptions, state, boxes, Ptr{Cvoid}[pointer_from_objref(b) for b in boxes], blocks, threads isa Integer ? (threads, 1) : threads)
 end
 
 function (l::FloorLaunch)()
     l.state[] = CUDACore.KernelState(l.exceptions, rand(CUDACore.launch_rng(), UInt32))
     GC.@preserve l begin
-        CUDACore.cuLaunchKernel(l.fun, l.blocks, 1, 1, l.threads, 1, 1, 0, CUDACore.stream(), l.pointers, C_NULL)
+        CUDACore.cuLaunchKernel(l.fun, l.blocks, 1, 1, l.threads..., 1, 0, CUDACore.stream(), l.pointers, C_NULL)
     end
     nothing
 end

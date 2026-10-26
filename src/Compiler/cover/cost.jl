@@ -101,10 +101,17 @@ function group_bytes(p::Plan, g::Group)
 end
 
 # The floor reads every load at every point of the domain, one item a thread;
-# a fold's or a scan's item sweeps the axes it folds along.
-function floor_estimate(p::Plan, g::Group)
+# a fold's or a scan's item sweeps the axes it folds along. Where the target
+# splits a reduction's items (`split`, see `Split`), the lanes of their parts
+# share the device, and each phase of folds is a launch more.
+function floor_estimate(p::Plan, g::Group, split = (items, positions, adjacent) -> nothing)
     points = prod(g.domain; init = 1)
     per_point = sum(m -> sum(l -> sizeof(p.graph.values[l.value].eltype), loads(g.terms[m]); init = 0), members(g); init = 0)
+    bytes = Float64(points * per_point) + group_bytes(p, g)
     items = g.kind in (:reduction, :scan) ? prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1) : points
-    [Work(Float64(points * per_point) + group_bytes(p, g); blocks = items / 256)]
+    s = group_split(p.graph, g, split)
+    s === nothing && return [Work(bytes; blocks = items / 256)]
+    blocks = items * s.parts * s.lanes / 256
+    phases = length(unique(g.phase[r] for r in g.reductions if primary(p.graph, g, r)))
+    [Work(bytes; blocks); [Work(0.0; blocks) for _ in 1:phases]]
 end

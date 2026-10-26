@@ -429,18 +429,33 @@ struct FloorKernels
     kernels::Vector{ScalarKernel}
 end
 
-Base.show(io::IO, f::FloorKernels) = print(io, "floor, ", join((string(k.items, " items") for k in f.kernels), " then "))
+function Base.show(io::IO, f::FloorKernels)
+    described(k) = string(k.items, " items", k.split === nothing ? "" : string(" split ", k.split.parts, "×", k.split.lanes, " lanes",
+        k.split.side > 1 ? string(", ", k.split.side, " side by side") : ""))
+    print(io, "floor, ", join(map(described, f.kernels), " then "))
+end
+
+"The launches of a group's floor kernels, in order, and the workspaces they share, which live as long as the launches."
+struct FloorRun
+    launches::Vector{Any}
+    workspaces::Vector{Any}
+end
+
+(r::FloorRun)() = foreach(l -> l(), r.launches)
 
 # Whether fold by key `r` is in the storage of the contents it starts from:
 # `storage` put it over them.
 starts_in_place(graph, r, buffers) = graph.values[r].definition.into isa Read && buffers[graph.values[r].definition.into.value] === buffers[r]
 
 # The floor for a group on any target: its scalar kernels, each launched as
-# the target launches one (see `floor_launch`). A fold by key in the storage
-# of the contents it starts from starts from them there.
+# the target launches one (see `floor_launch`), their folds split as it asks
+# (see `floor_split`). A fold by key in the storage of the contents it starts
+# from starts from them there.
 function build_floor(target, p::Plan, g::Group, buffers)
     held = filter(r -> keyed(p.graph, r) && starts_in_place(p.graph, r, buffers), g.reductions)
-    ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g); held)
-    launches = [floor_launch(target, k, Tuple(buffers[v] for v in k.slots)) for k in ks]
-    (() -> foreach(l -> l(), launches), FloorKernels(ks))
+    ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g); held, split = (items, positions, adjacent) -> floor_split(target, items, positions, adjacent))
+    spaces = Dict{Int, Any}()
+    space(w) = get!(() -> allocate(target, w.state, w.length), spaces, w.fold)
+    launches = Any[floor_launch(target, k, (Tuple(buffers[v] for v in k.slots)..., map(space, k.workspaces)...)) for k in ks]
+    (FloorRun(launches, collect(values(spaces))), FloorKernels(ks))
 end

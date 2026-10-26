@@ -3,13 +3,13 @@
 # times, and for the options it was made with (the kernel packages it uses, its
 # numerics, whether it permits rewrites that change rounding, and how it
 # classes products), through the protocol below: the public names of this
-# file, `packages`, `product_class`, and `ScalarKernel` and `accumulate!` of
-# the floor's code. The CPU's definitions are here; a package that adds a
+# file, `packages`, `product_class`, and `ScalarKernel`, `Split`,
+# `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, task_state, device_name,
-    measurable, time_launch, calibrate, capture, replay, release, floor_launch, ScalarKernel, accumulate!,
-    packages, numerics, permits_rewrites, product_class
+    measurable, time_launch, calibrate, capture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
+    accumulate!, merge_lanes, packages, numerics, permits_rewrites, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
 abstract type Target end
@@ -109,19 +109,32 @@ task_state(target) = () -> nothing
     floor_launch(target, kernel::ScalarKernel, args) -> launch
 
 A launch of a floor kernel on `target`: `launch()` computes every item of
-`kernel` over `args`, the buffers of its slots as a tuple. The CPU runs the
-items in order, in a function `generated` from the kernel's body; a device
-runs them at once, one thread per item, so a scatter's items add with
-`accumulate!`.
+`kernel` over `args`, the buffers of its slots and workspaces as a tuple. The
+CPU runs the items in order, in a function `generated` from the kernel's body;
+a device runs them at once, one thread per item, so a scatter's items add with
+`accumulate!`. A kernel with a `split` runs each lane of each part of each
+item, in the names its body reads: `lin` the item, `part` of `parts`, and
+`lane` of `lanes` in the part; the CPU runs a part as one lane.
 """
 function floor_launch(::CPUTarget, k::ScalarKernel, args)
-    f = generated(:(function (buffers, n)
-        for lin in 0:(n - 1)
+    if k.split === nothing
+        f = generated(:(function (buffers, n)
+            for lin in 0:(n - 1)
+                $(k.body)
+            end
+            nothing
+        end))
+        return HostLaunch(f, (args, k.items))
+    end
+    k.split.lanes == 1 || throw(ArgumentError("the CPU runs each part of a split item as one lane, not $(k.split.lanes)"))
+    f = generated(:(function (buffers, n, parts)
+        lane, lanes = 0, 1
+        for lin in 0:(n - 1), part in 0:(parts - 1)
             $(k.body)
         end
         nothing
     end))
-    HostLaunch(f, args, k.items)
+    HostLaunch(f, (args, k.items, k.split.parts))
 end
 
 """
@@ -131,11 +144,21 @@ a new type too, and every method it passes through would compile again for it.
 """
 struct HostLaunch
     f::Any
-    args::Tuple
-    items::Int
+    arguments::Tuple
 end
 
-(l::HostLaunch)() = Base.invokelatest(l.f, l.args, l.items)
+(l::HostLaunch)() = Base.invokelatest(l.f, l.arguments...)
+
+"""
+    floor_split(target, items, positions, adjacent) -> Split or nothing
+
+How the floor folds `positions` positions for each of `items` items on
+`target`, neighbouring items neighbours in memory when `adjacent`: nothing for
+one lane per item, which folds them in order, as on the CPU; or a `Split`,
+which deals them among lanes. A target that splits runs a part's lanes
+together and merges their states with `merge_lanes`.
+"""
+floor_split(::Target, items, positions, adjacent) = nothing
 
 ## Graphs.
 

@@ -137,8 +137,13 @@ function choice_key(d::Decider, p::Plan, g::Group, implementation, claim)
     replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
 end
 
+# The floor is split as the target splits it, except by a dry decider, which
+# touches no device and prices it unsplit.
+floor_splits(d::Decider) = d.measure === :dry ? (items, positions, adjacent) -> nothing :
+    (items, positions, adjacent) -> floor_split(d.target, items, positions, adjacent)
+
 function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, order = 0)
-    work = implementation === nothing ? floor_estimate(p, g) : Base.invokelatest(estimate, implementation, claim, d.target, view)
+    work = implementation === nothing ? floor_estimate(p, g, floor_splits(d)) : Base.invokelatest(estimate, implementation, claim, d.target, view)
     key = choice_key(d, p, g, implementation, claim)
     # The floor moves bytes at the device's rates.
     memory = implementation === nothing ? Memory(d.rates.launch, d.rates.cached) : memory!(d, package_of(implementation))
