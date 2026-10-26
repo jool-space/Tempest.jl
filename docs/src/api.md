@@ -77,6 +77,9 @@ Tempest.Compiler.task_state
 Tempest.Compiler.floor_launch
 Tempest.Compiler.ScalarKernel
 Tempest.Compiler.accumulate!
+Tempest.Compiler.floor_split
+Tempest.Compiler.Split
+Tempest.Compiler.merge_lanes
 Tempest.Compiler.capture
 Tempest.Compiler.replay
 Tempest.Compiler.release
