@@ -263,12 +263,14 @@ function cover(d::Decider)
     # is priced when every kernel that recomputes it is claimed by an
     # implementation that recomputes folds.
     priced = Dict{String, Any}()
+    function priceable(p, q, i)
+        p === nothing && return false
+        i === nothing || claimant(d, p, q, i) !== nothing || return false
+        !(q isa Recompute) || recomputed_claimed(d, p, q.value)
+    end
     function priced_plan(p, current, q, i)
-        p === nothing && return nothing
-        j = i === nothing ? nothing : claimant(d, p, q, i)
-        i === nothing || j !== nothing || return nothing
-        q isa Recompute && !recomputed_claimed(d, p, q.value) && return nothing
-        (compare(d, p, current), j)
+        priceable(p, q, i) || return nothing
+        (compare(d, p, current), i === nothing ? nothing : claimant(d, p, q, i))
     end
     price(current, taken, q, i, key) = get!(() -> priced_plan(trial(current, taken, Any[q]), current, q, i), priced, key)
     a = around(base, Any[])
@@ -279,9 +281,31 @@ function cover(d::Decider)
     firsts = Dict{String, Any}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
     planned = Dict(k => Threads.@spawn(trial(base, Any[], Any[q])) for (k, q) in firsts)
+    trials = Dict(k => fetch_result(t) for (k, t) in planned)
+    # The groups by which the trials priced below differ from the starting
+    # plan, searched together as the starting plan's are: each stage's kernels
+    # compile side by side for every trial, rather than group by group as
+    # each trial is priced.
+    if d.measure in (:close, :all)
+        shared = Set(group_identity(base, g) for g in base.groups)
+        ahead, seen, searched = Any[], Set{GroupIdentity}(), Set{String}()
+        for (q, i, k) in keyed
+            k in searched && continue
+            push!(searched, k)
+            p = trials[k]
+            priceable(p, q, i) || continue
+            for g in p.groups
+                id = group_identity(p, g)
+                (id in shared || id in seen || haskey(d.decided, canonical(p, g))) && continue
+                push!(seen, id)
+                push!(ahead, (p, g, options!(d, p, g)))
+            end
+        end
+        search!(d, ahead)
+    end
     ranked = Tuple{Float64, Any, Union{Nothing, Implementation}, String}[]
     for (q, i, k) in keyed
-        x = get!(() -> priced_plan(fetch_result(planned[k]), base, q, i), priced, k)
+        x = get!(() -> priced_plan(trials[k], base, q, i), priced, k)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
     end
     sort!(ranked; by = r -> (-r[1], fixes(r[2])))
