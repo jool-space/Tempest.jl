@@ -1,7 +1,8 @@
 # Implementations propose and claim, and the cover takes by cost: candidates
-# of an implementation's own in place of the generator's groups, and
-# recomputing a fold where it is read, priced where an implementation claims
-# every kernel that recomputes it.
+# of an implementation's own in place of the generator's groups, recomputing
+# a fold where it is read, priced where an implementation claims every kernel
+# that recomputes it, and storing a map apart from a kernel whose claim
+# failed to build.
 
 # An implementation that proposes each product alone, grown from its fold, in
 # place of the generator's product with the work after it; it claims a lone
@@ -72,5 +73,67 @@ C.estimate(::RecomputesOverThree{Cheap}, claim, target, g) where {Cheap} =
         finally
             C.register!(@__MODULE__)
         end
+    end
+end
+
+# A claim that fails to build is no option once it has, and the program is
+# planned again: each map of the group it claimed is proposed to be stored
+# apart. This implementation claims products and maps alike as free, and
+# fails to build a group that applies `log10`, as cuTile does: the map is
+# stored apart, run on the floor, and the product claimed. `explain` names
+# the claim that failed.
+struct NoLog10 <: C.Implementation end
+applies_log10(g) = any(t -> t isa C.Apply && t.f === log10, C.subterms([g.terms[m] for m in C.members(g)]))
+C.claims(::NoLog10, ::T.CPUTarget, g) = g.kind === :pointwise || lone_product(g) ? [:host] : []
+C.estimate(::NoLog10, claim, target, g) = [C.Work(0.0)]
+C.build_claim(::NoLog10, claim, target, g, buffers) = applies_log10(g) ? error("log10 has no lowering") : g.reference(target, buffers)
+
+@testset "a map stored apart from a kernel whose claim failed to build" begin
+    a, b = data(6, 5; scale = 0.3), abs.(data(5, 4)) .+ 1
+    p = trace((a, b) -> a * log10.(b .^ 2), a, b)
+    C.register!(@__MODULE__, NoLog10())
+    try
+        ex = @test_logs (:warn, r"failed to build") match_mode = :any prepare(p, a, b)
+        @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
+        stored = only(c.proposal for c in ex.considered if c.accepted)
+        @test stored isa C.Store && ex.plan.stored[stored.value]
+        floor, product = ex.decisions
+        @test floor.choice.implementation === nothing && !isempty(floor.failed)
+        @test product.choice.implementation isa NoLog10 && isempty(product.failed)
+        text = sprint(explain, ex)
+        @test occursin("is stored apart", text) && occursin("a claim of NoLog10 failed to build: log10 has no lowering", text)
+    finally
+        C.register!(@__MODULE__)
+    end
+end
+
+# A variant that fails to build is no option either, though the claim it
+# varies, which builds, offers it again whenever the options are searched.
+# The record times the variant faster, so it is chosen and fails first.
+struct FailingVariant <: C.Implementation end
+C.claims(::FailingVariant, ::T.CPUTarget, g) = g.kind === :pointwise ? [:base] : []
+C.variants(::FailingVariant, ::T.CPUTarget, g, claim) = claim === :base ? [:variant] : []
+C.estimate(::FailingVariant, claim, target, g) = [C.Work(0.0)]
+C.build_claim(::FailingVariant, claim, target, g, buffers) = claim === :variant ? error("the variant has no lowering") : g.reference(target, buffers)
+
+@testset "a variant that fails to build" begin
+    x = data(8, 8)
+    p = trace(x -> exp.(x) .+ 1, x)
+    C.register!(@__MODULE__, FailingVariant())
+    try
+        withenv("TEMPEST_CACHE" => mktempdir()) do
+            d = C.Decider(T.CPUTarget(), C.rewrite(C.lower(p)); measure = :none)
+            plan = C.generator_plan(d)
+            g = only(plan.groups)
+            for (claim, seconds) in ((:base, 2.0e-6), (:variant, 1.0e-6))
+                C.save_record(C.record_path(T.CPUTarget()), C.choice_key(d, plan, g, FailingVariant(), claim), seconds)
+            end
+            ex = @test_logs (:warn, r"failed to build") match_mode = :any prepare(p, x)
+            decision = only(ex.decisions)
+            @test decision.choice.claim === :base && !isempty(decision.failed)
+            @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, x); rtol = 1.0e-12)
+        end
+    finally
+        C.register!(@__MODULE__)
     end
 end

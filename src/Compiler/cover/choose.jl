@@ -6,7 +6,8 @@
 # noise margin, so the choice is deterministic given the record. An
 # implementation may stage its claims: the variants it offers of the claim
 # that measured best are tried next, until the best has none new. Groups alike
-# choose once.
+# choose once. A claim that fails to build is no option once it has: the
+# decider keeps it, and the cover plans again without it.
 
 # Two estimates closer than this factor are a close call.
 const ESTIMATE_ERROR = 1.5
@@ -25,12 +26,25 @@ struct Choice
     variants::Vector{Any} # the claims its implementation offers once it measures best (see `Tempest.Compiler.Implement.variants`)
 end
 
-"What was chosen for a group, how, and the time measured for it, if any."
+"A claim that failed to build: what `explain` calls its implementation, the group it claimed (by `canonical`), and why, in a line."
+struct Failure
+    implementation::String
+    group::String
+    reason::String
+end
+
+"""
+What was chosen for a group, how, and the time measured for it, if any; and
+the claims on it that failed to build, which are no options. A choice made
+`:instead` of one that failed to build as the program was prepared is the
+next option that built, the floor last.
+"""
 struct Decision
     choice::Choice
     options::Vector{Choice}
-    how::Symbol # :only, :estimated or :measured
+    how::Symbol # :only, :estimated, :measured or :instead
     measured::Union{Nothing, Float64}
+    failed::Vector{Failure}
 end
 
 function Base.show(io::IO, d::Decision)
@@ -38,6 +52,7 @@ function Base.show(io::IO, d::Decision)
     d.measured === nothing || print(io, ", measured ", round(1.0e6 * d.measured; sigdigits = 3), " μs")
     d.how === :measured && print(io, "; chosen by measurement among ", length(d.options))
     d.how === :estimated && length(d.options) > 1 && print(io, "; chosen by estimate among ", length(d.options))
+    d.how === :instead && print(io, "; in place of the choice, which failed to build")
 end
 
 mutable struct Decider
@@ -65,9 +80,10 @@ mutable struct Decider
     # options, how it was made, and the time measured; and each group's decision.
     decided::Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}
     instances::Dict{Any, Decision}
-    # Each group's options (by `group_identity`), found before its decision
-    # when its kernels are built ahead (see `prebuild!`).
+    # Each group's options (by `group_identity`), found once.
     options::Dict{Any, Vector{Choice}}
+    # The claims that failed to build, by key.
+    failed::Dict{String, Failure}
 end
 
 function Decider(target, graph; measure = :close, recompute = (), keep = ())
@@ -77,7 +93,36 @@ function Decider(target, graph; measure = :close, recompute = (), keep = ())
     r = dry ? rates(target) : device_rates!(target, calibration, calibration_path)
     Decider(target, graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
         Set{Int}(recompute), Set{Int}(keep), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
-        Dict{Any, Vector{Choice}}())
+        Dict{Any, Vector{Choice}}(), Dict{String, Failure}())
+end
+
+# Forget every decision and option, so that the cover plans again from what
+# the decider knows now: the claims that failed to build, and the times it
+# measured, which it does not measure again.
+function forget_decisions!(d::Decider)
+    empty!(d.decided)
+    empty!(d.instances)
+    empty!(d.options)
+    d
+end
+
+# Keep a claim on a group that failed to build.
+fail!(d::Decider, p::Plan, g::Group, o::Choice, err) = d.failed[o.key] = Failure(label(o.implementation), canonical(p, g), reason(err))
+
+# Why a build failed, in a line: the first of its message's that does not
+# only announce the lines after it, as "kernel compilation produced 2
+# errors:" does.
+function reason(err)
+    lines = filter(!isempty, strip.(split(sprint(showerror, err), '\n')))
+    isempty(lines) && return string(nameof(typeof(err)))
+    String(lines[something(findfirst(l -> !endswith(l, ':'), lines), 1)])
+end
+
+"The claims on a group that failed to build."
+function failures(d::Decider, p::Plan, g::Group)
+    isempty(d.failed) && return Failure[]
+    c = canonical(p, g)
+    sort!([f for f in values(d.failed) if f.group == c]; by = f -> (f.implementation, f.reason))
 end
 
 # What is measured: nothing (`:none`), the close calls (`:close`) or every
@@ -154,7 +199,7 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
         implementation === nothing ? Any[] : Any[Base.invokelatest(variants, implementation, d.target, view, claim)...])
 end
 
-"Every claim on a group, cheapest estimate first; the floor when none claims it."
+"Every claim on a group but those that failed to build, cheapest estimate first; the floor when none is left."
 function options(d::Decider, p::Plan, g::Group)
     view = group_view(p, g)
     # The protocol is called in the latest world here and wherever the
@@ -163,6 +208,7 @@ function options(d::Decider, p::Plan, g::Group)
     # while it precompiled, the cover's code that package cached would be
     # void in every session where another package loaded too.
     os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
+    filter!(o -> !haskey(d.failed, o.key), os)
     isempty(os) && push!(os, choice(d, p, g, view, nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
@@ -177,20 +223,31 @@ its group's values, so one taken from another group would build on its buffers.
 """
 function decide(d::Decider, p::Plan, g::Group)
     get!(d.instances, group_identity(p, g)) do
-        os = options!(d, p, g)
-        # Searched already, or alike a group that was: the search grows the
-        # options from the record and measures nothing.
-        search!(d, [(p, g, os)])
+        os = searched_options!(d, p, g)
         k, how, measured = get!(() -> choose(d, os), d.decided, canonical(p, g))
-        Decision(os[k], os, how, measured)
+        Decision(os[k], os, how, measured, failures(d, p, g))
     end
 end
 
 # The rank of the choice among options `os`, sorted by estimate; how it was
 # made; and its measured time. A rank and not a claim, because claims hold
 # value ids.
-"A group's options, found once by its identity (see `prebuild!`)."
+"A group's options, found once by its identity."
 options!(d::Decider, p::Plan, g::Group) = get!(() -> options(d, p, g), d.options, group_identity(p, g))
+
+# A group's options, searched (see `search!`): searched already, or alike a
+# group that was, the search grows them from the record and measures
+# nothing. Those that failed to build as they were measured are no options:
+# the rest are found and searched again.
+function searched_options!(d::Decider, p::Plan, g::Group)
+    os = options!(d, p, g)
+    search!(d, [(p, g, os)])
+    while any(o -> haskey(d.failed, o.key), os)
+        os = d.options[group_identity(p, g)] = options(d, p, g)
+        search!(d, [(p, g, os)])
+    end
+    os
+end
 
 # The ranks among `os`, sorted by estimate, of the options a decision
 # measures: every option under `:all`; otherwise those within the estimate's
@@ -246,7 +303,7 @@ end
 
 # Grow a group's options by the variants of its best measured option, and of
 # each within the noise of it (of every measured option under `:all`), that
-# were not tried; whether any were added. A variant's order is past its
+# were not tried and did not fail to build; whether any were added. A variant's order is past its
 # parent's: it is never an implementation's first claim.
 function expand!(d::Decider, p::Plan, g::Group, os::Vector{Choice})
     timed = [(o, d.record[o.key]) for o in os if o.implementation !== nothing && haskey(d.record, o.key)]
@@ -259,7 +316,7 @@ function expand!(d::Decider, p::Plan, g::Group, os::Vector{Choice})
     added = false
     for o in from, c in o.variants
         key = choice_key(d, p, g, o.implementation, c)
-        key in keys && continue
+        (key in keys || haskey(d.failed, key)) && continue
         push!(keys, key)
         push!(os, choice(d, p, g, view, o.implementation, c, o.order + 1))
         added = true
@@ -439,21 +496,29 @@ build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
 build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =
     get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, o.key)
 
-# A group's kernels: its choice, or the next claim when a build fails, and
-# the floor last.
+"""
+A group's kernels and the decision that runs them: its choice, or, when that
+fails to build, the next option that builds, the floor last, a decision made
+`:instead`. The decider keeps each claim that fails (see `fail!`), so that
+the cover plans the program again without it (see `prepare`).
+"""
 function build_group(d::Decider, p::Plan, g::Group, x, buffers)
-    x === nothing && return build_floor(d.target, p, g, buffers)
+    (x === nothing || x.choice.implementation === nothing) && return (build_floor(d.target, p, g, buffers)..., x)
     for o in [x.choice; filter(!=(x.choice), x.options)]
         o.implementation === nothing && break
         built = try
             build_choice(d.target, p, g, o, buffers)
         catch err
-            @warn "a claim failed to build; the next option runs the kernel" implementation = label(o.implementation) claim = o.claim exception = err maxlog = 1 _id = Symbol(o.key)
+            err isa InterruptException && rethrow()
+            fail!(d, p, g, o, err)
+            @warn "a claim failed to build; the next option runs the kernel, and the program is planned again without it" implementation = label(o.implementation) claim = o.claim exception = err maxlog = 1 _id = Symbol(o.key)
             nothing
         end
-        built === nothing || return built
+        built === nothing && continue
+        return (built..., o === x.choice ? x : Decision(o, x.options, :instead, nothing, failures(d, p, g)))
     end
-    build_floor(d.target, p, g, buffers)
+    floor = choice(d, p, g, group_view(p, g), nothing, nothing)
+    (build_floor(d.target, p, g, buffers)..., Decision(floor, x.options, :instead, nothing, failures(d, p, g)))
 end
 
 # Build an option to measure it. A claim that fails to build loses every
@@ -464,6 +529,7 @@ function build_option!(d::Decider, p::Plan, g::Group, o::Choice)
     catch err
         @debug "claim failed to build; it loses" o.implementation exception = err
         d.record[o.key] = Inf
+        fail!(d, p, g, o, err)
         nothing
     end
 end

@@ -1,9 +1,9 @@
 # Which groups there are: the cover. Implementations propose candidates of
 # their own, sets of values grown from anchors that they accept; the planner
-# offers its own joins of a stored value into the kernel that reads it, and
-# folds recomputed where they are read. A proposal replaces the generator's
-# groups when the plan with it is cheaper, each compared on the groups that
-# differ.
+# offers its own joins of a stored value into the kernel that reads it, folds
+# recomputed where they are read, and maps stored apart from a kernel a claim
+# on which failed to build. A proposal replaces the generator's groups when
+# the plan with it is cheaper, each compared on the groups that differ.
 
 """
     grow(graph, anchor, accept) -> Vector{Int}
@@ -112,10 +112,24 @@ struct Recompute
     value::Int
 end
 
-"The values a proposal is about: those it fixes as one group, or the fold it recomputes."
+"""
+A map stored apart rather than recomputed in the kernels that read it: a
+proposal of the planner's own, for each map of a kernel a claim on which
+failed to build. What failed may be the map alone, as a scalar function a
+kernel package cannot lower: stored apart, it runs in a kernel of its own,
+and the rest of the kernel may be claimed.
+"""
+struct Store
+    value::Int
+end
+
+"The values a proposal is about: those it fixes as one group, or the fold it recomputes, or the map it stores."
 fixes(q::Vector{Int}) = q
 fixes(q::Join) = q.group
-fixes(q::Recompute) = [q.value]
+fixes(q::Union{Recompute, Store}) = [q.value]
+
+# Whether a proposal fixes a set of values as one group.
+forms_group(q) = !(q isa Union{Recompute, Store})
 
 """
 A proposal's place in a plan, by the values it fixes: the groups its values
@@ -138,6 +152,13 @@ function proposal_key(p::Plan, a::Around, q)
     end
     q isa Join && print(io, " || join %", q.value)
     q isa Recompute && print(io, " || recompute")
+    # A stored map is inlined in the terms of the groups it reaches: its
+    # definition tells it from the group's other maps.
+    if q isa Store
+        d = p.graph.values[q.value].definition
+        print(io, " || store ", describe(d), " ")
+        join(io, (sprint(show_operand, o) for o in operands(d)), ", ")
+    end
     print(io, " || ", join(map(v -> "%$v", fixes(q)), " "))
     numbers = Dict{String, Int}()
     text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
@@ -168,8 +189,10 @@ end
 
 The planner's groups, with every fold stored, and the proposals: those
 implementations make, the planner's own joins of a stored value into the
-kernel that reads it, and the planner's own recomputing of a fold where it is
-read (see `recomputable_folds`), where an implementation recomputes folds.
+kernel that reads it, the planner's own recomputing of a fold where it is
+read (see `recomputable_folds`), where an implementation recomputes folds,
+and its own storing apart of each map of a kernel a claim on which failed to
+build (see `Store`).
 Proposals are accepted greedily by estimated gain over the plan, then by
 their values, each when its proposer claims the group it forms (any claim,
 or the floor, for a join; a claim of an implementation that recomputes folds,
@@ -196,6 +219,12 @@ function cover(d::Decider)
             push!(proposals, (Recompute(v), nothing))
         end
     end
+    for g in base.groups
+        isempty(failures(d, base, g)) && continue
+        for v in recomputed_maps(base, g)
+            any(x -> x[1] == Store(v), proposals) || push!(proposals, (Store(v), nothing))
+        end
+    end
     # What the starting plan stores: a set that does not form one group
     # there, where a trial would first form it, is not tried. A set holding a
     # pinned fold changes what is stored.
@@ -212,17 +241,18 @@ function cover(d::Decider)
         end
     end
     arounds = IdDict{Plan, Around}()
-    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if !(x isa Recompute)]), arounds, p)
+    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if forms_group(x)]), arounds, p)
     function trial(current, taken, qs)
         all = Any[taken; qs]
-        sets = Vector{Int}[fixes(x) for x in all if !(x isa Recompute)]
+        sets = Vector{Int}[fixes(x) for x in all if forms_group(x)]
         recompute = Set{Int}(d.pinned)
         foreach(x -> x isa Recompute && push!(recompute, x.value), all)
+        store = Set{Int}(x.value for x in all if x isa Store)
         # A value belongs to one proposal.
         allunique(Iterators.flatten(fixes(x) for x in all)) || return nothing
         isempty(taken) && length(sets) == 1 && !forms(only(sets)) && return nothing
         try
-            plan(d.graph; fixed = sets, recompute = recompute)
+            plan(d.graph; fixed = sets, recompute, store)
         catch e
             e isa NotAGroup || rethrow()
             nothing
@@ -310,8 +340,27 @@ function explain(io::IO, p::Plan, c::Considered)
     elseif q isa Recompute
         c.accepted && println(io, "%", q.value, " is recomputed where it is read", why)
         return
+    elseif q isa Store
+        c.accepted && println(io, "%", q.value, " is stored apart from the kernel a claim on which failed to build", why)
+        return
     end
     c.accepted && println(io, "candidate ", join(map(v -> "%$v", q), " "), " from ", label(c.implementation), " replaces the generator's grouping", why)
+end
+
+# The maps a group recomputes where it reads them: the unstored maps its
+# members read, directly or through other values it recomputes.
+function recomputed_maps(p::Plan, g::Group)
+    found, pending, seen = Int[], members(g), Set(members(g))
+    while !isempty(pending)
+        for o in operands(p.graph.values[pop!(pending)].definition), r in read_values(o)
+            r in seen && continue
+            push!(seen, r)
+            p.stored[r] && continue
+            p.graph.values[r].definition isa Pointwise && push!(found, r)
+            push!(pending, r)
+        end
+    end
+    sort!(found)
 end
 
 # Whether any implementation the target uses recomputes folds where it reads them.

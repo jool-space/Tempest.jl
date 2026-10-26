@@ -68,6 +68,12 @@ within the close-call factor of the best; `:all` times every option of every
 group and both sides of every comparison. `true` and `false` mean `:close` and
 `:none`.
 
+A claim that fails to build is no option once it has: the program is planned
+again without it, each map of the group it claimed proposed to be stored
+apart, so that a scalar function a kernel package cannot lower runs on the
+floor and the rest of the group on the package. `explain` names the claims
+that failed.
+
 `replaces` declares state, as pairs `result => argument` of positions among the
 program's results and its arguments, alike in structure, shapes and types:
 `(2 => 1, 3 => 2)` for a step `(params, state, batch) -> (loss, params, state)`.
@@ -143,6 +149,26 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         union!(pinned, recomputed)
     end
     d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept)
+    # Planned again while the last plan's builds failed, a few times at most;
+    # then what fails runs on the next option, the floor last (see
+    # `build_group`). The last plan's buffers are let go first.
+    ex = planned(program, d, inputs, pairs, input, by_reference, build)
+    for _ in 2:PLANS
+        any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
+        ex = nothing
+        ex = planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build)
+    end
+    ex.built && bind!(ex, inputs...)
+    ex
+end
+
+# The plans a preparation makes at most, each after builds that failed.
+const PLANS = 4
+
+# The program planned by decider `d` and, with `build`, built on buffers of
+# its own, its inputs not yet bound: `prepare` once its graph is lowered.
+function planned(program, d, inputs, pairs, input, by_reference, build)
+    target = d.target
     p, considered = cover(d)
     search!(d, p)
     ds = decisions(d, p)
@@ -197,10 +223,8 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
     outs = rebuild(k -> k === nothing ? nothing : results[k], program.output_structure)
-    ex = Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results, outs,
-        Any[first(b) for b in built], Any[last(b) for b in built], Any[ds...], Any[considered...], copies, nothing, true)
-    bind!(ex, inputs...)
-    ex
+    Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results, outs,
+        Any[b[1] for b in built], Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], copies, nothing, true)
 end
 
 runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
@@ -387,6 +411,7 @@ function explain(io::IO, ex::Executable)
     for (k, d) in enumerate(ex.kernels)
         x = ex.decisions[k]
         println(io, "  kernel ", k, ": ", ex.built ? d : "not built", x === nothing ? "" : string(" (", x, ")"))
+        x === nothing || foreach(f -> println(io, "    a claim of ", f.implementation, " failed to build: ", f.reason), x.failed)
     end
 end
 

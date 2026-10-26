@@ -245,15 +245,16 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
 end
 
 """
-    plan(graph::IndexGraph; fixed = [], recompute = ()) -> Plan
+    plan(graph::IndexGraph; fixed = [], recompute = (), store = ()) -> Plan
 
 Decide what is stored and form the kernels. Each set of values in `fixed`, a
 candidate an implementation proposed, forms a group of its own, its folds
 stored; the planner groups the rest around them. Each value in `recompute` is
-recomputed where it is read instead of stored.
+recomputed where it is read instead of stored, and each map in `store` is
+stored rather than recomputed where it is read.
 """
-function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = ())
-    s = storing(graph; recompute)
+function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = ())
+    s = storing(graph; recompute, store)
     graph, stored, live, results = s.graph, s.stored, s.live, s.results
     # A pointwise value read only by one group over its domain, at the same
     # index, is recomputed by that group: grouped again without it.
@@ -268,7 +269,8 @@ end
 
 # What `plan` decides before it forms kernels: the graph with its results
 # stored, what is stored, what runs, and the folds recomputed where read.
-function storing(graph::IndexGraph; recompute = ())
+# The values in `store` are stored as those a gather reads are.
+function storing(graph::IndexGraph; recompute = (), store = ())
     recomputed = Set{Int}(recompute)
     graph = with_stored_results(graph)
     values = graph.values
@@ -305,6 +307,7 @@ function storing(graph::IndexGraph; recompute = ())
         end
         d isa Keyed && d.into !== nothing && foreach(r -> materialized[r] = true, read_values(d.into))
     end
+    foreach(v -> materialized[v] = true, store)
     # Maps of recomputed folds are recomputed with them: a fold recomputed
     # where it is read has no storage, so a map of it is a map of its term. A
     # recomputed map's readers may still be stored; they recompute it inside.

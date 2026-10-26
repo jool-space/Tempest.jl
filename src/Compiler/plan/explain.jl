@@ -33,7 +33,8 @@ Print what Tempest decided for a program. For each kernel: what it computes,
 what it reads, and which values it stores or leaves to be recomputed where
 they are read. For a prepared program, also the precision of its products,
 the close calls measured between implementations, how values share storage,
-and which implementation runs each kernel, at what estimated or measured time.
+which implementation runs each kernel, at what estimated or measured time,
+and the claims on it that failed to build.
 
 It describes what Tempest decided today; what it prints may change.
 """

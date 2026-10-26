@@ -32,11 +32,11 @@ end
 end
 
 # The floor evaluates recomputed folds too: an implementation that asks for
-# them and leaves the kernels to the floor.
+# them and builds the floor's kernels, the group's reference.
 struct RecomputeOnTheFloor <: C.Implementation end
 C.recomputes_folds(::RecomputeOnTheFloor, target) = true
 C.claims(::RecomputeOnTheFloor, target, g) = isempty(C.recomputed_in(g)) ? () : (:floor,)
-C.build_claim(::RecomputeOnTheFloor, claim, target, g, buffers) = error("left to the floor")
+C.build_claim(::RecomputeOnTheFloor, claim, target, g, buffers) = g.reference(target, buffers)
 
 function with_recomputing_floor(f)
     C.register!(@__MODULE__, RecomputeOnTheFloor())
