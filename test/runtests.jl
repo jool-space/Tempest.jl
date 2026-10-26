@@ -45,20 +45,23 @@ const init_code = quote
     include($(joinpath(@__DIR__, "setup.jl")))
 end
 
-# Each worker holds a CUDA context and its own compiled kernels. The GPU's
-# free memory says little on a unified-memory device, so cap the default.
+# Each worker holds a CUDA context and its own compiled kernels, about 4.4 GB
+# under coverage. The runner's default divides free memory by 2 GB, but under a
+# memory limit free memory is the limit less the file cache earlier jobs left,
+# which gave CI's 20 GiB runners 1 to 3 jobs; here the limit and the CPUs decide.
 args = parse_args(ARGS)
 if CUDA_FUNCTIONAL && args.jobs === nothing && !haskey(ENV, "PTR_NUM_JOBS")
-    jobs = min(ParallelTestRunner.default_njobs(), 12)
+    cpus = @static isdefined(Sys, :EFFECTIVE_CPU_THREADS) ? Sys.EFFECTIVE_CPU_THREADS : Sys.CPU_THREADS
+    jobs = clamp(min(cpus, Int(Sys.total_memory() ÷ (5 * 2^30))), 1, 12)
     args = ParallelTestRunner.ParsedArgs(
         Some(jobs), args.verbose, args.quickfail, args.list, args.custom, args.positionals,
     )
 end
 
-# A worker on CUDA holds about 3.9 GB from the start, past the runner's
-# default of 3.8 GB at which a worker is replaced, so every file would get a
-# new one; under coverage a new worker compiles much of Tempest again. A worker
-# is replaced past 8 GB here, or JULIA_TEST_MAXRSS_MB.
+# A worker on CUDA holds 1.6 GB loaded and about 3.9 GB after one file of
+# kernels, past the runner's default of 3.8 GB at which a worker is replaced, so
+# every file would get a new one; under coverage a new worker compiles much of
+# Tempest again. A worker is replaced past 8 GB here, or JULIA_TEST_MAXRSS_MB.
 max_worker_rss = parse(Int, get(ENV, "JULIA_TEST_MAXRSS_MB", "8192")) * 2^20
 
 runtests(Tempest, args; testsuite, init_code, max_worker_rss)
