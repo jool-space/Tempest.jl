@@ -55,4 +55,10 @@ if CUDA_FUNCTIONAL && args.jobs === nothing && !haskey(ENV, "PTR_NUM_JOBS")
     )
 end
 
-runtests(Tempest, args; testsuite, init_code)
+# A worker on CUDA holds about 3.9 GB from the start, past the runner's
+# default of 3.8 GB at which a worker is replaced, so every file would get a
+# new one; under coverage a new worker compiles much of Tempest again. A worker
+# is replaced past 8 GB here, or JULIA_TEST_MAXRSS_MB.
+max_worker_rss = parse(Int, get(ENV, "JULIA_TEST_MAXRSS_MB", "8192")) * 2^20
+
+runtests(Tempest, args; testsuite, init_code, max_worker_rss)
