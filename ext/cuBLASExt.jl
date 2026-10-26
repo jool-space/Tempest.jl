@@ -133,8 +133,9 @@ function candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
         g.kind === :reduction || continue
         product(r, t) = g.values[r].fold isa SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
             all(f -> factor_load(f, g) !== nothing, t.args)
-        r = first(g.reductions)
-        length(members(g)) > 1 && product(r, g.terms[r]) && product_axes(g) !== nothing && push!(found, [r])
+        for r in g.reductions
+            length(members(g)) > 1 && product(r, g.terms[r]) && product_axes(g, r) !== nothing && push!(found, [r])
+        end
         roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
         for t in subterms(roots; nested = true)
             t isa Recomputed && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])

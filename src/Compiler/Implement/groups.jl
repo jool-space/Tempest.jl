@@ -89,33 +89,40 @@ end
 
 """
     product_axes(group) -> (M, N, K, B) or nothing
+    product_axes(group, r) -> (M, N, K, B) or nothing
 
 The axes of a group whose folds each sum a product of two factors over the
 group's primary axes `K`: those only the first factor reads (`M`), those only
 the second reads (`N`), and those both read and keep (`B`). Nothing when a fold
-is not such a product, or the folds split the axes differently.
+is not such a product, or the folds split the axes differently. Given a fold
+`r`, the axes of that fold's product alone.
 """
 function product_axes(g::GroupView)
+    found = nothing
+    for r in g.reductions
+        groups = product_axes(g, r)
+        groups === nothing && return nothing
+        found === nothing || found == groups || found == (groups[2], groups[1], groups[3], groups[4]) || return nothing
+        found === nothing && (found = groups)
+    end
+    found
+end
+
+function product_axes(g::GroupView, r)
     n = length(g.domain)
     K = sort!(collect(g.primary_axes))
     # Axes of extent one, kept or summed, are read by neither factor and need
     # no tile axis.
     kept = [k for k in 1:n if !(k in K) && g.domain[k] > 1]
-    found = nothing
-    for r in g.reductions
-        g.values[r].keyed && return nothing
-        factors = product_factors(g.values[r].fold, g.terms[r])
-        factors === nothing && return nothing
-        ax, ay = axes_read(factors[1], n), axes_read(factors[2], n)
-        (ax === nothing || ay === nothing) && return nothing
-        all(k -> g.domain[k] == 1 || k in ax && k in ay, K) || return nothing
-        M = [k for k in kept if k in ax && !(k in ay)]
-        N = [k for k in kept if k in ay && !(k in ax)]
-        B = [k for k in kept if k in ax && k in ay]
-        length(M) + length(N) + length(B) == length(kept) && !isempty(M) && !isempty(N) || return nothing
-        groups = (M, N, K, B)
-        found === nothing || found == groups || found == (N, M, K, B) || return nothing
-        found === nothing && (found = groups)
-    end
-    found
+    g.values[r].keyed && return nothing
+    factors = product_factors(g.values[r].fold, g.terms[r])
+    factors === nothing && return nothing
+    ax, ay = axes_read(factors[1], n), axes_read(factors[2], n)
+    (ax === nothing || ay === nothing) && return nothing
+    all(k -> g.domain[k] == 1 || k in ax && k in ay, K) || return nothing
+    M = [k for k in kept if k in ax && !(k in ay)]
+    N = [k for k in kept if k in ay && !(k in ax)]
+    B = [k for k in kept if k in ax && k in ay]
+    length(M) + length(N) + length(B) == length(kept) && !isempty(M) && !isempty(N) || return nothing
+    (M, N, K, B)
 end

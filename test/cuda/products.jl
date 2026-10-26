@@ -2,7 +2,7 @@
 # epilogue, a conversion to BFloat16, half operands, a product spelled as a
 # broadcast and a sum, and a long sum split among blocks; and by cuBLAS in
 # either orientation, batched and in half precision, with the work after the
-# product a kernel of its own.
+# product a kernel of its own, and each product of a kernel of several.
 include("../fixtures/programs.jl")
 
 @testset "products on cuTile" begin
@@ -72,4 +72,12 @@ end
     @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, left, right, w); rtol = 1.0e-5)
     ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
     @test isempty(built(ex))
+    # Products the generator groups as one kernel, the first by a constant
+    # zero, which is no product of two factors: each of the others is
+    # cuBLAS's candidate, not only the kernel's first fold.
+    u, v, y = single(data(512, 512; scale = 0.1)), single(data(512, 512)), single(data(512, 512; scale = 0.3))
+    p = trace((u, v, y) -> (u * fill!(similar(v), 0), u * v, u * y), u, v, y)
+    ex = prepare(p, CuArray(u), CuArray(v), CuArray(y); target = T.CUDATarget(cuBLAS))
+    @test length(built(ex)) == 2
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, u, v, y)); rtol = 1.0e-5)
 end
