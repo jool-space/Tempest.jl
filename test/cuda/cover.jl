@@ -1,6 +1,7 @@
 # The cover on CUDA: claims timed on buffers of their own, choices measured and
 # kept in the tuning record, a search that tries the variants of the option
-# that measures best, and the implementations a target names.
+# that measures best, what a kernel's tiles read again, and the
+# implementations a target names.
 include("../fixtures/programs.jl")
 
 # Claims are timed on buffers of their own, which a kernel reads as data:
@@ -113,6 +114,26 @@ end
         @test sort([step(o) for o in d.options if o.implementation isa ext.cuTileGenerator]) == [32, 64, 128]
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, x)]; rtol = 1.0e-4)
     end
+end
+
+@testset "what a streamed kernel's tiles read again" begin
+    # Products of one factor with several, grouped as one kernel and the
+    # first by a constant zero, which no product claim takes, are a streamed
+    # reduction: a tile per row of the first factor and head, each reading
+    # every other factor of its head whole. Each is read by 64 tiles, and the
+    # estimate counts the 63 reads after the first.
+    q = single(data(64, 128, 16; scale = 0.1))
+    states = [single(data(128, 128, 16; scale = 0.01 * k)) for k in 1:4]
+    head(q, s) = C.contract(q, s, (1, 4, 3), (4, 2, 3), (1, 2, 3))
+    p = trace((q, s...) -> (head(q, fill!(similar(first(s)), 0)), map(x -> head(q, x), s)...), q, states...)
+    target = T.CUDATarget(cuTile)
+    d = C.Decider(target, C.lower(p); measure = :none)
+    plan, _ = C.cover(d)
+    g = only(plan.groups)
+    x = C.decide(d, plan, g)
+    @test x.choice.claim.schedule.sketch === :streamed
+    work = C.estimate(x.choice.implementation, x.choice.claim, target, C.group_view(plan, g))
+    @test maximum(w -> w.reread, work) == 63 * sum(sizeof, states)
 end
 
 @testset "implementation sets" begin

@@ -49,7 +49,9 @@ const OVERLAP = 0.05
 
 function seconds(w::Work, r::Rates, memory::Memory, line, price = (regime, f) -> 0.0)
     share = min(1.0, w.blocks / r.blocks)
-    memory_seconds = memory.latency + w.bytes / (w.bytes <= r.cache ? memory.bandwidth : r.bandwidth) / share
+    # What blocks read again, other blocks along the grid read just before:
+    # it comes from the cache, at the rate of a launch whose bytes fit it.
+    memory_seconds = memory.latency + (w.bytes / (w.bytes <= r.cache ? memory.bandwidth : r.bandwidth) + w.reread / r.cached) / share
     # Elementwise work: each function at its positions, at the seconds per
     # position measured for it on the device, in the regime it is applied in.
     cost(regime, pairs) = sum(((f, n),) -> n * price(regime, f), pairs; init = 0.0)

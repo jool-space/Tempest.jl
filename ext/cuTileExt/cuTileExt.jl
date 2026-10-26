@@ -656,15 +656,34 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     else
         0.0, Float32
     end
+    # A load is read again by every tile along a kept axis its index does not
+    # mention, and by every block a split sweep gives a part of the swept axes
+    # when it mentions none of them: a value is read as often as its most
+    # read load is. A product's tiles reuse what they read through the cache,
+    # by design, and are priced on their line.
+    kept_tiles = [(ax.axes, cld(ax.extent, ax.tile)) for ax in s.tiling if !ax.reduced]
+    function times_read(v)
+        s.sketch === :product && return 1
+        n = 1
+        for m in members(g), t in (haskey(g.terms, m) ? loads(g.terms[m]) : Load[])
+            t.value == v || continue
+            along = prod((k for (axes, k) in kept_tiles if !any(a -> mentions(t, a), axes)); init = 1)
+            split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
+            n = max(n, along * split)
+        end
+        n
+    end
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
     streaming, swept, inner = applied(c, roots)
     main = findfirst(k -> k.name != INITIAL_STATES, kernels)
     combined(r) = (g.values[r].fold isa Overwrite ? 1 : 2) * prod(k -> g.domain[k], g.values[r].reduced; init = 1)
     elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) : prod(a.sizes; init = 1)
     map(enumerate(kernels)) do (i, kernel)
-        bytes = sum(a -> elements(kernel, a) * sizeof(element(a)) * (i == main && a.buffer isa Int ? share(a.buffer) : 1.0), kernel.args; init = 0.0)
+        moved(a) = elements(kernel, a) * sizeof(element(a)) * (i == main && a.buffer isa Int ? share(a.buffer) : 1.0)
+        bytes = sum(moved, kernel.args; init = 0.0)
+        reread = i == main ? sum(a -> a.buffer isa Int ? moved(a) * (times_read(a.buffer) - 1) : 0.0, kernel.args; init = 0.0) : 0.0
         blocks = prod(kernel.grid; init = 1)
-        i == main ? Work(bytes; flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
+        i == main ? Work(bytes; reread, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
     end
 end
 
