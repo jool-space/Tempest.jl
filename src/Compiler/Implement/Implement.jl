@@ -113,8 +113,9 @@ function build_claim end
 
 What the implementation proposes in place of the generator's groups: sets of
 values to realize as one group each, grown from anchors in `plan` (a product)
-and accepted by the implementation. None by default. Proposals read the
-compiler's plan, its groups through `Tempest.Compiler.group_views`.
+and accepted by the implementation, or several such sets, each a group of
+its own, proposed as one. None by default. Proposals read the compiler's
+plan, its groups through `Tempest.Compiler.group_views`.
 """
 candidates(::Implementation, target, plan) = Vector{Int}[]
 

@@ -1,7 +1,8 @@
 # The cover on CUDA: claims timed on buffers of their own, choices measured and
 # kept in the tuning record, a search that tries the variants of the option
-# that measures best, what a kernel's tiles read again, and the
-# implementations a target names.
+# that measures best, what a kernel's tiles read again, products proposed
+# apart from a fold among them that is not one, and the implementations a
+# target names.
 include("../fixtures/programs.jl")
 
 # Claims are timed on buffers of their own, which a kernel reads as data:
@@ -116,24 +117,44 @@ end
     end
 end
 
-@testset "what a streamed kernel's tiles read again" begin
+@testset "products grouped with a product by a constant" begin
     # Products of one factor with several, grouped as one kernel and the
     # first by a constant zero, which no product claim takes, are a streamed
-    # reduction: a tile per row of the first factor and head, each reading
-    # every other factor of its head whole. Each is read by 64 tiles, and the
-    # estimate counts the 63 reads after the first.
+    # reduction in the generator's plan: a tile per row of the first factor
+    # and head, each reading every other factor of its head whole. Each is
+    # read by 64 tiles, and the estimate counts the 63 reads after the first.
     q = single(data(64, 128, 16; scale = 0.1))
     states = [single(data(128, 128, 16; scale = 0.01 * k)) for k in 1:4]
     head(q, s) = C.contract(q, s, (1, 4, 3), (4, 2, 3), (1, 2, 3))
     p = trace((q, s...) -> (head(q, fill!(similar(first(s)), 0)), map(x -> head(q, x), s)...), q, states...)
     target = T.CUDATarget(cuTile)
     d = C.Decider(target, C.lower(p); measure = :none)
-    plan, _ = C.cover(d)
-    g = only(plan.groups)
-    x = C.decide(d, plan, g)
+    base = C.generator_plan(d)
+    g = only(base.groups)
+    x = C.decide(d, base, g)
     @test x.choice.claim.schedule.sketch === :streamed
-    work = C.estimate(x.choice.implementation, x.choice.claim, target, C.group_view(plan, g))
+    work = C.estimate(x.choice.implementation, x.choice.claim, target, C.group_view(base, g))
     @test maximum(w -> w.reread, work) == 63 * sum(sizeof, states)
+    # cuTile proposes the four products as one group, a product's, and the
+    # cover takes it: the product by zero is a kernel of its own.
+    plan, _ = C.cover(d)
+    @test length(plan.groups) == 2
+    product(g) = (c = C.decide(d, plan, g).choice; c.implementation !== nothing && c.claim.schedule.sketch === :product)
+    @test count(g -> length(g.reductions) == 4 && product(g), plan.groups) == 1
+    ex = prepare(p, CuArray(q), map(CuArray, states)...; target)
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, states...)); rtol = 1.0e-5)
+    # Products of parts of one value, which the generator groups by that
+    # value with a product by zero, share no read: cuTile proposes them
+    # apart, each a kernel. Of one factor with each state, they share it, and
+    # are proposed as one group.
+    ext = Base.get_extension(Tempest, :cuTileExt)
+    proposed(p) = (d = C.Decider(target, C.lower(p); measure = :none); C.candidates(ext.cuTileGenerator(), target, C.generator_plan(d)))
+    a = single(data(64, 4 * 128; scale = 0.1))
+    parts(a, s...) = (a[:, 1:128] * fill!(similar(s[1][:, :, 1]), 0), ntuple(k -> a[:, (128k - 127):128k] * s[k][:, :, 1], 4)...)
+    found = proposed(trace(parts, a, states...))
+    @test length(only(found)) == 4 && all(set -> length(set) == 1, only(found))
+    found = proposed(p)
+    @test only(found) isa Vector{Int} && length(only(found)) == 4
 end
 
 @testset "implementation sets" begin

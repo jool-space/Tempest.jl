@@ -20,6 +20,7 @@ using Republic: @republic
 using Tempest: CUDATarget
 @republic republic=false inherit=:public using Tempest.Compiler.IR
 @republic republic=false inherit=:public import Tempest.Compiler.Implement
+using Tempest.Compiler: Plan, group_views
 
 "cuTile's generator: one implementation for every group a sketch can schedule."
 struct cuTileGenerator <: Implementation end
@@ -504,6 +505,37 @@ end
 recomputing_fits(c) = all(m -> terms_expressible(c, (c.g.terms[m],); stats = true), members(c.g)) &&
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
     all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
+
+# Candidates: of a kernel that is not a product's, its product folds, the
+# most that split the axes alike, apart from its other folds, and apart from
+# each other but where they share a read or a fold recomputed. Products the
+# generator groups by a value they read in parts, chunks of a sequence say,
+# stream as one kernel while one fold among them, a product by a constant, is
+# not one; and one product's kernel steps each of its sums in every block, so
+# products that share nothing gain nothing there and hold many sums at once.
+function candidates(::cuTileGenerator, target::CUDATarget, p::Plan)
+    found = []
+    for g in group_views(p)
+        g.kind === :reduction && product_axes(g) === nothing || continue
+        alike = Dict{Any, Vector{Int}}()
+        for r in g.reductions
+            axes = product_axes(g, r)
+            axes === nothing || push!(get!(() -> Int[], alike, min(axes, (axes[2], axes[1], axes[3], axes[4]))), r)
+        end
+        isempty(alike) && continue
+        parts = Tuple{Vector{Int}, Vector{Term}}[]
+        for r in argmax(length, values(alike))
+            shared = Term[t for t in subterms((g.terms[r],); nested = true) if t isa Union{Load, Recomputed}]
+            sharing = [k for (k, (_, ts)) in enumerate(parts) if any(t -> t in ts, shared)]
+            joined = (vcat([r], (parts[k][1] for k in sharing)...), vcat(shared, (parts[k][2] for k in sharing)...))
+            deleteat!(parts, sharing)
+            push!(parts, joined)
+        end
+        sets = sort!([sort!(first(x)) for x in parts])
+        length(sets) > 1 ? push!(found, sets) : length(only(sets)) > 1 && push!(found, only(sets))
+    end
+    found
+end
 
 function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind === :scan && return scan_claims(g)

@@ -123,13 +123,20 @@ struct Store
     value::Int
 end
 
-"The values a proposal is about: those it fixes as one group, or the fold it recomputes, or the map it stores."
+"""
+The values a proposal is about: those it fixes as one group, or as groups
+apart (a candidate that is several sets), or the fold it recomputes, or the
+map it stores.
+"""
 fixes(q::Vector{Int}) = q
+fixes(q::Vector{Vector{Int}}) = reduce(vcat, q)
 fixes(q::Join) = q.group
 fixes(q::Union{Recompute, Store}) = [q.value]
 
-# Whether a proposal fixes a set of values as one group.
+# Whether a proposal fixes sets of values as groups, and the sets.
 forms_group(q) = !(q isa Union{Recompute, Store})
+group_sets(q::Vector{Vector{Int}}) = q
+group_sets(q) = [fixes(q)]
 
 """
 A proposal's place in a plan, by the values it fixes: the groups its values
@@ -151,6 +158,7 @@ function proposal_key(p::Plan, a::Around, q)
         end
     end
     q isa Join && print(io, " || join %", q.value)
+    q isa Vector{Vector{Int}} && print(io, " || apart ", join((join(map(v -> "%$v", set), " ") for set in q), " | "))
     q isa Recompute && print(io, " || recompute")
     # A stored map is inlined in the terms of the groups it reaches: its
     # definition tells it from the group's other maps.
@@ -241,10 +249,10 @@ function cover(d::Decider)
         end
     end
     arounds = IdDict{Plan, Around}()
-    around(p, taken) = get!(() -> Around(p, Vector{Int}[fixes(x) for x in taken if forms_group(x)]), arounds, p)
+    around(p, taken) = get!(() -> Around(p, Vector{Int}[s for x in taken if forms_group(x) for s in group_sets(x)]), arounds, p)
     function trial(current, taken, qs)
         all = Any[taken; qs]
-        sets = Vector{Int}[fixes(x) for x in all if forms_group(x)]
+        sets = Vector{Int}[s for x in all if forms_group(x) for s in group_sets(x)]
         recompute = Set{Int}(d.pinned)
         foreach(x -> x isa Recompute && push!(recompute, x.value), all)
         store = Set{Int}(x.value for x in all if x isa Store)
@@ -368,7 +376,9 @@ function explain(io::IO, p::Plan, c::Considered)
         c.accepted && println(io, "%", q.value, " is stored apart, in a kernel of its own", why)
         return
     end
-    c.accepted && println(io, "candidate ", join(map(v -> "%$v", q), " "), " from ", label(c.implementation), " replaces the generator's grouping", why)
+    sets = join((join(map(v -> "%$v", set), " ") for set in group_sets(q)), ", ")
+    what = q isa Vector{Vector{Int}} ? "candidates " * sets * ", one kernel each," : "candidate " * sets
+    c.accepted && println(io, what, " from ", label(c.implementation), " replaces the generator's grouping", why)
 end
 
 # The maps a group recomputes where it reads them: the unstored maps its
@@ -415,9 +425,12 @@ function recomputed_claimed(d::Decider, p::Plan, v)
     end
 end
 
-# The implementation that claims the group a proposal of `i` forms: `i`, or nothing.
+# The implementation that claims the groups a proposal of `i` forms: `i`, or nothing.
 function claimant(d::Decider, p::Plan, q, i)
-    v = first(q)
-    p.owner[v] == 0 && return nothing
-    isempty(Base.invokelatest(claims, i, d.target, group_view(p, p.groups[p.owner[v]]))) ? nothing : i
+    for set in group_sets(q)
+        v = first(set)
+        p.owner[v] == 0 && return nothing
+        isempty(Base.invokelatest(claims, i, d.target, group_view(p, p.groups[p.owner[v]]))) && return nothing
+    end
+    i
 end
