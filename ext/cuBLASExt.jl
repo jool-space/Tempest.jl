@@ -207,25 +207,30 @@ __init__() = register!(cuBLAS, cuBLASProducts())
 # estimates, proposes candidates and decides. Building needs a library
 # handle, so it compiles in the session.
 
-using PrecompileTools: @setup_workload, @compile_workload
+using PrecompileTools: PrecompileTools, @setup_workload, @compile_workload
 
-@setup_workload begin
-    sample(T, dims...) = T.(reshape(sin.(1:prod(dims)), dims))
-    gelu(x) = x / (1 + exp(-1.702f0 * x))
-    losses = Tuple{Any, Any}[((w, x, b) -> sum(abs2, gelu.(w * x .+ b)), (sample(T, 32, 64), sample(T, 64, 48), sample(T, 32)))
-        for T in FACTOR_TYPES]
-    # A batch of products over (features, keys, heads, batch), as attention makes.
-    q, k = sample(Float32, 16, 32, 2, 2), sample(Float32, 16, 32, 2, 2)
-    push!(losses, ((q, k) -> sum(abs2, Tempest.Compiler.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
-    @compile_workload begin
-        # Registered for this process alone; the package registers it when it loads.
-        register!(cuBLAS, cuBLASProducts())
-        for (f, args) in losses, target in (CUDATarget(cuBLAS), CUDATarget(cuBLAS; precision = :tf32))
-            program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
-            ex = Tempest.Compiler.prepare(program, args...; target, build = false)
-            Tempest.explain(devnull, ex)
+# An extension has no preferences of its own, since no project names it: its
+# workload follows Tempest's, so `[Tempest] precompile_workload = false` turns
+# every workload off.
+if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_enabled(Tempest)
+    @setup_workload begin
+        sample(T, dims...) = T.(reshape(sin.(1:prod(dims)), dims))
+        gelu(x) = x / (1 + exp(-1.702f0 * x))
+        losses = Tuple{Any, Any}[((w, x, b) -> sum(abs2, gelu.(w * x .+ b)), (sample(T, 32, 64), sample(T, 64, 48), sample(T, 32)))
+            for T in FACTOR_TYPES]
+        # A batch of products over (features, keys, heads, batch), as attention makes.
+        q, k = sample(Float32, 16, 32, 2, 2), sample(Float32, 16, 32, 2, 2)
+        push!(losses, ((q, k) -> sum(abs2, Tempest.Compiler.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
+        @compile_workload begin
+            # Registered for this process alone; the package registers it when it loads.
+            register!(cuBLAS, cuBLASProducts())
+            for (f, args) in losses, target in (CUDATarget(cuBLAS), CUDATarget(cuBLAS; precision = :tf32))
+                program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
+                ex = Tempest.Compiler.prepare(program, args...; target, build = false)
+                Tempest.explain(devnull, ex)
+            end
+            register!(cuBLAS)
         end
-        register!(cuBLAS)
     end
 end
 
