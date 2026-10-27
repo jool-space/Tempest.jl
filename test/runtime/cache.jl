@@ -29,6 +29,36 @@ closure(s) = x -> s * x
     Core.eval(Elsewhere, :(scale(x) = 3x))
     @test C.content_key(Elsewhere.scale) != before
     @test C.content_key(closure(1.0f0)) != C.content_key(closure(2.0f0))
+    # A checked key names Tempest's own code without its identity, which an
+    # edit anywhere in Tempest changes; the kernel is checked by what it uses.
+    @test occursin("Tempest = checked by dependencies", C.canonical_text(T.logsumexp; checked = true))
+    @test occursin("Base = julia", C.canonical_text(T.logsumexp, sin; checked = true))
+    # Before Julia 1.12 there are no edges to check by, and the key is whole.
+    @test (C.content_key(T.logsumexp; checked = true) == C.content_key(T.logsumexp)) == !C.EDGES
+end
+
+@testset "what a kernel depends on of Tempest's code" begin
+    # The methods of Tempest's that inference reached, from the edges it keeps:
+    # here a fold's observe, through a function outside Tempest that calls it.
+    observed(s) = IR.fold_observe(IR.SumFold(), s)
+    observed((1.0f0,))
+    mi = only(methods(observed)).specializations
+    mi = mi isa Core.MethodInstance ? mi : first(filter(!isnothing, collect(mi)))
+    bytes = C.dependencies(mi.cache, m -> isdefined(m, :cache) ? m.cache : nothing)
+    if !C.EDGES
+        @test isempty(bytes)
+    else
+        records = C.deserialize(IOBuffer(bytes))
+        @test any(r -> r[1] === :method && r[2] <: Tuple{typeof(IR.fold_observe), Vararg}, records)
+        @test all(r -> r[1] !== :method || C.own_code(which(r[2]).module), records)
+        @test C.current(bytes)
+        # Changed code, a record that cannot be read back, and none.
+        kind, sig, _ = first(filter(r -> r[1] === :method, records))
+        io = IOBuffer(); C.serialize(io, [(kind, sig, "other code")])
+        @test !C.current(take!(io))
+        @test !C.current(UInt8[1, 2, 3])
+    end
+    @test C.current(UInt8[])
 end
 
 @testset "where the tuning record lives" begin

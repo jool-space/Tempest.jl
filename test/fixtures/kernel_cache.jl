@@ -39,3 +39,13 @@ programs = [
     @test all(isapprox.(first, filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-2))
     name == "the floor" && @test all(d -> d isa C.FloorKernels, kernels)
 end
+
+# A kernel that failed to compile fails again, with the compiler's message: a
+# kernel keyed without Tempest's code looks for its failures under the whole key.
+@testset "a failure kept" begin
+    key = C.content_key("a kernel that fails")
+    @test C.cached_failure(key) === nothing
+    C.store_failure(key, "the compiler's message")
+    @test_throws "the compiler's message" C.cached_failure(key)
+    @test_throws "failed to compile before" C.load_kernel(key)
+end

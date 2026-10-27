@@ -26,11 +26,18 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     FUNCTIONS[key] = compiled_function(f, tt, occupancy, groups)
 end
 
+# A kernel is keyed without Tempest's own code and stored with what its
+# compilation used of it (`Tempest.Compiler.dependencies`), so that an edit to
+# Tempest compiles again only the kernels whose code it changed. A failure has
+# no inference to read that from, and is kept under the whole key.
 function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, groups)
     arch = ct.device_sm_arch()
-    key = Tempest.Compiler.content_key("cuTile kernel", f, tt, occupancy, groups, arch,
-        ct.tileiras_version(), ct.bytecode_version(), ENTRY)
+    parts = ("cuTile kernel", f, tt, occupancy, groups, arch, ct.tileiras_version(), ct.bytecode_version(), ENTRY)
+    key = Tempest.Compiler.content_key(parts...; checked = true)
     entry, cubin = Tempest.Compiler.cached_kernel(key) do
+        # A kernel cuTile cannot express fails the same way next time.
+        failed = Tempest.Compiler.content_key(parts...)
+        Tempest.Compiler.cached_failure(failed)
         Base.invokelatest(f, tt) do f, tt
             argtypes, constants = ct.unwrap_argtypes(f, tt)
             job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
@@ -38,11 +45,15 @@ function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, group
             cubin = try
                 ct.invoke_frozen(ct.compile_or_lookup, job).cubin
             catch err
-                # A kernel cuTile cannot express fails the same way next time.
-                err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(key, sprint(showerror, err))
+                err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(failed, sprint(showerror, err))
                 rethrow()
             end
-            Tempest.Compiler.store_kernel(key, ENTRY, cubin)
+            # The generic inference of the kernel, whose edges cover any
+            # constant-seeded one's.
+            cache = ct.inference_cache(job)
+            code = ct.invoke_frozen(ct.infer, cache, job.source)
+            dependencies = Tempest.Compiler.dependencies(code, mi -> get(cache, mi, nothing))
+            Tempest.Compiler.store_kernel(key, ENTRY, cubin; dependencies)
         end
     end
     CuFunction(CuModule(cubin), entry)

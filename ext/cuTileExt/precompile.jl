@@ -54,7 +54,7 @@ unbacked_tile_array(T, spec) = ct.TileArray(Ptr{kernel_eltype(T)}(256), Int32.(s
                         T = spec.buffer isa Int ? g.values[spec.buffer].eltype : workspaces[spec.buffer].eltype
                         unbacked_tile_array(T, spec)
                     end
-                    Tempest.Compiler.content_key("cuTile kernel", source(k), Tuple{map(Core.Typeof, arrays)...}, alias_groups(arrays))
+                    Tempest.Compiler.content_key("cuTile kernel", source(k), Tuple{map(Core.Typeof, arrays)...}, alias_groups(arrays); checked = true)
                     foreach(a -> flatten!(Any[], a), arrays)
                 end
             end

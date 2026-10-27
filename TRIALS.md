@@ -220,6 +220,35 @@ to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
 
+**A kernel is keyed without Tempest's code and checked by what it uses of it,
+adopted.** On trial was the kernel cache's key holding the identity of every
+package a kernel names, Tempest's a hash of all its sources while it is
+developed: an edit anywhere in Tempest, a comment included, made every
+kernel compile again. The challenger, Julia's own answer for its code: a
+cuTile kernel's key names Tempest without its identity (`content_key`'s
+`checked`, `src/Compiler/runtime/cache.jl`), and the kernel is stored with
+what its compilation used of Tempest's code, the methods its inference
+reached through the edges it keeps, the globals they read and the types they
+were specialized on, each with its lowered code or value
+(`dependencies`). A kernel loads while each is unchanged (`current`, checked
+once per session per record). A failure has no inference to read that from
+and is kept under the whole key (`cached_failure`). Judged on the GB10 by
+preparation's wall time over the guard rails and the coverage compositions
+(61 programs), the tuning record warm and the store large enough to keep
+every kernel:
+
+| | warm | after a comment edit to the planner |
+|---|---|---|
+| before | 16.5 s, 0 compiled | 39.8 s, 87 of 110 compiled |
+| after | 15.2 s, 0 compiled | 17.7 s, 0 compiled |
+
+An edit to a fold's `observe` compiles again the one kernel whose inference
+reached it. What is not judged, named: Julia 1.11, whose inference keeps no
+such edges, keeps the whole key (`EDGES`); and the store's bound, 512 MiB by
+default and shared by every process and checkout on the machine, which the
+guard rails and the test suite together outgrow, so that warm runs compile
+again what it removed whatever the key.
+
 **What a generator lowers is asked before it claims: a trial kernel per
 function, adopted.** On trial was learning it from builds that fail:
 cuTile's `expressible` (`ext/cuTileExt/cuTileExt.jl`) checked element types
