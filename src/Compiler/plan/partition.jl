@@ -60,11 +60,13 @@ end
 # never free, since a product's sweep absorbs no prologue cheaply, and the
 # value is written by the backward anyway (PyTorch's "materialized in
 # backward"). A product at the index level is a sum fold of a pointwise
-# product of two factors.
+# product of two factors, each converted to Float32 first when it is half
+# precision.
 function factor_of_backward_product(graph, users, live, v)
     any(users[v]) do u
         live[u] && graph.backward[u] || return false
         d = graph.values[u].definition
+        d isa Pointwise && d.f isa Cast{<:AbstractFloat} && return factor_of_backward_product(graph, users, live, u)
         d isa Pointwise && d.f === (*) && length(d.operands) == 2 || return false
         any(w -> live[w] && graph.values[w].definition isa Reduction{SumFold}, users[u])
     end

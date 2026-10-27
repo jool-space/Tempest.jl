@@ -1,8 +1,8 @@
 # What joins a kernel: maps fuse into the scans and folds that read them,
 # writes into an allocation plan with their readers, and a slice that misses
 # a write reads past it, folds over other axes and a scatter's sum by key join
-# the kernel computing their elements, and no kernel joins a fold its reads
-# wait on.
+# the kernel computing their elements, no kernel joins a fold its reads wait
+# on, and no backward product recomputes a factor inside it.
 include("../fixtures/programs.jl")
 
 # A scan is the sweep of a kernel along the axes it scans: a map before it is
@@ -106,6 +106,22 @@ end
     for m in C.members(g), s in C.stats(g.terms[m])
         @test C.primary(norm.graph, g, s)
     end
+end
+
+# The backward saves a factor of its products rather than recompute it inside
+# them, whatever the factor's precision: a half-precision product converts its
+# factors to Float32, and the partition looks through the conversion. So an
+# MLP's activation, which GELU's derivative does not read, is saved in
+# BFloat16 and Float16 as in Float32.
+@testset "the backward saves a product's factor in any precision" begin
+    args = (data(16, 8), data(32, 16; scale = 0.1), data(32; scale = 0.2), data(16, 32; scale = 0.3), data(16; scale = 0.4))
+    function saved(E)
+        p = differentiate(trace((x, w1, b1, w2, b2) -> sum(abs2, w2 * gelu.(w1 * x .+ b1) .+ b2), map(a -> E.(a), args)...))
+        graph = C.rewrite(C.lower(p))
+        sort([(graph.values[v].dims, nameof(typeof(graph.values[v].definition))) for v in first(C.partition(graph))])
+    end
+    @test ((32, 8), :Pointwise) in saved(Float32)
+    @test saved(BFloat16) == saved(Float16) == saved(Float32)
 end
 
 # A scatter by index arrays is a sum by key, which joins the kernel computing
