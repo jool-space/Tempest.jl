@@ -14,25 +14,28 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**Attention's backward costs fifteen forwards.** At 1024 positions and
-TF32 the forward takes 0.19 ms and the training step 2.8 ms, at 2048 0.46
-and 10.6 ms (the masked-attention trial's table). The step stores the
-scores and their probabilities, since the partition may not recompute a
-fold, and the backward is a scores product, a resident softmax gradient
-over the stored scores, and three products over the stored probabilities
-and their gradient (`src/Compiler/plan/partition.jl`, the ban on folds;
-`ext/cuTileExt/build.jl`, the resident kernel). Challenger:
-FlashAttention-2's backward (`flash_attn/flash_attn_triton.py`, the
-Triton version reads shortest), which keeps only the log-sum-exp and the
-output's dot with its gradient, and recomputes the probabilities inside
-the sweeps of the three backward products from the queries, the keys and
-the log-sum-exp, one pass over keys writing the key and value gradients
-and accumulating the query gradient. Tempest's index level has the pieces:
-the forward already recomputes the scores inside its sweep, and a fold
-read in the backward as `exp(s - lse)` with `lse` stored is a map of a
-recomputed product, which the partition could price rather than ban.
-Judged by the step's time at 1024 and 2048 positions against the forward's,
-which FlashAttention holds near two and a half, and by the bytes the step
+**Attention's training step costs nearly six forwards.** At 1024
+positions, TF32, causal, 64 features, 8 heads and batch 2, the forward
+takes 0.145 ms and the training step 0.815 ms; at 2048, 0.458 and 2.67 ms
+(measured on 27 October; the masked-attention trial's table has 2.79 and
+10.57 ms for the step, when the partition banned recomputing folds and the
+step stored the scores and their probabilities). The cover now recomputes
+the scores, the probabilities' gradient and the output's dot with its
+gradient inside the backward's sweep, so the step stores the log-sum-exp
+and no probabilities, 20 MiB at 1024, in four kernels: the log-sum-exp, a
+pass of its own recomputing the scores (75 μs); the forward (168 μs); the
+loss; and one backward kernel writing the three gradients (570 μs). What
+stands trial: that backward kernel, which recomputes the scores in both
+orientations, once for the key and value gradients and once, transposed,
+for the query gradient (`ext/cuTileExt/build.jl`); and the log-sum-exp's
+pass, since no group writes a fold over fewer of its kept axes than its
+domain has, and the forward's online fold already holds the statistic
+(`src/Compiler/plan/planner.jl`, `fixed_group`). Challenger:
+FlashAttention-2 (`flash_attn/flash_attn_triton.py`), whose forward writes
+the log-sum-exp beside the output and whose backward recomputes the scores
+once per tile, accumulating the query gradient atomically. Judged by the
+step's time at 1024 and 2048 positions against the forward's, which
+FlashAttention holds near two and a half, and by the bytes the step
 stores; the answers agreeing with the interpreter.
 
 **Time to first execution, cold and warm.** From `using Tempest` to a
