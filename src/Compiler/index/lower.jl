@@ -144,6 +144,71 @@ compose(a::ValueAccess, index, d) = ValueAccess(a.value, map(e -> substitute(e, 
 compose(a::LiteralAccess, index, d) = a
 compose(a::IndexAccess, index, d) = IndexAccess(substitute(a.expr, index, d), a.eltype)
 
+# A read of a select by positions, where its condition is decided at every
+# position the read reaches, is a read of the branch taken there: a slice of
+# a write that misses what was written reads the contents written over, as
+# XLA simplifies a slice of a dynamic update. So the cotangent of a
+# concatenation reaches each piece as a slice of it, rather than through the
+# masks of every piece written after.
+function taken(a::ValueAccess, values, d::Domain)
+    while true
+        def = values[a.value].definition
+        def isa Pointwise && def.f === ifelse || return a
+        c = decided(values, def.operands[1], a.index, d)
+        c === nothing && return a
+        a = access(def.operands[c ? 2 : 3], a.index, d)
+        a isa ValueAccess || return a
+    end
+end
+taken(a::Access, values, d::Domain) = a
+
+access(o::Read, index, d) = ValueAccess(o.value, map(e -> substitute(e, index, d), o.index))
+access(o::Literal, index, d) = LiteralAccess(o.value)
+access(o::IndexOperand{T}, index, d) where {T} = IndexAccess(substitute(o.expr, index, d), T)
+
+# Whether a condition read at `index` holds at every position of `d`, at
+# none, or neither (nothing): comparisons of positions, by the ranges of
+# their formulas, and conjunctions, disjunctions and negations of those.
+decided(values, o::Literal{Bool}, index, d::Domain) = o.value
+decided(values, o::Operand, index, d::Domain) = nothing
+function decided(values, o::Read, index, d::Domain)
+    def = values[o.value].definition
+    def isa Pointwise || return nothing
+    at = map(e -> substitute(e, index, d), o.index)
+    xs = def.operands
+    if def.f === (&) || def.f === (|)
+        cs = map(x -> decided(values, x, at, d), xs)
+        all = def.f === (&)
+        any(==(!all), cs) && return !all
+        Base.all(==(all), cs) ? all : nothing
+    elseif def.f === (!)
+        c = decided(values, only(xs), at, d)
+        c === nothing ? nothing : !c
+    elseif def.f in (<, <=, >, >=, ==, !=) && length(xs) == 2
+        es = map(x -> position_formula(x, at, d), xs)
+        any(isnothing, es) && return nothing
+        lo, hi = affine_range(add(es[1], scale(es[2], -1), d), d)
+        f = def.f
+        holds = f === (<) ? hi < 0 : f === (<=) ? hi <= 0 : f === (>) ? lo > 0 : f === (>=) ? lo >= 0 : lo == hi == 0
+        fails = f === (<) ? lo >= 0 : f === (<=) ? lo > 0 : f === (>) ? hi <= 0 : f === (>=) ? hi < 0 : lo > 0 || hi < 0
+        f === (!=) && ((holds, fails) = (fails, holds))
+        holds ? true : fails ? false : nothing
+    else
+        nothing
+    end
+end
+
+# A position compared, as a formula over `d`: one of an integer type its
+# range fits, so that the comparison in that type is the formulas'.
+function position_formula(o::IndexOperand{T}, at, d::Domain) where {T}
+    T <: Integer || return nothing
+    e = substitute(o.expr, at, d)
+    lo, hi = affine_range(e, d)
+    typemin(T) <= lo && hi <= typemax(T) ? e : nothing
+end
+position_formula(o::Literal{<:Integer}, at, d::Domain) = o.value isa Bool ? nothing : constant(o.value)
+position_formula(o::Operand, at, d::Domain) = nothing
+
 # A node of shape `dims` filled out to a larger shape, as Julia broadcasts.
 fill_out(a::ValueAccess, dims, d) = ValueAccess(a.value, map(e -> substitute(e, broadcast_index(dims), d), a.index))
 fill_out(a::LiteralAccess, dims, d) = a
@@ -377,7 +442,7 @@ function lower(p::Program)
                 rank = length(input_dims[i.input])
                 (held_index(inputs[i.input], ntuple(k -> var(axis + k), rank), d, values, extent), rank)
             end
-            compose(first(inputs), layout_index(op, n.dims, first(input_dims), d, held), d)
+            taken(compose(first(inputs), layout_index(op, n.dims, first(input_dims), d, held), d), values, d)
         else
             scattered!(value!, op, inputs, input_dims, n, values)
         end

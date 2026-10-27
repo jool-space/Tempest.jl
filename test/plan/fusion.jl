@@ -1,7 +1,8 @@
 # What joins a kernel: maps fuse into the scans and folds that read them,
-# writes into an allocation plan with their readers, folds over other axes and
-# a scatter's sum by key join the kernel computing their elements, and no
-# kernel joins a fold its reads wait on.
+# writes into an allocation plan with their readers, and a slice that misses
+# a write reads past it, folds over other axes and a scatter's sum by key join
+# the kernel computing their elements, and no kernel joins a fold its reads
+# wait on.
 include("../fixtures/programs.jl")
 
 # A scan is the sweep of a kernel along the axes it scans: a map before it is
@@ -49,6 +50,19 @@ end
         @test C.structure(planned).stored == [o.value for o in planned.graph.results]
         @test agree(C.execute(planned, args...), [interpret(p, args...)])
     end
+end
+
+# A slice of a write that misses what was written reads the contents written
+# over: each piece of a concatenation reads its slice of the cotangent, which
+# is the one value of the concatenation's size the gradient stores, rather
+# than the cotangent masked by every piece written after it.
+@testset "a slice of a write reads past it" begin
+    xs = [data(4, 6; scale = 0.1 * k) for k in 1:4]
+    p = differentiate(trace((xs...) -> sum(abs2, vcat(xs...)), xs...))
+    planned = C.plan(C.lower(p))
+    g = planned.graph
+    @test count(v -> g.values[v].dims == (16, 6) && planned.owner[v] != 0, eachindex(g.values)) == 1
+    @test agree(C.execute(planned, xs...), C.leaves(interpret(p, xs...)))
 end
 
 # No kernel waits on itself: a fold does not join a kernel that already reads,
