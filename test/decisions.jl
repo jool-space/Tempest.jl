@@ -168,12 +168,15 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
     if CUDA_FUNCTIONAL
         # A kernel is loaded or compiled once per key, however many groups
         # share it: a cold prepare builds at most one per distinct group.
+        # The generator's trials of the functions it lowers (`lowers`) are
+        # kernels of their own, one a function, and not the program's.
         layers, x = stack(8, CuArray)
         p = differentiate(trace(stack_loss, x, layers))
-        before = C.cache_counts()
+        trials() = length(Base.get_extension(Tempest, :cuTileExt).LOWERED)
+        before, tried = C.cache_counts(), trials()
         ex = prepare(p, x, layers; target = T.CUDATarget(), measure = false)
         after = C.cache_counts()
-        built = (after.compiled - before.compiled) + (after.loaded - before.loaded)
+        built = (after.compiled - before.compiled) + (after.loaded - before.loaded) - (trials() - tried)
         @test built > 0
         @test built <= distinct(ex.plan)
         # A fold's state is named by its place in the group, so layers alike

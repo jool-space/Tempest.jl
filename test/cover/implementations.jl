@@ -1,8 +1,8 @@
 # Implementations propose and claim, and the cover takes by cost: candidates
 # of an implementation's own in place of the generator's groups, recomputing
 # a fold where it is read, priced where an implementation claims every kernel
-# that recomputes it, and storing a map apart from a kernel whose claim
-# failed to build.
+# that recomputes it, and storing a map apart from a kernel that applies a
+# function an implementation cannot lower, or whose claim failed to build.
 
 # An implementation that proposes each product alone, grown from its fold, in
 # place of the generator's product with the work after it; it claims a lone
@@ -102,6 +102,33 @@ C.build_claim(::NoLog10, claim, target, g, buffers) = applies_log10(g) ? error("
         @test product.choice.implementation isa NoLog10 && isempty(product.failed)
         text = sprint(explain, ex)
         @test occursin("is stored apart", text) && occursin("a claim of NoLog10 failed to build: log10 has no lowering", text)
+    finally
+        C.register!(@__MODULE__)
+    end
+end
+
+# The same implementation, declaring what it cannot lower (`lowers`) rather
+# than failing to build it: it claims no group that applies `log10`, and the
+# map is stored apart without a build failing first.
+struct DeclinesLog10 <: C.Implementation end
+C.claims(::DeclinesLog10, ::T.CPUTarget, g) = (g.kind === :pointwise || lone_product(g)) && !applies_log10(g) ? [:host] : []
+C.lowers(::DeclinesLog10, ::T.CPUTarget, t, g) = t.f !== log10
+C.estimate(::DeclinesLog10, claim, target, g) = [C.Work(0.0)]
+C.build_claim(::DeclinesLog10, claim, target, g, buffers) = g.reference(target, buffers)
+
+@testset "a map stored apart from a kernel that applies a function an implementation cannot lower" begin
+    a, b = data(6, 5; scale = 0.3), abs.(data(5, 4)) .+ 1
+    p = trace((a, b) -> a * log10.(b .^ 2), a, b)
+    C.register!(@__MODULE__, DeclinesLog10())
+    try
+        ex = @test_nowarn prepare(p, a, b)
+        @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
+        stored = only(c.proposal for c in ex.considered if c.accepted)
+        @test stored isa C.Store && ex.plan.stored[stored.value]
+        floor, product = ex.decisions
+        @test floor.choice.implementation === nothing && isempty(floor.failed)
+        @test product.choice.implementation isa DeclinesLog10 && isempty(product.failed)
+        @test occursin("is stored apart", sprint(explain, ex))
     finally
         C.register!(@__MODULE__)
     end

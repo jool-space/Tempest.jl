@@ -114,10 +114,10 @@ end
 
 """
 A map stored apart rather than recomputed in the kernels that read it: a
-proposal of the planner's own, for each map of a kernel a claim on which
-failed to build. What failed may be the map alone, as a scalar function a
-kernel package cannot lower: stored apart, it runs in a kernel of its own,
-and the rest of the kernel may be claimed.
+proposal of the planner's own, for each map of a kernel that applies a scalar
+function an implementation cannot lower (see `lowers`), or that a claim
+failed to build. Stored apart, the map runs in a kernel of its own, and the
+rest of the kernel may be claimed.
 """
 struct Store
     value::Int
@@ -191,8 +191,8 @@ The planner's groups, with every fold stored, and the proposals: those
 implementations make, the planner's own joins of a stored value into the
 kernel that reads it, the planner's own recomputing of a fold where it is
 read (see `recomputable_folds`), where an implementation recomputes folds,
-and its own storing apart of each map of a kernel a claim on which failed to
-build (see `Store`).
+and its own storing apart of each map of a kernel that applies a function an
+implementation cannot lower, or that a claim failed to build (see `Store`).
 Proposals are accepted greedily by estimated gain over the plan, then by
 their values, each when its proposer claims the group it forms (any claim,
 or the floor, for a join; a claim of an implementation that recomputes folds,
@@ -220,7 +220,7 @@ function cover(d::Decider)
         end
     end
     for g in base.groups
-        isempty(failures(d, base, g)) && continue
+        isempty(failures(d, base, g)) && !unlowered(d, base, g) && continue
         for v in recomputed_maps(base, g)
             any(x -> x[1] == Store(v), proposals) || push!(proposals, (Store(v), nothing))
         end
@@ -365,7 +365,7 @@ function explain(io::IO, p::Plan, c::Considered)
         c.accepted && println(io, "%", q.value, " is recomputed where it is read", why)
         return
     elseif q isa Store
-        c.accepted && println(io, "%", q.value, " is stored apart from the kernel a claim on which failed to build", why)
+        c.accepted && println(io, "%", q.value, " is stored apart, in a kernel of its own", why)
         return
     end
     c.accepted && println(io, "candidate ", join(map(v -> "%$v", q), " "), " from ", label(c.implementation), " replaces the generator's grouping", why)
@@ -385,6 +385,14 @@ function recomputed_maps(p::Plan, g::Group)
         end
     end
     sort!(found)
+end
+
+# Whether `g` applies a function an implementation the target uses cannot lower.
+function unlowered(d::Decider, p::Plan, g::Group)
+    view = group_view(p, g)
+    any(subterms(Term[view.terms[m] for m in members(view)]; nested = true)) do t
+        t isa Apply && any(i -> !Base.invokelatest(lowers, i, d.target, t, view), implementations(d.target))
+    end
 end
 
 # Whether any implementation the target uses recomputes folds where it reads them.

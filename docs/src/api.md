@@ -183,4 +183,6 @@ Tempest.Compiler.Implement.candidates
 Tempest.Compiler.Implement.record_name
 Tempest.Compiler.Implement.recomputes_folds
 Tempest.Compiler.Implement.in_place
+Tempest.Compiler.Implement.lowers
+Tempest.Compiler.Implement.compiling
 ```

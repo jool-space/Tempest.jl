@@ -786,6 +786,7 @@ function terms_expressible(c::Context, roots; stats = false)
         s isa Apply && !tile_type(s.eltype) && return false
         s isa Lit && s.value isa Float64 && return false
         s isa Load && !loadable(c, s) && return false
+        s isa Apply && !lowered(s, c.g) && return false
     end
     true
 end

@@ -220,6 +220,37 @@ to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
 
+**What a generator lowers is asked before it claims: a trial kernel per
+function, adopted.** On trial was learning it from builds that fail:
+cuTile's `expressible` (`ext/cuTileExt/cuTileExt.jl`) checked element types
+and folds but not whether a scalar function lowers, so a group applying
+`exp10` or `log10` was claimed, failed to build, and was planned again
+(`prepare`, `build_group`). The challenger, the answer declared: the cover
+asks (`Implement.lowers`), and the generator answers by compiling a kernel
+that applies the function once to tiles of its argument types, through the
+kernel cache, so that it compiles once per machine and a failure loads as
+one (`ext/cuTileExt/lowers.jl`); a map stored apart is proposed on the
+answer rather than on a failure (`unlowered`, `src/Compiler/cover/cover.jl`).
+A preparation that builds nothing compiles no trial (`compiling`). Judged on
+the GB10 by the builds that fail and by preparation's wall time, cold (no
+kernel cache, an empty record) and warm, over the guard rails and the
+coverage compositions (61 programs), and over the four programs of
+`test/cuda/failures.jl`:
+
+| | builds that failed | cold | warm |
+|---|---|---|---|
+| guard rails and compositions, before | 0 | 114.2 s | 15.6 s |
+| after | 0 | 111.7 s | 15.3 s |
+| programs applying `exp10` or `log10`, before | 4 | 15.8 s | 2.9 s |
+| after | 0 | 13.2 s | 2.0 s |
+
+The trials are 25 of the first set's 323 kernels cold, and cost nothing
+measurable: a trial compiles in 0.1 to 0.9 s and loads from the cache in 1 to
+40 ms. What is not judged, named: a function the trial lowers and the
+group's kernel does not, as at a literal other than the trial's two or at a
+shape its one-dimensional tiles do not take, still fails at build and is
+planned around.
+
 **Scores past the length the device holds are computed: a tile every mask
 rules out is skipped, adopted.** On trial was Qwen3.5-4B's whole decoding
 step over a cache of 32768 positions, prepared once and run at lengths 512

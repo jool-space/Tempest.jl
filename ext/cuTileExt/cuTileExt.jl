@@ -233,7 +233,8 @@ function copied(g::GroupView, r, t::Load)
 end
 
 # Whether the generator can express a group: tile-typed values, supported
-# folds, and positions without gathers; its loads are checked with a schedule.
+# folds, scalar functions it lowers, and positions without gathers; its loads
+# are checked with a schedule.
 function expressible(g::GroupView)
     collapse_axes(g) === nothing && return false
     for m in members(g)
@@ -246,6 +247,7 @@ function expressible(g::GroupView)
             t isa Apply && !tile_type(t.eltype) && return false
             t isa Lit && t.value isa Float64 && return false
             t isa Load && !(g.values[t.value].eltype <: TILE_TYPES) && return false
+            t isa Apply && !lowered(t, g) && return false
         end
     end
     true
@@ -692,6 +694,7 @@ include("cache.jl")
 include("mask.jl")
 include("build.jl")
 include("contract.jl")
+include("lowers.jl")
 
 __init__() = register!(ct, cuTileGenerator())
 

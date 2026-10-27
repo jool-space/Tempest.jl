@@ -153,12 +153,16 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept)
     # Planned again while the last plan's builds failed, a few times at most;
     # then what fails runs on the next option, the floor last (see
-    # `build_group`). The last plan's buffers are let go first.
-    ex = planned(program, d, inputs, pairs, input, by_reference, build)
-    for _ in 2:PLANS
-        any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
-        ex = nothing
-        ex = planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build)
+    # `build_group`). The last plan's buffers are let go first. Without
+    # `build`, implementations compile nothing as they claim (`compiling`).
+    ex = Base.ScopedValues.with(Implement.COMPILING => build) do
+        ex = planned(program, d, inputs, pairs, input, by_reference, build)
+        for _ in 2:PLANS
+            any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
+            ex = nothing
+            ex = planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build)
+        end
+        ex
     end
     ex.built && bind!(ex, inputs...)
     ex

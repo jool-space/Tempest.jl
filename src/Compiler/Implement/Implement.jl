@@ -12,7 +12,7 @@ using Republic: @republic
 @republic republic=false inherit=:public using ..IR
 
 public Implementation, Work, register!, claims, variants, estimate, build_claim, candidates, record_name,
-    recomputes_folds, in_place
+    recomputes_folds, in_place, lowers, compiling
 
 include("groups.jl")
 
@@ -133,5 +133,29 @@ into the storage of a value they read only at the address they write it (see
 `storage`). The floor's kernels do, and so do the generator's.
 """
 in_place(::Implementation, claim) = false
+
+"""
+    lowers(implementation, target, term, group) -> Bool
+
+Whether `implementation` can realize a group that applies `term`, an `Apply`
+in `group`, a `GroupView`: false for a generator without a lowering of the
+scalar function. What an implementation cannot do is declared here, before it
+claims, rather than learned from a build that fails; the cover stores a map
+the target's implementations cannot all lower apart, in a kernel of its own
+(see `Tempest.Compiler.Store`). True by default.
+"""
+lowers(::Implementation, target, term, group) = true
+
+"""
+    compiling() -> Bool
+
+Whether an implementation may compile on the device while it claims, as a
+generator does to learn what it lowers (see `lowers`): not while a
+preparation that builds nothing plans, which touches no device, nor while a
+package precompiles.
+"""
+compiling() = COMPILING[] && ccall(:jl_generating_output, Cint, ()) == 0
+
+const COMPILING = Base.ScopedValues.ScopedValue(true)
 
 end

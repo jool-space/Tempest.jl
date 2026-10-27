@@ -1,9 +1,10 @@
-# Claims that fail to build: cuTile cannot lower `exp10` or `log10` (Base's
-# branch on a comparison of its argument), so a group that applies one is
-# planned again without the claim. The floor runs the whole group where that
+# Functions cuTile cannot lower: `exp10` or `log10` (Base's branch on a
+# comparison of its argument). The generator is asked before it claims
+# (`lowers`), compiling a trial kernel once per machine, so no claim of a group
+# that applies one fails to build. The floor runs the whole group where that
 # is cheapest, its fold split among the device's lanes; where the rest of the
 # group is worth a claim, the map is stored apart and the floor computes it
-# alone. `explain` names the claim that failed, and prices what runs.
+# alone. `explain` prices what runs.
 
 # The floor's kernels of a prepared program.
 floors(ex) = [k for d in ex.kernels if d isa C.FloorKernels for k in d.kernels]
@@ -14,15 +15,15 @@ floors(ex) = [k for d in ex.kernels if d isa C.FloorKernels for k in d.kernels]
         p = trace(x -> sum(f.(x)), x)
         ex = prepare(p, CuArray(x))
         @test isapprox(Array(only(C.leaves(outputs(execute!(ex)))))[], interpret(p, x); rtol = 1.0e-4)
+        x1 = only(ex.decisions)
+        @test isempty(x1.failed)
         f === expm1 && continue
         # A fold of a map is cheapest on the floor whole, split among lanes
         # rather than one thread's.
-        x1 = only(ex.decisions)
-        @test x1.choice.implementation === nothing && !isempty(x1.failed)
+        @test x1.choice.implementation === nothing
         @test all(k -> k.split !== nothing && k.split.parts * k.split.lanes >= 1024, floors(ex))
-        # `explain` says the claim failed, and gives the floor's estimate.
+        # `explain` gives the floor's estimate.
         text = sprint(explain, ex)
-        @test occursin("a claim of cuTileGenerator failed to build", text)
         @test occursin(string("(estimated ", round(1.0e6 * x1.choice.estimate; sigdigits = 3), " μs"), text)
         @test x1.choice.estimate < 1.0e-3
     end
@@ -47,5 +48,20 @@ end
     @test length(stored) == 1
     @test any(d -> d isa C.FloorKernels, ex.kernels) && any(d -> !(d isa C.FloorKernels), ex.kernels)
     @test occursin("is stored apart", sprint(explain, ex))
-    @test occursin("a claim of cuTileGenerator failed to build", sprint(explain, ex))
+    @test all(d -> d === nothing || isempty(d.failed), ex.decisions)
+end
+
+# A preparation that builds nothing asks the generator nothing it would compile
+# to answer: it claims what it cannot tell it lowers, here a function that
+# branches on its argument, which is recorded whole.
+@testset "a preparation that builds nothing compiles no trial" begin
+    x = single(data(256, 64))
+    p = trace(x -> sum((y -> y > 0.5f0 ? y : 2y).(x)), x)
+    before = C.cache_counts()
+    ex = prepare(p, CuArray(x); build = false)
+    @test C.cache_counts() == before
+    @test only(ex.decisions).choice.implementation !== nothing
+    ex = prepare(p, CuArray(x))
+    @test isempty(only(ex.decisions).failed)
+    @test isapprox(Array(only(C.leaves(outputs(execute!(ex)))))[], interpret(p, x); rtol = 1.0e-4)
 end
