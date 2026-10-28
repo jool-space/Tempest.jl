@@ -22,9 +22,12 @@ abstract type Library <: Implementation end
 A function a library computes, `f`, of arrays named and with named axes in
 `inputs`, as `(A = (:m, :k), B = (:k, :n))`, returning the arrays named in
 `outputs`, one name for each, in order. Tempest traces `f` with arrays of the
-axes' extents; an axis no axis of a group matches has extent one. Every axis
-must be read by a different set of arrays, or be summed where another is
-not, so that which of a group's axes it stands for is never a choice.
+axes' extents; an axis no axis of a group matches has extent one. An axis
+stands for the group's axes that the same arrays read, the same folds sum
+and the same index formulas (a causal mask's) move with. Axes alike in all
+three are interchangeable, as attention's query positions and the query
+heads that share a key head are: the library is offered a binding for each
+way, those whose arrays are laid out as `inputs` names their axes first.
 """
 struct Template
     f::Any

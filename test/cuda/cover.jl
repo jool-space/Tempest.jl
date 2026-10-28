@@ -179,7 +179,7 @@ end
     p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
     # Loading a package makes its implementations available; a target
     # names the ones it uses, and the floor is always there.
-    @test C.used_packages(T.CUDATarget()) == [cuBLAS, cuTile]
+    @test C.used_packages(T.CUDATarget()) == [cuBLAS, cuDNN, cuTile]
     ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile))
     @test ex.packages == [cuTile]
     @test occursin("implementations from cuTile, and the floor", sprint(explain, ex))

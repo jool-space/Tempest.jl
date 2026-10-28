@@ -41,7 +41,7 @@ end
 # earlier test on its worker happened to load.
 const init_code = quote
     using Tempest, Test, NNlib, CUDACore, Einops
-    import Statistics, cuBLAS, cuTile
+    import Statistics, cuBLAS, cuDNN, cuTile
     include($(joinpath(@__DIR__, "setup.jl")))
 end
 

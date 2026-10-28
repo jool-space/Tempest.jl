@@ -1,8 +1,9 @@
 # Libraries (see `Implement.Library`): a template is traced and planned as a
-# program of its own, and a group of a plan computes it when its members are
-# the template's group's, term for term, with each of the template's axes one
-# or more of the group's and each of its arrays a strided view of a value the
-# group reads or stores.
+# program of its own, every fold recomputed where it can be, and a group of a
+# plan computes it when its members are the template's group's, term for
+# term, the folds they recompute and their index formulas too, with each of
+# the template's axes one or more of the group's and each of its arrays a
+# strided view of a value the group reads or stores.
 #
 # A match is found in two passes. The first traces the template with axes of
 # small distinct extents and finds which of the group's values and axes each
@@ -58,7 +59,7 @@ end
 
 const TEMPLATE_GROUPS = Dict{Any, Any}()
 const PROBE_GROUPS = Dict{Tuple{UInt, Bool}, Any}()
-const MATCHES = Dict{Any, Union{Nothing, Binding}}()
+const MATCHES = Dict{Any, Vector{Binding}}()
 const LIBRARY_LOCK = ReentrantLock()
 
 # Matches are keyed by a group's terms, which one preparation shares: equal
@@ -85,20 +86,40 @@ function cached_template_group(t::Template, rewrites, types, extents)
 end
 
 # What the terms of a template's group (`a`) and a group (`b`) unify to: the
-# value of `b` each value of `a` is, and each load's and stored member's index
-# on both sides, for the axes to be found from.
+# value of `b` each value of `a` is, each load's and stored member's index on
+# both sides and each index formula's, for the axes to be found from. A fold
+# recomputed in a term adds the axes it reduces to its side's, after the
+# domain's, each with its extent and the fold (`extra`); its body numbers
+# them after its reader's variables, which `vars` maps to the side's axes.
 mutable struct Unifier
     a::GroupView
     b::GroupView
     exact::Bool
     values::Dict{Int, Int}
     reads::Vector{Tuple{Int, Tuple{Vararg{Affine}}, Int, Tuple{Vararg{Affine}}}}
+    formulas::Vector{Tuple{Affine, Affine}}
+    extra::Tuple{Vector{Tuple{Int, Int}}, Vector{Tuple{Int, Int}}}
+    vars::Tuple{Vector{Int}, Vector{Int}}
 end
 
-Unifier(a, b, exact) = Unifier(a, b, exact, Dict{Int, Int}(), [])
+Unifier(a, b, exact) = Unifier(a, b, exact, Dict{Int, Int}(), [], [], ([], []),
+    (collect(eachindex(a.domain)), collect(eachindex(b.domain))))
 
-snapshot(u::Unifier) = (copy(u.values), length(u.reads))
-restore!(u::Unifier, (values, n)) = (u.values = values; resize!(u.reads, n); u)
+snapshot(u::Unifier) = (copy(u.values), length(u.reads), length(u.formulas), map(length, u.extra))
+restore!(u::Unifier, (values, n, f, e)) =
+    (u.values = values; resize!(u.reads, n); resize!(u.formulas, f); foreach(resize!, u.extra, e); u)
+
+# The axes of side `i` (1 for the template's group): its domain's and the
+# reduced axes of the folds its terms recompute.
+side_domain(u::Unifier, i) = ((i == 1 ? u.a : u.b).domain..., map(first, u.extra[i])...)
+
+# An index of side `i`'s term in the side's axes.
+function side_index(u::Unifier, i, index)
+    vars = u.vars[i]
+    vars == eachindex(vars) && return index
+    d = Domain(side_domain(u, i))
+    map(e -> substitute(e, map(var, vars), d), index)
+end
 
 function same_value!(u::Unifier, x, y)
     haskey(u.values, x) && return u.values[x] == y
@@ -127,18 +148,52 @@ function unify!(@nospecialize(then), u::Unifier, a::Term, b::Term)
             (unify_all!(then, u, a.args, b.args) ||
              length(a.args) == 2 && any(f -> f === a.f, COMMUTATIVE) && (restore!(u, s); unify_all!(then, u, a.args, reverse(b.args))))
     elseif a isa Load
-        b isa Load && same_value!(u, a.value, b.value) && (push!(u.reads, (a.value, a.index, b.value, b.index)); then())
+        b isa Load && same_value!(u, a.value, b.value) &&
+            (push!(u.reads, (a.value, side_index(u, 1, a.index), b.value, side_index(u, 2, b.index))); then())
     elseif a isa Stat
         b isa Stat && same_value!(u, a.value, b.value) && then()
     elseif a isa Lit
         b isa Lit && typeof(a.value) === typeof(b.value) && (!u.exact || isequal(a.value, b.value)) && then()
+    elseif a isa Ix
+        # Compared once the axes are found.
+        typeof(a) === typeof(b) &&
+            (push!(u.formulas, (only(side_index(u, 1, (a.expr,))), only(side_index(u, 2, (b.expr,))))); then())
+    elseif a isa Recomputed
+        b isa Recomputed && length(a.extents) == length(b.extents) && (!u.exact || a.extents == b.extents) &&
+            same_kind(u, u.a.values[a.value], u.b.values[b.value]) && same_value!(u, a.value, b.value) &&
+            unify_body!(then, u, a, b)
     else
-        # Index formulas and recomputed folds are not matched yet.
         false
     end
     found || restore!(u, s)
     found
 end
+
+# The bodies of folds recomputed, their reduced axes the sides' next: each
+# body's variables past its reader's are those axes, and what follows the
+# fold reads its reader's variables again.
+function unify_body!(@nospecialize(then), u::Unifier, a::Recomputed, b::Recomputed)
+    outer = u.vars
+    inner = map((1, 2), (a, b)) do i, t
+        n = length(side_domain(u, i))
+        append!(u.extra[i], ((e, t.value) for e in t.extents))
+        [outer[i]; (n + 1):(n + length(t.extents))]
+    end
+    u.vars = inner
+    found = unify!(u, a.body, b.body) do
+        u.vars = outer
+        r = then()
+        u.vars = inner
+        r
+    end
+    u.vars = outer
+    found
+end
+
+# Values computed alike: of one type, stored or not alike, and folds of one
+# kind, the numbers their observes compute with aside unless `exact`.
+same_kind(u::Unifier, x, y) = x.eltype === y.eltype && x.stored == y.stored && x.scalar == y.scalar &&
+    same_fold(x.fold, y.fold, u.exact) && x.keyed == y.keyed && x.into === nothing && y.into === nothing && x.scan == y.scan
 
 # Folds alike, the numbers their observes compute with aside unless `exact`,
 # as a literal is: a mean's divisor moves into its fold's observe.
@@ -179,9 +234,8 @@ end
 
 function unify_member!(@nospecialize(then), u::Unifier, m, n)
     x, y = u.a.values[m], u.b.values[n]
-    (m in u.a.reductions) == (n in u.b.reductions) && x.eltype === y.eltype && x.stored == y.stored && x.scalar == y.scalar &&
-        same_fold(x.fold, y.fold, u.exact) && x.keyed == y.keyed && x.into === nothing && y.into === nothing && x.scan == y.scan &&
-        haskey(u.a.terms, m) == haskey(u.b.terms, n) || return false
+    (m in u.a.reductions) == (n in u.b.reductions) && same_kind(u, x, y) && haskey(u.a.terms, m) == haskey(u.b.terms, n) ||
+        return false
     s = snapshot(u)
     same_value!(u, m, n) || return false
     x.stored && push!(u.reads, (m, something(u.a.placement[m], ()), n, something(u.b.placement[n], ())))
@@ -190,21 +244,30 @@ function unify_member!(@nospecialize(then), u::Unifier, m, n)
     found
 end
 
-# For each wide axis of a group's domain, what reads or reduces it: the arrays
-# (as `name`s them) whose addresses move along it, and the members (as `member`
-# names them) whose folds reduce it. Nothing when an address is not affine.
-function axis_uses(g::GroupView, reads, name, member)
-    d = Domain(g.domain)
-    uses = [(Set{Symbol}(), Set{Int}()) for _ in g.domain]
+# For each wide axis of side `i` of `u`, what reads or reduces it: the arrays
+# (as `name`s them) whose addresses move along it, the members and recomputed
+# folds (as `fold` names them) that reduce it, and the index formulas, by
+# their place in `u.formulas`, that move with it. Nothing when an address is
+# not affine.
+function axis_uses(u::Unifier, i, reads, name, fold)
+    g, dom = i == 1 ? u.a : u.b, side_domain(u, i)
+    d = Domain(dom)
+    uses = [(Set{Symbol}(), Set{Int}(), Set{Int}()) for _ in dom]
     for (v, index) in reads
         e = address(g.values[v], index, d)
         is_affine(e) || return nothing
-        for k in eachindex(g.domain)
-            g.domain[k] > 1 && coefficient(e, k) != 0 && push!(uses[k][1], name(v))
+        for k in eachindex(dom)
+            dom[k] > 1 && coefficient(e, k) != 0 && push!(uses[k][1], name(v))
         end
     end
     for m in members(g), k in g.values[m].reduced
-        push!(uses[k][2], member(m))
+        push!(uses[k][2], fold(m))
+    end
+    for (k, (_, v)) in enumerate(u.extra[i])
+        push!(uses[length(g.domain) + k][2], fold(v))
+    end
+    for (f, e) in enumerate(u.formulas), k in eachindex(dom)
+        dom[k] > 1 && mentions(e[i], k) && push!(uses[k][3], f)
     end
     uses
 end
@@ -221,14 +284,17 @@ function template_axes(index, dims)
     any(isnothing, axes) || !allunique(filter(!iszero, collect(axes))) ? nothing : axes
 end
 
-# The binding of template `t`, the `k`th of its library's, whose group `tg`
+# The bindings of template `t`, the `k`th of its library's, whose group `tg`
 # was unified with group `g` in `u`. Each axis of the template's stands for
-# the group's axes that the same arrays read and the same folds reduce, in
-# the order the first array to read them strides along them, which every
-# array must chain over. Nothing when an axis of the group is none of the
-# template's, an array is not one strided view, or two of the template's
-# axes are used alike.
-function binding(t::Template, k, tg, g::GroupView, u::Unifier)
+# the group's axes that the same arrays read, the same folds reduce and the
+# same formulas move with, in the order the first array to read them strides
+# along them, which every array must chain over. Axes of the template's used
+# alike are interchangeable: the template computes the same whichever stands
+# for which of the group's, as the query positions and the query heads that
+# share a key head are in attention, and there is a binding for each way,
+# each of their axes one of the group's at most. None when an axis of the
+# group is none of the template's or an array is not one strided view.
+function axis_bindings(t::Template, k, tg, g::GroupView, u::Unifier)
     a = tg.group
     names = Dict{Int, Symbol}()
     foreach((v, n) -> names[v] = n, tg.inputs, keys(t.inputs))
@@ -236,20 +302,55 @@ function binding(t::Template, k, tg, g::GroupView, u::Unifier)
     image = Dict(y => x for (x, y) in u.values)
     treads = unique((x, i) for (x, i, _, _) in u.reads)
     greads = unique((y, j) for (_, _, y, j) in u.reads)
-    allunique(first.(treads)) && allunique(first.(greads)) || return nothing
-    tuses = axis_uses(a, treads, v -> names[v], identity)
-    guses = axis_uses(g, greads, v -> names[image[v]], m -> image[m])
-    (tuses === nothing || guses === nothing) && return nothing
+    allunique(first.(treads)) && allunique(first.(greads)) || return Binding[]
+    tuses = axis_uses(u, 1, treads, v -> names[v], identity)
+    guses = axis_uses(u, 2, greads, v -> names[image[v]], m -> image[m])
+    (tuses === nothing || guses === nothing) && return Binding[]
+    tdom, gdom = side_domain(u, 1), side_domain(u, 2)
     wide(dom) = [j for j in eachindex(dom) if dom[j] > 1]
-    tw = wide(a.domain)
-    allunique(tuses[tw]) || return nothing
-    stands = Dict(j => Int[] for j in tw)
-    for kg in wide(g.domain)
-        j = findfirst(j -> tuses[j] == guses[kg], tw)
-        j === nothing && return nothing
-        push!(stands[tw[j]], kg)
+    # Axes by their uses, in the order of the template's first of each.
+    uses = unique(tuses[j] for j in wide(tdom))
+    classes = [(Int[], Int[]) for _ in uses]
+    for j in wide(tdom)
+        push!(classes[findfirst(==(tuses[j]), uses)][1], j)
     end
-    d = Domain(g.domain)
+    for kg in wide(gdom)
+        c = findfirst(==(guses[kg]), uses)
+        c === nothing && return Binding[]
+        push!(classes[c][2], kg)
+    end
+    found = Binding[]
+    for ways in Iterators.product((assignments(js, ks) for (js, ks) in classes)...)
+        stands = Dict{Int, Vector{Int}}(j => copy(ks) for way in ways for (j, ks) in way)
+        b = binding(t, k, tg, g, u, stands, names, treads, greads, gdom)
+        b === nothing || push!(found, b)
+    end
+    # Those whose arrays are laid out as the template names their axes first.
+    sort!(found; by = b -> sum(disorder, b.arrays))
+end
+
+# The ways the group's axes `ks` stand for the template's `js`, used alike:
+# all of them for one, or each for a different one, the template's last
+# axes first, as a group without a batch has positions and no heads.
+function assignments(js, ks)
+    length(js) == 1 && return [Dict(only(js) => copy(ks))]
+    length(ks) <= length(js) || return Dict{Int, Vector{Int}}[]
+    choices = sort!([c for c in Iterators.product(ntuple(_ -> js, length(ks))...) if allunique(c)]; by = c -> -sum(c; init = 0))
+    [Dict(j => [ks[i] for i in eachindex(ks) if c[i] == j] for j in js) for c in choices]
+end
+
+# How many pairs of an array's axes wider than one stride against the order
+# the template names them in.
+function disorder(s::Strided)
+    strides = [d for (n, d) in zip(s.size, s.strides) if n > 1]
+    count(((i, j),) -> i < j && strides[i] > strides[j], Iterators.product(eachindex(strides), eachindex(strides)))
+end
+
+# The binding of the template's axes standing for the group's as `stands`
+# says.
+function binding(t::Template, k, tg, g::GroupView, u::Unifier, stands, names, treads, greads, gdom)
+    a = tg.group
+    d = Domain(gdom)
     index = Dict(greads)
     views = [(names[x], template_axes(i, a.values[x].dims), u.values[x]) for (x, i) in treads]
     any(v -> v[2] === nothing, views) && return nothing
@@ -259,7 +360,8 @@ function binding(t::Template, k, tg, g::GroupView, u::Unifier)
     for (_, axes, y) in views, j in axes
         j == 0 || j in ordered || (push!(ordered, j); sort!(stands[j]; by = kg -> abs(coefficient(addresses[y], kg))))
     end
-    extent(j) = j == 0 ? 1 : prod(kg -> g.domain[kg], stands[j]; init = 1)
+    all(((x, y),) -> same_formula(x, y, stands, gdom, u.exact), u.formulas) || return nothing
+    extent(j) = j == 0 ? 1 : prod(kg -> gdom[kg], stands[j]; init = 1)
     by_name = Dict{Symbol, Int}()
     found = Dict{Symbol, Strided}()
     for (n, axes, y) in views
@@ -269,7 +371,7 @@ function binding(t::Template, k, tg, g::GroupView, u::Unifier)
             j == 0 || get!(by_name, name, j) == j || return nothing
         end
         e = addresses[y]
-        strides = map(j -> j == 0 || isempty(stands[j]) ? 0 : group_stride(e, stands[j], g.domain), axes)
+        strides = map(j -> j == 0 || isempty(stands[j]) ? 0 : group_stride(e, stands[j], gdom), axes)
         any(isnothing, strides) && return nothing
         found[n] = Strided(g.values[y].eltype, e.constant, map(extent, axes), strides, nothing, y)
     end
@@ -280,6 +382,23 @@ function binding(t::Template, k, tg, g::GroupView, u::Unifier)
     Binding(k, NamedTuple{names_t}(extents), NamedTuple{order}(Tuple(found[n] for n in order)))
 end
 
+# Whether index formula `y` of a group is formula `x` of a template's group,
+# each axis of the template's the group's it `stands` for, the first fastest:
+# their constants aside unless `exact`, since a constant may be an extent.
+function same_formula(x::Affine, y::Affine, stands, dom, exact)
+    is_affine(x) && is_affine(y) && (!exact || x.constant == y.constant) || return false
+    seen = 0
+    for (v, c) in x.terms
+        p = 1
+        for k in get(stands, v.n, ())
+            coefficient(y, k) == c * p || return false
+            p *= dom[k]
+            seen += 1
+        end
+    end
+    seen == length(y.terms)
+end
+
 # Whether two groups may unify: of one kind, with as many folds and other
 # members, which apply the same functions to as many loads.
 function alike(a::GroupView, b::GroupView)
@@ -287,30 +406,30 @@ function alike(a::GroupView, b::GroupView)
     a.kind === b.kind && length(a.reductions) == length(b.reductions) && length(a.outputs) == length(b.outputs) && shapes(a) == shapes(b)
 end
 
-# The binding of a template's group, `tg` as `template_group` gives it, to a
-# group of the plan, unified with literals compared (`exact`) or not; nothing
+# The bindings of a template's group, `tg` as `template_group` gives it, to a
+# group of the plan, unified with literals compared (`exact`) or not; none
 # when they differ.
 function unify_group(t::Template, k, tg, g::GroupView, exact)
-    tg !== nothing && alike(tg.group, g) || return nothing
+    tg !== nothing && alike(tg.group, g) || return Binding[]
     a = tg.group
     u = Unifier(a, g, exact)
-    found = Ref{Union{Nothing, Binding}}(nothing)
+    found = Binding[]
     unify_members!(u, members(a), members(g), falses(length(members(g)))) do
         all(v -> haskey(u.values, v), tg.inputs) || return false
-        found[] = binding(t, k, tg, g, u)
-        found[] !== nothing
+        append!(found, axis_bindings(t, k, tg, g, u))
+        !isempty(found)
     end
-    found[]
+    found
 end
 
 """
-    match_template(template, k, target, group) -> Binding or nothing
+    match_template(template, k, target, group) -> bindings
 
-The binding of `group`, a `GroupView`, to `template`, the `k`th of its
-library's: the template, traced at the extents and element types the binding
+The bindings of `group`, a `GroupView`, to `template`, the `k`th of its
+library's: the template, traced at the extents and element types a binding
 gives its axes and arrays, computes what the group does, term for term. Each
 array has every axis its template names, of extent one where no axis of the
-group stands for it.
+group stands for it. More than one when axes of the template are used alike.
 """
 function match_template(t::Template, k, target, g::GroupView)
     rewrites = permits_rewrites(target)
@@ -318,19 +437,21 @@ function match_template(t::Template, k, target, g::GroupView)
     # Told apart from the template traced in Float32 before it is traced at
     # the group's types, which are numbers.
     shape = probe_group(t, rewrites)
-    shape === nothing || alike(shape.group, g) || return nothing
+    shape === nothing || alike(shape.group, g) || return Binding[]
     ms = members(g)
     reads = unique(l.value for m in ms if haskey(g.terms, m) for l in loads(g.terms[m]) if !(l.value in ms))
     types = unique(g.values[v].eltype for v in reads)
-    !isempty(types) && all(T -> T <: Number, types) || return nothing
+    !isempty(types) && all(T -> T <: Number, types) || return Binding[]
     for ts in Iterators.product(ntuple(_ -> types, length(t.inputs))...)
-        b = unify_group(t, k, cached_template_group(t, rewrites, ts, probe), g, false)
-        b === nothing && continue
-        Tuple(b.arrays[n].eltype for n in keys(t.inputs)) == ts || continue
-        exact = unify_group(t, k, cached_template_group(t, rewrites, ts, b.extents), g, true)
-        exact !== nothing && same_binding(exact, b) && return b
+        found = Binding[]
+        for b in unify_group(t, k, cached_template_group(t, rewrites, ts, probe), g, false)
+            Tuple(b.arrays[n].eltype for n in keys(t.inputs)) == ts || continue
+            exact = unify_group(t, k, cached_template_group(t, rewrites, ts, b.extents), g, true)
+            any(e -> same_binding(e, b), exact) && push!(found, b)
+        end
+        isempty(found) || return found
     end
-    nothing
+    Binding[]
 end
 
 # Bindings alike over their axes wider than one: the template traced at the
@@ -384,14 +505,22 @@ function bindings(l::Library, target, g)
         key = (objectid(t), k, permits_rewrites(target), g.kind, g.domain, Tuple(members(g)),
             Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(g.placement[m] for m in members(g)),
             Tuple(sort!([(v, x.eltype, x.dims, x.stored) for (v, x) in g.values])))
-        b = @lock LIBRARY_LOCK get(MATCHES, key, missing)
-        if b === missing
-            b = match_template(t, k, target, g)
-            @lock LIBRARY_LOCK MATCHES[key] = b
+        bs = @lock LIBRARY_LOCK get(MATCHES, key, missing)
+        if bs === missing
+            bs = match_template(t, k, target, g)
+            @lock LIBRARY_LOCK MATCHES[key] = bs
         end
-        b === nothing || push!(found, b)
+        append!(found, bs)
     end
     found
+end
+
+# A library recomputes folds where it reads them when a template's group does,
+# as attention's recomputes its scores: the cover then proposes recomputing
+# the folds of a plan, for the library to claim the groups that form.
+Implement.recomputes_folds(l::Library, target) = any(templates(l, target)) do t
+    tg = probe_group(t, permits_rewrites(target))
+    tg !== nothing && !isempty(recomputed_in(tg.group))
 end
 
 # A library's launch moves the group's bytes and does the products its folds

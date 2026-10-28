@@ -10,7 +10,8 @@ include("../fixtures/programs.jl")
 product(A, B) = C.contract(A, B, (1, 3, 4), (3, 2, 4), (1, 2, 4))
 const PRODUCT = C.Template(product; inputs = (A = (:m, :k, :b), B = (:k, :n, :b)), outputs = (:C,))
 
-bound(t, f, args...) = [C.match_template(t, 1, T.CPUTarget(), g) for g in C.group_views(C.plan(C.rewrite(C.lower(trace(f, args...)))))]
+# Each group's first binding, or nothing.
+bound(t, f, args...) = [get(C.match_template(t, 1, T.CPUTarget(), g), 1, nothing) for g in C.group_views(C.plan(C.rewrite(C.lower(trace(f, args...)))))]
 layout(s) = (s.size, s.strides, s.offset)
 
 @testset "a template binds the groups that compute it" begin
@@ -44,6 +45,68 @@ layout(s) = (s.size, s.strides, s.offset)
     # Over eight rows the divisor is a product by an eighth, as Tempest writes
     # a quotient whose reciprocal is exact.
     @test only(bound(mean, x -> sum(x; dims = 1) ./ 8, data(8, 4))).extents == (r = 8, c = 4)
+end
+
+# Attention as a library would compute it, the scores in Float32 and the
+# output in the operands' type: queries (d, g, h, m, b), query head g + G·h
+# reading key head h. Its group recomputes the scores and reads a causal
+# mask's positions, which a group binds when it computes the same, also with
+# heads not grouped, or of one head; its query heads per key head and query
+# positions, and its key heads and batch, are interchangeable, as each
+# group's layout orders them. Rounding the scores, keeping the output in
+# Float32 or scaling otherwise is another function.
+const LABELS = (d = 1, g = 2, h = 3, m = 4, b = 5, n = 6)
+function sdpa(q, k, v; causal)
+    (; d, g, h, m, b, n) = LABELS
+    s = C.contract(Float32.(k), Float32.(q), (d, h, n, b), (d, g, h, m, b), (n, g, h, m, b)) .* Float32(inv(sqrt(size(q, 1))))
+    causal && (s = ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, -Inf32))
+    eltype(q).(C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (d, h, n, b), (n, g, h, m, b), (d, g, h, m, b)))
+end
+attention_template(causal) = C.Template((q, k, v) -> sdpa(q, k, v; causal);
+    inputs = (q = (:d, :g, :h, :m, :b), k = (:d, :h, :n, :b), v = (:e, :h, :n, :b)), outputs = (:o,))
+const SDPA, CAUSAL = attention_template(false), attention_template(true)
+# As a model writes it: (features, heads, positions, batch).
+function spelled(q, k, v; causal, widen = true, round = true, scale = Float32(inv(sqrt(size(q, 1)))))
+    (; d, g, h, m, b, n) = LABELS
+    q5 = reshape(q, size(q, 1), size(q, 2) ÷ size(k, 2), size(k, 2), size(q, 3), size(q, 4))
+    s = C.contract(widen ? Float32.(k) : k, widen ? Float32.(q5) : q5, (d, h, n, b), (d, g, h, m, b), (n, g, h, m, b)) .* scale
+    causal && (s = ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, -Inf32))
+    o = C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (d, h, n, b), (n, g, h, m, b), (d, g, h, m, b))
+    reshape(round ? eltype(q).(o) : o, size(q))
+end
+
+@testset "a template binds recomputed folds, index formulas and axes alike" begin
+    half(dims...) = BFloat16.(single(data(dims...; scale = 0.1)))
+    q, k, v = half(16, 8, 24, 2), half(16, 2, 24, 2), half(16, 2, 24, 2)
+    function matches(t, f, args...)
+        graph = C.rewrite(C.lower(trace(f, args...)))
+        C.match_template(t, 1, T.CPUTarget(), only(C.group_views(C.plan(graph; recompute = C.recomputable_folds(graph)))))
+    end
+    # Causal: the mask tells the positions from the heads of a group, but
+    # not the key heads from the batch.
+    bs = matches(CAUSAL, (q, k, v) -> spelled(q, k, v; causal = true), q, k, v)
+    b = first(bs)
+    @test length(bs) == 2 && last(bs).arrays.k.strides == (1, 768, 32, 16)
+    @test b.extents == (d = 16, g = 4, h = 2, m = 24, b = 2, n = 24, e = 16)
+    @test b.arrays.q.strides == (1, 16, 64, 128, 3072) && b.arrays.k.strides == (1, 16, 32, 768)
+    @test isempty(matches(SDPA, (q, k, v) -> spelled(q, k, v; causal = true), q, k, v))
+    # Unmasked, the query heads of a group and the positions bind either
+    # way, and so do the key heads and the batch: laid out as named first.
+    bs = matches(SDPA, (q, k, v) -> spelled(q, k, v; causal = false), q, k, v)
+    @test length(bs) == 4 && first(bs).extents == b.extents
+    @test sort([(x.extents.g, x.extents.m) for x in bs]) == [(4, 24), (4, 24), (24, 4), (24, 4)]
+    # Heads not grouped, and one head: axes of extent one.
+    @test first(matches(CAUSAL, (q, k, v) -> spelled(q, k, v; causal = true), k, k, v)).extents == (d = 16, g = 1, h = 2, m = 24, b = 2, n = 24, e = 16)
+    one = first(matches(SDPA, (q, k, v) -> spelled(q, k, v; causal = false), half(16, 1, 24, 1), half(16, 1, 40, 1), half(16, 1, 40, 1)))
+    @test one.extents == (d = 16, g = 1, h = 1, m = 24, b = 1, n = 40, e = 16)
+    # Keys stored positions first: a strided view all the same.
+    kt = half(24, 16, 2, 2)
+    @test first(matches(CAUSAL, (q, k, v) -> spelled(q, permutedims(k, (2, 3, 1, 4)), v; causal = true), q, kt, v)).arrays.k.strides == (24, 384, 1, 768)
+    # Other functions.
+    for f in ((q, k, v) -> spelled(q, k, v; causal = true, widen = false), (q, k, v) -> spelled(q, k, v; causal = true, round = false),
+            (q, k, v) -> spelled(q, k, v; causal = true, scale = 0.1f0))
+        @test isempty(matches(CAUSAL, f, q, k, v))
+    end
 end
 
 # A library on the CPU: products computed from their bindings alone, element

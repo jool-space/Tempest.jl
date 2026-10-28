@@ -11,7 +11,10 @@ fitted_line(d, package, class) =
 """
 The line of `package` for products of `T` factors on the decider's target,
 fitted on first need and kept in the rates file. A package that claims no
-reference product borrows the class's fastest line.
+reference product, as a library of attention does not, borrows the class's
+fastest line of the target's packages; or, when none of them has one, of
+every package loaded, fitted for it; or, when none does products, one that
+bounds no time, for the decision to measure.
 """
 function line!(d::Decider, package, T)
     class = product_class(d.target, T)
@@ -21,7 +24,15 @@ function line!(d::Decider, package, T)
         own(p) = Line((d.calibration[key(p, what)] for what in ("latency", "rate", "split", "recompute"))..., false)
         fitted_line(d, package, class) || fit!(d, T)
         fitted_line(d, package, class) && return own(package)
-        fastest = argmax(l -> l.rate, [own(nameof(m)) for m in used_packages(d.target) if fitted_line(d, nameof(m), class)])
+        fitted(packages) = [own(nameof(m)) for m in packages if fitted_line(d, nameof(m), class)]
+        lines = fitted(used_packages(d.target))
+        if isempty(lines)
+            loaded = Module[m for (m, _) in REGISTERED]
+            fit!(d, T, loaded)
+            lines = fitted(loaded)
+        end
+        isempty(lines) && return Line(0.0, Inf, Inf, Inf, true)
+        fastest = argmax(l -> l.rate, lines)
         Line(fastest.latency, fastest.rate, fastest.split, fastest.recompute, true)
     end
 end
@@ -156,7 +167,8 @@ function memory!(d::Decider, package)
     get!(d.memories, package) do
         measures(d) || return Memory(d.rates.launch, d.rates.cached)
         key(what) = string(package, " memory ", what)
-        haskey(d.calibration, key("bandwidth")) || fit_memory!(d)
+        haskey(d.calibration, key("bandwidth")) ||
+            fit_memory!(d, Module[m for (m, _) in REGISTERED if m in used_packages(d.target) || nameof(m) === package])
         Memory(d.calibration[key("latency")], d.calibration[key("bandwidth")])
     end
 end
@@ -213,18 +225,19 @@ const REFERENCE_SHAPES = (((64, 16), (16, 64)), ((256, 256), (256, 256)), ((2048
 const RECOMPUTED_SHAPES = ((128, 64), (64, 16384), (16384, 128))
 
 """
-Fit the line of every package on the decider's target that has none for
-products of `T` factors: the fastest of the package's claims on `a * b` for
+Fit the line of every package of `packages`, by default those on the
+decider's target, that has none for products of `T` factors: the fastest of the package's claims on `a * b` for
 each reference shape, timed as claims are, the line through the small and the
 large one's times, the rate at which the middle one computes when it splits
 the sums, and the rate at which the package's claim on `(a * b) * c`, with
 `a * b` recomputed, recomputes it when that claim splits; the line's rate for
 either that does not split.
 """
-function fit!(d::Decider, T)
+function fit!(d::Decider, T, packages = used_packages(d.target))
     class = product_class(d.target, T)
     key(p, what) = string(p, " ", class, " ", what)
-    unfitted = [m for m in used_packages(d.target) if !fitted_line(d, nameof(m), class)]
+    unfitted = [m for m in packages if !fitted_line(d, nameof(m), class)]
+    isempty(unfitted) && return nothing
     times = map(shapes -> reference(d, unfitted, *, map(dims -> zeros(T, dims), shapes)...), REFERENCE_SHAPES)
     recomputing = reference(d, unfitted, (a, b, c) -> (a * b) * c, map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)...; recomputing = true)
     # A reference's first launch: its time less those of the launches after
@@ -248,14 +261,15 @@ end
 const MEMORY_COLUMNS = (256, 1024)
 
 """
-Fit the memory of every package on the decider's target that has none: the
+Fit the memory of every package of `packages`, by default those on the
+decider's target, that has none: the
 line through the times of its fastest claims on a fold over each column at
 the two reference sizes, against the bytes the claims move. A package that
 claims no such fold moves bytes at the device's rates.
 """
-function fit_memory!(d::Decider)
+function fit_memory!(d::Decider, packages = used_packages(d.target))
     key(p, what) = string(p, " memory ", what)
-    unfitted = [m for m in used_packages(d.target) if !haskey(d.calibration, key(nameof(m), "bandwidth"))]
+    unfitted = [m for m in packages if !haskey(d.calibration, key(nameof(m), "bandwidth"))]
     small, large = map(n -> reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n)), MEMORY_COLUMNS)
     for m in unfitted
         package = nameof(m)
