@@ -71,6 +71,7 @@ include("runtime/runtime.jl")
 
 # The cover: which groups there are, and how each runs.
 include("cover/view.jl")
+include("cover/library.jl")
 include("cover/cost.jl")
 include("cover/choose.jl")
 include("cover/cover.jl")

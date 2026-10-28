@@ -80,7 +80,7 @@ end
     u, v, y = single(data(512, 512; scale = 0.1)), single(data(512, 512)), single(data(512, 512; scale = 0.3))
     p = trace((u, v, y) -> (u * fill!(similar(v), 0), u * v, u * y), u, v, y)
     ex = prepare(p, CuArray(u), CuArray(v), CuArray(y); target = T.CUDATarget(cuBLAS))
-    @test isempty(built(ex)) && length(only(grouped(ex)).claim.products) == 2
+    @test isempty(built(ex)) && length(only(grouped(ex)).products) == 2
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, u, v, y)); rtol = 1.0e-5)
     # Products of parts of one value, which the generator groups as one
     # kernel, alike in all but where their operands start: one call.
@@ -89,6 +89,6 @@ end
     parts(a, s...) = ntuple(k -> C.contract(a[:, (128k - 127):128k], s[k], (1, 4), (4, 2, 3), (1, 2, 3)), 8)
     p = trace(parts, whole, states...)
     ex = prepare(p, CuArray(whole), map(CuArray, states)...; target = T.CUDATarget(cuBLAS))
-    @test length(ex.kernels) == 1 && length(only(grouped(ex)).claim.products) == 8
+    @test length(ex.kernels) == 1 && length(only(grouped(ex)).products) == 8
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, whole, states...)); rtol = 1.0e-5)
 end

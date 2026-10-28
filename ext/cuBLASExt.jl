@@ -1,31 +1,40 @@
-# cuBLAS: a product as one library call. It claims a group that is one sum of a
-# product of two loads, each a strided matrix (or a batch of them) over the
-# product's axes, written whole to its own buffer: no prologue, no epilogue;
-# and a group of such products alike in all but where their operands start,
-# as one call over arrays of their matrices.
+# cuBLAS: a product as one library call. A library to Tempest: its templates
+# are a batch of products, and the same of half-precision factors summed in
+# Float32, and it supports those whose factors and result are matrices cuBLAS
+# reads, each with a unit stride and a leading dimension; and instances of
+# them alike but for where their operands start, as one call over arrays of
+# their matrices.
 module cuBLASExt
 
 using CUDACore
 using cuBLAS
 using BFloat16s: BFloat16
-using Republic: @republic
 import Tempest
 using Tempest: CUDATarget
-@republic republic=false inherit=:public using Tempest.Compiler.IR
-@republic republic=false inherit=:public import Tempest.Compiler.Implement
-using Tempest.Compiler: Plan, group_views
+using Tempest.Compiler: contract
+using Tempest.Compiler.Implement: Library, Template, Binding, register!
+import Tempest.Compiler.Implement: templates, supports, build
 
-struct cuBLASProducts <: Implementation end
+struct cuBLASProducts <: Library end
+
+product(A, B) = contract(A, B, (1, 3, 4), (3, 2, 4), (1, 2, 4))
+widened(A, B) = product(Float32.(A), Float32.(B))
+
+const PRODUCTS = (Template(product; inputs = (A = (:m, :k, :b), B = (:k, :n, :b)), outputs = (:C,)),
+    Template(widened; inputs = (A = (:m, :k, :b), B = (:k, :n, :b)), outputs = (:C,)))
+
+templates(::cuBLASProducts, ::CUDATarget) = PRODUCTS
+
+const FACTOR_TYPES = (Float32, Float16, BFloat16)
 
 "A factor or the result as cuBLAS reads it: column-major with a leading dimension."
 struct Operand
-    value::Int
-    offset::Int
+    name::Symbol
     leading::Int
     batch_stride::Int
 end
 
-struct GemmClaim
+struct Gemm
     transposes::Tuple{Char, Char}
     m::Int
     n::Int
@@ -38,34 +47,11 @@ struct GemmClaim
     result::DataType
 end
 
-"Products alike in all but where their operands start: one call over arrays of their matrices."
-struct GroupedClaim
-    products::Vector{GemmClaim}
-end
-
-# What products must share to be one call: all but their operands' values and offsets.
-layout(o::Operand) = (o.leading, o.batch_stride)
-alike(c::GemmClaim) = (c.transposes, c.m, c.n, c.k, c.batch, layout(c.a), layout(c.b), layout(c.c), c.factor, c.result)
-
-const FACTOR_TYPES = (Float32, Float16, BFloat16)
-
 # The compute type of a product of `T` factors under the target's numerics:
 # Float32 in full or as TF32, half factors accumulating in Float32. The one place
 # this extension reads precision; `:tf32x3` is met by full Float32.
 compute_type(target::CUDATarget, T) =
     T === Float32 && target.precision === :tf32 ? cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 : cuBLAS.CUBLAS_COMPUTE_32F
-
-# Strides of value `v` read at `index` along each group of axes, and its offset;
-# nothing when the read is not a strided view over them.
-function strides(g::GroupView, v, index, groups...)
-    e = address(g.values[v], index, Domain(g.domain))
-    is_affine(e) || return nothing
-    covered = reduce(vcat, groups; init = Int[])
-    any(k -> g.domain[k] > 1 && coefficient(e, k) != 0 && !(k in covered), eachindex(g.domain)) && return nothing
-    s = map(grp -> group_stride(e, grp, g.domain), groups)
-    any(x -> x === nothing || x < 0, s) && return nothing
-    (e.constant, s...)
-end
 
 # A matrix of `rows` by `columns` with strides `(along rows, along columns)` as
 # cuBLAS takes it: untransposed when rows are unit-stride, transposed when
@@ -82,102 +68,46 @@ function orient(rows, columns, (sr, sc))
     nothing
 end
 
-# A factor's load: the load itself, or a half-precision load converted to
-# Float32, whose products cuBLAS accumulates in Float32 exactly.
-factor_load(t::Load, g) = t
-function factor_load(t::Apply, g)
-    t.f isa Cast{Float32} && only(t.args) isa Load || return nothing
-    l = only(t.args)
-    g.values[l.value].eltype <: HalfFloat ? l : nothing
-end
-factor_load(t, g) = nothing
-
-function claims(::cuBLASProducts, target::CUDATarget, g::GroupView)
-    g.kind === :reduction && isempty(g.outputs) || return GemmClaim[]
-    products = [gemm_claim(target, g, r) for r in g.reductions]
-    any(isnothing, products) && return GemmClaim[]
-    length(products) == 1 && return GemmClaim[only(products)]
-    allequal(map(alike, products)) ? [GroupedClaim(products)] : GemmClaim[]
-end
-
-# Fold `r` of a group as one product call, or nothing.
-function gemm_claim(target::CUDATarget, g::GroupView, r)
-    g.values[r].stored && g.values[r].fold isa SumFold || return nothing
-    found = product_axes(g, r)
-    found === nothing && return nothing
-    M, N, K, B = found
-    x, y = map(f -> factor_load(f, g), g.terms[r].args)
-    (x === nothing || y === nothing) && return nothing
-    T = g.values[x.value].eltype
-    R = g.values[r].eltype
-    T in FACTOR_TYPES && g.values[y.value].eltype === T && (R === T || R === Float32) || return nothing
-    extent(axes) = prod(k -> g.domain[k], axes; init = 1)
-    m, n, k, batch = extent(M), extent(N), extent(K), extent(B)
-    max(m, n, k, batch) < typemax(Int32) || return nothing
-    sx = strides(g, x.value, x.index, M, K, B)
-    sy = strides(g, y.value, y.index, K, N, B)
-    sc = strides(g, r, g.placement[r], M, N, B)
-    (sx === nothing || sy === nothing || sc === nothing) && return nothing
-    left, right = (x.value, sx[1], (sx[2], sx[3]), sx[4]), (y.value, sy[1], (sy[2], sy[3]), sy[4])
-    out = (r, sc[1], (sc[2], sc[3]), sc[4])
+# The call that computes a binding, or nothing when cuBLAS does not take it:
+# products of matrices of more than one row and column, the widened
+# template's of half-precision factors only.
+function gemm(b::Binding)
+    A, B, C = b.arrays.A, b.arrays.B, b.arrays.C
+    T, R = A.eltype, C.eltype
+    T in FACTOR_TYPES && B.eltype === T && (R === T || R === Float32) && (b.template == 1 || T !== Float32) || return nothing
+    m, n, k, batch = b.extents.m, b.extents.n, b.extents.k, b.extents.b
+    m > 1 && n > 1 && max(m, n, k, batch) < typemax(Int32) || return nothing
+    left, right, out = (:A, A.strides[1:2], A.strides[3]), (:B, B.strides[1:2], B.strides[3]), (:C, C.strides[1:2], C.strides[3])
     # cuBLAS writes a column-major result: when the result's columns are unit
     # stride instead, compute its transpose, the factors swapped and transposed.
-    if !(m == 1 || sc[2] == 1)
-        left, right = (right[1], right[2], reverse(right[3]), right[4]), (left[1], left[2], reverse(left[3]), left[4])
-        out = (r, sc[1], reverse(out[3]), sc[4])
+    if C.strides[1] != 1
+        left, right = (right[1], reverse(right[2]), right[3]), (left[1], reverse(left[2]), left[3])
+        out = (:C, reverse(out[2]), out[3])
         m, n = n, m
     end
-    oc = orient(m, n, out[3])
+    oc = orient(m, n, out[2])
     oc === nothing || oc[1] == 'N' || return nothing
-    oa, ob = orient(m, k, left[3]), orient(k, n, right[3])
+    oa, ob = orient(m, k, left[2]), orient(k, n, right[2])
     (oc === nothing || oa === nothing || ob === nothing) && return nothing
     maximum((oa[2], ob[2], oc[2])) < typemax(Int32) || return nothing
-    operand((v, offset, _, bs), o) = Operand(v, offset, o[2], bs)
-    GemmClaim((oa[1], ob[1]), m, n, k, batch, operand(left, oa), operand(right, ob), operand(out, oc), T, R)
+    operand((name, _, bs), o) = Operand(name, o[2], bs)
+    Gemm((oa[1], ob[1]), m, n, k, batch, operand(left, oa), operand(right, ob), operand(out, oc), T, R)
 end
 
-estimate(::cuBLASProducts, c::GemmClaim, target, g::GroupView) =
-    [Work(g.bytes; flops = 2.0 * c.m * c.n * c.k * c.batch, factor = c.factor)]
-estimate(::cuBLASProducts, c::GroupedClaim, target, g::GroupView) =
-    [Work(g.bytes; flops = 2.0 * sum(p -> p.m * p.n * p.k * p.batch, c.products), factor = first(c.products).factor)]
+supports(::cuBLASProducts, ::CUDATarget, b::Binding) = gemm(b) !== nothing
 
-record_name(::cuBLASProducts, c::GemmClaim) = string("cuBLAS ", c.transposes..., " ", c.m, "×", c.n, "×", c.k,
-    c.batch > 1 ? " batch $(c.batch)" : "", " leading ", (c.a.leading, c.b.leading, c.c.leading), " ", c.factor, " to ", c.result)
-record_name(i::cuBLASProducts, c::GroupedClaim) = string(record_name(i, first(c.products)), " ×", length(c.products))
+# What products must share to be one call: all but where their operands start.
+alike(c::Gemm) = (c.transposes, c.m, c.n, c.k, c.batch, c.a, c.b, c.c, c.factor, c.result)
 
-# Candidates: each product fold the generator groups with other work, alone,
-# so that its group is this claim's and the work after it a kernel of its own,
-# and each product fold it recomputes inside another's, stored by this claim.
-function candidates(::cuBLASProducts, target::CUDATarget, p::Plan)
-    found = Vector{Int}[]
-    for g in group_views(p)
-        g.kind === :reduction || continue
-        product(r, t) = g.values[r].fold isa SumFold && t isa Apply && t.f === (*) && length(t.args) == 2 &&
-            all(f -> factor_load(f, g) !== nothing, t.args)
-        for r in g.reductions
-            length(members(g)) > 1 && product(r, g.terms[r]) && product_axes(g, r) !== nothing && push!(found, [r])
-        end
-        # Of a kernel cuBLAS does not claim whole, the most products alike, as one call.
-        if isempty(claims(cuBLASProducts(), target, g))
-            classes = Dict{Any, Vector{Int}}()
-            for r in g.reductions
-                c = gemm_claim(target, g, r)
-                c === nothing || push!(get!(() -> Int[], classes, alike(c)), r)
-            end
-            isempty(classes) || (set = argmax(length, values(classes)); length(set) > 1 && push!(found, sort(set)))
-        end
-        roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
-        for t in subterms(roots; nested = true)
-            t isa Recomputed && product(t.value, t.body) && !([t.value] in found) && push!(found, [t.value])
-        end
-    end
-    found
+function supports(::cuBLASProducts, ::CUDATarget, bs::Vector{Binding})
+    cs = map(gemm, bs)
+    !any(isnothing, cs) && allequal(map(alike, cs))
 end
 
 # One handle per context, its workspace and the device constants one and
 # zero, set up once: pointers to device constants, Float32 accumulation that
 # never reduces precision, and the precision of each call in its compute type.
-struct Library
+struct Handle
     handle::cuBLAS.cublasHandle_t
     workspace::CuArray{UInt8, 1}
     one::CuArray{Float32, 1}
@@ -185,53 +115,51 @@ struct Library
 end
 
 const WORKSPACE_BYTES = 32 << 20
-const LIBRARIES = Dict{CUDACore.CuContext, Library}()
+const HANDLES = Dict{CUDACore.CuContext, Handle}()
 
-function library()
-    get!(LIBRARIES, CUDACore.context()) do
+function handle()
+    get!(HANDLES, CUDACore.context()) do
         handle = cuBLAS.cublasCreate()
         cuBLAS.cublasSetPointerMode_v2(handle, cuBLAS.CUBLAS_POINTER_MODE_DEVICE)
         cuBLAS.cublasSetMathMode(handle, cuBLAS.cublasMath_t(
             cuBLAS.CUBLAS_DEFAULT_MATH | cuBLAS.CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION))
-        Library(handle, CuArray{UInt8}(undef, WORKSPACE_BYTES), CuArray(Float32[1]), CuArray(Float32[0]))
+        Handle(handle, CuArray{UInt8}(undef, WORKSPACE_BYTES), CuArray(Float32[1]), CuArray(Float32[0]))
     end
 end
 
 struct BuiltProduct
-    claim::GemmClaim
+    gemm::Gemm
     compute::cuBLAS.cublasComputeType_t
 end
 
 struct BuiltProducts
-    claim::GroupedClaim
+    products::Vector{Gemm}
     compute::cuBLAS.cublasComputeType_t
 end
 
-function Base.show(io::IO, b::BuiltProducts)
-    print(io, length(b.claim.products), " ", BuiltProduct(first(b.claim.products), b.compute), ", one call")
-end
+Base.show(io::IO, b::BuiltProducts) = print(io, length(b.products), " ", BuiltProduct(first(b.products), b.compute), ", one call")
 
 function Base.show(io::IO, b::BuiltProduct)
-    c = b.claim
+    c = b.gemm
     print(io, "cuBLAS product ", c.m, "×", c.n, " summing ", c.k)
     c.batch > 1 && print(io, ", batch ", c.batch)
     print(io, ", ", c.transposes[1], c.transposes[2], ", ",
         b.compute == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : c.factor === Float32 ? "full precision" : "$(c.factor) accumulating in Float32")
 end
 
-function build_claim(::cuBLASProducts, c::GemmClaim, target, g::GroupView, buffers)
-    lib = library()
-    operand_pointer(o::Operand, T) = pointer(buffers[o.value]) + o.offset * sizeof(T)
-    a, b, y = operand_pointer(c.a, c.factor), operand_pointer(c.b, c.factor), operand_pointer(c.c, c.result)
+function build(::cuBLASProducts, target::CUDATarget, b::Binding)
+    c = gemm(b)
+    lib = handle()
+    a, x, y = pointer(b.arrays[c.a.name]), pointer(b.arrays[c.b.name]), pointer(b.arrays[c.c.name])
     compute = compute_type(target, c.factor)
     (ta, tb), (m, n, k, batch) = c.transposes, (c.m, c.n, c.k, c.batch)
-    keep = (lib, buffers)
+    keep = (lib, b)
     function launch()
         cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
         # Setting the stream resets the workspace: install it after.
         cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
         cuBLAS.cublasGemmStridedBatchedEx(lib.handle, ta, tb, m, n, k, lib.one, a, c.factor, c.a.leading, c.a.batch_stride,
-            b, c.factor, c.b.leading, c.b.batch_stride, lib.zero, y, c.result, c.c.leading, c.c.batch_stride, batch,
+            x, c.factor, c.b.leading, c.b.batch_stride, lib.zero, y, c.result, c.c.leading, c.c.batch_stride, batch,
             compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
         keep
         nothing
@@ -241,24 +169,25 @@ end
 
 # The matrices of products alike, by arrays of their addresses on the device,
 # fixed when it is built: the buffers of a prepared program do not move.
-function build_claim(::cuBLASProducts, c::GroupedClaim, target, g::GroupView, buffers)
-    lib = library()
-    p = first(c.products)
-    at(o::Operand, T, b) = Ptr{Cvoid}(reinterpret(UInt, pointer(buffers[o.value])) + (o.offset + b * o.batch_stride) * sizeof(T))
-    addresses(f) = CuArray(Ptr{Cvoid}[f(q, b) for q in c.products for b in 0:(p.batch - 1)])
-    a, b, y = addresses((q, i) -> at(q.a, p.factor, i)), addresses((q, i) -> at(q.b, p.factor, i)), addresses((q, i) -> at(q.c, p.result, i))
-    compute = compute_type(target, p.factor)
-    (ta, tb), (m, n, k), count = p.transposes, (p.m, p.n, p.k), length(c.products) * p.batch
-    keep = (lib, buffers, a, b, y)
+function build(::cuBLASProducts, target::CUDATarget, bs::Vector{Binding})
+    cs = map(gemm, bs)
+    c = first(cs)
+    lib = handle()
+    at(b, o, T, i) = Ptr{Cvoid}(reinterpret(UInt, pointer(b.arrays[o.name])) + i * o.batch_stride * sizeof(T))
+    addresses(o, T) = CuArray(Ptr{Cvoid}[at(b, o, T, i) for b in bs for i in 0:(c.batch - 1)])
+    a, x, y = addresses(c.a, c.factor), addresses(c.b, c.factor), addresses(c.c, c.result)
+    compute = compute_type(target, c.factor)
+    (ta, tb), (m, n, k), count = c.transposes, (c.m, c.n, c.k), length(bs) * c.batch
+    keep = (lib, bs, a, x, y)
     function launch()
         cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
         cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
-        cuBLAS.cublasGemmBatchedEx(lib.handle, ta, tb, m, n, k, lib.one, a, p.factor, p.a.leading, b, p.factor, p.b.leading,
-            lib.zero, y, p.result, p.c.leading, count, compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
+        cuBLAS.cublasGemmBatchedEx(lib.handle, ta, tb, m, n, k, lib.one, a, c.factor, c.a.leading, x, c.factor, c.b.leading,
+            lib.zero, y, c.result, c.c.leading, count, compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
         keep
         nothing
     end
-    (launch, BuiltProducts(c, compute))
+    (launch, BuiltProducts(cs, compute))
 end
 
 __init__() = register!(cuBLAS, cuBLASProducts())

@@ -159,4 +159,6 @@ compiling() = COMPILING[] && ccall(:jl_generating_output, Cint, ()) == 0
 
 const COMPILING = Base.ScopedValues.ScopedValue(true)
 
+include("library.jl")
+
 end

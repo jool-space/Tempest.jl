@@ -122,6 +122,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         replaces = (), by_reference = (), recompute = (), partition::Bool = true, build::Bool = true)
     # The terms an earlier preparation interned are of its program.
     IR.forget_terms!()
+    forget_matches!()
     graph = lower(program)
     permits_rewrites(target) && (graph = rewrite(graph))
     pairs = replacements(program, replaces)

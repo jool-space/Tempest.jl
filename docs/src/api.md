@@ -188,3 +188,19 @@ Tempest.Compiler.Implement.in_place
 Tempest.Compiler.Implement.lowers
 Tempest.Compiler.Implement.compiling
 ```
+
+### Libraries
+
+A library realizes the groups that compute a function Tempest can already
+compute. It names that function as a template, and Tempest finds the groups
+that compute it and hands the library each array as a strided view.
+
+```@docs
+Tempest.Compiler.Implement.Library
+Tempest.Compiler.Implement.Template
+Tempest.Compiler.Implement.templates
+Tempest.Compiler.Implement.supports
+Tempest.Compiler.Implement.build
+Tempest.Compiler.Implement.Binding
+Tempest.Compiler.Implement.Strided
+```
