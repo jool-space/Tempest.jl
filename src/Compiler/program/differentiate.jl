@@ -196,6 +196,7 @@ end
 IR.fold_observe(::Recurrence{K}, s) where {K} = ntuple(r -> s[K * K + r], Val(K))
 
 pullback(op::Accumulate, n, id, g, tape) = (scan_pullback(op.fold, op, h(tape, only(n.inputs)), g, tape),)
+pullback(op::Loop, n, id, g, tape) = throw(ArgumentError("differentiating a recurrence, `accumulate` over slices, is not supported yet"))
 
 # A sum's prefixes: each element enters every prefix after it, so its
 # cotangent is the sum of theirs, the scan of the cotangent the other way.

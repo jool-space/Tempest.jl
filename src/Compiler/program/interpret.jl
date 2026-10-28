@@ -102,9 +102,31 @@ function interpret(p::Program, args...)
         values[id] = inputs[k]
     end
     keep = live(p.nodes, p.results)
+    loops = IdDict{LoopBody, Vector{Any}}()
     for (id, n) in enumerate(p.nodes)
         (keep[id] && !(n.op isa Argument)) || continue
-        values[id] = evaluate(n.op, n, map(i -> values[i], n.inputs))
+        xs = map(i -> values[i], n.inputs)
+        values[id] = n.op isa Loop ? get!(() -> run_loop(n.op.body, xs), loops, n.op.body)[n.op.result] : evaluate(n.op, n, xs)
     end
     rebuild(k -> k === nothing ? nothing : values[p.results[k]], p.output_structure)
+end
+
+# A recurrence's results, stacked along a last axis: its step run on the
+# state, a slice of each scanned array and the captures, as Base runs it.
+function run_loop(body::LoopBody, xs)
+    nstate, nscanned = length(body.carried), length(body.sliced)
+    state = collect(Any, xs[1:nstate])
+    scanned, captured = xs[(nstate + 1):(nstate + nscanned)], xs[(nstate + nscanned + 1):end]
+    steps = map(1:body.steps) do t
+        slices = map((x, k) -> copy(selectdim(x, k, t)), scanned, body.sliced)
+        out = interpret(body.program, state..., slices..., captured...)
+        ys = Vector{Any}(undef, length(body.program.results))
+        foreach((y, r) -> r === nothing || (ys[r] = y), out, body.program.output_structure)
+        state = ys[body.carried]
+        ys
+    end
+    map(eachindex(body.program.results)) do r
+        n = body.program.nodes[body.program.results[r]]
+        n.scalar ? [y[r] for y in steps] : stack(y -> y[r], steps)
+    end
 end

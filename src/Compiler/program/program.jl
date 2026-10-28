@@ -6,6 +6,9 @@ abstract type Operation end
 "An input of the program."
 struct Argument <: Operation end
 
+"A stand-in for a recurrence's state or slice while its step is traced; no program keeps one (see `recurrence`)."
+struct Placeholder <: Operation end
+
 "A constant: a number filling the node's shape, an array of it, or a range of integers."
 struct Constant{T} <: Operation
     value::T
@@ -108,10 +111,14 @@ mutable struct Tape
     nodes::Vector{Node}
     # The nodes a reverse pass appended: the backward of the program.
     backward::BitSet
+    # Of each recurrence's step being traced, the last node before it: a step
+    # writes no array made before it (see `recurrence`).
+    steps::Vector{Int}
 end
 
-Tape() = Tape(Node[], BitSet())
-Tape(nodes::Vector{Node}) = Tape(nodes, BitSet())
+Tape() = Tape(Node[], BitSet(), Int[])
+Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[])
+Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[])
 
 function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))
@@ -139,12 +146,38 @@ end
 Program(nodes, arguments, results, input_structure, output_structure) =
     Program(nodes, arguments, results, input_structure, output_structure, BitSet())
 
+"""
+A recurrence's step: a program whose arguments are the state's arrays, a slice
+of each scanned array and the values the step captures, in that order, as the
+inputs of the recurrence's nodes are; `steps` steps, the state's `k`th array
+carried by the step's `carried[k]`th result, the `k`th scanned array sliced
+along its axis `sliced[k]`.
+"""
+struct LoopBody
+    program::Program
+    steps::Int
+    carried::Vector{Int}
+    sliced::Vector{Int}
+end
+
+"""
+A recurrence, as Base's `accumulate` over slices of arrays runs one: `body`
+run once per step, each step's result the next step's state. The node is the
+body's `result`th result at every step, stacked along a last axis, so a step's
+result is its slice there (see `LoopBody`).
+"""
+struct Loop <: Operation
+    body::LoopBody
+    result::Int
+end
+
 op_name(op::Operation) = lowercase(string(nameof(typeof(op))))
 op_detail(op::Operation) = ""
 op_detail(op::Constant) = op.value isa AbstractRange ? " " * repr(op.value) : op.value isa AbstractArray ? " array" : " " * repr(op.value)
 op_detail(op::Map) = " " * string(op.f)
 op_detail(op::Reduce) = " " * string(fold_name(op.fold)) * " over " * string(op.axes)
 op_detail(op::Accumulate) = " " * scan_summary(op.fold, op.axes, op.reverse, op.exclusive)
+op_detail(op::Loop) = string(" of ", op.body.steps, " steps, result ", op.result)
 
 # A scan in words: its fold, its axes, and its direction where it is not the plain one.
 scan_summary(fold, axes, reverse, exclusive) =

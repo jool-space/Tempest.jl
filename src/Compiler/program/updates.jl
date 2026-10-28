@@ -43,6 +43,7 @@ function write!(x::TracedArray, contents::Int)
         owner = owner.layout.parent
     end
     owner.input && throw(ArgumentError(INPUT_WRITE))
+    isempty(owner.tape.steps) || owner.id > last(owner.tape.steps) || throw(ArgumentError(STEP_WRITE))
     while x.layout !== nothing
         (; parent, op, inputs) = x.layout
         contents = written_through(op, parent, inputs, contents)

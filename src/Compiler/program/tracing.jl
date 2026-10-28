@@ -773,6 +773,122 @@ Base.cumsum(x::TracedArray{<:Any, 1}) = cumsum(x; dims = 1)
 Base.cumprod(x::TracedArray; dims::Integer) = accumulate(Base.mul_prod, x; dims)
 Base.cumprod(x::TracedArray{<:Any, 1}) = cumprod(x; dims = 1)
 
+# Recurrences: Base's `accumulate` over slices of traced arrays, from `init`,
+# each step's result the next step's state, as Base runs it: `f(state, x)`,
+# `x` a slice of each array, zipped. The step is traced once, on stand-ins for
+# the state and the slices, on the program's tape: what it computes from them
+# is the loop's body (see `Loop`), and what it computes from neither stays
+# outside, computed once. Its result has the structure of `init`; a part of
+# the state the step never reads, `nothing` in `init` say, is a result of each
+# step rather than a state, as JAX's `scan` returns `ys` beside its carry. The
+# result is Base's: a vector of each step's result, each a slice of the
+# loop's stacked results.
+const TracedSlices = Base.Slices{<:TracedArray}
+
+Base.accumulate(f, xs::TracedSlices; init) = recurrence(f, (xs,), init, false)
+Base.accumulate(f, xs::Iterators.Zip{<:Tuple{Vararg{TracedSlices}}}; init) = recurrence(f, xs.is, init, true)
+
+const STEP_WRITE = "a step of `accumulate` writes an array made before it: each step is a function of its state and \
+    slices, which it reads, so a write into an array from outside the step, or into a view of one, would change \
+    it once per step without the loop stating it. Carry the array in the state instead"
+
+function recurrence(f, scanned, init, zipped)
+    arrays = map(parent, scanned)
+    tape = first(arrays).tape
+    all(a -> a.tape === tape, arrays) || throw(ArgumentError("accumulate's arrays were traced by different programs"))
+    sliced = map(scanned) do xs
+        along = findall(i -> !(i isa Colon), xs.slicemap)
+        length(along) == 1 || throw(ArgumentError("accumulate over slices takes them along one axis, got $(xs.slicemap)"))
+        only(along)
+    end
+    steps = size(first(arrays), first(sliced))
+    all(k -> size(arrays[k], sliced[k]) == steps, eachindex(arrays)) ||
+        throw(DimensionMismatch("accumulate zips slices of different counts: $(map(size, arrays, sliced))"))
+    stand_in(dims, T; scalar = false) = record!(tape, Placeholder(), (), dims, T; scalar)
+    # The state's arrays and numbers; a plain one is a constant.
+    states = map(leaves(init)) do leaf
+        leaf === nothing && return nothing
+        x = leaf isa Union{TracedArray, Traced} ? leaf : leaf isa Union{Number, AbstractArray{<:Number}} ?
+            constant_handle(tape, leaf) : throw(ArgumentError("accumulate's `init` holds arrays and numbers, got $(typeof(leaf))"))
+        x.tape === tape || throw(ArgumentError("accumulate's `init` was traced by another program"))
+        x
+    end
+    start = length(tape.nodes)
+    held = map(x -> x === nothing ? nothing : x isa Traced ? Traced(tape, stand_in((), node(x).eltype; scalar = true)) :
+        TracedArray(tape, stand_in(size(x), eltype(x))), states)
+    slices = map((a, k) -> TracedArray(tape, stand_in(Tuple(size(a, i) for i in 1:ndims(a) if i != k), eltype(a))), arrays, sliced)
+    count = Ref(0)
+    state = rebuild(_ -> held[count[] += 1], init)
+    push!(tape.steps, start)
+    result = try
+        f(state, zipped ? Tuple(slices) : only(slices))
+    finally
+        pop!(tape.steps)
+    end
+    outs = map(leaves(result)) do leaf
+        leaf === nothing && return nothing
+        leaf isa Union{TracedArray, Traced} && leaf.tape === tape && return leaf.id
+        leaf isa Union{Number, AbstractArray{<:Number}} && return constant_handle(tape, leaf).id
+        throw(ArgumentError("a step of accumulate returns arrays and numbers, got $(typeof(leaf))"))
+    end
+    length(outs) == length(held) || throw(ArgumentError("a step of accumulate returns a result of the structure of `init`"))
+    # The step: what reads a stand-in; the rest stays outside, its values
+    # the step's captures.
+    reads = falses(length(tape.nodes))
+    stand_ins = Set(x.id for x in (filter(!isnothing, held)..., slices...))
+    for id in (start + 1):length(tape.nodes)
+        reads[id] = id in stand_ins || any(i -> reads[i], tape.nodes[id].inputs)
+    end
+    body = [id for id in (start + 1):length(tape.nodes) if reads[id] && !(id in stand_ins)]
+    captured = sort!(unique([[i for id in body for i in tape.nodes[id].inputs if !reads[i]];
+        [o for o in outs if o !== nothing && !reads[o]]]))
+    carried = Int[]
+    for (k, x) in enumerate(held)
+        x === nothing && continue
+        o = outs[k]
+        o === nothing && throw(ArgumentError("a step of accumulate returns `nothing` where `init` holds its state"))
+        n, m = tape.nodes[x.id], tape.nodes[o]
+        (n.dims, n.eltype, n.scalar) == (m.dims, m.eltype, m.scalar) || throw(ArgumentError(
+            "the state accumulate carries changes from $(node_type(n)) to $(node_type(m)); convert it in the step"))
+        push!(carried, k)
+    end
+    # The step's program: its arguments the state, the slices and the captures.
+    arguments = [Int[x.id for x in held if x !== nothing]; Int[x.id for x in slices]; captured]
+    renumbered = Dict(id => k for (k, id) in enumerate(arguments))
+    nodes = [Node(Argument(), (), tape.nodes[id].dims, tape.nodes[id].eltype, tape.nodes[id].scalar) for id in arguments]
+    for id in body
+        n = tape.nodes[id]
+        push!(nodes, Node(n.op, map(i -> renumbered[i], n.inputs), n.dims, n.eltype, n.scalar))
+        renumbered[id] = length(nodes)
+    end
+    results = Int[]
+    output_structure = Tuple(map(outs) do o
+        o === nothing && return nothing
+        push!(results, renumbered[o])
+        length(results)
+    end)
+    program = Program(nodes, collect(eachindex(arguments)), results, Tuple(eachindex(arguments)), output_structure)
+    loop = LoopBody(program, steps, [output_structure[k] for k in carried], collect(sliced))
+    inputs = [Int[x.id for x in states if x !== nothing]; Int[a.id for a in arrays]; captured]
+    stacked = map(eachindex(results)) do k
+        n = nodes[results[k]]
+        id = record!(tape, Loop(loop, k), inputs, n.scalar ? (steps,) : (n.dims..., steps), n.eltype)
+        TracedArray(tape, id)
+    end
+    map(1:steps) do t
+        k = 0
+        rebuild(result) do _
+            r = output_structure[k += 1]
+            r === nothing && return nothing
+            x = stacked[r]
+            nodes[results[r]].scalar ? x[t] : x[ntuple(_ -> Colon(), ndims(x) - 1)..., t]
+        end
+    end
+end
+
+constant_handle(tape, x::Number) = Traced(tape, constant!(tape, x))
+constant_handle(tape, x::AbstractArray) = TracedArray(tape, constant!(tape, x))
+
 # `map` over arrays of one shape is a broadcast, and `dot` a sum of products,
 # rather than loops over their elements.
 function Base.map(f, x::TracedArray, xs::AbstractArray...)

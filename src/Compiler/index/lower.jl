@@ -429,6 +429,8 @@ function lower(p::Program)
             value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
         elseif op isa Accumulate
             value!(Scan(op.fold, operand(only(inputs), only(input_dims), d), op.axes, op.reverse, op.exclusive), n)
+        elseif op isa Loop
+            throw(ArgumentError("compiling a recurrence, `accumulate` over slices, is not supported yet; `interpret` runs it"))
         elseif op isa Contract
             contraction!(value!, op, inputs, input_dims, n)
         elseif op isa Scatter && !any(i -> i isa IndexInput, op.indices)
