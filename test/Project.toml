@@ -17,6 +17,7 @@ cuTile = {rev = "main", url = "https://github.com/JuliaGPU/cuTile.jl"}
 
 [compat]
 CUDACore = "6.4"
+LinearAlgebra = "1.11"
 ParallelTestRunner = "2.9"
 Test = "1"
 cuBLAS = "6.4"
