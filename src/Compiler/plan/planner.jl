@@ -87,6 +87,7 @@ end
 # group keeps everything but its folds over its whole domain. A fold by key
 # keeps each element at its key.
 function placement(graph, g::Group, v)
+    g.kind === :recurrence && return v in g.outputs ? recurrence_places(graph, g.outputs).places[v] : nothing
     val = graph.values[v]
     d = val.definition
     d isa Keyed && return v in g.reductions ? d.key : nothing
@@ -149,8 +150,8 @@ domain, or inside a recomputed fold that domain extended by the fold's axes.
 function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain))
     val = graph.values[v]
     d = val.definition
-    # A recurrence's group reads its state wherever this step stored it.
-    g.kind === :recurrence && d isa Carried && v in g.outputs && return Load(v, index)
+    # A recurrence's group reads what it computes wherever this step stored it.
+    g.kind === :recurrence && v in g.outputs && return Load(v, index)
     if v in g.reductions
         g.kind === :scan && d isa Reduction && throw(OutsideGroup())
         primary(graph, g, v) && kept_at(graph, g, v, index) || throw(OutsideGroup())
@@ -365,16 +366,19 @@ function storing(graph::IndexGraph; recompute = (), store = ())
         d isa Union{Pointwise, Reduction, Scan, Keyed} && !live[id] && return false
         d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id] || fold_slice(values, d)) : true
     end
-    # A recurrence's state and the value it is carried from are stored, the
-    # values of its cycle that nothing else reads are not: its group
-    # recomputes them at each step (see `recurrence_group`).
+    # A recurrence's state is stored, and the values of its cycle something
+    # outside it reads, the value the state is carried from among them: its
+    # group stores them at each step. The rest it recomputes at each step,
+    # the value it is carried from becoming the state one step on (see
+    # `recurrence_group`).
     cycles = recurrences(graph)
     if !isempty(cycles)
         users = readers(graph)
         for (c, f, cycle) in cycles
-            stored[c] = stored[f] = true
+            stored[c] = true
             for w in cycle
-                w in (c, f) || w in results || materialized[w] || any(u -> live[u] && !(u in cycle), users[w]) || (stored[w] = false)
+                w == c && continue
+                stored[w] = w in results || materialized[w] || any(u -> live[u] && !(u in cycle), users[w])
             end
         end
     end
@@ -573,67 +577,114 @@ awaits_sweep(graph, deps, g::Group, v) = g.kind === :scan &&
 # carried from reads, both through others: what its group computes at each
 # step.
 function recurrences(graph)
-    values = graph.values
     found = Tuple{Int, Int, Vector{Int}}[]
-    for (c, v) in enumerate(values)
+    for (c, v) in enumerate(graph.values)
         d = v.definition
         d isa Carried && d.from isa Read && d.from.value > c || continue
-        f = d.from.value
-        reaches, feeds = falses(f), falses(f)
-        reaches[c] = feeds[f] = true
-        for w in (c + 1):f
-            reaches[w] = any(o -> any(r -> r <= f && reaches[r], read_values(o)), operands(values[w].definition))
-        end
-        for w in f:-1:c
-            feeds[w] || continue
-            for o in operands(values[w].definition), r in read_values(o)
-                c <= r && (feeds[r] = true)
-            end
-        end
-        cycle = [w for w in c:f if reaches[w] && feeds[w]]
-        all(w -> w == c || values[w].definition isa Union{Pointwise, Reduction}, cycle) ||
-            throw(ArgumentError("a recurrence whose step scans, scatters or writes is not supported yet"))
-        push!(found, (c, f, cycle))
+        push!(found, (c, d.from.value, recurrence_cycle(graph, c, d.from.value)))
     end
     found
 end
 
-# A recurrence's group, over its state's domain, stepping along the state's
-# axis: the state, stored at each step, where it starts or else the value it
-# is carried from one step back, and that value, whose term recomputes the
-# cycle between and reads the state wherever this step stored it.
-function recurrence_group(graph, stored, c, f, cycle)
+function recurrence_cycle(graph, c, f)
     values = graph.values
-    D = values[c].dims
-    values[f].dims == D || throw(ArgumentError("a recurrence's state carried from a value of another shape is not supported yet"))
-    g = Group(:recurrence, D)
-    inside = copy(stored)
-    foreach(w -> w == c || (inside[w] = false), cycle)
-    domain, index = Domain(D), identity_index(D)
-    push!(g.outputs, c, f)
-    g.terms[c] = operand_term(graph, inside, g, values[c].definition.init, index, domain)
-    g.terms[f] = values[f].definition isa Reduction ? fold_term(graph, inside, g, f, index, domain) :
-        definition_term(graph, inside, g, values[f].definition, values[f], index, domain)
-    g.phase[c] = g.phase[f] = 0
-    g
+    reaches, feeds = falses(f), falses(f)
+    reaches[c] = feeds[f] = true
+    for w in (c + 1):f
+        reaches[w] = any(o -> any(r -> r <= f && reaches[r], read_values(o)), operands(values[w].definition))
+    end
+    for w in f:-1:c
+        feeds[w] || continue
+        for o in operands(values[w].definition), r in read_values(o)
+            c <= r && (feeds[r] = true)
+        end
+    end
+    cycle = [w for w in c:f if reaches[w] && feeds[w]]
+    all(w -> w == c || values[w].definition isa Union{Pointwise, Reduction}, cycle) ||
+        throw(ArgumentError("a recurrence whose step scans, scatters or writes is not supported yet"))
+    cycle
 end
 
 """
-A recurrence group's axes: the state's axis it steps along; those along
-which no term reads the state at another position, its items' (`parallel`);
-and the rest, which each step computes whole (`inner`).
+    recurrence_places(graph, members) -> (; domain, places)
+
+A recurrence's group's domain and where it keeps each of `members`, the state
+first, as the member's index over it. The domain is the state's, then an
+axis for each axis of a member along none of the state's. A value of the
+cycle lies along the state's axis `q` at its own axis `r` where it reads the
+state, or a value of the cycle lying along `q` at its axis `s`, with `s`
+indexed by `r`'s variable: as the value the state is carried from lies along
+the state's own axes, and as flash-linear-attention's `v_new`, `Ũ - W S`,
+lies along the state's columns and chunks, its rows an axis of its own.
 """
-function recurrence_axes(graph, g::Group)
-    c = first(g.outputs)
-    axis = graph.values[c].definition.axis
-    across = Set{Int}()
-    for m in g.outputs, t in subterms((g.terms[m],); nested = true)
-        t isa Load && t.value == c || continue
-        t.index[axis] == var(axis) || error("a recurrence reads its state at another step")
-        foreach(k -> t.index[k] == var(k) || push!(across, k), eachindex(t.index))
+function recurrence_places(graph, members)
+    values = graph.values
+    c = first(members)
+    d = values[c].definition
+    f = d.from.value
+    D = values[c].dims
+    along = Dict{Int, Vector{Int}}(c => collect(eachindex(D)))
+    for w in recurrence_cycle(graph, c, f)
+        w == c && continue
+        e = values[w].definition
+        kept = e isa Reduction ? [k for k in eachindex(e.iteration) if !(k in e.reduced)] : collect(eachindex(values[w].dims))
+        at = zeros(Int, length(D))
+        for o in operands(e)
+            o isa Read && haskey(along, o.value) || continue
+            for (q, s) in enumerate(along[o.value])
+                s == 0 && continue
+                r = findfirst(k -> o.index[s] == var(k), kept)
+                r === nothing && continue
+                at[q] in (0, r) || throw(ArgumentError("a recurrence whose step reads a value along two of the state's axes is not supported yet"))
+                at[q] = r
+            end
+        end
+        along[w] = at
     end
-    (; axis, parallel = [k for k in eachindex(g.domain) if k != axis && !(k in across)],
-        inner = [k for k in eachindex(g.domain) if k != axis && k in across])
+    domain = collect(D)
+    places = Dict{Int, Tuple{Vararg{Affine}}}()
+    for m in members
+        m in (c, f) && (places[m] = identity_index(D); continue)
+        along[m][d.axis] == 0 && throw(ArgumentError("a recurrence whose step computes a value not along its steps is not supported yet"))
+        places[m] = ntuple(length(values[m].dims)) do r
+            q = findfirst(==(r), along[m])
+            q === nothing || return var(q)
+            push!(domain, values[m].dims[r])
+            var(length(domain))
+        end
+    end
+    (; domain = Tuple(domain), places)
+end
+
+# A recurrence's group, stepping along the state's axis: the state, stored
+# at each step, where it starts or else the value it is carried from one step
+# back; the values of the cycle stored, in order; and that value, stored or
+# not, the state one step on. Their terms recompute the rest of the cycle
+# and read what the group computes wherever this step stored it.
+function recurrence_group(graph, stored, c, f, cycle)
+    values = graph.values
+    values[f].dims == values[c].dims || throw(ArgumentError("a recurrence's state carried from a value of another shape is not supported yet"))
+    members = [c; [w for w in cycle if w != c && w != f && stored[w]]; f]
+    (; domain, places) = recurrence_places(graph, members)
+    g = Group(:recurrence, domain)
+    inside = copy(stored)
+    foreach(w -> w in members || (inside[w] = false), cycle)
+    append!(g.outputs, members)
+    whole = Domain(domain)
+    g.terms[c] = operand_term(graph, inside, g, values[c].definition.init, places[c], whole)
+    for m in members[2:end]
+        g.terms[m] = values[m].definition isa Reduction ? fold_term(graph, inside, g, m, places[m], whole) :
+            definition_term(graph, inside, g, values[m].definition, values[m], places[m], whole)
+    end
+    foreach(m -> g.phase[m] = 0, members)
+    g
+end
+
+"A recurrence group's axes (see `Tempest.Compiler.Implement.recurrence_axes`)."
+function recurrence_axes(graph, g::Group)
+    state = graph.values[first(g.outputs)]
+    Implement.recurrence_axes(state.definition.axis, length(state.dims), g.domain, g.outputs, g.terms,
+        recurrence_places(graph, g.outputs).places)
 end
 
 "A candidate whose values do not form one group."

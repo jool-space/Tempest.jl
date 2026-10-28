@@ -150,7 +150,7 @@ store_expr(c, v, index, value) =
 
 function scalar_kernel(graph, stored, g::Group, slots)
     g.kind === :scan && return scan_kernel(graph, stored, g, slots)
-    g.kind === :recurrence && return recurrence_kernel(graph, g, slots)
+    g.kind === :recurrence && return recurrence_kernel(graph, stored, g, slots)
     D = g.domain
     vars = index_vars(length(D))
     c = EmitContext(graph, slots, vars, Domain(D))
@@ -364,46 +364,40 @@ function scan_kernel(graph, stored, g::Group, slots)
 end
 
 # A recurrence's group: an item per position of its parallel axes, stepping
-# along the state's axis. At each step it stores the state over the other
-# axes, where it starts at the first step and else the value it is carried
-# from one step back, then computes and stores that value, whose term reads
-# the state where this step stored it.
-function recurrence_kernel(graph, g::Group, slots)
+# along the state's axis. At the first step it stores the state where it
+# starts; at each it computes and stores each other member over its axes,
+# reading what this step stored, the value the state is carried from last,
+# into the state one step on.
+function recurrence_kernel(graph, stored, g::Group, slots)
     D = g.domain
     vars = index_vars(length(D))
     domain = Domain(D)
     c = EmitContext(graph, slots, vars, domain)
-    (; axis, parallel, inner) = recurrence_axes(graph, g)
-    state, rest = first(g.outputs), g.outputs[2:end]
-    from = graph.values[state].definition.from
-    back = ntuple(k -> k == axis ? add(var(k), -1, domain) : var(k), length(D))
-    previous = Load(from.value, map(e -> substitute(e, back, domain), from.index))
+    (; axis, parallel) = recurrence_axes(graph, g)
+    state = first(g.outputs)
+    from = graph.values[state].definition.from.value
+    places = recurrence_places(graph, g.outputs).places
+    next = Base.setindex(places[from], add(var(axis), 1, domain), axis)
     body = Expr(:block)
     delinearize_expr(body.args, :lin, parallel, D, vars)
-    starts, carries = Expr(:block), Expr(:block)
-    names = emit_terms!(starts.args, [g.terms[state]], c)
-    push!(starts.args, store_expr(c, state, identity_index(D), names[g.terms[state]]))
-    names = emit_terms!(carries.args, [previous], c)
-    push!(carries.args, store_expr(c, state, identity_index(D), names[previous]))
-    carry = Expr(:block)
-    delinearize_expr(carry.args, :position, inner, D, vars)
-    push!(carry.args, :(if $(vars[axis]) == 0
-        $starts
-    else
-        $carries
-    end))
-    compute = Expr(:block)
-    delinearize_expr(compute.args, :position, inner, D, vars)
-    names = emit_terms!(compute.args, [g.terms[m] for m in rest], c)
-    foreach(m -> push!(compute.args, store_expr(c, m, identity_index(D), names[g.terms[m]])), rest)
-    count = prod(k -> D[k], inner; init = 1)
-    push!(body.args, :(for $(vars[axis]) in 0:$(D[axis] - 1)
-        for position in 0:$(count - 1)
-            $carry
+    steps = Expr(:block)
+    for m in g.outputs
+        inner = [k for k in eachindex(D) if k != axis && !(k in parallel) && any(e -> mentions(e, k), places[m])]
+        compute = Expr(:block)
+        delinearize_expr(compute.args, :position, inner, D, vars)
+        names = emit_terms!(compute.args, [g.terms[m]], c)
+        x = names[g.terms[m]]
+        stored[m] && push!(compute.args, store_expr(c, m, places[m], x))
+        if m == from
+            push!(compute.args, :($(vars[axis]) + 1 < $(D[axis]) && $(store_expr(c, state, next, x))))
         end
-        for position in 0:$(count - 1)
+        loop = :(for position in 0:$(prod(k -> D[k], inner; init = 1) - 1)
             $compute
-        end
+        end)
+        push!(steps.args, m == state ? :($(vars[axis]) == 0 && $loop) : loop)
+    end
+    push!(body.args, :(for $(vars[axis]) in 0:$(D[axis] - 1)
+        $steps
     end))
     ScalarKernel(slots, prod(k -> D[k], parallel; init = 1), body)
 end

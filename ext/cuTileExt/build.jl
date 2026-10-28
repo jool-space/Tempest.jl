@@ -656,32 +656,45 @@ function scan_kernel(c::Context)
 end
 
 # A recurrence's group: a block per tile of its parallel axes, stepping along
-# the state's axis with the state's tile: at each step it stores the state,
-# then computes the value the state is carried from, whose products read the
-# state from the tile it carries, stores that and carries it.
+# the state's axis with the state's tile. Each step computes each member but
+# the state as a tile, reading the state and the members before it from the
+# tiles it holds; then stores them where they are stored, and the state, and
+# carries the value the state is carried from, the last. A step that stores
+# the state before reading it ran 3.4 times as long (2.1 ms against 0.63 for
+# chunked gated DeltaNet's at T 1024, H 32), its stores waited on.
 function recurrence_kernel(c::Context)
     k = TileKernel("recurrence", (), c.s.occupancy)
     st = k.body
     indices, k.grid, _, _ = block_indices!(st, c)
-    state, from = c.g.outputs
+    state = first(c.g.outputs)
+    from = c.g.values[state].carried.from.value
     p = only(swept(c.s))
-    T = c.g.values[state].eltype
-    shape = Base.setindex(tile(c), 1, p)
-    as_state(x) = :(convert($(ct.Tile){$T}, $(ct.broadcast_to)($(tile_of(x)), $shape)))
+    n = length(c.g.domain)
+    # A member's tile lies along the axes its placement mentions, one step.
+    along(m) = [only(q for q in 1:n if mentions(e, q)) for e in c.g.placement[m]]
+    shape(m) = ntuple(q -> q != p && q in along(m) ? tile(c)[q] : 1, n)
+    as_tile(m, x) = :(convert($(ct.Tile){$(c.g.values[m].eltype)}, $(ct.broadcast_to)($(tile_of(x)), $(shape(m)))))
     first_step = copy(indices)
     first_step[p] = :(Int32(1))
     names = emit_tiles!(k, st, c, [c.g.terms[state]], Dict{Term, Any}(), first_step...)
     s = gensym(:state)
-    push!(st, :($s = $(as_state(names[c.g.terms[state]]))))
+    push!(st, :($s = $(as_tile(state, names[c.g.terms[state]]))))
     t = gensym(:step)
     at = copy(indices)
     at[p] = t
     loop = Any[]
-    store_values!(k, loop, c, [state], Dict{Term, Any}(c.g.terms[state] => s), at...)
-    held = Context(c.g, c.s, Dict{Int, Tuple{Symbol, Tuple}}(state => (s, shape)))
-    names = emit_tiles!(k, loop, held, [c.g.terms[from]], Dict{Term, Any}(), at...)
-    store_values!(k, loop, c, [from], names, at...)
-    push!(loop, :($s = $(as_state(names[c.g.terms[from]]))))
+    held = Context(c.g, c.s, Dict{Int, Tuple{Symbol, Vector{Int}, Tuple}}(state => (s, along(state), shape(state))))
+    tiles = Dict{Term, Any}(c.g.terms[state] => s)
+    for m in c.g.outputs[2:end]
+        names = emit_tiles!(k, loop, held, [c.g.terms[m]], Dict{Term, Any}(), at...)
+        x = gensym(:member)
+        push!(loop, :($x = $(as_tile(m, names[c.g.terms[m]]))))
+        tiles[c.g.terms[m]] = x
+        m == from || (held.held[m] = (x, along(m), shape(m)))
+    end
+    stored = [m for m in c.g.outputs[2:end] if c.g.values[m].stored]
+    store_values!(k, loop, c, [stored; state], tiles, at...)
+    push!(loop, :($s = $(tiles[c.g.terms[from]])))
     push!(st, :(for $t in Int32(1):Int32($(c.s.tiling[p].extent))
         $(loop...)
     end))

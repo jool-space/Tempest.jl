@@ -1,7 +1,8 @@
-# A recurrence prepared: one group computes its state and what the state is
-# carried from, a step at a time, an item per position its step does not
-# read the state across; what each step computes besides is planned as any
-# value over the steps, reading the stored states, a batch over them. On the
+# A recurrence prepared: one group computes its state, the values of its
+# cycle read outside it and what the state is carried from, a step at a
+# time, an item per position its step does not read them across; what each
+# step computes besides is planned as any value over the steps, reading what
+# the group stored, a batch over them. On the
 # CPU, and on CUDA, by the floor and beside the generators, which step
 # through it holding its state on chip; its kernels do not grow with its steps.
 @testset "recurrences prepared" begin
@@ -20,9 +21,16 @@
         ex = prepare(p, map(device, args)...)
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(f, args...), args...)); rtol)
     end
-    p = C.plan(C.lower(trace(chunks, inputs(5)...)))
-    g = only(g for g in p.groups if g.kind === :recurrence)
-    @test C.recurrence_axes(p.graph, g) == (axis = 3, parallel = [2], inner = [1])
+    # The product each step returns is of its cycle: the group stores it at
+    # each step, along the state's columns and steps, its rows an axis of
+    # their own. The state one step on it stores where it is returned.
+    products(xs...) = last(chunks(xs...))
+    for (f, stores) in ((chunks, true), (products, false))
+        p = C.plan(C.lower(trace(f, inputs(5)...)))
+        g = only(g for g in p.groups if g.kind === :recurrence)
+        @test C.recurrence_axes(p.graph, g) == (axis = 3, parallel = [2], inner = [1, 4])
+        @test g.domain == (3, 2, 5, 4) && length(g.outputs) == 3 && p.stored[last(g.outputs)] == stores
+    end
     kernels(n) = length(prepare(trace(chunks, inputs(n)...), inputs(n)...).kernels)
     @test kernels(5) == kernels(9)
     if CUDA_FUNCTIONAL

@@ -90,16 +90,18 @@ function combined_bytes(val::Value)
 end
 
 # A recurrence's floor kernel: an item per position of its parallel axes,
-# loading what each term reads at every point of the domain, a recomputed
-# fold's body at each of its own positions too.
+# loading what each member's term reads at every point it computes the
+# member, a recomputed fold's body at each of its own positions too.
 function recurrence_floor_estimate(p::Plan, g::Group)
     bytes(t::Load) = sizeof(p.graph.values[t.value].eltype)
     bytes(t::Recomputed) = prod(t.extents; init = 1) * bytes(t.body)
     bytes(t::Apply) = sum(bytes, t.args; init = 0)
     bytes(t::Term) = 0
-    points = prod(g.domain; init = 1)
-    items = prod(k -> g.domain[k], recurrence_axes(p.graph, g).parallel; init = 1)
-    [Work(Float64(points * sum(m -> bytes(g.terms[m]), g.outputs)) + group_bytes(p, g); blocks = items / 256)]
+    (; axis, parallel) = recurrence_axes(p.graph, g)
+    places = recurrence_places(p.graph, g.outputs).places
+    points(m) = prod(k -> k == axis || any(e -> mentions(e, k), places[m]) ? g.domain[k] : 1, eachindex(g.domain); init = 1)
+    items = prod(k -> g.domain[k], parallel; init = 1)
+    [Work(Float64(sum(m -> points(m) * bytes(g.terms[m]), g.outputs)) + group_bytes(p, g); blocks = items / 256)]
 end
 
 "Bytes a group moves: what it reads from storage once, and what it writes."

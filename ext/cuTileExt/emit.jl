@@ -111,14 +111,15 @@ function source(k::TileKernel)
 end
 
 # Everything a kernel of a group needs to know while emitting, with the values
-# it holds on chip: each a tile over its tile axes, and its shape, which loads
-# of it read instead of its buffer where they can (see `held_tile`).
+# it holds on chip: each a tile, the tile axis each of the value's axes lies
+# along, and the tile's shape, which loads of it read instead of its buffer
+# where they can (see `held_tile`).
 struct Context
     g::GroupView
     s::TileSchedule
-    held::Dict{Int, Tuple{Symbol, Tuple}}
+    held::Dict{Int, Tuple{Symbol, Vector{Int}, Tuple}}
 end
-Context(g, s) = Context(g, s, Dict{Int, Tuple{Symbol, Tuple}}())
+Context(g, s) = Context(g, s, Dict{Int, Tuple{Symbol, Vector{Int}, Tuple}}())
 
 tile(c::Context) = tiles(c.s)
 groups(c::Context) = groups(c.s)
@@ -190,35 +191,34 @@ end
 
 # A load of a value the kernel holds, as its tile or a piece of it: each of the
 # value's axes read at a tile axis of the tiling, the same tile when it is the
-# value's own, else a piece of its lanes along it at a step known when the
-# kernel is generated (an unrolled fold's, see `emit_fold!`); or nothing.
+# axis the held tile lies along, else a piece of its lanes along it at a step
+# known when the kernel is generated (an unrolled fold's, see `emit_fold!`);
+# or nothing.
 function held_tile(c::Context, t::Load, indices)
-    x, shape = c.held[t.value]
+    x, along, shape = c.held[t.value]
     n = length(c.s.tiling)
     at = map(eachindex(t.index)) do q
         findfirst(m -> c.s.tiling[m].axes == [m] && t.index[q] == var(m), 1:n)
     end
     (any(isnothing, at) || !allunique(at)) && return nothing
-    piece, size = Int[], Int[]
-    for (q, m) in enumerate(at)
+    piece, size = ones(Int, length(shape)), collect(shape)
+    for (q, (a, m)) in enumerate(zip(along, at))
         tm = tile(c)[m]
-        if m == q
-            tm == shape[q] || return nothing
-            push!(piece, 1)
+        if m == a
+            tm == shape[a] || return nothing
         else
-            c.s.tiling[m].extent == c.g.values[t.value].dims[q] && shape[q] % tm == 0 || return nothing
-            step = tm == shape[q] ? Int32(1) : indices[m]
+            c.s.tiling[m].extent == c.g.values[t.value].dims[q] && shape[a] % tm == 0 || return nothing
+            step = tm == shape[a] ? Int32(1) : indices[m]
             step isa Int32 || return nothing
-            push!(piece, Int(step))
+            piece[a], size[a] = Int(step), tm
         end
-        push!(size, tm)
     end
     size == collect(shape) || (x = :($(ct.extract)($x, $(Tuple(piece)), $(Tuple(size)))))
-    lanes = [q for q in eachindex(size) if size[q] > 1]
+    # Its lanes, in the held tile's order, moved to the tile axes read.
+    lanes = sort([q for q in eachindex(along) if size[along[q]] > 1]; by = q -> along[q])
     order = sortperm(at[lanes])
-    compact = Tuple(size[lanes])
     if order != eachindex(order)
-        x = :(permutedims(reshape($x, $compact), $(Tuple(order))))
+        x = :(permutedims(reshape($x, $(Tuple(size[along[lanes]]))), $(Tuple(order))))
     end
     :(reshape($x, $(ntuple(m -> m in at ? tile(c)[m] : 1, n))))
 end

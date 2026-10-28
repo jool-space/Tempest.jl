@@ -538,41 +538,35 @@ function candidates(::cuTileGenerator, target::CUDATarget, p::Plan)
     found
 end
 
-# A recurrence: a block per tile of the axes along which no step reads the
-# state at another position, stepping through the steps with the state's
-# tile on chip, as flash-linear-attention's chunk_fwd_h holds its state; each
-# step computes the state over the other axes whole, its products the
-# kernel's recomputed folds (see `recurrence_kernel`). The tiled axis's tile
-# is searched; the state's tile stays within `RECURRENCE_STATE` lanes, past
-# which Float32 states crowd the registers (flash-linear-attention's state at
-# 128×16 took 0.51 ms, 128×32 0.79 ms and 128×64 13 ms).
+# A recurrence: a block per tile of the axes along which no step reads what
+# it computes at another position, stepping through the steps with the
+# state's tile on chip, as flash-linear-attention's chunk_fwd_h holds its
+# state; each step computes its members over the other axes whole, their
+# products the kernel's recomputed folds (see `recurrence_kernel`). The tiled
+# axis's tile is searched; each member's tile stays within
+# `RECURRENCE_STATE` lanes, past which a Float32 state crowds the registers
+# (flash-linear-attention's state at 128×16 took 0.51 ms, 128×32 0.79 ms and
+# 128×64 13 ms).
 const RECURRENCE_TILES = (16, 32, 64)
 const RECURRENCE_STATE = 2048
 
 function recurrence_claims(target, g::GroupView)
-    state, from = g.outputs
-    axis = g.values[state].carried.axis
+    (; axis, parallel, inner) = recurrence_axes(g)
     D = g.domain
-    across = Set{Int}()
-    for t in subterms((g.terms[from],); nested = true)
-        t isa Load && t.value == state || continue
-        foreach(k -> t.index[k] == var(k) || push!(across, k), eachindex(t.index))
-    end
-    axis in across && return Claim[]
-    parallel = [k for k in eachindex(D) if k != axis && !(k in across)]
-    whole = prod(k -> nextpow(2, D[k]), sort!(collect(across)); init = 1)
+    spans(m) = [k for k in eachindex(D) if any(e -> mentions(e, k), g.placement[m])]
+    tiled = isempty(parallel) ? 0 : first(parallel)
     found = Claim[]
-    for tile in (isempty(parallel) ? (1,) : RECURRENCE_TILES)
-        tiled = isempty(parallel) ? 0 : first(parallel)
+    for tile in (tiled == 0 ? (1,) : RECURRENCE_TILES)
         t = tiled == 0 ? 1 : min(tile, nextpow(2, D[tiled]))
-        whole * t <= RECURRENCE_STATE || continue
+        lanes(m) = prod(k -> k == tiled ? t : k in inner ? nextpow(2, D[k]) : 1, spans(m); init = 1)
+        all(m -> lanes(m) <= RECURRENCE_STATE, g.outputs) || continue
         tiling = map(eachindex(D)) do k
-            k == axis ? TileAxis([k], D[k], 1, true) : k in across ? TileAxis([k], D[k], nextpow(2, D[k]), false) :
+            k == axis ? TileAxis([k], D[k], 1, true) : k in inner ? TileAxis([k], D[k], nextpow(2, D[k]), false) :
                 TileAxis([k], D[k], k == tiled ? t : 1, false)
         end
         c = Context(g, TileSchedule(:recurrence, tiling, 1, nothing, 0, target.precision))
-        all(m -> g.values[m].eltype <: TILE_TYPES && output_view(c, m) !== nothing, g.outputs) &&
-            terms_expressible(c, (g.terms[state], g.terms[from])) || continue
+        all(m -> g.values[m].eltype <: TILE_TYPES && (!g.values[m].stored || output_view(c, m) !== nothing), g.outputs) &&
+            terms_expressible(c, [g.terms[m] for m in g.outputs]) || continue
         any(cl -> cl.schedule.tiling == c.s.tiling, found) || push!(found, Claim(c.s))
     end
     found

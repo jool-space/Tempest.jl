@@ -12,7 +12,7 @@ using Republic: @republic
 @republic republic=false inherit=:public using ..IR
 
 public Implementation, Work, package_of, loaded, claims, variants, estimate, build_claim, candidates, record_name,
-    recomputes_folds, in_place, lowers, compiling
+    recomputes_folds, in_place, lowers, compiling, recurrence_axes
 
 include("groups.jl")
 

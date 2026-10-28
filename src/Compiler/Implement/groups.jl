@@ -41,8 +41,11 @@ end
 A group of the plan as implementations see it. A group computes its members
 over one domain: `reductions`, its folds, and `outputs`, its other values, each
 defined by its term in `terms`. A `:recurrence` group's outputs are a
-recurrence's state, its term where the state starts, and the value it is
-carried from, which each step computes from the state there. A `:scan` group's
+recurrence's state, its term where the state starts; the values of its cycle
+it stores, in order; and last the value the state is carried from, the state
+one step on, stored only where something else reads it. Each step computes
+them in order, reading what it stored, over the axes their placements
+mention (see `recurrence_axes`). A `:scan` group's
 `reductions` are scans along its `primary_axes` in one direction, which its
 members read at the position its sweep has reached. Folds over `primary_axes`, the
 axes its first fold not by key reduces, can be read within the group, and `phase` counts the folds each member waits for. `values` describes every
@@ -71,6 +74,32 @@ GroupView(kind::Symbol, domain, values) = GroupView(kind, domain, Int[], Int[], 
 
 "The values a group computes, its folds first."
 members(g::GroupView) = [g.reductions; g.outputs]
+
+"""
+    recurrence_axes(g::GroupView) -> (; axis, parallel, inner)
+
+A `:recurrence` group's axes: the state's axis it steps along; those of the
+state's along which no term reads what the group computes at another
+position, its items' (`parallel`); and the rest, which each step computes
+whole (`inner`).
+"""
+function recurrence_axes(g::GroupView)
+    state = g.values[first(g.outputs)]
+    recurrence_axes(state.carried.axis, length(state.dims), g.domain, g.outputs, g.terms, g.placement)
+end
+
+function recurrence_axes(axis, n, domain, outputs, terms, places)
+    across = Set{Int}()
+    for m in outputs, t in subterms((terms[m],); nested = true)
+        t isa Load && t.value in outputs || continue
+        for (e, p) in zip(t.index, places[t.value])
+            e == p || foreach(k -> mentions(p, k) && push!(across, k), eachindex(domain))
+        end
+    end
+    axis in across && error("a recurrence reads its state at another step")
+    parallel = [k for k in 1:n if k != axis && !(k in across)]
+    (; axis, parallel, inner = [k for k in eachindex(domain) if k != axis && !(k in parallel)])
+end
 
 # Products: groups whose folds sum a product of two factors. Which of the
 # domain's axes each factor reads splits the kept axes into those only the
