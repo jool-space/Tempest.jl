@@ -655,12 +655,46 @@ function scan_kernel(c::Context)
     k
 end
 
+# A recurrence's group: a block per tile of its parallel axes, stepping along
+# the state's axis with the state's tile: at each step it stores the state,
+# then computes the value the state is carried from, whose products read the
+# state from the tile it carries, stores that and carries it.
+function recurrence_kernel(c::Context)
+    k = TileKernel("recurrence", (), c.s.occupancy)
+    st = k.body
+    indices, k.grid, _, _ = block_indices!(st, c)
+    state, from = c.g.outputs
+    p = only(swept(c.s))
+    T = c.g.values[state].eltype
+    shape = Base.setindex(tile(c), 1, p)
+    as_state(x) = :(convert($(ct.Tile){$T}, $(ct.broadcast_to)($(tile_of(x)), $shape)))
+    first_step = copy(indices)
+    first_step[p] = :(Int32(1))
+    names = emit_tiles!(k, st, c, [c.g.terms[state]], Dict{Term, Any}(), first_step...)
+    s = gensym(:state)
+    push!(st, :($s = $(as_state(names[c.g.terms[state]]))))
+    t = gensym(:step)
+    at = copy(indices)
+    at[p] = t
+    loop = Any[]
+    store_values!(k, loop, c, [state], Dict{Term, Any}(c.g.terms[state] => s), at...)
+    held = Context(c.g, c.s, Dict{Int, Tuple{Symbol, Tuple}}(state => (s, shape)))
+    names = emit_tiles!(k, loop, held, [c.g.terms[from]], Dict{Term, Any}(), at...)
+    store_values!(k, loop, c, [from], names, at...)
+    push!(loop, :($s = $(as_state(names[c.g.terms[from]]))))
+    push!(st, :(for $t in Int32(1):Int32($(c.s.tiling[p].extent))
+        $(loop...)
+    end))
+    k
+end
+
 # The kernels of a schedule; a fold by key in `held` starts from what its
 # storage holds, with no launch before its elements.
 function schedule_kernels(c::Context, workspaces; held = ())
     initial = [initial_states_kernel(c, r) for r in keyed_folds(c) if !(r in held)]
     c.s.sketch === :pointwise && return [initial; pointwise_kernel(c)]
     c.s.sketch === :scan && return [scan_kernel(c)]
+    c.s.sketch === :recurrence && return [recurrence_kernel(c)]
     slots = Dict{Int, Int}()
     kernels = c.s.sketch in (:resident, :streamed) || (c.s.sketch === :product && c.s.splits == 1) ?
         unsplit_kernel(c, workspaces, slots) : split_kernels(c, workspaces, slots)

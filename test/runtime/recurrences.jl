@@ -2,8 +2,8 @@
 # carried from, a step at a time, an item per position its step does not
 # read the state across; what each step computes besides is planned as any
 # value over the steps, reading the stored states, a batch over them. On the
-# CPU, and on CUDA, by the floor and beside the generators; its kernels do
-# not grow with its steps.
+# CPU, and on CUDA, by the floor and beside the generators, which step
+# through it holding its state on chip; its kernels do not grow with its steps.
 @testset "recurrences prepared" begin
     step((S, _), (w, u, kd, g)) = (g .* S .+ kd' * (u .- w * S), w * S)
     chunks(W, U, Kd, G, S0) = (r = accumulate(step, zip(eachslice(W; dims = 3), eachslice(U; dims = 3),
@@ -25,4 +25,15 @@
     @test C.recurrence_axes(p.graph, g) == (axis = 3, parallel = [2], inner = [1])
     kernels(n) = length(prepare(trace(chunks, inputs(n)...), inputs(n)...).kernels)
     @test kernels(5) == kernels(9)
+    if CUDA_FUNCTIONAL
+        # In Float32 the generator steps through it, the state's tile on chip,
+        # in one kernel; at a state's size, reading it in pieces of that tile.
+        state(c, dk, dv, n) = (data(c, dk, n; scale = 0.3), data(c, dv, n; scale = 0.2), data(c, dk, n; scale = 0.01),
+            0.5 .+ 0.1 .* data(1, 1, n), data(dk, dv; scale = 0.4))
+        for args in (inputs(5), state(64, 128, 128, 3))
+            ex = prepare(trace(chunks, map(single, args)...), map(x -> CuArray(single(x)), args)...)
+            @test count(k -> occursin("cuTile recurrence", string(k)), ex.kernels) == 1
+            @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(chunks, args...), args...)); rtol = 1.0e-4)
+        end
+    end
 end

@@ -3,7 +3,7 @@
 # equal expressions. Indices are zero-based. Everything here is immutable and
 # built from tuples, so `==` and `hash` are structural.
 
-public Affine, Var, Div, Mod, Indirect, Domain, affine_range, coefficient, is_affine,
+public Affine, Var, Div, Mod, Indirect, Domain, affine_range, coefficient, is_affine, var,
     indirect_values, substitute
 
 abstract type Atom end

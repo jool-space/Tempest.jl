@@ -110,11 +110,15 @@ function source(k::TileKernel)
     end)
 end
 
-# Everything a kernel of a group needs to know while emitting.
+# Everything a kernel of a group needs to know while emitting, with the values
+# it holds on chip: each a tile over its tile axes, and its shape, which loads
+# of it read instead of its buffer where they can (see `held_tile`).
 struct Context
     g::GroupView
     s::TileSchedule
+    held::Dict{Int, Tuple{Symbol, Tuple}}
 end
+Context(g, s) = Context(g, s, Dict{Int, Tuple{Symbol, Tuple}}())
 
 tile(c::Context) = tiles(c.s)
 groups(c::Context) = groups(c.s)
@@ -169,6 +173,10 @@ index_tile(k, c::Context, a::Indirect, indices) =
 # elements at addresses computed lane by lane, zero outside the domain as a
 # view's padding is.
 function load_tile(k::TileKernel, c::Context, t::Load, indices)
+    if haskey(c.held, t.value)
+        x = held_tile(c, t, indices)
+        x === nothing || return x
+    end
     v = gathers(t) ? nothing : load_view(c, t.value, t.index)
     v === nothing || return load_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, offset_at(c, v, indices))
     shape = spanned_shape(c, t)
@@ -178,6 +186,41 @@ function load_tile(k::TileKernel, c::Context, t::Load, indices)
     axes = findall(>(1), shape)
     mask = isempty(axes) ? nothing : :($(ct.broadcast_to)($(inside(c, axes, indices)), $shape))
     :($(tile_gather)($flat, $lanes; mask = $mask))
+end
+
+# A load of a value the kernel holds, as its tile or a piece of it: each of the
+# value's axes read at a tile axis of the tiling, the same tile when it is the
+# value's own, else a piece of its lanes along it at a step known when the
+# kernel is generated (an unrolled fold's, see `emit_fold!`); or nothing.
+function held_tile(c::Context, t::Load, indices)
+    x, shape = c.held[t.value]
+    n = length(c.s.tiling)
+    at = map(eachindex(t.index)) do q
+        findfirst(m -> c.s.tiling[m].axes == [m] && t.index[q] == var(m), 1:n)
+    end
+    (any(isnothing, at) || !allunique(at)) && return nothing
+    piece, size = Int[], Int[]
+    for (q, m) in enumerate(at)
+        tm = tile(c)[m]
+        if m == q
+            tm == shape[q] || return nothing
+            push!(piece, 1)
+        else
+            c.s.tiling[m].extent == c.g.values[t.value].dims[q] && shape[q] % tm == 0 || return nothing
+            step = tm == shape[q] ? Int32(1) : indices[m]
+            step isa Int32 || return nothing
+            push!(piece, Int(step))
+        end
+        push!(size, tm)
+    end
+    size == collect(shape) || (x = :($(ct.extract)($x, $(Tuple(piece)), $(Tuple(size)))))
+    lanes = [q for q in eachindex(size) if size[q] > 1]
+    order = sortperm(at[lanes])
+    compact = Tuple(size[lanes])
+    if order != eachindex(order)
+        x = :(permutedims(reshape($x, $compact), $(Tuple(order))))
+    end
+    :(reshape($x, $(ntuple(m -> m in at ? tile(c)[m] : 1, n))))
 end
 
 gathers(t::Load) = any(e -> !isempty(indirect_values(e)), t.index)
@@ -772,13 +815,13 @@ end
 # product of tiles; any other folds elementwise.
 const INNER_TILE = 128
 
-function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE)
+function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE, chosen = lanes != INNER_TILE)
     base = length(c.g.domain)
     inner = [TileAxis([base + j], e, min(nextpow(2, e), lanes), true) for (j, e) in enumerate(t.extents)]
     s = c.s
     e = Context(GroupView(c.g.kind, (c.g.domain..., t.extents...), c.g.values),
-        TileSchedule(s.sketch, [s.tiling; inner], s.splits, s.occupancy, s.swizzle, s.precision))
-    lanes == INNER_TILE || return e
+        TileSchedule(s.sketch, [s.tiling; inner], s.splits, s.occupancy, s.swizzle, s.precision), c.held)
+    chosen && return e
     f = c.g.values[t.value].fold
     if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
         return fold_context(c, t; lanes = product_step(s.precision, term_eltype(product_factor(e, t.body.args[1]), c.g)))
@@ -822,7 +865,14 @@ function terms_expressible(c::Context, roots; stats = false)
     true
 end
 
-# A recomputed fold at block indices `indices`, as a tile over the tiling.
+# A recomputed fold at block indices `indices`, as a tile over the tiling. One
+# that reads a tile the kernel holds along its reduced axis is unrolled, each
+# step reading its piece of the tile, as `extract` takes pieces known when the
+# kernel is generated. A fold it recomputes in turn that reads such a tile is
+# computed once over all its steps' lanes and held, each step reading its
+# piece: as a recurrence's step computes what it reads of its state whole,
+# flash-linear-attention's `v_new` (computing it in each step's lanes instead
+# runs four times as many products, each a quarter the size, 1.5× slower).
 function emit_fold!(k, st, c::Context, t::Recomputed, indices)
     e = fold_context(c, t)
     n = length(c.s.tiling)
@@ -832,29 +882,38 @@ function emit_fold!(k, st, c::Context, t::Recomputed, indices)
     T = c.g.values[t.value].eltype
     tp, E = e.s.tiling[p].tile, e.s.tiling[p].extent
     steps = cld(E, tp)
+    held(s) = s isa Load && haskey(e.held, s.value)
+    inner = steps == 1 ? Recomputed[] :
+        [r for r in subterms((t.body,)) if r isa Recomputed && mentions(r, p) && any(held, subterms((r.body,); nested = true))]
+    unrolled = steps > 1 && (!isempty(inner) || any(s -> held(s) && mentions(s, p), subterms((t.body,))))
+    whole = isempty(inner) ? nothing : fold_context(c, t; lanes = nextpow(2, E), chosen = true)
+    hoisted = Dict{Term, Any}(r => emit_fold!(k, st, whole, r, (indices..., Int32(1))) for r in inner)
     j = gensym(:j)
-    at = steps == 1 ? :(Int32(1)) : j
-    loop = steps == 1 ? st : Any[]
+    runs = unrolled ? [(st, Int32(i)) for i in 1:steps] : [(steps == 1 ? st : Any[], steps == 1 ? :(Int32(1)) : j)]
     sums = sweep_sums(e, f, t.body, p)
     shape = Base.setindex(spanned_shape(e, t.body), tp, p)
     # A fold that does not sum, in one step, folds the tile directly.
     direct = sums === nothing && steps == 1
     acc = sums !== nothing ? sum_accumulators!(st, e, f, t.body, sums, p, gensym(:acc)) : [gensym(:acc) for _ in fold_init(f, A)]
     sums !== nothing || direct || init_state!(st, acc, f, A, shape)
-    names = emit_tiles!(k, loop, e, unique(step_roots(e, f, t.body, sums)), Dict{Term, Any}(), indices..., at)
-    valid = gensym(:valid)
-    if sums === nothing || f isa Relative
-        lanes = ntuple(q -> q == p ? tp : 1, p)
-        push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
+    for (loop, at) in runs
+        pieces = Dict{Term, Any}(r => :($(ct.extract)($x, $(ntuple(q -> q == p ? Int(at) : 1, p)), $(spanned_shape(e, r))))
+            for (r, x) in hoisted)
+        names = emit_tiles!(k, loop, e, unique(step_roots(e, f, t.body, sums)), pieces, indices..., at)
+        valid = gensym(:valid)
+        if sums === nothing || f isa Relative
+            lanes = ntuple(q -> q == p ? tp : 1, p)
+            push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
+        end
+        if sums !== nothing
+            sum_step!(k, loop, e, f, t.body, sums, acc, names, valid, (indices..., at), p)
+        else
+            x = as_accumulator(loop, names[t.body], A, term_eltype(t.body, c.g), shape)
+            direct ? (acc = direct_state!(st, f, A, x, valid, p)) : accumulate_elements!(loop, f, A, acc, x, valid)
+        end
     end
-    if sums !== nothing
-        sum_step!(k, loop, e, f, t.body, sums, acc, names, valid, (indices..., at), p)
-    else
-        x = as_accumulator(loop, names[t.body], A, term_eltype(t.body, c.g), shape)
-        direct ? (acc = direct_state!(st, f, A, x, valid, p)) : accumulate_elements!(loop, f, A, acc, x, valid)
-    end
-    steps == 1 || push!(st, :(for $j in Int32(1):Int32($steps)
-        $(loop...)
+    steps == 1 || unrolled || push!(st, :(for $j in Int32(1):Int32($steps)
+        $(first(only(runs))...)
     end))
     state = sums !== nothing ? sum_state(e, sums, acc) : direct ? acc : reduce_state!(st, f, A, acc, p)
     stat = observe!(st, f, A, T, state)

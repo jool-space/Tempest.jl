@@ -89,6 +89,19 @@ function combined_bytes(val::Value)
     (d.fold isa Overwrite ? 1 : 2) * sizeof(val.eltype) * prod(d.iteration; init = 1)
 end
 
+# A recurrence's floor kernel: an item per position of its parallel axes,
+# loading what each term reads at every point of the domain, a recomputed
+# fold's body at each of its own positions too.
+function recurrence_floor_estimate(p::Plan, g::Group)
+    bytes(t::Load) = sizeof(p.graph.values[t.value].eltype)
+    bytes(t::Recomputed) = prod(t.extents; init = 1) * bytes(t.body)
+    bytes(t::Apply) = sum(bytes, t.args; init = 0)
+    bytes(t::Term) = 0
+    points = prod(g.domain; init = 1)
+    items = prod(k -> g.domain[k], recurrence_axes(p.graph, g).parallel; init = 1)
+    [Work(Float64(points * sum(m -> bytes(g.terms[m]), g.outputs)) + group_bytes(p, g); blocks = items / 256)]
+end
+
 "Bytes a group moves: what it reads from storage once, and what it writes."
 function group_bytes(p::Plan, g::Group)
     graph = p.graph
@@ -108,6 +121,7 @@ end
 # splits a reduction's items (`split`, see `Split`), the lanes of their parts
 # share the device, and each phase of folds is a launch more.
 function floor_estimate(p::Plan, g::Group, split = (items, positions, adjacent) -> nothing)
+    g.kind === :recurrence && return recurrence_floor_estimate(p, g)
     points = prod(g.domain; init = 1)
     per_point = sum(m -> sum(l -> sizeof(p.graph.values[l.value].eltype), loads(g.terms[m]); init = 0), members(g); init = 0)
     bytes = Float64(points * per_point) + group_bytes(p, g)

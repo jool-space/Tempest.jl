@@ -47,5 +47,6 @@ function value_view(p::Plan, v)
     fold, reduced = d isa Union{Reduction, Keyed} ? (d.fold, folded_axes(d)) : d isa Scan ? (d.fold, ()) : (nothing, ())
     scan = d isa Scan ? (; d.reverse, d.exclusive) : nothing
     into = d isa Keyed && d.into !== nothing ? stored_term(d.into) : nothing
-    ValueView(val.eltype, val.dims, val.scalar, p.stored[v], fold, reduced, d isa Keyed, into, scan, masked(p.graph, v))
+    carried = d isa Carried ? (; d.axis, from = stored_term(d.from)) : nothing
+    ValueView(val.eltype, val.dims, val.scalar, p.stored[v], fold, reduced, d isa Keyed, into, scan, masked(p.graph, v), carried)
 end

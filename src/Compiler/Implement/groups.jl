@@ -17,7 +17,9 @@ element out of its own prefix (`exclusive`), nothing for any other value; and
 for a value masked by formulas over its positions, `masked`: the formulas,
 each at most zero where the mask holds, and the number the value is where it
 fails (see `Tempest.Compiler.IR.comparison_mask` and
-`Tempest.Compiler.IR.masked_result`).
+`Tempest.Compiler.IR.masked_result`); and for a recurrence's state,
+`carried`: the axis it steps along and the value it is carried from, a load
+over its domain read one step back (see `Tempest.Compiler.Carried`).
 """
 struct ValueView
     eltype::DataType
@@ -30,6 +32,7 @@ struct ValueView
     into::Union{Nothing, Term}
     scan::Union{Nothing, @NamedTuple{reverse::Bool, exclusive::Bool}}
     masked::Union{Nothing, Tuple{Vector{Affine}, Any}}
+    carried::Union{Nothing, @NamedTuple{axis::Int, from::Term}}
 end
 
 """
@@ -37,7 +40,9 @@ end
 
 A group of the plan as implementations see it. A group computes its members
 over one domain: `reductions`, its folds, and `outputs`, its other values, each
-defined by its term in `terms`. A `:scan` group's
+defined by its term in `terms`. A `:recurrence` group's outputs are a
+recurrence's state, its term where the state starts, and the value it is
+carried from, which each step computes from the state there. A `:scan` group's
 `reductions` are scans along its `primary_axes` in one direction, which its
 members read at the position its sweep has reached. Folds over `primary_axes`, the
 axes its first fold not by key reduces, can be read within the group, and `phase` counts the folds each member waits for. `values` describes every
