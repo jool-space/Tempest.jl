@@ -149,6 +149,8 @@ domain, or inside a recomputed fold that domain extended by the fold's axes.
 function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain))
     val = graph.values[v]
     d = val.definition
+    # A recurrence's group reads its state wherever this step stored it.
+    g.kind === :recurrence && d isa Carried && v in g.outputs && return Load(v, index)
     if v in g.reductions
         g.kind === :scan && d isa Reduction && throw(OutsideGroup())
         primary(graph, g, v) && kept_at(graph, g, v, index) || throw(OutsideGroup())
@@ -293,8 +295,6 @@ recomputed where it is read instead of stored, and each map in `store` is
 stored rather than recomputed where it is read.
 """
 function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = ())
-    any(v -> v.definition isa Carried, graph.values) &&
-        throw(ArgumentError("planning a recurrence, `accumulate` over slices, is not supported yet; `interpret` runs it"))
     s = storing(graph; recompute, store)
     graph, stored, live, results = s.graph, s.stored, s.live, s.results
     # A pointwise value read only by one group over its domain, at the same
@@ -364,6 +364,19 @@ function storing(graph::IndexGraph; recompute = (), store = ())
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
         d isa Union{Pointwise, Reduction, Scan, Keyed} && !live[id] && return false
         d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id] || fold_slice(values, d)) : true
+    end
+    # A recurrence's state and the value it is carried from are stored, the
+    # values of its cycle that nothing else reads are not: its group
+    # recomputes them at each step (see `recurrence_group`).
+    cycles = recurrences(graph)
+    if !isempty(cycles)
+        users = readers(graph)
+        for (c, f, cycle) in cycles
+            stored[c] = stored[f] = true
+            for w in cycle
+                w in (c, f) || w in results || materialized[w] || any(u -> live[u] && !(u in cycle), users[w]) || (stored[w] = false)
+            end
+        end
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
     for id in eachindex(values)
@@ -441,6 +454,11 @@ function group_values(graph, stored, live, results, fixed)
     for set in fixed
         push!(groups, fixed_group(graph, stored, deps, set))
         foreach(m -> owner[m] = length(groups), set)
+    end
+    for (c, f, cycle) in recurrences(graph)
+        live[c] || continue
+        push!(groups, recurrence_group(graph, stored, c, f, cycle))
+        foreach(m -> owner[m] = length(groups), members(groups[end]))
     end
     # Who reads each value, directly or through a gather: a group grows toward
     # them, so it never scans the values that cannot reach it.
@@ -549,6 +567,74 @@ end
 # from storage, so a map that reads both can join it, and not this one.
 awaits_sweep(graph, deps, g::Group, v) = g.kind === :scan &&
     any(s -> deps.owner[s] == 0 && graph.values[s].definition isa Scan && !(s in g.reductions), findall(deps.up[v]))
+
+# Recurrences: each carried state, the value it is carried from, and the
+# cycle between, the values that read the state and that the value it is
+# carried from reads, both through others: what its group computes at each
+# step.
+function recurrences(graph)
+    values = graph.values
+    found = Tuple{Int, Int, Vector{Int}}[]
+    for (c, v) in enumerate(values)
+        d = v.definition
+        d isa Carried && d.from isa Read && d.from.value > c || continue
+        f = d.from.value
+        reaches, feeds = falses(f), falses(f)
+        reaches[c] = feeds[f] = true
+        for w in (c + 1):f
+            reaches[w] = any(o -> any(r -> r <= f && reaches[r], read_values(o)), operands(values[w].definition))
+        end
+        for w in f:-1:c
+            feeds[w] || continue
+            for o in operands(values[w].definition), r in read_values(o)
+                c <= r && (feeds[r] = true)
+            end
+        end
+        cycle = [w for w in c:f if reaches[w] && feeds[w]]
+        all(w -> w == c || values[w].definition isa Union{Pointwise, Reduction}, cycle) ||
+            throw(ArgumentError("a recurrence whose step scans, scatters or writes is not supported yet"))
+        push!(found, (c, f, cycle))
+    end
+    found
+end
+
+# A recurrence's group, over its state's domain, stepping along the state's
+# axis: the state, stored at each step, where it starts or else the value it
+# is carried from one step back, and that value, whose term recomputes the
+# cycle between and reads the state wherever this step stored it.
+function recurrence_group(graph, stored, c, f, cycle)
+    values = graph.values
+    D = values[c].dims
+    values[f].dims == D || throw(ArgumentError("a recurrence's state carried from a value of another shape is not supported yet"))
+    g = Group(:recurrence, D)
+    inside = copy(stored)
+    foreach(w -> w == c || (inside[w] = false), cycle)
+    domain, index = Domain(D), identity_index(D)
+    push!(g.outputs, c, f)
+    g.terms[c] = operand_term(graph, inside, g, values[c].definition.init, index, domain)
+    g.terms[f] = values[f].definition isa Reduction ? fold_term(graph, inside, g, f, index, domain) :
+        definition_term(graph, inside, g, values[f].definition, values[f], index, domain)
+    g.phase[c] = g.phase[f] = 0
+    g
+end
+
+"""
+A recurrence group's axes: the state's axis it steps along; those along
+which no term reads the state at another position, its items' (`parallel`);
+and the rest, which each step computes whole (`inner`).
+"""
+function recurrence_axes(graph, g::Group)
+    c = first(g.outputs)
+    axis = graph.values[c].definition.axis
+    across = Set{Int}()
+    for m in g.outputs, t in subterms((g.terms[m],); nested = true)
+        t isa Load && t.value == c || continue
+        t.index[axis] == var(axis) || error("a recurrence reads its state at another step")
+        foreach(k -> t.index[k] == var(k) || push!(across, k), eachindex(t.index))
+    end
+    (; axis, parallel = [k for k in eachindex(g.domain) if k != axis && !(k in across)],
+        inner = [k for k in eachindex(g.domain) if k != axis && k in across])
+end
 
 "A candidate whose values do not form one group."
 struct NotAGroup <: Exception

@@ -71,6 +71,12 @@ function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
         new = f(b, id)
         b.ids[id] = new === nothing ? add!(b, remap(v.definition, b.ids), v.dims, v.eltype, v.scalar) : new
     end
+    # A state's value later in the graph has its new id only now.
+    for (id, v) in enumerate(graph.values)
+        keep[id] && v.definition isa Carried || continue
+        w = b.values[b.ids[id]]
+        b.values[b.ids[id]] = Value(Carried(w.definition.init, remap(v.definition.from, b.ids), w.definition.axis), w.dims, w.eltype, w.scalar)
+    end
     notes = [[b.ids[v] => s for (v, s) in graph.rewrites if b.ids[v] != 0]; b.rewrites]
     g = IndexGraph(b.values, map(a -> b.ids[a], graph.arguments), Operand[remap(o, b.ids) for o in graph.results],
         graph.result_dims, graph.result_scalar, graph.result_eltype, notes, b.backward)
@@ -91,6 +97,8 @@ remap(d::Scan, ids) = Scan(d.fold, remap(d.operand, ids), d.axes, d.reverse, d.e
 remap(d::Keyed, ids) = Keyed(d.fold, remap(d.operand, ids), d.iteration, map(e -> remap(e, ids), d.key),
     d.into === nothing ? nothing : remap(d.into, ids))
 remap(d::Union{Input, ConstantArray}, ids) = d
+# What a state is carried from is remapped once the graph is rebuilt (see `rebuild`).
+remap(d::Carried, ids) = Carried(remap(d.init, ids), d.from, d.axis)
 
 # The values something reads: the results and what they read, inputs and
 # constant arrays.
@@ -98,6 +106,10 @@ function live_values(graph::IndexGraph)
     live = falses(length(graph.values))
     for o in graph.results, r in read_values(o)
         live[r] = true
+    end
+    # A state, always kept, keeps what it is carried from.
+    for v in graph.values
+        v.definition isa Carried && foreach(r -> live[r] = true, read_values(v.definition.from))
     end
     for id in length(graph.values):-1:1
         d = graph.values[id].definition

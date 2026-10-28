@@ -1,0 +1,28 @@
+# A recurrence prepared: one group computes its state and what the state is
+# carried from, a step at a time, an item per position its step does not
+# read the state across; what each step computes besides is planned as any
+# value over the steps, reading the stored states, a batch over them. On the
+# CPU, and on CUDA, by the floor and beside the generators; its kernels do
+# not grow with its steps.
+@testset "recurrences prepared" begin
+    step((S, _), (w, u, kd, g)) = (g .* S .+ kd' * (u .- w * S), w * S)
+    chunks(W, U, Kd, G, S0) = (r = accumulate(step, zip(eachslice(W; dims = 3), eachslice(U; dims = 3),
+        eachslice(Kd; dims = 3), eachslice(G; dims = 3)); init = (S0, nothing)); (stack(first.(r)), stack(last.(r))))
+    inputs(n) = (data(4, 3, n; scale = 0.3), data(4, 2, n; scale = 0.2), data(4, 3, n; scale = 0.1), 0.5 .+ 0.1 .* data(1, 1, n), data(3, 2; scale = 0.4))
+    cell(Wh, xs, h0) = Tuple(accumulate((h, x) -> tanh.(transpose(Wh) * h .+ x), eachslice(xs; dims = 2); init = h0))
+    run(xs, s0) = Tuple(accumulate((s, x) -> s * 0.5 + sum(abs2, x), eachslice(xs; dims = 2); init = s0))
+    cases = [(chunks, inputs(5)), (chunks, inputs(1)), (cell, (data(3, 3; scale = 0.5), data(3, 6; scale = 0.2), data(3; scale = 0.1))),
+        (run, (data(3, 4), 0.25))]
+    devices = CUDA_FUNCTIONAL ? [(identity, 1.0e-12), (x -> x isa AbstractArray ? CuArray(x) : x, 1.0e-12),
+        (x -> x isa AbstractArray ? CuArray(single(x)) : single(x), 1.0e-5)] : [(identity, 1.0e-12)]
+    for (f, args) in cases, (device, rtol) in devices
+        p = trace(f, map(x -> device(x) isa CuArray{Float32} ? single(x) : x, args)...)
+        ex = prepare(p, map(device, args)...)
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(f, args...), args...)); rtol)
+    end
+    p = C.plan(C.lower(trace(chunks, inputs(5)...)))
+    g = only(g for g in p.groups if g.kind === :recurrence)
+    @test C.recurrence_axes(p.graph, g) == (axis = 3, parallel = [2], inner = [1])
+    kernels(n) = length(prepare(trace(chunks, inputs(n)...), inputs(n)...).kernels)
+    @test kernels(5) == kernels(9)
+end

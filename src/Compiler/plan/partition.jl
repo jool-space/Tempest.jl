@@ -39,7 +39,7 @@ function partition(graph::IndexGraph)
     for v in forward
         d = values[v].definition
         free = d isa Union{Input, ConstantArray}
-        banned = free || d isa Union{Keyed, Scan} || materialized[v] || d isa Reduction && 4 * value_bytes(values[v]) < reduced_bytes(graph, v) ||
+        banned = free || d isa Union{Keyed, Scan, Carried} || materialized[v] || d isa Reduction && 4 * value_bytes(values[v]) < reduced_bytes(graph, v) ||
             factor_of_backward_product(graph, users, live, v)
         alone = d isa Pointwise && count(u -> live[u] && !graph.backward[u], users[v]) == 1
         edge!(flow, inside(v), outside(v), free ? 0.0 : value_bytes(values[v]) * (alone ? 2.0 : 1.0))

@@ -36,7 +36,26 @@ end
 function run_group!(g::Group, buffers, graph)
     g.kind === :reduction && return run_reduction!(g, buffers, graph)
     g.kind === :scan && return run_scan!(g, buffers, graph)
+    g.kind === :recurrence && return run_recurrence!(g, buffers, graph)
     run_pointwise!(g, buffers, graph)
+end
+
+# A step at a time: the state there, where it starts or what it is carried
+# from one step back; then the value it is carried from.
+function run_recurrence!(g::Group, buffers, graph)
+    D = g.domain
+    axis = recurrence_axes(graph, g).axis
+    state = first(g.outputs)
+    from = graph.values[state].definition.from
+    domain = Domain(D)
+    back = ntuple(k -> k == axis ? add(var(k), -1, domain) : var(k), length(D))
+    previous = Load(from.value, map(e -> substitute(e, back, domain), from.index))
+    foreach(m -> buffers[m] = Array{graph.values[m].eltype}(undef, D), g.outputs)
+    for n in 0:(D[axis] - 1), m in g.outputs, I in CartesianIndices(Base.setindex(D, 1, axis))
+        x = Base.setindex(Tuple(I) .- 1, n, axis)
+        t = m == state && n > 0 ? previous : g.terms[m]
+        buffers[m][(x .+ 1)...] = evaluate_term(t, x, nothing, buffers, nothing, graph)
+    end
 end
 
 function run_pointwise!(g::Group, buffers, graph)

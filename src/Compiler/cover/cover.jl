@@ -52,7 +52,8 @@ function Around(p::Plan, sets)
         g = p.groups[j]
         i = findfirst(s -> p.owner[first(s)] == j, sets)
         i === nothing || return (:fixed, i)
-        g.kind === :reduction ? (:fold, first(g.reductions)) : g.kind === :pointwise ? (:pointwise, minimum(owned[j])) : (:scan, first(g.reductions))
+        g.kind === :reduction ? (:fold, first(g.reductions)) : g.kind === :pointwise ? (:pointwise, minimum(owned[j])) :
+            g.kind === :recurrence ? (:recurrence, first(g.outputs)) : (:scan, first(g.reductions))
     end
     reading = [Int[] for _ in p.graph.values]
     for (j, g) in enumerate(p.groups), r in group_reads(p.graph, g)
