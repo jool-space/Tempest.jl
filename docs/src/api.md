@@ -13,6 +13,9 @@ Tempest.gradient
 explain
 Tempest.CPUTarget
 Tempest.CUDATarget
+Tempest.cuBLASProducts
+Tempest.cuDNNAttention
+Tempest.cuTileGenerator
 ```
 
 ## Writing programs
@@ -66,7 +69,7 @@ Tempest.Compiler.group_views
 ```@docs
 Tempest.Compiler.Target
 Tempest.Compiler.target_for
-Tempest.Compiler.packages
+Tempest.Compiler.implementations
 Tempest.Compiler.numerics
 Tempest.Compiler.permits_rewrites
 Tempest.Compiler.product_class
@@ -171,7 +174,8 @@ Tempest.Compiler.IR.masked_result
 ```@docs
 Tempest.Compiler.Implement
 Tempest.Compiler.Implement.Implementation
-Tempest.Compiler.Implement.register!
+Tempest.Compiler.Implement.package_of
+Tempest.Compiler.Implement.loaded
 Tempest.Compiler.Implement.GroupView
 Tempest.Compiler.Implement.ValueView
 Tempest.Compiler.Implement.members

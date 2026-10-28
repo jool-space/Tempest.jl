@@ -43,7 +43,7 @@ end
         (:full, data(512, 300), (1, 2))), f in (x -> reduce(VARIANCE, x; dims), x -> base_variance(x; dims))
         x = single(x)
         p = trace(f, x)
-        ex = prepare(p, CuArray(x); target = T.CUDATarget(cuTile))
+        ex = prepare(p, CuArray(x); target = T.CUDATarget(T.cuTileGenerator()))
         @test only(ex.kernels).schedule.sketch === sketch
         @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, x); rtol = 1.0e-4)
     end
@@ -65,7 +65,7 @@ end
     @testset "$(eltype(x))" for x in (x, BFloat16s.BFloat16.(x), Int32.(replace(round.(x), NaN => 0)))
         reference = x isa AbstractArray{BFloat16s.BFloat16} ? Float32.(x) : x
         for f in (on_tiles..., x -> findmax(x; dims = 1), x -> findmin(x[1:1000, :]; dims = 2), argmin, x -> extrema(x; dims = 1))
-            ex = prepare(trace(f, x), CuArray(x); target = T.CUDATarget(cuTile))
+            ex = prepare(trace(f, x), CuArray(x); target = T.CUDATarget(T.cuTileGenerator()))
             f in on_tiles && @test !any(k -> k isa C.FloorKernels, ex.kernels)
             @test isequal(found_in_floats(outputs(execute!(ex))), found(f(reference)))
         end

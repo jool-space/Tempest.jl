@@ -28,7 +28,7 @@ const POSITIONAL = [
     @testset "$name" for (name, f, args) in POSITIONAL
         args = map(single, args)
         p = trace(f, args...)
-        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(T.cuTileGenerator()))
         @test all(d -> !(d isa C.FloorKernels), ex.kernels)
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 2.0e-4)
     end
@@ -42,7 +42,7 @@ const INTEGER_HASH = "an integer hash (wrapping multiplies, logical shifts) on I
 @testset "gap: $INTEGER_HASH" begin
     x, s = single(data(64, 48)), Int32[7]
     p = trace((x, s) -> Ops.dropout(x, s; rate = 0.25), x, s)
-    ex = prepare(p, CuArray(x), CuArray(s); target = T.CUDATarget(cuTile))
+    ex = prepare(p, CuArray(x), CuArray(s); target = T.CUDATarget(T.cuTileGenerator()))
     @test_broken !(only(ex.kernels) isa C.FloorKernels)
     @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, x, s)])
 end

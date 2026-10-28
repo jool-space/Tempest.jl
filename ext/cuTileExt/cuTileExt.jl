@@ -22,8 +22,9 @@ using Tempest: CUDATarget
 @republic republic=false inherit=:public import Tempest.Compiler.Implement
 using Tempest.Compiler: Plan, group_views
 
-"cuTile's generator: one implementation for every group a sketch can schedule."
-struct cuTileGenerator <: Implementation end
+# cuTile's generator, `Tempest.cuTileGenerator`: one implementation for every
+# group a sketch can schedule, which can be made once this extension loads.
+Implement.loaded(::Type{cuTileGenerator}) = true
 
 in_place(::cuTileGenerator, claim) = true
 
@@ -727,8 +728,6 @@ include("mask.jl")
 include("build.jl")
 include("contract.jl")
 include("lowers.jl")
-
-__init__() = register!(ct, cuTileGenerator())
 
 include("precompile.jl")
 

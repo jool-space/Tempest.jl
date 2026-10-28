@@ -27,7 +27,7 @@ const GATHERS = [
     @testset "$name" for (name, f, args, kernels) in GATHERS
         args = map(single, args)
         p = trace(f, args...)
-        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(T.cuTileGenerator()))
         @test length(ex.kernels) == kernels && all(d -> !(d isa C.FloorKernels), ex.kernels)
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 1.0e-3)
     end
@@ -53,7 +53,7 @@ const PARTIAL_COLLAPSE = [
     @testset "$name" for (name, f, args, training) in PARTIAL_COLLAPSE
         args = map(single, args)
         p = training ? differentiate(trace(f, args...)) : trace(f, args...)
-        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(T.cuTileGenerator()))
         @test !any(k -> k isa C.FloorKernels, ex.kernels)
         @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-4)
     end
@@ -75,7 +75,7 @@ const SCATTERS = [
 ]
 
 @testset "scatters on the device" begin
-    @testset "$name, $where" for (name, f, args) in SCATTERS, (where, target) in (("cuTile", T.CUDATarget(cuTile)), ("the floor", T.CUDATarget(:full, true, ())))
+    @testset "$name, $where" for (name, f, args) in SCATTERS, (where, target) in (("cuTile", T.CUDATarget(T.cuTileGenerator())), ("the floor", T.CUDATarget(:full, true, ())))
         args = map(single, args)
         p = differentiate(trace(f, args...))
         ex = prepare(p, map(CuArray, args)...; target)

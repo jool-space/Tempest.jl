@@ -12,10 +12,11 @@ using BFloat16s: BFloat16
 import Tempest
 using Tempest: CUDATarget
 using Tempest.Compiler: contract
-using Tempest.Compiler.Implement: Library, Template, Binding, register!
-import Tempest.Compiler.Implement: templates, supports, build
+using Tempest.Compiler.Implement: Library, Template, Binding, cuBLASProducts
+import Tempest.Compiler.Implement: templates, supports, build, loaded
 
-struct cuBLASProducts <: Library end
+# The library, `Tempest.cuBLASProducts`, can be made once this extension loads.
+loaded(::Type{cuBLASProducts}) = true
 
 product(A, B) = contract(A, B, (1, 3, 4), (3, 2, 4), (1, 2, 4))
 widened(A, B) = product(Float32.(A), Float32.(B))
@@ -190,8 +191,6 @@ function build(::cuBLASProducts, target::CUDATarget, bs::Vector{Binding})
     (launch, BuiltProducts(cs, compute))
 end
 
-__init__() = register!(cuBLAS, cuBLASProducts())
-
 # Work the cuBLAS products do while they precompile, without a GPU: preparing
 # small programs with products for CUDA without building them, which claims,
 # estimates, proposes candidates and decides. Building needs a library
@@ -212,14 +211,11 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
         q, k = sample(Float32, 16, 32, 2, 2), sample(Float32, 16, 32, 2, 2)
         push!(losses, ((q, k) -> sum(abs2, Tempest.Compiler.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
         @compile_workload begin
-            # Registered for this process alone; the package registers it when it loads.
-            register!(cuBLAS, cuBLASProducts())
-            for (f, args) in losses, target in (CUDATarget(cuBLAS), CUDATarget(cuBLAS; precision = :tf32))
+            for (f, args) in losses, target in (CUDATarget(cuBLASProducts()), CUDATarget(cuBLASProducts(); precision = :tf32))
                 program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
                 ex = Tempest.Compiler.prepare(program, args...; target, build = false)
                 Tempest.explain(devnull, ex)
             end
-            register!(cuBLAS)
         end
     end
 end

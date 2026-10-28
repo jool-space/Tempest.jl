@@ -67,10 +67,10 @@ end
     # without the generator (cuBLAS and the floor).
     @testset "an implementation removed" begin
         @testset "$(c.name)" for c in COMPOSITIONS
-            ex = prepared(c, T.CUDATarget(cuTile); recompute = streaming(c))
+            ex = prepared(c, T.CUDATarget(T.cuTileGenerator()); recompute = streaming(c))
             @test relative_error(ex, references[c.name]) <= TOLERANCE
             check_structure(structure(ex), c.generated)
-            ex = prepared(c, T.CUDATarget(cuBLAS))
+            ex = prepared(c, T.CUDATarget(T.cuBLASProducts()))
             @test !any(k -> occursin("cuTile", string(k)), ex.kernels)
             @test relative_error(ex, references[c.name]) <= TOLERANCE
         end

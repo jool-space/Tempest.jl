@@ -70,7 +70,7 @@ end
     # splits.
     a, b, c = single(data(256, 4096; scale = 0.1)), single(data(4096, 256)), single(data(256))
     p = trace((a, b, c) -> gelu.(a * b .+ c), a, b, c)
-    target = T.CUDATarget(cuTile)
+    target = T.CUDATarget(T.cuTileGenerator())
     dir = mktempdir()
     rates = C.rates_path(target)
     isfile(rates) && (mkpath(joinpath(dir, "tuning")); cp(rates, joinpath(dir, "tuning", basename(rates))))
@@ -103,7 +103,7 @@ end
     # enough for 64 blocks, so that the sum streams rather than splits.
     w, x = single(data(512, 4096; scale = 0.1)), single(data(512, 1))
     p = trace((w, x) -> Einops.@einsum(w, x, "k m, k n -> m n"), w, x)
-    target = T.CUDATarget(cuTile)
+    target = T.CUDATarget(T.cuTileGenerator())
     dir = mktempdir()
     rates = C.rates_path(target)
     isfile(rates) && (mkpath(joinpath(dir, "tuning")); cp(rates, joinpath(dir, "tuning", basename(rates))))
@@ -127,7 +127,7 @@ end
     states = [single(data(128, 128, 16; scale = 0.01 * k)) for k in 1:4]
     head(q, s) = C.contract(q, s, (1, 4, 3), (4, 2, 3), (1, 2, 3))
     p = trace((q, s...) -> (head(q, fill!(similar(first(s)), 0)), map(x -> head(q, x), s)...), q, states...)
-    target = T.CUDATarget(cuTile)
+    target = T.CUDATarget(T.cuTileGenerator())
     d = C.Decider(target, C.lower(p); measure = :none)
     base = C.generator_plan(d)
     g = only(base.groups)
@@ -147,8 +147,7 @@ end
     # value with a product by zero, share no read: cuTile proposes them
     # apart, each a kernel. Of one factor with each state, they share it, and
     # are proposed as one group.
-    ext = Base.get_extension(Tempest, :cuTileExt)
-    proposed(p) = (d = C.Decider(target, C.lower(p); measure = :none); C.candidates(ext.cuTileGenerator(), target, C.generator_plan(d)))
+    proposed(p) = (d = C.Decider(target, C.lower(p); measure = :none); C.candidates(T.cuTileGenerator(), target, C.generator_plan(d)))
     a = single(data(64, 4 * 128; scale = 0.1))
     parts(a, s...) = (a[:, 1:128] * fill!(similar(s[1][:, :, 1]), 0), ntuple(k -> a[:, (128k - 127):128k] * s[k][:, :, 1], 4)...)
     found = proposed(trace(parts, a, states...))
@@ -165,7 +164,7 @@ end
     x, w, m = single(data(64, 64, 512; scale = 0.1)), single(data(64, 64, 32; scale = 0.2)), single(data(64, 64; scale = 0.3))
     chunk(x, n) = reshape(x, 64, 64, 16, 32)[:, :, n, :]
     loss(x, w, m) = sum(n -> sum(abs2, C.contract(chunk(x, n) .* m, w, (1, 4, 3), (4, 2, 3), (1, 2, 3))), 1:16)
-    target = T.CUDATarget(cuTile)
+    target = T.CUDATarget(T.cuTileGenerator())
     d = C.Decider(target, C.lower(differentiate(trace(loss, x, w, m))); measure = :none)
     base = C.generator_plan(d)
     g = only(g for g in base.groups if g.domain == size(x))
@@ -174,14 +173,21 @@ end
     @test only(C.estimate(chosen.implementation, chosen.claim, target, C.group_view(base, g))).bytes == moved
 end
 
+# An implementation of a package not loaded.
+struct NotLoaded <: C.Implementation end
+C.Implement.loaded(::Type{NotLoaded}) = false
+
 @testset "implementation sets" begin
     w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
     p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
-    # Loading a package makes its implementations available; a target
-    # names the ones it uses, and the floor is always there.
-    @test C.used_packages(T.CUDATarget()) == [cuBLAS, cuDNN, cuTile]
-    ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile))
-    @test ex.packages == [cuTile]
-    @test occursin("implementations from cuTile, and the floor", sprint(explain, ex))
-    @test_throws ArgumentError prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(Test))
+    # A target holds the implementations it uses, by default Tempest's own
+    # whose packages are loaded, as every worker loads them; the floor is
+    # always there.
+    @test C.implementations(T.CUDATarget()) == (T.cuBLASProducts(), T.cuDNNAttention(), T.cuTileGenerator())
+    ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(T.cuTileGenerator()))
+    @test C.implementations(ex.target) == (T.cuTileGenerator(),)
+    @test occursin("implementations cuTileGenerator() and the floor", sprint(explain, ex))
+    @test sprint(show, T.CUDATarget(T.cuTileGenerator(); precision = :tf32)) == "CUDATarget(cuTileGenerator(); precision = :tf32)"
+    # One of Tempest's own cannot be made before its package loads.
+    @test occursin("needs Nothing loaded", message(() -> C.Implement.needs(NotLoaded(), :Nothing)))
 end

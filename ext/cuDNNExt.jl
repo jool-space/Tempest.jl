@@ -18,10 +18,11 @@ using BFloat16s: BFloat16
 import Tempest
 using Tempest: CUDATarget
 using Tempest.Compiler: contract
-using Tempest.Compiler.Implement: Library, Template, Binding, Strided, Work, register!
-import Tempest.Compiler.Implement: templates, supports, build, estimate
+using Tempest.Compiler.Implement: Library, Template, Binding, Strided, Work, cuDNNAttention
+import Tempest.Compiler.Implement: templates, supports, build, estimate, loaded
 
-struct cuDNNAttention <: Library end
+# The library, `Tempest.cuDNNAttention`, can be made once this extension loads.
+loaded(::Type{cuDNNAttention}) = true
 
 # The labels of `contract`: features, query heads per key head, key heads,
 # queries, batch, keys.
@@ -167,8 +168,6 @@ function build(::cuDNNAttention, target::CUDATarget, b::Binding)
     (launch, BuiltAttention(c, g.workspace_size))
 end
 
-__init__() = register!(cuDNN, cuDNNAttention())
-
 # Work the library does while it precompiles, without a GPU: preparing
 # attention programs for CUDA without building them, which traces and plans
 # the templates, matches them, estimates and decides.
@@ -182,14 +181,11 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
         sample(T, dims...) = T.(reshape(sin.(1:prod(dims)), dims))
         q, k, v = sample(BFloat16, 64, 2, 2, 32, 1), sample(BFloat16, 64, 2, 32, 1), sample(BFloat16, 64, 2, 32, 1)
         @compile_workload begin
-            # Registered for this process alone; the package registers it when it loads.
-            register!(cuDNN, cuDNNAttention())
             for causal in (false, true)
                 program = Tempest.Compiler.trace((q, k, v) -> attention(q, k, v; causal), q, k, v)
-                ex = Tempest.Compiler.prepare(program, q, k, v; target = CUDATarget(cuDNN), build = false)
+                ex = Tempest.Compiler.prepare(program, q, k, v; target = CUDATarget(cuDNNAttention()), build = false)
                 Tempest.explain(devnull, ex)
             end
-            register!(cuDNN)
         end
     end
 end

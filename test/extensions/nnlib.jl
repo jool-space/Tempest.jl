@@ -60,7 +60,7 @@ if CUDA_FUNCTIONAL
         q, k, v = (Float32.(data(16, 200, 3; scale)) for scale in (0.1, 0.2, 0.3))
         for f in spellings
             p = trace(f, q, k, v)
-            ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile), recompute = C.recomputable_folds(C.rewrite(C.lower(p))))
+            ex = prepare(p, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = C.recomputable_folds(C.rewrite(C.lower(p))))
             kernel = only(ex.kernels)
             @test !(kernel isa C.FloorKernels) && occursin("online softmax", string(kernel))
             @test close(C.leaves(outputs(execute!(ex))), [f(q, k, v)]; rtol = 1.0e-4)

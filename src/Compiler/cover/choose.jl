@@ -191,8 +191,8 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     work = implementation === nothing ? floor_estimate(p, g, floor_splits(d)) : Base.invokelatest(estimate, implementation, claim, d.target, view)
     key = choice_key(d, p, g, implementation, claim)
     # The floor moves bytes at the device's rates.
-    memory = implementation === nothing ? Memory(d.rates.launch, d.rates.cached) : memory!(d, package_of(implementation))
-    lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_of(implementation), w.factor) for w in work]
+    memory = implementation === nothing ? Memory(d.rates.launch, d.rates.cached) : memory!(d, package_name(implementation))
+    lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_name(implementation), w.factor) for w in work]
     price(w) = (regime, f) -> price!(d, regime, product_class(d.target, w.factor), f)
     Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0), key,
         any(l -> l !== nothing && l.borrowed, lines), order,

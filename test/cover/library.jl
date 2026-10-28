@@ -130,23 +130,19 @@ C.supports(::HostLibrary, ::T.CPUTarget, bs::Vector{C.Binding}) = true
 C.build(::HostLibrary, target, bs::Vector{C.Binding}) = (() -> foreach(host_product, bs), "host products ×$(length(bs))")
 
 @testset "a library computes what it binds" begin
-    C.register!(@__MODULE__, HostLibrary())
-    try
-        chunks(a, s...) = ntuple(k -> C.contract(a[:, (8k - 7):8k], s[k], (1, 4), (4, 2, 3), (1, 2, 3)), 4)
-        whole, states = data(6, 32; scale = 0.1), [data(8, 5, 3; scale = 0.1k) for k in 1:4]
-        ex = prepare(trace(chunks, whole, states...), whole, states...)
-        @test occursin("host products ×4", sprint(explain, ex))
-        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(chunks, whole, states...), whole, states...)))
-        for (f, args) in (((a, b) -> sum(abs2, tanh.(permutedims(a) * b)), (data(4, 6), data(4, 5))),
-                ((w, x) -> sum(abs2, tanh.(w * x)), (data(5, 6; scale = 0.3), data(6, 4))),
-                ((q, k) -> sum(abs2, C.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (data(8, 6, 2, 3), data(8, 6, 2, 3; scale = 0.7))))
-            for p in (trace(f, args...), differentiate(trace(f, args...)))
-                ex = prepare(p, args...)
-                @test occursin("host product", sprint(explain, ex))
-                @test agree(C.leaves(outputs(execute!(ex))), filter(!isnothing, C.leaves(interpret(p, args...))))
-            end
+    target = T.CPUTarget(HostLibrary())
+    chunks(a, s...) = ntuple(k -> C.contract(a[:, (8k - 7):8k], s[k], (1, 4), (4, 2, 3), (1, 2, 3)), 4)
+    whole, states = data(6, 32; scale = 0.1), [data(8, 5, 3; scale = 0.1k) for k in 1:4]
+    ex = prepare(trace(chunks, whole, states...), whole, states...; target)
+    @test occursin("host products ×4", sprint(explain, ex))
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(chunks, whole, states...), whole, states...)))
+    for (f, args) in (((a, b) -> sum(abs2, tanh.(permutedims(a) * b)), (data(4, 6), data(4, 5))),
+            ((w, x) -> sum(abs2, tanh.(w * x)), (data(5, 6; scale = 0.3), data(6, 4))),
+            ((q, k) -> sum(abs2, C.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (data(8, 6, 2, 3), data(8, 6, 2, 3; scale = 0.7))))
+        for p in (trace(f, args...), differentiate(trace(f, args...)))
+            ex = prepare(p, args...; target)
+            @test occursin("host product", sprint(explain, ex))
+            @test agree(C.leaves(outputs(execute!(ex))), filter(!isnothing, C.leaves(interpret(p, args...))))
         end
-    finally
-        C.register!(@__MODULE__)
     end
 end

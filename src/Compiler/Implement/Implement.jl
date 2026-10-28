@@ -1,17 +1,17 @@
 """
 The interface kernel packages implement. An implementation realizes groups of a
 plan as kernels: it claims the groups it can realize, estimates the launches of
-each claim, and builds them. It may also propose groups of its own. A package
-makes its implementations available with `register!` when it loads, and a
-target decides which of them it uses. Claims read a `GroupView` of the group,
-in the vocabulary of `Tempest.Compiler.IR`.
+each claim, and builds them. It may also propose groups of its own. An
+implementation is a value, and a target holds those it uses (see
+`CUDATarget`). Claims read a `GroupView` of the group, in the vocabulary of
+`Tempest.Compiler.IR`.
 """
 module Implement
 
 using Republic: @republic
 @republic republic=false inherit=:public using ..IR
 
-public Implementation, Work, register!, claims, variants, estimate, build_claim, candidates, record_name,
+public Implementation, Work, package_of, loaded, claims, variants, estimate, build_claim, candidates, record_name,
     recomputes_folds, in_place, lowers, compiling
 
 include("groups.jl")
@@ -55,21 +55,22 @@ Work(bytes; reread = 0.0, flops = 0.0, recomputed = 0.0, factor = Float32, block
     applied = Pair{Any, Float64}[], swept = Pair{Any, Float64}[], inner = Pair{Any, Float64}[]) =
     Work(bytes, reread, flops, recomputed, factor, blocks, split, applied, swept, inner)
 
-# Implementations by the package that provides them, ordered by its name.
-const REGISTERED = Pair{Module, Vector{Implementation}}[]
+"""
+    package_of(implementation) -> Symbol
+
+The package whose kernels `implementation` launches, by name: the rates file
+keeps the line and the memory it is priced on under it, shared by the
+package's implementations. By default the module that defines its type.
+"""
+package_of(implementation::Implementation) = nameof(parentmodule(typeof(implementation)))
 
 """
-    register!(package::Module, items...)
+    loaded(T) -> Bool
 
-Make `items`, implementations, available under `package`, replacing what it
-registered before; extensions call this when their packages load.
+Whether implementations of type `T` can be made: true but for Tempest's own
+implementations of a package, whose extension says so when the package loads.
 """
-function register!(package::Module, items::Implementation...)
-    filter!(p -> p.first !== package, REGISTERED)
-    isempty(items) || push!(REGISTERED, package => Implementation[items...])
-    sort!(REGISTERED; by = p -> string(nameof(p.first)))
-    nothing
-end
+loaded(::Type{<:Implementation}) = true
 
 """
     claims(implementation, target, group) -> claims
@@ -160,5 +161,6 @@ compiling() = COMPILING[] && ccall(:jl_generating_output, Cint, ()) == 0
 const COMPILING = Base.ScopedValues.ScopedValue(true)
 
 include("library.jl")
+include("packages.jl")
 
 end

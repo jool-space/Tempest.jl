@@ -45,9 +45,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
             ((q, k) -> sum(abs2, grouped(q, k, k)), (sample(16, 4, 32, 2), sample(16, 2, 32, 2))),
         ]
         @compile_workload begin
-            # Registered for this process alone; the package registers it when it loads.
-            register!(ct, cuTileGenerator())
-            for (f, args) in losses, target in (CUDATarget(), CUDATarget(precision = :tf32))
+            for (f, args) in losses, target in (CUDATarget(cuTileGenerator()), CUDATarget(cuTileGenerator(); precision = :tf32))
                 program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
                 ex = Tempest.Compiler.prepare(program, args...; target, build = false)
                 explain(devnull, ex)
@@ -63,7 +61,6 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
                     end
                 end
             end
-            register!(ct)
         end
     end
 end

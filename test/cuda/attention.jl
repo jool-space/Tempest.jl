@@ -22,7 +22,7 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
         q, k, v = single(data(D, H, S, B; scale = 0.1)), single(data(D, KV, S, B; scale = 0.2)), single(data(D, KV, S, B; scale = 0.3))
         p = trace((q, k, v) -> Ops.attention(q, k, v; causal), q, k, v)
         for online in (true, false)
-            target = T.CUDATarget(cuTile; online)
+            target = T.CUDATarget(T.cuTileGenerator(); online)
             ex = prepare(p, map(CuArray, (q, k, v))...; target, recompute = streaming(p, target))
             kernel = only(ex.kernels)
             @test !(kernel isa C.FloorKernels)
@@ -45,7 +45,7 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
         C.contract(v, e ./ sum(e; dims = 1), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
     end
     for precision in (:full, :tf32)
-        target = T.CUDATarget(cuTile; precision)
+        target = T.CUDATarget(T.cuTileGenerator(); precision)
         ex = prepare(p, map(CuArray, (q, k, v))...; target, recompute = streaming(p, target))
         @test occursin("online softmax", string(only(ex.kernels)))
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v)]; rtol = precision === :tf32 ? 1.0e-2 : 1.0e-4)
@@ -55,14 +55,14 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
     # rounded to BFloat16 for the tensor cores.
     qh, kh, vh = map(x -> BFloat16.(single(x)), (data(16, 2, 70, 2; scale = 0.1), data(16, 2, 70, 2; scale = 0.2), data(16, 2, 70, 2; scale = 0.3)))
     p = trace((q, k, v) -> Ops.attention(q, k, v; causal = true), qh, kh, vh)
-    ex = prepare(p, map(CuArray, (qh, kh, vh))...; target = T.CUDATarget(cuTile), recompute = streaming(p, T.CUDATarget(cuTile)))
+    ex = prepare(p, map(CuArray, (qh, kh, vh))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(p, T.CUDATarget(T.cuTileGenerator())))
     @test occursin("online softmax", string(only(ex.kernels)))
     @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, qh, kh, vh)]; rtol = 1.0e-2)
     # The reference's gradient: every product generated, also those that
     # sum over key heads shared by one query head each.
     q, k, v = single(data(16, 2, 70, 2; scale = 0.1)), single(data(16, 2, 70, 2; scale = 0.2)), single(data(16, 2, 70, 2; scale = 0.3))
     d = differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v))
-    ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile))
+    ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()))
     @test all(d -> !(d isa C.FloorKernels), ex.kernels)
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
     # Its streaming plan, as FlashAttention's backward: the scores and
@@ -71,7 +71,7 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
     # the scores stored. The key gradients sum over the queries after each
     # key and the query gradients over the keys before each query, in one
     # sweep, each fold stepping where its mask leaves it work.
-    ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(cuTile), recompute = streaming(d, T.CUDATarget(cuTile)))
+    ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(d, T.CUDATarget(T.cuTileGenerator())))
     @test all(d -> !(d isa C.FloorKernels), ex.kernels)
     @test all(v -> !ex.plan.stored[v] || prod(ex.plan.graph.values[v].dims) < 70 * 70, eachindex(ex.plan.graph.values))
     @test any(d -> occursin("folds stepping by their masks", string(d)), ex.kernels)
@@ -81,7 +81,7 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
     # axis spans: the queries are tiled and the heads swept in turn.
     g = single(data(16, 4, 70, 2; scale = 0.1))
     d = differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), g, k, v))
-    ex = prepare(d, map(CuArray, (g, k, v))...; target = T.CUDATarget(cuTile))
+    ex = prepare(d, map(CuArray, (g, k, v))...; target = T.CUDATarget(T.cuTileGenerator()))
     @test all(d -> !(d isa C.FloorKernels), ex.kernels)
     @test any(d -> occursin("in turn", string(d)), ex.kernels)
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, g, k, v))); rtol = 1.0e-4)
@@ -89,7 +89,7 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
     # head, where the reference groups heads along an axis of extent one.
     x = single(data(16, 2, 70, 2; scale = 0.5))
     p = trace((q, k, v, x) -> Ops.attention(q, k, v; causal = true) .+ x, q, k, v, x)
-    ex = prepare(p, map(CuArray, (q, k, v, x))...; target = T.CUDATarget(cuTile), recompute = streaming(p, T.CUDATarget(cuTile)))
+    ex = prepare(p, map(CuArray, (q, k, v, x))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(p, T.CUDATarget(T.cuTileGenerator())))
     @test length(ex.kernels) == 1 && !(only(ex.kernels) isa C.FloorKernels)
     @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
 end
@@ -100,7 +100,7 @@ end
     x, w1, b1 = single(data(64, 256; scale = 0.5)), single(data(256, 64; scale = 0.05)), single(data(256; scale = 0.1))
     w2, b2 = single(data(64, 256; scale = 0.05)), single(data(64; scale = 0.1))
     d = differentiate(trace((x, w1, b1, w2, b2) -> sum(abs2, w2 * tanh.(w1 * x .+ b1) .+ b2), x, w1, b1, w2, b2))
-    target = T.CUDATarget(cuTile)
+    target = T.CUDATarget(T.cuTileGenerator())
     ex = prepare(d, map(CuArray, (x, w1, b1, w2, b2))...; target, recompute = streaming(d, target))
     @test all(k -> !(k isa C.FloorKernels), ex.kernels)
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, x, w1, b1, w2, b2))); rtol = 1.0e-4)
@@ -121,7 +121,7 @@ end
     q, k, v = single(data(16, 8, 3; scale = 0.1)), single(data(16, 200, 2, 3; scale = 0.2)), single(data(16, 200, 2, 3; scale = 0.3))
     n = Int32[37, 200, 1]
     p = trace(decode, q, k, v, n)
-    target = T.CUDATarget(cuTile)
+    target = T.CUDATarget(T.cuTileGenerator())
     for recompute in ((), streaming(p, target))
         ex = prepare(p, map(CuArray, (q, k, v, n))...; target, recompute)
         @test any(k -> occursin("masked steps skipped", string(k)), ex.kernels)

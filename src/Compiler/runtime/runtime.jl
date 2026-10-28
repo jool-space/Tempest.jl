@@ -1,22 +1,5 @@
 # Prepared programs: a plan with fixed buffers and a launch per kernel.
 
-"The packages a target names, or nothing for every registered one."
-packages(::Target) = nothing
-packages(target::CUDATarget) = target.packages
-
-"The packages whose implementations a target uses, in order."
-function used_packages(target)
-    named = packages(target)
-    named === nothing && return Module[p.first for p in REGISTERED]
-    for m in named
-        any(p -> p.first === m, REGISTERED) || throw(ArgumentError("$m provides no implementations; is its extension loaded?"))
-    end
-    Module[p.first for p in REGISTERED if p.first in named]
-end
-
-"The implementations a target uses, in order: by package name, then as registered."
-implementations(target) = Implementation[i for (m, is) in REGISTERED if m in used_packages(target) for i in is]
-
 """
     Executable
 
@@ -31,7 +14,6 @@ mutable struct Executable{T <: Target}
     program::Program
     plan::Plan
     target::T
-    packages::Vector{Module}
     storage::Storage
     slots::Vector{Any}
     buffers::Vector{Any}
@@ -190,7 +172,7 @@ function planned(program, d, inputs, pairs, input, by_reference, build)
     ds = ds[order]
     if !build
         none(n) = Vector{Any}(nothing, n)
-        return Executable(program, p, target, used_packages(target), s, Any[], none(length(values)),
+        return Executable(program, p, target, s, Any[], none(length(values)),
             none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
             Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], nothing, false)
     end
@@ -230,7 +212,7 @@ function planned(program, d, inputs, pairs, input, by_reference, build)
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
     outs = rebuild(k -> k === nothing ? nothing : results[k], program.output_structure)
-    Executable(program, p, target, used_packages(target), s, slots, buffers, arguments, referenced, results, outs,
+    Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
         Any[b[1] for b in built], Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], copies, nothing, true)
 end
 
@@ -413,8 +395,8 @@ function explain(io::IO, ex::Executable)
         ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
     foreach(c -> explain(io, ex.plan, c), ex.considered)
     explain(io, ex.plan, ex.storage)
-    println(io, "implementations from ", isempty(ex.packages) ? "no package" : join(map(string ∘ nameof, ex.packages), ", "),
-        ", and the floor:")
+    is = implementations(ex.target)
+    println(io, isempty(is) ? "the floor alone:" : string("implementations ", join(map(repr, is), ", "), " and the floor:"))
     for (k, d) in enumerate(ex.kernels)
         x = ex.decisions[k]
         println(io, "  kernel ", k, ": ", ex.built ? d : "not built", x === nothing ? "" : string(" (", x, ")"))

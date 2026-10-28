@@ -34,7 +34,7 @@ import .IR: mentions
 
 # The protocol of implementations, which the cover calls and the generator implements.
 @republic republic=false inherit=:public import .Implement
-using .Implement: REGISTERED
+using .Implement: loaded_implementations
 
 # Beneath `compile`: a program traced and prepared, for a step run in place.
 public trace, prepare, bind!, execute!, capture!, replay!, outputs

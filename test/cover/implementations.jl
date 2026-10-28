@@ -20,21 +20,16 @@ C.build_claim(::HostProducts, claim, target, g, buffers) = g.reference(target, b
     a, b = data(6, 5; scale = 0.3), data(5, 4)
     p = trace((a, b) -> tanh.(a * b), a, b)
     @test length(C.plan(C.lower(p)).groups) == 1 # the generator fuses the tanh
-    C.register!(@__MODULE__, HostProducts())
-    try
-        ex = prepare(p, a, b)
-        @test length(only(taken(ex))) == 1
-        @test length(ex.plan.groups) == 2
-        @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
-        @test occursin("from HostProducts replaces", sprint(explain, ex))
-        # The product, the tanh and a sum over the result span two domains.
-        graph = C.lower(trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b))
-        planned = C.plan(graph)
-        r = only(g.reductions[1] for g in planned.groups if C.product_axes(C.group_view(planned, g)) !== nothing)
-        @test_throws C.NotAGroup C.plan(graph; fixed = [C.grow(graph, r, set -> length(set) <= 3)])
-    finally
-        C.register!(@__MODULE__)
-    end
+    ex = prepare(p, a, b; target = T.CPUTarget(HostProducts()))
+    @test length(only(taken(ex))) == 1
+    @test length(ex.plan.groups) == 2
+    @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
+    @test occursin("from HostProducts replaces", sprint(explain, ex))
+    # The product, the tanh and a sum over the result span two domains.
+    graph = C.lower(trace((a, b) -> sum(tanh.(a * b); dims = 2), a, b))
+    planned = C.plan(graph)
+    r = only(g.reductions[1] for g in planned.groups if C.product_axes(C.group_view(planned, g)) !== nothing)
+    @test_throws C.NotAGroup C.plan(graph; fixed = [C.grow(graph, r, set -> length(set) <= 3)])
 end
 
 # Recomputing a fold where it is read is a proposal: priced only where an
@@ -61,18 +56,13 @@ C.estimate(::RecomputesOverThree{Cheap}, claim, target, g) where {Cheap} =
     q = only(C.recomputable_folds(graph))
     @test graph.values[q].definition isa C.Reduction && graph.values[q].dims == (8, 6)
     for cheap in (false, true)
-        C.register!(@__MODULE__, RecomputesOverThree{cheap}())
-        try
-            d = C.Decider(T.CPUTarget(), graph; measure = false)
-            p, considered = C.cover(d)
-            proposed = filter(c -> c.proposal isa C.Recompute, considered)
-            @test map(c -> c.proposal.value, proposed) == [q]
-            @test only(proposed).accepted == cheap
-            @test (q in reduce(union, map(C.recomputed_in, p.groups); init = Set{Int}())) == cheap
-            @test all(g -> !isempty(C.claims(RecomputesOverThree{cheap}(), d.target, C.group_view(p, g))), p.groups)
-        finally
-            C.register!(@__MODULE__)
-        end
+        d = C.Decider(T.CPUTarget(RecomputesOverThree{cheap}()), graph; measure = false)
+        p, considered = C.cover(d)
+        proposed = filter(c -> c.proposal isa C.Recompute, considered)
+        @test map(c -> c.proposal.value, proposed) == [q]
+        @test only(proposed).accepted == cheap
+        @test (q in reduce(union, map(C.recomputed_in, p.groups); init = Set{Int}())) == cheap
+        @test all(g -> !isempty(C.claims(RecomputesOverThree{cheap}(), d.target, C.group_view(p, g))), p.groups)
     end
 end
 
@@ -91,20 +81,15 @@ C.build_claim(::NoLog10, claim, target, g, buffers) = applies_log10(g) ? error("
 @testset "a map stored apart from a kernel whose claim failed to build" begin
     a, b = data(6, 5; scale = 0.3), abs.(data(5, 4)) .+ 1
     p = trace((a, b) -> a * log10.(b .^ 2), a, b)
-    C.register!(@__MODULE__, NoLog10())
-    try
-        ex = @test_logs (:warn, r"failed to build") match_mode = :any prepare(p, a, b)
-        @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
-        stored = only(c.proposal for c in ex.considered if c.accepted)
-        @test stored isa C.Store && ex.plan.stored[stored.value]
-        floor, product = ex.decisions
-        @test floor.choice.implementation === nothing && !isempty(floor.failed)
-        @test product.choice.implementation isa NoLog10 && isempty(product.failed)
-        text = sprint(explain, ex)
-        @test occursin("is stored apart", text) && occursin("a claim of NoLog10 failed to build: log10 has no lowering", text)
-    finally
-        C.register!(@__MODULE__)
-    end
+    ex = @test_logs (:warn, r"failed to build") match_mode = :any prepare(p, a, b; target = T.CPUTarget(NoLog10()))
+    @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
+    stored = only(c.proposal for c in ex.considered if c.accepted)
+    @test stored isa C.Store && ex.plan.stored[stored.value]
+    floor, product = ex.decisions
+    @test floor.choice.implementation === nothing && !isempty(floor.failed)
+    @test product.choice.implementation isa NoLog10 && isempty(product.failed)
+    text = sprint(explain, ex)
+    @test occursin("is stored apart", text) && occursin("a claim of NoLog10 failed to build: log10 has no lowering", text)
 end
 
 # The same implementation, declaring what it cannot lower (`lowers`) rather
@@ -119,19 +104,14 @@ C.build_claim(::DeclinesLog10, claim, target, g, buffers) = g.reference(target, 
 @testset "a map stored apart from a kernel that applies a function an implementation cannot lower" begin
     a, b = data(6, 5; scale = 0.3), abs.(data(5, 4)) .+ 1
     p = trace((a, b) -> a * log10.(b .^ 2), a, b)
-    C.register!(@__MODULE__, DeclinesLog10())
-    try
-        ex = @test_nowarn prepare(p, a, b)
-        @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
-        stored = only(c.proposal for c in ex.considered if c.accepted)
-        @test stored isa C.Store && ex.plan.stored[stored.value]
-        floor, product = ex.decisions
-        @test floor.choice.implementation === nothing && isempty(floor.failed)
-        @test product.choice.implementation isa DeclinesLog10 && isempty(product.failed)
-        @test occursin("is stored apart", sprint(explain, ex))
-    finally
-        C.register!(@__MODULE__)
-    end
+    ex = @test_nowarn prepare(p, a, b; target = T.CPUTarget(DeclinesLog10()))
+    @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
+    stored = only(c.proposal for c in ex.considered if c.accepted)
+    @test stored isa C.Store && ex.plan.stored[stored.value]
+    floor, product = ex.decisions
+    @test floor.choice.implementation === nothing && isempty(floor.failed)
+    @test product.choice.implementation isa DeclinesLog10 && isempty(product.failed)
+    @test occursin("is stored apart", sprint(explain, ex))
 end
 
 # A variant that fails to build is no option either, though the claim it
@@ -146,21 +126,17 @@ C.build_claim(::FailingVariant, claim, target, g, buffers) = claim === :variant 
 @testset "a variant that fails to build" begin
     x = data(8, 8)
     p = trace(x -> exp.(x) .+ 1, x)
-    C.register!(@__MODULE__, FailingVariant())
-    try
-        withenv("TEMPEST_CACHE" => mktempdir()) do
-            d = C.Decider(T.CPUTarget(), C.rewrite(C.lower(p)); measure = :none)
-            plan = C.generator_plan(d)
-            g = only(plan.groups)
-            for (claim, seconds) in ((:base, 2.0e-6), (:variant, 1.0e-6))
-                C.save_record(C.record_path(T.CPUTarget()), C.choice_key(d, plan, g, FailingVariant(), claim), seconds)
-            end
-            ex = @test_logs (:warn, r"failed to build") match_mode = :any prepare(p, x)
-            decision = only(ex.decisions)
-            @test decision.choice.claim === :base && !isempty(decision.failed)
-            @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, x); rtol = 1.0e-12)
+    withenv("TEMPEST_CACHE" => mktempdir()) do
+        target = T.CPUTarget(FailingVariant())
+        d = C.Decider(target, C.rewrite(C.lower(p)); measure = :none)
+        plan = C.generator_plan(d)
+        g = only(plan.groups)
+        for (claim, seconds) in ((:base, 2.0e-6), (:variant, 1.0e-6))
+            C.save_record(C.record_path(target), C.choice_key(d, plan, g, FailingVariant(), claim), seconds)
         end
-    finally
-        C.register!(@__MODULE__)
+        ex = @test_logs (:warn, r"failed to build") match_mode = :any prepare(p, x; target)
+        decision = only(ex.decisions)
+        @test decision.choice.claim === :base && !isempty(decision.failed)
+        @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, x); rtol = 1.0e-12)
     end
 end

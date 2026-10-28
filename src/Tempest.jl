@@ -8,7 +8,8 @@ and reads at index formulas. Products, reshapes, permutations, gathers and
 scatters are spellings of them, and so is every function a program calls.
 `Tempest` names only what Base cannot spell:
 
-- the way in: `compile`, `explain`, `gradient` and the targets;
+- the way in: `compile`, `explain`, `gradient`, the targets, and the
+  implementations of kernel packages Tempest has extensions for;
 - the derivative of a scalar function, which its code does not carry:
   `scalar_partials`, and a value no gradient flows through: `stopgrad`;
 - the laws of a fold's combine: `GenericFold`.
@@ -50,7 +51,7 @@ include("Compiler/Compiler.jl")
 
 # What programs are written with: the way in, and what Base cannot spell.
 @republic using .Compiler: compile, Compiled, gradient, explain, CPUTarget, CUDATarget,
-    logsumexp, scalar_partials, stopgrad
+    cuBLASProducts, cuDNNAttention, cuTileGenerator, logsumexp, scalar_partials, stopgrad
 @republic using .Compiler.IR: GenericFold
 
 include("precompile.jl")

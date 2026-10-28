@@ -23,14 +23,14 @@ include("../fixtures/programs.jl")
     sketches(ex) = [k.schedule.sketch for k in ex.kernels if hasproperty(k, :schedule)]
     for (f, args) in scans
         p = trace(f, args...)
-        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(T.cuTileGenerator()))
         @test :scan in sketches(ex)
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 1.0e-4)
     end
     for (f, args) in [((a, b) -> recurrence(a, b), (single(data(700)), single(data(700)))),
         (x -> T.gradient(x -> sum(cumprod(1 .+ 0.001f0 .* x; dims = 1)), x), (x,))]
         p = trace(f, args...)
-        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(cuTile))
+        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(T.cuTileGenerator()))
         @test !(:scan in sketches(ex))
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 1.0e-4)
     end

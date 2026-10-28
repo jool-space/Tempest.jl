@@ -28,7 +28,7 @@ end
             (Float16, 64, 4, 1, 96, 2, true), (Float16, 32, 2, 2, 64, 3, false))
         q, k, v = half(H, d, heads, positions, batch), half(H, d, kv, positions, batch), half(H, d, kv, positions, batch)
         p = trace((q, k, v) -> sdpa(q, k, v; causal), q, k, v)
-        ex = prepare(p, CuArray(q), CuArray(k), CuArray(v); target = T.CUDATarget(cuDNN))
+        ex = prepare(p, CuArray(q), CuArray(k), CuArray(v); target = T.CUDATarget(T.cuDNNAttention()))
         # Heads and batch are interchangeable to attention: cuDNN is offered
         # either way, and the decision measures them.
         call = only(called(ex)).call
@@ -37,7 +37,7 @@ end
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, k, v)); rtol = 1.0e-2)
     end
     q, k, v = half(BFloat16, 64, 4, 128, 2), half(BFloat16, 64, 2, 128, 2), half(BFloat16, 64, 2, 128, 2)
-    claimed(f, args...; target = T.CUDATarget(cuDNN)) = !isempty(called(prepare(trace(f, args...), map(CuArray, args)...; target)))
+    claimed(f, args...; target = T.CUDATarget(T.cuDNNAttention())) = !isempty(called(prepare(trace(f, args...), map(CuArray, args)...; target)))
     @test claimed((q, k, v) -> sdpa(q, k, v; causal = true), q, k, v)
     # Another function: the output kept in Float32, or attention as the
     # fixture spells it, its scores rounded to BFloat16.
@@ -49,9 +49,9 @@ end
     @test !claimed((q, k, v) -> sdpa(q, k, v; causal = true), half(BFloat16, 20, 4, 64, 1), half(BFloat16, 20, 2, 64, 1), half(BFloat16, 20, 2, 64, 1))
     @test !claimed((q, k, v) -> sdpa(q, permutedims(k, (2, 3, 1, 4)), v; causal = true), q, permutedims(k, (3, 1, 2, 4)), v)
     # The engines rescale the softmax online, which this target forbids.
-    @test !claimed((q, k, v) -> sdpa(q, k, v; causal = true), q, k, v; target = T.CUDATarget(cuDNN; online = false))
+    @test !claimed((q, k, v) -> sdpa(q, k, v; causal = true), q, k, v; target = T.CUDATarget(T.cuDNNAttention(); online = false))
     # Among cuTile's kernels, measured against them, it computes the same.
     p = trace((q, k, v) -> sdpa(q, k, v; causal = true), q, k, v)
-    ex = prepare(p, CuArray(q), CuArray(k), CuArray(v); target = T.CUDATarget(cuDNN, cuTile))
+    ex = prepare(p, CuArray(q), CuArray(k), CuArray(v); target = T.CUDATarget(T.cuDNNAttention(), T.cuTileGenerator()))
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, k, v)); rtol = 1.0e-2)
 end

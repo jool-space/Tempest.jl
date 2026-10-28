@@ -99,6 +99,6 @@ end
     @test private_names(source("const C = Tempest.Compiler\nC.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("using Tempest.Compiler\nCompiler.Decider(p)")) == ["Tempest.Compiler.Decider"]
     @test private_names(source("using Tempest.Compiler: Plan, Decider")) == ["Tempest.Compiler.Decider"]
-    @test private_names(source("import Tempest.Compiler.Implement: claims, REGISTERED")) == ["Tempest.Compiler.Implement.REGISTERED"]
+    @test private_names(source("import Tempest.Compiler.Implement: claims, COMPILING")) == ["Tempest.Compiler.Implement.COMPILING"]
     @test private_names(source("using Tempest: CUDATarget; using Tempest.Compiler.Implement")) == String[]
 end

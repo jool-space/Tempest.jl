@@ -66,8 +66,9 @@ end
 product_class(target::CUDATarget, T) = T <: HalfFloat ? nameof(T) : target.precision
 product_class(target, T) = nameof(T)
 
-"The name of the package that registered `implementation`."
-package_of(implementation) = nameof(first(m for (m, is) in REGISTERED if implementation in is))
+# The package an implementation is priced as, asked as the protocol is (see
+# `options`).
+package_name(implementation) = Base.invokelatest(package_of, implementation)
 
 const NOISE = 0.05
 

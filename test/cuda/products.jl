@@ -8,7 +8,7 @@ include("../fixtures/programs.jl")
 
 @testset "products on cuTile" begin
     w, x, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112)), Float32.(data(96))
-    for target in (T.CUDATarget(cuTile), T.CUDATarget(cuTile; precision = :tf32))
+    for target in (T.CUDATarget(T.cuTileGenerator()), T.CUDATarget(T.cuTileGenerator(); precision = :tf32))
         p = trace((w, x, b) -> gelu.(w * x .+ b), w, x, b)
         ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target)
         @test any(d -> !(d isa C.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
@@ -17,7 +17,7 @@ include("../fixtures/programs.jl")
     # A conversion to BFloat16 is part of the epilogue: one kernel, and
     # only the BFloat16 result is stored.
     p = trace((w, x, b) -> BFloat16.(gelu.(w * x .+ b)), w, x, b)
-    ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(cuTile; precision = :tf32))
+    ex = prepare(p, CuArray(w), CuArray(x), CuArray(b); target = T.CUDATarget(T.cuTileGenerator(); precision = :tf32))
     @test length(ex.kernels) == 1 && only(ex.kernels).schedule.sketch === :product
     y = only(C.leaves(outputs(execute!(ex))))
     @test eltype(y) === BFloat16
@@ -25,17 +25,17 @@ include("../fixtures/programs.jl")
     # Half operands accumulate in Float32 and round once.
     h, y = Float16.(data(64, 48; scale = 0.1)), Float16.(data(48, 32))
     p = trace((h, y) -> h * y, h, y)
-    ex = prepare(p, CuArray(h), CuArray(y); target = T.CUDATarget(cuTile))
+    ex = prepare(p, CuArray(h), CuArray(y); target = T.CUDATarget(T.cuTileGenerator()))
     @test any(d -> !(d isa C.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
     @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, h, y); rtol = eps(Float16))
     # A product spelled as a broadcast and a sum is a product too.
     a, c = Float32.(data(64, 48; scale = 0.1)), Float32.(data(48, 80))
-    ex = prepare(trace(spelled_product, a, c), CuArray(a), CuArray(c); target = T.CUDATarget(cuTile))
+    ex = prepare(trace(spelled_product, a, c), CuArray(a), CuArray(c); target = T.CUDATarget(T.cuTileGenerator()))
     @test any(d -> !(d isa C.FloorKernels) && d.schedule.sketch === :product, ex.kernels)
     @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), a * c; rtol = 1.0e-4)
     # A long sum over a small output splits among blocks (split-K) and merges.
     u, z = Float32.(data(64, 3000; scale = 0.01)), Float32.(data(3000, 48))
-    for target in (T.CUDATarget(cuTile), T.CUDATarget(cuTile; precision = :tf32))
+    for target in (T.CUDATarget(T.cuTileGenerator()), T.CUDATarget(T.cuTileGenerator(); precision = :tf32))
         p = trace((u, z) -> u * z, u, z)
         ex = prepare(p, CuArray(u), CuArray(z); target)
         @test any(d -> !(d isa C.FloorKernels) && d.schedule.sketch === :product && d.schedule.splits > 1, ex.kernels)
@@ -55,7 +55,7 @@ end
         ((a, bt) -> a * transpose(bt), (a, bt)), ((at, bt) -> transpose(at) * transpose(bt), (at, bt)),
         ((a, b) -> C.contract(a, b, (1, 2), (2, 3), (3, 1)), (a, b)), ((A, B) -> C.contract(A, B, (1, 2, 4), (2, 3, 4), (1, 3, 4)), (A, B)),
         ((a, b) -> a * b, (Float16.(a), Float16.(b))), ((a, b) -> a * b, (BFloat16.(a), BFloat16.(b)))]
-    for (f, args) in layouts, target in (T.CUDATarget(cuBLAS), T.CUDATarget(cuBLAS; precision = :tf32))
+    for (f, args) in layouts, target in (T.CUDATarget(T.cuBLASProducts()), T.CUDATarget(T.cuBLASProducts(); precision = :tf32))
         p = trace(f, args...)
         ex = prepare(p, map(CuArray, args)...; target)
         @test length(built(ex)) == 1
@@ -68,10 +68,10 @@ end
     left, right = Float32.(data(256, 192; scale = 0.1)), Float32.(data(192, 224))
     w = Float32.(data(256; scale = 0.3))
     p = trace((a, b, w) -> tanh.(a * b .+ w), left, right, w)
-    ex = prepare(p, CuArray(left), CuArray(right), CuArray(w); target = T.CUDATarget(cuBLAS))
+    ex = prepare(p, CuArray(left), CuArray(right), CuArray(w); target = T.CUDATarget(T.cuBLASProducts()))
     @test length(built(ex)) == 1 && length(taken(ex)) == 1 && length(ex.kernels) == 2
     @test isapprox(Array(only(C.leaves(outputs(execute!(ex))))), interpret(p, left, right, w); rtol = 1.0e-5)
-    ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
+    ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(T.cuTileGenerator()))
     @test isempty(built(ex))
     # Products the generator groups as one kernel, the first by a constant
     # zero, which is no product of two factors: the others are cuBLAS's
@@ -79,7 +79,7 @@ end
     grouped(ex) = [d for d in ex.kernels if d isa Base.get_extension(Tempest, :cuBLASExt).BuiltProducts]
     u, v, y = single(data(512, 512; scale = 0.1)), single(data(512, 512)), single(data(512, 512; scale = 0.3))
     p = trace((u, v, y) -> (u * fill!(similar(v), 0), u * v, u * y), u, v, y)
-    ex = prepare(p, CuArray(u), CuArray(v), CuArray(y); target = T.CUDATarget(cuBLAS))
+    ex = prepare(p, CuArray(u), CuArray(v), CuArray(y); target = T.CUDATarget(T.cuBLASProducts()))
     @test isempty(built(ex)) && length(only(grouped(ex)).products) == 2
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, u, v, y)); rtol = 1.0e-5)
     # Products of parts of one value, which the generator groups as one
@@ -88,7 +88,7 @@ end
     states = [single(data(128, 64, 16; scale = 0.01 * k)) for k in 1:8]
     parts(a, s...) = ntuple(k -> C.contract(a[:, (128k - 127):128k], s[k], (1, 4), (4, 2, 3), (1, 2, 3)), 8)
     p = trace(parts, whole, states...)
-    ex = prepare(p, CuArray(whole), map(CuArray, states)...; target = T.CUDATarget(cuBLAS))
+    ex = prepare(p, CuArray(whole), map(CuArray, states)...; target = T.CUDATarget(T.cuBLASProducts()))
     @test length(ex.kernels) == 1 && length(only(grouped(ex)).products) == 8
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, whole, states...)); rtol = 1.0e-5)
 end

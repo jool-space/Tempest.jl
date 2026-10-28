@@ -186,7 +186,7 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
             layers, x = stack(L, CuArray)
             p = differentiate(trace(stack_loss, x, layers))
             before = C.cache_counts()
-            prepare(p, x, layers; target = T.CUDATarget(cuTile), measure = false)
+            prepare(p, x, layers; target = T.CUDATarget(T.cuTileGenerator()), measure = false)
             after = C.cache_counts()
             (compiled = after.compiled - before.compiled, loaded = after.loaded - before.loaded)
         end
@@ -343,6 +343,6 @@ relative(graph) = [v.definition.fold for v in graph.values if v.definition isa C
     @testset "gap: $REVERSED_VIEW" begin
         p = C.plan(C.lower(trace(x -> reverse(x; dims = 1) .* 2, x)))
         view = C.group_view(p, only(p.groups))
-        @test_broken !isempty(Tempest.Compiler.Implement.claims(Base.get_extension(Tempest, :cuTileExt).cuTileGenerator(), T.CUDATarget(), view))
+        @test_broken !isempty(Tempest.Compiler.Implement.claims(T.cuTileGenerator(), T.CUDATarget(), view))
     end
 end

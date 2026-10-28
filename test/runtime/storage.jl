@@ -196,7 +196,7 @@ const DEVICE_WRITES = [
 
 if CUDA_FUNCTIONAL
     @testset "writes on the device" begin
-        targets = (("cuTile", T.CUDATarget(cuTile)), ("the floor", T.CUDATarget(:full, true, ())))
+        targets = (("cuTile", T.CUDATarget(T.cuTileGenerator())), ("the floor", T.CUDATarget(:full, true, ())))
         @testset "$name, $where" for (name, f, args) in DEVICE_WRITES, (where, target) in targets
             args = map(single, args)
             traced = trace(f, args...)

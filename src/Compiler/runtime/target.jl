@@ -1,32 +1,44 @@
 # A target: where a program runs. The compiler asks a target for buffers, for
 # the floor's launches, for captured graphs, for the device's name, rates and
-# times, and for the options it was made with (the kernel packages it uses, its
-# numerics, whether it permits rewrites that change rounding, and how it
+# times, and for the options it was made with (the implementations it uses,
+# its numerics, whether it permits rewrites that change rounding, and how it
 # classes products), through the protocol below: the public names of this
-# file, `packages`, `product_class`, and `ScalarKernel`, `Split`,
+# file, `implementations`, `product_class`, and `ScalarKernel`, `Split`,
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, task_state, device_name,
     measurable, time_launch, calibrate, capture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
-    accumulate!, merge_lanes, packages, numerics, permits_rewrites, product_class
+    accumulate!, merge_lanes, implementations, numerics, permits_rewrites, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
 abstract type Target end
 
-"Run on the CPU, through the same generated floor code CUDA runs."
-struct CPUTarget <: Target end
+"""
+    CPUTarget(implementations...)
 
-Base.show(io::IO, ::CPUTarget) = print(io, "CPUTarget()")
+Run on the CPU, through the same generated floor code CUDA runs, and the
+`implementations` given, none by default.
+"""
+struct CPUTarget <: Target
+    implementations::Tuple{Vararg{Implementation}}
+    CPUTarget(implementations::Implementation...) = new(implementations)
+end
+
+Base.show(io::IO, t::CPUTarget) = print(io, "CPUTarget(", join(map(repr, t.implementations), ", "), ")")
 
 """
-    CUDATarget(packages...; precision = :full, online = true)
+    CUDATarget(implementations...; precision = :full, online = true)
 
-Run on an NVIDIA GPU; needs CUDACore loaded. `packages` names the packages whose
-implementations the target may use, as in `CUDATarget(cuTile)`; by default it
-uses every implementation available when a program is prepared. The floor is
-always used. `precision` is the numerics policy for products: `:full` keeps
-Float32 products in Float32, `:tf32` allows TF32 tensor cores for them, and
+Run on an NVIDIA GPU; needs CUDACore loaded. The target uses the floor and
+the `implementations` given, as in `CUDATarget(cuTileGenerator())`, ties
+between their estimates going to the first; by default Tempest's own whose
+packages are loaded when it is made, cuBLAS's, cuDNN's and cuTile's (see
+`cuBLASProducts`, `cuDNNAttention` and `cuTileGenerator`). Another package's
+implementation takes part only when it is given, and with none at all,
+`CUDATarget(precision, online, ())`, the floor runs every kernel.
+`precision` is the numerics policy for products: `:full` keeps Float32
+products in Float32, `:tf32` allows TF32 tensor cores for them, and
 `:tf32x3` splits each Float32 factor into two TF32 parts and sums three
 tensor-core products (close to Float32 accuracy). Half-precision products
 always accumulate in Float32. `online` permits the online softmax (see
@@ -36,16 +48,20 @@ softmax's maximum, rescaled as it grows, which changes rounding.
 struct CUDATarget <: Target
     precision::Symbol
     online::Bool
-    packages::Union{Nothing, Tuple{Vararg{Module}}}
+    implementations::Tuple{Vararg{Implementation}}
 end
 
-function CUDATarget(packages::Module...; precision::Symbol = :full, online::Bool = true)
+function CUDATarget(implementations::Implementation...; precision::Symbol = :full, online::Bool = true)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision, online, isempty(packages) ? nothing : packages)
+    CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations)
 end
 
-Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", t.packages === nothing ? "" : join(map(string ∘ nameof, t.packages), ", ") * "; ",
+Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", join(map(repr, t.implementations), ", "), "; ",
     "precision = :", t.precision, t.online ? "" : ", online = false", ")")
+
+"The implementations a target uses beside the floor, in order."
+implementations(target::Union{CPUTarget, CUDATarget}) = target.implementations
+implementations(::Target) = ()
 
 """
     target_for(x) -> target or nothing

@@ -38,15 +38,6 @@ C.recomputes_folds(::RecomputeOnTheFloor, target) = true
 C.claims(::RecomputeOnTheFloor, target, g) = isempty(C.recomputed_in(g)) ? () : (:floor,)
 C.build_claim(::RecomputeOnTheFloor, claim, target, g, buffers) = g.reference(target, buffers)
 
-function with_recomputing_floor(f)
-    C.register!(@__MODULE__, RecomputeOnTheFloor())
-    try
-        f()
-    finally
-        C.register!(@__MODULE__)
-    end
-end
-
 attention_cases = [
     ("causal attention, grouped heads", (q, k, v) -> Ops.attention(q, k, v; causal = true),
      (data(4, 4, 9, 2; scale = 0.3), data(4, 2, 9, 2; scale = 0.2), data(4, 2, 9, 2; scale = 0.1))),
@@ -54,25 +45,21 @@ attention_cases = [
 ]
 
 @testset "recomputed folds on the CPU floor" begin
-    with_recomputing_floor() do
-        @testset "$name" for (name, f, args) in attention_cases
-            p = trace(f, args...)
-            ex = prepare(p, args...)
-            @test !isempty(C.recomputed_in(only(ex.plan.groups)))
-            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, args...)])
-        end
+    @testset "$name" for (name, f, args) in attention_cases
+        p = trace(f, args...)
+        ex = prepare(p, args...; target = T.CPUTarget(RecomputeOnTheFloor()))
+        @test !isempty(C.recomputed_in(only(ex.plan.groups)))
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, args...)])
     end
 end
 
 if CUDA_FUNCTIONAL
     @testset "recomputed folds on the CUDA floor" begin
-        with_recomputing_floor() do
-            @testset "$name" for (name, f, args) in attention_cases
-                p = trace(f, args...)
-                ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(@__MODULE__))
-                @test all(d -> d isa C.FloorKernels, ex.kernels)
-                @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, args...)]; rtol = 1.0e-8)
-            end
+        @testset "$name" for (name, f, args) in attention_cases
+            p = trace(f, args...)
+            ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(RecomputeOnTheFloor()))
+            @test all(d -> d isa C.FloorKernels, ex.kernels)
+            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, args...)]; rtol = 1.0e-8)
         end
     end
 end
@@ -89,17 +76,8 @@ C.device_name(::ThreeParts) = "cpu"
 C.floor_launch(::ThreeParts, k::C.ScalarKernel, args) = C.floor_launch(C.CPUTarget(), k, args)
 C.floor_split(::ThreeParts, items, positions, adjacent) = positions > 1 ? C.Split(3, 1) : nothing
 
-# What claims nothing, so that the floor runs every kernel on CUDA.
-struct NoClaims <: C.Implementation end
-
-function with_floor_alone(f)
-    C.register!(@__MODULE__, NoClaims())
-    try
-        f()
-    finally
-        C.register!(@__MODULE__)
-    end
-end
+# CUDA with no implementation, so that the floor runs every kernel.
+floor_alone() = T.CUDATarget(:full, true, ())
 
 split_cases = [
     ("a sum", x -> sum(abs2, x), (data(300, 200),)),
@@ -135,15 +113,13 @@ end
 
 if CUDA_FUNCTIONAL
     @testset "folds split among lanes on CUDA" begin
-        with_floor_alone() do
-            @testset "$name" for (name, f, args) in split_cases
-                for p in split_programs(f, args)
-                    ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(@__MODULE__))
-                    @test all(d -> d isa C.FloorKernels, ex.kernels)
-                    @test any(k -> any(s -> s.split !== nothing, k.kernels), ex.kernels)
-                    @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...)));
-                        rtol = rtol_of(args))
-                end
+        @testset "$name" for (name, f, args) in split_cases
+            for p in split_programs(f, args)
+                ex = prepare(p, map(CuArray, args)...; target = floor_alone())
+                @test all(d -> d isa C.FloorKernels, ex.kernels)
+                @test any(k -> any(s -> s.split !== nothing, k.kernels), ex.kernels)
+                @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...)));
+                    rtol = rtol_of(args))
             end
         end
     end
@@ -151,14 +127,12 @@ if CUDA_FUNCTIONAL
     # A full reduction is dealt among the device's lanes, its parts many
     # blocks, not one thread; a few items' neighbours in memory side by side.
     @testset "a fold of few items fills the device" begin
-        with_floor_alone() do
-            x = data(2048, 512)
-            ex = prepare(trace(sum, x), CuArray(x); target = T.CUDATarget(@__MODULE__))
-            s = first(only(ex.kernels).kernels).split
-            @test s.parts * s.lanes >= 1024 && s.side == 1
-            ex = prepare(trace(x -> sum(x; dims = 2), x), CuArray(x); target = T.CUDATarget(@__MODULE__))
-            @test first(only(ex.kernels).kernels).split.side == 32
-            @test isapprox(Array(outputs(execute!(ex))), sum(x; dims = 2); rtol = 1.0e-10)
-        end
+        x = data(2048, 512)
+        ex = prepare(trace(sum, x), CuArray(x); target = floor_alone())
+        s = first(only(ex.kernels).kernels).split
+        @test s.parts * s.lanes >= 1024 && s.side == 1
+        ex = prepare(trace(x -> sum(x; dims = 2), x), CuArray(x); target = floor_alone())
+        @test first(only(ex.kernels).kernels).split.side == 32
+        @test isapprox(Array(outputs(execute!(ex))), sum(x; dims = 2); rtol = 1.0e-10)
     end
 end
