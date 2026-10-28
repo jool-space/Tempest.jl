@@ -8,6 +8,12 @@ struct ArgSpec
     strides::Tuple{Vararg{Int}}
 end
 
+# The elements a view can reach: those of its index space, or, where its axes
+# overlap in memory, those it spans. A value read at a head's offset, `4096h`
+# for `h` the position over 16, is a view whose last axis steps one element at
+# a time over every offset of the heads but the last, 126977 of them for 32.
+reachable(a::ArgSpec) = min(prod(a.sizes; init = 1), 1 + sum(((n, s),) -> (n - 1) * abs(s), zip(a.sizes, a.strides); init = 0))
+
 # A view keeps only the tile axes it spans, in the order of their strides, so
 # loads and stores have the shape and order a hand-written kernel would give
 # them: the unit-stride axis first. Tiles are permuted and reshaped to the

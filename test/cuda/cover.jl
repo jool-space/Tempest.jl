@@ -1,8 +1,8 @@
 # The cover on CUDA: claims timed on buffers of their own, choices measured and
 # kept in the tuning record, a search that tries the variants of the option
-# that measures best, what a kernel's tiles read again, products proposed
-# apart from a fold among them that is not one, and the implementations a
-# target names.
+# that measures best, what a kernel's tiles read again and what a view
+# reaches, products proposed apart from a fold among them that is not one, and
+# the implementations a target names.
 include("../fixtures/programs.jl")
 
 # Claims are timed on buffers of their own, which a kernel reads as data:
@@ -155,6 +155,23 @@ end
     @test length(only(found)) == 4 && all(set -> length(set) == 1, only(found))
     found = proposed(p)
     @test only(found) isa Vector{Int} && length(only(found)) == 4
+end
+
+@testset "what a view at a head's offset reaches" begin
+    # The gradient of chunks of a sequence sums each chunk's into its place:
+    # each is read at its head's offset, a view whose last axis steps one
+    # element at a time over the offsets of every head but the last. Its
+    # bytes are the value's, not that axis's extent times the others'.
+    x, w, m = single(data(64, 64, 512; scale = 0.1)), single(data(64, 64, 32; scale = 0.2)), single(data(64, 64; scale = 0.3))
+    chunk(x, n) = reshape(x, 64, 64, 16, 32)[:, :, n, :]
+    loss(x, w, m) = sum(n -> sum(abs2, C.contract(chunk(x, n) .* m, w, (1, 4, 3), (4, 2, 3), (1, 2, 3))), 1:16)
+    target = T.CUDATarget(cuTile)
+    d = C.Decider(target, C.lower(differentiate(trace(loss, x, w, m))); measure = :none)
+    base = C.generator_plan(d)
+    g = only(g for g in base.groups if g.domain == size(x))
+    chosen = C.decide(d, base, g).choice
+    moved = sum(v -> C.value_bytes(base.graph.values[v]), [collect(C.group_reads(base.graph, g)); filter(v -> base.stored[v], C.members(g))])
+    @test only(C.estimate(chosen.implementation, chosen.claim, target, C.group_view(base, g))).bytes == moved
 end
 
 @testset "implementation sets" begin
