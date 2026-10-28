@@ -35,6 +35,11 @@ end
     q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
     a, b, c = only(groups(by_logsumexp, q, k, v)), only(groups(by_maximum, q, k, v)), only(groups(spelled_out, q, k, v))
     @test a.terms == b.terms == c.terms
+    # As many features as keys and queries: the scores and the weighted sum
+    # iterate over the same extents, and the scores, which the sum reads
+    # transposed, are recomputed in its kernel all the same.
+    qs, ks, vs = data(6, 2, 6, 2; scale = 0.3), data(6, 2, 6, 2; scale = 0.2), data(6, 2, 6, 2; scale = 0.1)
+    @test length(C.recomputed_in(only(groups(by_logsumexp, qs, ks, vs)))) == 1
     graph = C.rewrite(C.lower(trace(by_maximum, q, k, v)))
     @test graph.values[only(b.reductions)].definition.fold == IR.Relative(IR.Exponential(), IR.Composed(/, (IR.Sum(1), IR.Sum(2))))
     @test length(C.recomputed_in(b)) == 1

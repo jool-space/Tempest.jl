@@ -528,11 +528,13 @@ end
 
 # The folds that can be recomputed where they are read, as proposals for the
 # cover (see `Recompute`): a fold that is not a result, an index of a gather,
-# or in `kept`, whose every reader through maps is
-# a fold over another domain (a fold over the same domain joins its group as
-# a later phase instead). A fold recomputed inside a reader's sweep, at
-# positions that move along its own reduced axes, does not recompute such a
-# fold in turn: nested sweeps multiply the work past what a plan should price.
+# or in `kept`, whose every reader through maps is a fold over another domain,
+# or over the same extents reading it elsewhere than where its group keeps it,
+# as attention reads its scores when the features are as many as the keys (a
+# fold that reads it there joins its group as a later phase instead). A fold
+# recomputed inside a reader's sweep, at positions that move along its own
+# reduced axes, does not recompute such a fold in turn: nested sweeps multiply
+# the work past what a plan should price.
 # Whether recomputing pays is the cover's decision, by cost.
 function recomputable_folds(graph, kept = Set{Int}())
     s = storing(graph)
@@ -564,7 +566,8 @@ function recomputable_folds(graph, kept = Set{Int}())
             end
         end
         ok && !isempty(consumers) || continue
-        all(((u, _),) -> values[u].definition.iteration != d.iteration, consumers) || continue
+        own = Tuple(var(k) for k in eachindex(d.iteration) if !(k in d.reduced))
+        all(((u, at),) -> values[u].definition.iteration != d.iteration || at != own, consumers) || continue
         hoisted = all(((u, at),) -> !any(k -> any(e -> mentions(e, k), at), values[u].definition.reduced), consumers)
         hoisted || !recomputes(values, v, union(selected, kept), results, materialized) || continue
         push!(selected, v)
