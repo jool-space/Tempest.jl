@@ -2,7 +2,8 @@
 # epilogue, a conversion to BFloat16, half operands, a product spelled as a
 # broadcast and a sum, and a long sum split among blocks; and by cuBLAS in
 # either orientation, batched and in half precision, with the work after the
-# product a kernel of its own, and each product of a kernel of several.
+# product a kernel of its own, each product of a kernel of several, and
+# products alike but for where their operands start as one call.
 include("../fixtures/programs.jl")
 
 @testset "products on cuTile" begin
@@ -73,11 +74,21 @@ end
     ex = prepare(trace((a, b) -> a * b, a, b), CuArray(a), CuArray(b); target = T.CUDATarget(cuTile))
     @test isempty(built(ex))
     # Products the generator groups as one kernel, the first by a constant
-    # zero, which is no product of two factors: each of the others is
-    # cuBLAS's candidate, not only the kernel's first fold.
+    # zero, which is no product of two factors: the others are cuBLAS's
+    # candidates, not only the kernel's first fold, and alike, one call.
+    grouped(ex) = [d for d in ex.kernels if d isa Base.get_extension(Tempest, :cuBLASExt).BuiltProducts]
     u, v, y = single(data(512, 512; scale = 0.1)), single(data(512, 512)), single(data(512, 512; scale = 0.3))
     p = trace((u, v, y) -> (u * fill!(similar(v), 0), u * v, u * y), u, v, y)
     ex = prepare(p, CuArray(u), CuArray(v), CuArray(y); target = T.CUDATarget(cuBLAS))
-    @test length(built(ex)) == 2
+    @test isempty(built(ex)) && length(only(grouped(ex)).claim.products) == 2
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, u, v, y)); rtol = 1.0e-5)
+    # Products of parts of one value, which the generator groups as one
+    # kernel, alike in all but where their operands start: one call.
+    whole = single(data(64, 8 * 128; scale = 0.1))
+    states = [single(data(128, 64, 16; scale = 0.01 * k)) for k in 1:8]
+    parts(a, s...) = ntuple(k -> C.contract(a[:, (128k - 127):128k], s[k], (1, 4), (4, 2, 3), (1, 2, 3)), 8)
+    p = trace(parts, whole, states...)
+    ex = prepare(p, CuArray(whole), map(CuArray, states)...; target = T.CUDATarget(cuBLAS))
+    @test length(ex.kernels) == 1 && length(only(grouped(ex)).claim.products) == 8
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, whole, states...)); rtol = 1.0e-5)
 end
