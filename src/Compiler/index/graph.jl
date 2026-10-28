@@ -103,6 +103,20 @@ end
 Keyed(fold, operand, iteration, key) = Keyed(fold, operand, iteration, key, nothing)
 
 """
+The state of a recurrence along `axis` of the value's domain: at the axis's
+first position `init`, read over the value's domain, and at each other the
+operand `from` read one position back. `from` reads a value computed from
+this one, later in the graph: the one read that does not follow the graph's
+order, so the two values and those between are computed position by position
+along the axis together (see `recurrence_regions`). `operands` leaves it out.
+"""
+struct Carried <: Definition
+    init::Operand
+    from::Operand
+    axis::Int
+end
+
+"""
 A value: its definition, the extents of its domain (none of them one; see
 `wide_axes`), its element type, and whether it is a number rather than an array.
 """
@@ -159,12 +173,31 @@ IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
 operands(d::Union{Reduction, Scan}) = (d.operand,)
+operands(d::Carried) = (d.init,)
 # A fold by key reads its key's positions, as a gather reads its indices, and
 # the contents it starts from.
 operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempty(indirect_values(e)))...,
     (d.into === nothing ? () : (d.into,))...)
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
+
+# The spans of values computed together, position by position along their
+# recurrence's axis: from each carried state to the last value it is carried
+# from, overlapping spans merged.
+function recurrence_regions(graph::IndexGraph)
+    spans = UnitRange{Int}[]
+    for (id, v) in enumerate(graph.values)
+        d = v.definition
+        d isa Carried && d.from isa Read && d.from.value > id || continue
+        span = id:d.from.value
+        if !isempty(spans) && first(span) <= last(last(spans))
+            spans[end] = first(last(spans)):max(last(last(spans)), last(span))
+        else
+            push!(spans, span)
+        end
+    end
+    spans
+end
 
 function readers(graph::IndexGraph)
     users = [Int[] for _ in graph.values]
@@ -181,6 +214,7 @@ describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
 describe(d::Scan) = "scan($(scan_summary(d.fold, d.axes, d.reverse, d.exclusive)))"
+describe(d::Carried) = string("carried along ", d.axis, " from ", sprint(show_operand, d.from), " one back")
 describe(d::Keyed) = "reduce($(fold_name(d.fold)) by key [$(join(map(string, d.key), ", "))] of $(d.iteration)" *
     (d.into === nothing ? ")" : string(" into ", sprint(show_operand, d.into), ")"))
 

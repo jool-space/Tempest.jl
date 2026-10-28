@@ -67,6 +67,12 @@ function narrow(d::Scan, dims)
     Scan(d.fold, narrow(d.operand, n), Tuple(j for (j, k) in enumerate(keep) if k in d.axes), d.reverse, d.exclusive)
 end
 
+# A recurrence's state keeps its axis among the wide ones: its steps are more than one.
+function narrow(d::Carried, dims)
+    n = narrowing(dims, wide_axes(dims))
+    Carried(narrow(d.init, n), narrow(d.from, n), findfirst(==(d.axis), wide_axes(dims)))
+end
+
 # Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
 # broadcasts: axes of extent one, and missing trailing axes, read index zero.
 broadcast_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
@@ -373,7 +379,103 @@ end
 
 The program at the index level.
 """
+# Recurrences: each loop's step spliced into the program, every node of the
+# step over its own shape and a last axis of the steps, as JAX batches a
+# function over a mapped axis. A slice of a scanned array is the array, its
+# sliced axis last; a value the step captures is the same at every step; a
+# product takes the steps as a batch; and the state is a `Carry`, the value
+# the step computes one step back. So below the program level a recurrence
+# is values over its steps like any others, and one definition, `Carried`.
+function inline_loops(p::Program)
+    any(n -> n.op isa Loop, p.nodes) || return p
+    nodes = Node[]
+    new = zeros(Int, length(p.nodes))
+    spliced = IdDict{LoopBody, Vector{Int}}()
+    backward = BitSet()
+    for (id, n) in enumerate(p.nodes)
+        if n.op isa Loop
+            id in p.backward && throw(ArgumentError("a recurrence in a program's backward is not supported yet"))
+            new[id] = get!(() -> splice_step!(nodes, n.op.body, map(i -> new[i], n.inputs)), spliced, n.op.body)[n.op.result]
+        else
+            push!(nodes, Node(n.op, map(i -> new[i], n.inputs), n.dims, n.eltype, n.scalar))
+            new[id] = length(nodes)
+            id in p.backward && push!(backward, new[id])
+        end
+    end
+    Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure, backward)
+end
+
+# The nodes of a loop's step over its steps, appended to `nodes`, the loop's
+# inputs at `inputs`; the node of each of its results.
+function splice_step!(nodes, body::LoopBody, inputs)
+    steps, step = body.steps, body.program
+    nstate, nscanned = length(body.carried), length(body.sliced)
+    over(n::Node) = n.scalar ? (steps,) : (n.dims..., steps)
+    emit!(op, ins, dims, T) = (push!(nodes, Node(op, Tuple(ins), Tuple(dims), T, false)); length(nodes))
+    # A node of rank `r` over the steps, read where a node of rank `rank`
+    # broadcasts it: its axes, then axes of extent one, then the steps.
+    function broadcast(id, r, rank)
+        n = nodes[id]
+        rank >= r && return id
+        emit!(Reshape(), (id,), (n.dims[1:(end - 1)]..., ntuple(_ -> 1, rank - r)..., steps), n.eltype)
+    end
+    rank(n::Node) = n.scalar ? 0 : length(n.dims)
+    at = zeros(Int, length(step.nodes))
+    carries = Int[]
+    for (k, a) in enumerate(step.arguments)
+        n = step.nodes[a]
+        outer = nodes[inputs[k]]
+        at[a] = if k <= nstate
+            # One step: the state is where it starts.
+            steps == 1 ? emit!(Reshape(), (inputs[k],), over(n), n.eltype) :
+                (push!(carries, emit!(Carry(0), (inputs[k],), over(n), n.eltype)); last(carries))
+        elseif k <= nstate + nscanned
+            axis = body.sliced[k - nstate]
+            m = length(outer.dims)
+            axis == m ? inputs[k] : emit!(Permute(Tuple([1:(axis - 1); (axis + 1):m; axis])), (inputs[k],), over(n), n.eltype)
+        else
+            # A capture, the same at each step.
+            shaped = emit!(Reshape(), (inputs[k],), outer.scalar ? (1,) : (outer.dims..., 1), outer.eltype)
+            emit!(Map(identity), (shaped,), over(n), n.eltype)
+        end
+    end
+    for (id, n) in enumerate(step.nodes)
+        n.op isa Argument && continue
+        op = n.op
+        ins = map(i -> at[i], n.inputs)
+        any(i -> i isa IndexInput, op isa Union{Select, Scatter, Update} ? op.indices : ()) &&
+            throw(ArgumentError("a gather or scatter by index arrays in a recurrence's step is not supported yet"))
+        at[id] = if op isa Map
+            emit!(op, map((i, j) -> broadcast(i, rank(step.nodes[j]), rank(n)), ins, n.inputs), over(n), n.eltype)
+        elseif op isa Reduce
+            r = emit!(op, ins, n.scalar ? (ntuple(_ -> 1, length(step.nodes[only(n.inputs)].dims))..., steps) : over(n), n.eltype)
+            n.scalar ? emit!(Reshape(), (r,), (steps,), n.eltype) : r
+        elseif op isa Contract
+            label = maximum((op.a..., op.b..., op.out...); init = 0) + 1
+            emit!(Contract((op.a..., label), (op.b..., label), (op.out..., label)), ins, over(n), n.eltype)
+        elseif op isa Permute
+            emit!(Permute((op.perm..., length(op.perm) + 1)), ins, over(n), n.eltype)
+        elseif op isa Select
+            emit!(Select((op.indices..., 1:steps)), ins, over(n), n.eltype)
+        elseif op isa Scatter
+            emit!(Scatter((op.indices..., 1:steps)), ins, over(n), n.eltype)
+        elseif op isa Update
+            emit!(Update((op.indices..., 1:steps)), ins, over(n), n.eltype)
+        elseif op isa Union{Reshape, Accumulate}
+            emit!(op, ins, over(n), n.eltype)
+        else
+            throw(ArgumentError("a $(op_name(op)) in a recurrence's step is not supported yet"))
+        end
+    end
+    for (k, c) in enumerate(carries)
+        n = nodes[c]
+        nodes[c] = Node(Carry(at[step.results[body.carried[k]]]), n.inputs, n.dims, n.eltype, n.scalar)
+    end
+    [at[r] for r in step.results]
+end
+
 function lower(p::Program)
+    p = inline_loops(p)
     nodes = p.nodes
     keep = live(nodes, p.results)
     values = Value[]
@@ -395,6 +497,7 @@ function lower(p::Program)
     end
     value!(definition, n::Node) = value!(definition, n.dims, n.eltype; scalar = n.scalar)
     arguments = Int[]
+    carried = Tuple{Int, Int}[]
     for (id, n) in enumerate(nodes)
         if n.op isa Argument
             access[id] = value!(Input(findfirst(==(id), p.arguments)), n)
@@ -429,8 +532,12 @@ function lower(p::Program)
             value!(Reduction(op.fold, operand(only(inputs), parent, Domain(parent)), parent, op.axes), n)
         elseif op isa Accumulate
             value!(Scan(op.fold, operand(only(inputs), only(input_dims), d), op.axes, op.reverse, op.exclusive), n)
-        elseif op isa Loop
-            throw(ArgumentError("compiling a recurrence, `accumulate` over slices, is not supported yet; `interpret` runs it"))
+        elseif op isa Carry
+            # Defined once the state it carries is lowered, after it.
+            push!(values, Value(Carried(Literal(nothing), Literal(nothing), 0), map(k -> n.dims[k], wide_axes(n.dims)), n.eltype, false))
+            push!(backward, in_backward)
+            push!(carried, (length(values), id))
+            ValueAccess(length(values), wide_index(n.dims))
         elseif op isa Contract
             contraction!(value!, op, inputs, input_dims, n)
         elseif op isa Scatter && !any(i -> i isa IndexInput, op.indices)
@@ -448,6 +555,12 @@ function lower(p::Program)
         else
             scattered!(value!, op, inputs, input_dims, n, values)
         end
+    end
+    for (v, id) in carried
+        n = nodes[id]
+        d = Domain(n.dims)
+        init = operand(access[only(n.inputs)], nodes[only(n.inputs)].dims, d)
+        values[v] = Value(narrow(Carried(init, operand(access[n.op.from], n.dims, d), length(n.dims)), n.dims), values[v].dims, n.eltype, false)
     end
     results = Operand[operand(access[r], nodes[r].dims, Domain(nodes[r].dims)) for r in p.results]
     IndexGraph(

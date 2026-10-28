@@ -293,6 +293,8 @@ recomputed where it is read instead of stored, and each map in `store` is
 stored rather than recomputed where it is read.
 """
 function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = ())
+    any(v -> v.definition isa Carried, graph.values) &&
+        throw(ArgumentError("planning a recurrence, `accumulate` over slices, is not supported yet; `interpret` runs it"))
     s = storing(graph; recompute, store)
     graph, stored, live, results = s.graph, s.stored, s.live, s.results
     # A pointwise value read only by one group over its domain, at the same

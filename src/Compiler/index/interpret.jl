@@ -44,6 +44,21 @@ function evaluate_value(d::Reduction, v, arrays, graph, arguments)
     v.scalar ? only(y) : shaped(y, v)
 end
 
+evaluate_value(d::Definition, v, arrays, graph, arguments; first) = evaluate_value(d, v, arrays, graph, arguments)
+
+# The state at each step: where it starts, at the first step and in a
+# recurrence's first pass, before what it is carried from is computed; else
+# that, one step back.
+function evaluate_value(d::Carried, v, arrays, graph, arguments; first = false)
+    out = Array{v.eltype}(undef, v.dims)
+    for I in CartesianIndices(v.dims)
+        x = Tuple(I) .- 1
+        out[I] = first || x[d.axis] == 0 ? read_operand(d.init, x, arrays, graph) :
+            read_operand(d.from, Base.setindex(x, x[d.axis] - 1, d.axis), arrays, graph)
+    end
+    out
+end
+
 function evaluate_value(d::Scan, v, arrays, graph, arguments)
     y = scan_array(d.fold, materialize(d.operand, v.dims, arrays, graph), d.axes, d.reverse, d.exclusive)
     v.scalar ? only(y) : y
@@ -72,8 +87,23 @@ Evaluate an index graph on the CPU, value by value.
 function interpret(graph::IndexGraph, inputs...)
     arguments = filter(is_input, leaves(inputs))
     arrays = Vector{Any}(undef, length(graph.values))
-    for (id, v) in enumerate(graph.values)
-        arrays[id] = evaluate_value(v.definition, v, arrays, graph, arguments)
+    regions = recurrence_regions(graph)
+    id = 1
+    while id <= length(graph.values)
+        k = findfirst(r -> first(r) == id, regions)
+        if k === nothing
+            arrays[id] = evaluate_value(graph.values[id].definition, graph.values[id], arrays, graph, arguments)
+            id += 1
+            continue
+        end
+        # A recurrence's values, each over all its steps, once per step: each
+        # pass makes one more step right, from its states one step back.
+        region = regions[k]
+        steps = maximum(v -> v.definition isa Carried ? v.dims[v.definition.axis] : 1, graph.values[region])
+        for pass in 1:steps, v in region
+            arrays[v] = evaluate_value(graph.values[v].definition, graph.values[v], arrays, graph, arguments; first = pass == 1)
+        end
+        id = last(region) + 1
     end
     map(eachindex(graph.results)) do k
         materialize(graph.results[k], graph.result_dims[k], arrays, graph; scalar = graph.result_scalar[k])

@@ -171,6 +171,17 @@ struct Loop <: Operation
     result::Int
 end
 
+"""
+A recurrence's state over its steps, along the node's last axis, as lowering
+splices a loop's step into the program (see `inline_loops`): its input, the
+state the loop starts from, at the first step, and at each other node `from`,
+the state the step computes, one step back. `from` comes after it, the one
+node read before it is computed, so only lowering sees one.
+"""
+struct Carry <: Operation
+    from::Int
+end
+
 op_name(op::Operation) = lowercase(string(nameof(typeof(op))))
 op_detail(op::Operation) = ""
 op_detail(op::Constant) = op.value isa AbstractRange ? " " * repr(op.value) : op.value isa AbstractArray ? " array" : " " * repr(op.value)
@@ -290,6 +301,7 @@ function live(nodes, results)
         keep[id] && continue
         keep[id] = true
         append!(stack, nodes[id].inputs)
+        nodes[id].op isa Carry && push!(stack, nodes[id].op.from)
     end
     keep
 end
