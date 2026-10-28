@@ -16,6 +16,7 @@ Tempest = {path = ".."}
 cuTile = {rev = "main", url = "https://github.com/JuliaGPU/cuTile.jl"}
 
 [compat]
+BFloat16s = "0.6.3"
 CUDACore = "6.4"
 ParallelTestRunner = "2.9"
 Test = "1"
