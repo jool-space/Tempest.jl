@@ -13,13 +13,22 @@
 
 using PrecompileTools: PrecompileTools, @setup_workload, @compile_workload
 
-# A tile array over no memory, enough to name a kernel.
-unbacked_tile_array(T, spec) = ct.TileArray(Ptr{kernel_eltype(T)}(256), Int32.(spec.sizes), Int32.(spec.strides))
+# A tile array over no memory, enough to name a kernel: at its offset in a
+# buffer at `base`, as `tile_array` places one.
+function unbacked_tile_array(T, spec, base)
+    S = kernel_eltype(T)
+    ct.TileArray(Ptr{S}(base) + spec.offset * sizeof(S), Int32.(spec.sizes), Int32.(spec.strides))
+end
 
-# Kernel `k`'s arguments over no memory, for group `g`.
-unbacked_arguments(g, k, workspaces) = map(k.args) do spec
-    T = spec.buffer isa Int ? g.values[spec.buffer].eltype : workspaces[spec.buffer].eltype
-    unbacked_tile_array(T, spec)
+# Kernel `k`'s arguments over no memory, for group `g`. Each buffer lies a
+# terabyte from the others, so that arrays overlap only where they share one,
+# as in a session: the kernel compiles for the aliasing a session's has.
+function unbacked_arguments(g, k, workspaces)
+    bases = Dict{Any, Int}()
+    map(k.args) do spec
+        T = spec.buffer isa Int ? g.values[spec.buffer].eltype : workspaces[spec.buffer].eltype
+        unbacked_tile_array(T, spec, get!(() -> (length(bases) + 1) << 40, bases, spec.buffer))
+    end
 end
 
 # The kernels the workload compiles are defined here, since `Generated` is
