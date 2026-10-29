@@ -80,16 +80,16 @@ function run_reduction!(g::Group, buffers, graph)
         stats[r] = val.scalar ? only(out) : reshape(out, val.dims)
         buffers[r] = stats[r]
     end
-    # An output over the domain, or at the positions of the primary folds: its
-    # index over the domain, with the reduced axes at zero.
+    # An output over the domain, at the positions of the primary folds, or at
+    # those of a fold it is a slice of: its index over the domain, with the
+    # axes it does not keep at zero.
     for m in g.outputs
         val = graph.values[m]
         if val.scalar
             buffers[m] = evaluate_term(g.terms[m], ntuple(_ -> 0, length(D)), nothing, buffers, stats, graph)
             continue
         end
-        axes = val.dims == D ? () : primary_axes(graph, g)
-        kept = [k for k in 1:length(D) if !(k in axes)]
+        kept = [findfirst(k -> p == var(k), eachindex(D)) for p in placement(graph, g, m)]
         out = Array{val.eltype}(undef, val.dims)
         for I in CartesianIndices(val.dims)
             x = ntuple(k -> (j = findfirst(==(k), kept)) === nothing ? 0 : I[j] - 1, length(D))

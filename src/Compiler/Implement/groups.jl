@@ -94,12 +94,15 @@ end
 The axes of a group whose folds each sum a product of two factors over the
 group's primary axes `K`: those only the first factor reads (`M`), those only
 the second reads (`N`), and those both read and keep (`B`). Nothing when a fold
-is not such a product, or the folds split the axes differently. Given a fold
-`r`, the axes of that fold's product alone.
+is not such a product, or the folds split the axes differently; a fold of
+weights alone, a log-sum-exp beside attention's weighted sum, has no factors
+and rides the products' sweep. Given a fold `r`, the axes of that fold's
+product alone.
 """
 function product_axes(g::GroupView)
     found = nothing
     for r in g.reductions
+        weights_alone(g, r) && continue
         groups = product_axes(g, r)
         groups === nothing && return nothing
         found === nothing || found == groups || found == (groups[2], groups[1], groups[3], groups[4]) || return nothing
@@ -107,6 +110,10 @@ function product_axes(g::GroupView)
     end
     found
 end
+
+"Whether fold `r` is an exponential fold of a number: of the weights `exp(y - m)` alone."
+weights_alone(g::GroupView, r) = g.values[r].fold isa Relative{Exponential} && !g.values[r].keyed &&
+    !(g.terms[r] isa Apply && g.terms[r].f === tuple)
 
 function product_axes(g::GroupView, r)
     n = length(g.domain)

@@ -638,8 +638,22 @@ function store_values!(k, st, c, vs, names, indices...)
     for m in vs
         v = output_view(c, m)
         value = m in c.g.reductions ? names[Stat(m)] : names[c.g.terms[m]]
-        push!(st, store_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, value))
+        push!(st, store_nd(argument!(k, value_spec(c, v)), v, tile(c), indices, as_rows(c, v, c.g.values[m].eltype, value)))
     end
+end
+
+# A product kernel's tile of the output's columns alone, as a log-sum-exp
+# beside attention's weighted sum, is stored as the maximum of its copies
+# along the output's rows, which is the tile: tileiras then lays it out as
+# the output tile's rows. Stored as it is beside the weighted sum, it moved
+# attention's forward to three warp groups of 168 registers, which spilled:
+# 275 μs against 149, at 1024 positions, 64 features, causal, TF32.
+function as_rows(c::Context, v, T, value)
+    c.s.sketch === :product && T <: AbstractFloat && !(value isa Number) || return value
+    rows = tile(c)[1]
+    rows > 1 && !v.spans[1] && v.spans[3] || return value
+    full = map((s, t) -> s ? t : 1, v.spans, tile(c))
+    :(maximum($(ct.broadcast_to)($value, $(Base.setindex(full, rows, 1))); dims = 1))
 end
 
 store_outputs!(k, st, c, ms, names, indices...) = store_values!(k, st, c, ms, names, indices...)

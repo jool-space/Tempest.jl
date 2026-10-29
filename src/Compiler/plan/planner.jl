@@ -82,9 +82,10 @@ end
 
 # Where a group keeps a value it computes, as the value's index over the
 # domain: a fold of the group at the variables of the axes it keeps, any other
-# value over the whole domain or at the positions of the primary folds; or
-# nothing. A scan's group keeps everything but its folds over its whole
-# domain. A fold by key keeps each element at its key.
+# value over the whole domain or at the positions of the primary folds, or a
+# slice of one of its folds where the fold keeps it; or nothing. A scan's
+# group keeps everything but its folds over its whole domain. A fold by key
+# keeps each element at its key.
 function placement(graph, g::Group, v)
     val = graph.values[v]
     d = val.definition
@@ -92,7 +93,45 @@ function placement(graph, g::Group, v)
     g.kind === :scan && !(d isa Reduction) && return val.dims == g.domain ? identity_index(g.domain) : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
-    map(k -> g.domain[k], kept) == val.dims ? map(var, kept) : nothing
+    map(k -> g.domain[k], kept) == val.dims && return map(var, kept)
+    v in g.reductions ? nothing : slice_placement(graph, g, v)
+end
+
+# A slice of a fold of the group: the fold read at a variable of the slice
+# along some of its axes and at constants along the others, kept where the
+# fold keeps those variables. A fold whose term does not vary along the
+# constants' axes is the same there as anywhere along them (see `kept_at`),
+# as a log-sum-exp is along the features of attention's output.
+function slice_placement(graph, g::Group, v)
+    d = graph.values[v].definition
+    d isa Pointwise && d.f === identity && only(d.operands) isa Read || return nothing
+    o = only(d.operands)
+    o.value in g.reductions || return nothing
+    at = placement(graph, g, o.value)
+    at === nothing && return nothing
+    n = length(graph.values[v].dims)
+    found = map(j -> findall(==(var(j)), o.index), 1:n)
+    all(f -> length(f) == 1, found) && all(e -> e in map(var, 1:n) || isempty(e.terms), o.index) || return nothing
+    Tuple(map(f -> at[only(f)], found))
+end
+
+# Whether fold `v` of the group, read at `index`, is what the group keeps: at
+# its placement, or at constants along axes its term does not vary along.
+function kept_at(graph, g::Group, v, index)
+    at = placement(graph, g, v)
+    (at === nothing || length(at) != length(index)) && return false
+    all(zip(index, at)) do (e, p)
+        e == p && return true
+        a = findfirst(k -> p == var(k), eachindex(g.domain))
+        a !== nothing && isempty(e.terms) && 0 <= e.constant < g.domain[a] && !varies(graph, g, g.terms[v], a)
+    end
+end
+
+# Whether term `t` of group `g` varies along axis `a` of its domain: through
+# what it reads, and through the folds of the group it reads.
+varies(graph, g::Group, t::Term, a) = any(subterms((t,); nested = true)) do s
+    s isa Stat && return any(e -> mentions(e, a), something(placement(graph, g, s.value), ()))
+    s isa Union{Load, Ix} && mentions(s, a)
 end
 
 "The iteration index of fold `d` read at `index`, its value's index, with `inner[j]` along its `j`th reduced axis."
@@ -112,7 +151,7 @@ function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain)
     d = val.definition
     if v in g.reductions
         g.kind === :scan && d isa Reduction && throw(OutsideGroup())
-        primary(graph, g, v) && index == placement(graph, g, v) || throw(OutsideGroup())
+        primary(graph, g, v) && kept_at(graph, g, v, index) || throw(OutsideGroup())
         return Stat(v)
     end
     if v in g.outputs
@@ -322,7 +361,7 @@ function storing(graph::IndexGraph; recompute = (), store = ())
         d = values[id].definition
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
         d isa Union{Pointwise, Reduction, Scan, Keyed} && !live[id] && return false
-        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id]) : true
+        d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id] || fold_slice(values, d)) : true
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
     for id in eachindex(values)
@@ -332,6 +371,15 @@ function storing(graph::IndexGraph; recompute = (), store = ())
         all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
     end
     (; graph, stored, live, results, materialized)
+end
+
+# Whether `d` is a slice of a fold: the fold read at constants along some of
+# its axes. It is stored, so that what reads it reads the slice and not the
+# whole fold, which the fold's group need not write (see `slice_placement`).
+function fold_slice(values, d::Pointwise)
+    d.f === identity && length(d.operands) == 1 && only(d.operands) isa Read || return false
+    o = only(d.operands)
+    values[o.value].definition isa Reduction && any(e -> isempty(e.terms), o.index)
 end
 
 # Whether stored pointwise value `id` is read only within one group over its

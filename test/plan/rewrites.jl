@@ -82,6 +82,31 @@ end
     @test agree(C.execute(recomputing(g), q, k, v), filter(!isnothing, C.leaves(interpret(p, q, k, v))))
 end
 
+# The backward reads the forward's log-sum-exp, which the online rewrite no
+# longer needs: the group of the weighted sum computes it beside the sum, as
+# FlashAttention's forward writes it, and stores its slice over the queries;
+# no group computes it apart. With as many features as keys and queries, the
+# scores tell the axes apart.
+@testset "a statistic still read is kept beside the relative fold" begin
+    notes(g) = [id for (id, note) in g.rewrites if occursin("beside a relative fold", note)]
+    lse(p, r) = (f = p.graph.values[r].definition.fold; f isa IR.Relative && f.observe == IR.LOGSUMEXP)
+    weighted(p, r) = (f = p.graph.values[r].definition.fold; f isa IR.Relative && f.observe != IR.LOGSUMEXP)
+    for (q, k, v) in ((data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)),
+            (data(6, 2, 6, 2; scale = 0.3), data(6, 2, 6, 2; scale = 0.2), data(6, 2, 6, 2; scale = 0.1)))
+        p = differentiate(trace((q, k, v) -> sum(abs2, by_logsumexp(q, k, v)), q, k, v))
+        planned = recomputing(C.rewrite(C.lower(p)))
+        slice = only(notes(planned.graph))
+        @test planned.graph.values[slice].dims == (2, 6, 2) && planned.stored[slice]
+        forward = only(g for g in planned.groups if any(r -> weighted(planned, r), g.reductions))
+        @test count(r -> lse(planned, r), forward.reductions) == 1 && slice in forward.outputs
+        @test !any(g -> any(r -> lse(planned, r), g.reductions), filter(!=(forward), planned.groups))
+        @test agree(C.execute(planned, q, k, v), filter(!isnothing, C.leaves(interpret(p, q, k, v))))
+    end
+    # The forward alone reads it nowhere else.
+    q, k, v = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)
+    @test isempty(notes(C.rewrite(C.lower(trace(by_logsumexp, q, k, v)))))
+end
+
 # The laws are data: the same rules that make a softmax one fold relative to
 # the maximum make a variance one fold relative to the mean (Welford), and a
 # log-sum-exp written by hand the fold `logsumexp` records.

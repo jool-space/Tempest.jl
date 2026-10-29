@@ -157,21 +157,27 @@ function unsplit_kernel(c::Context, workspaces, slots)
     ruled === nothing || (k.name *= ", masked tiles skipped")
     for phase in reduction_phases(c)
         sums = Dict(r => fold_sums(c, r) for r in phase)
-        # Folds of a resident tile that do not sum fold it directly.
-        accumulators = Dict(r => fold_accumulators!(body, c, r, sums[r]) for r in phase if !resident || sums[r] !== nothing)
+        # Folds of a resident tile that do not sum fold it directly; folds
+        # whose sums another holds are that one's (see `shared_sums`).
+        shared = shared_sums(c, phase, sums)
+        stepping = filter(r -> !haskey(shared, r), phase)
+        accumulators = Dict(r => fold_accumulators!(body, c, r, sums[r]) for r in stepping if !resident || sums[r] !== nothing)
+        for (r, (R, places)) in shared
+            accumulators[r] = [accumulators[R][1]; accumulators[R][places]]
+        end
         loop = resident ? body : Any[]
         t = resident ? one32 : gensym(:t)
         valid = resident ? valid1 : elementwise(phase) ? valid_mask!(loop, c, at(t)[p]) : nothing
         scope = resident ? names : merge(Dict{Term, Any}(), statistics)
-        roots = phase_roots(c, phase, sums)
+        roots = phase_roots(c, stepping, sums)
         resident || hoist_folds!(k, body, c, roots, scope, at(one32))
         # Folds whose masks rule out different steps each take theirs alone.
-        classes = resident ? nothing : mask_classes(k, c, phase, p, indices, n)
+        classes = resident ? nothing : mask_classes(k, c, stepping, p, indices, n)
         classes === nothing || (k.name *= ", folds stepping by their masks")
         states = Dict{Int, Vector{Any}}()
         if classes === nothing
             emit_tiles!(k, loop, c, roots, scope, at(t)...)
-            for r in phase
+            for r in stepping
                 if haskey(accumulators, r)
                     fold_step!(k, loop, c, r, sums[r], accumulators[r], scope, valid, at(t))
                 else
@@ -185,7 +191,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         end
         if !resident
             # Steps a mask rules out for every fold of the phase are skipped.
-            live = live_steps(k, c, phase, p, indices, n)
+            live = live_steps(k, c, stepping, p, indices, n)
             lo, hi = live === nothing ? (:(Int32(1)), :(Int32($n))) : live
             live === nothing || (k.name *= ", masked steps skipped")
             sweep = :(for $t in $lo:$hi
@@ -380,6 +386,33 @@ function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices,
             accumulate_product!(st, c, scope, product, a, indices[p], p)
         end
     end
+end
+
+# Exponential folds of a phase whose sums, over the same `y`, another of the
+# phase accumulates: each is that fold's running maximum and those of its
+# sums, and steps no sums of its own, as a log-sum-exp beside attention's
+# weighted sum is the sum's maximum and its sum of the weights. Each such fold
+# and the fold whose sums it reads, with their places among its accumulators.
+function shared_sums(c::Context, phase, sums)
+    shared = Dict{Int, Tuple{Int, Vector{Int}}}()
+    for r in phase
+        f = fold_of(c, r)
+        f isa Relative{Exponential} && sums[r] !== nothing || continue
+        y = first(shifted_parts(c, c.g.terms[r]))
+        for R in phase
+            (R == r || haskey(shared, R)) && continue
+            e = fold_of(c, R)
+            e isa Relative{Exponential} && sums[R] !== nothing || continue
+            first(shifted_parts(c, c.g.terms[R])) == y || continue
+            shifted_type(c, f, c.g.terms[r]) === shifted_type(c, e, c.g.terms[R]) || continue
+            places = [findfirst(s -> s[1] == term, sums[R]) for (term, _) in sums[r]]
+            any(isnothing, places) && continue
+            # The running maximum is the first accumulator, the sums after it.
+            shared[r] = (R, places .+ 1)
+            break
+        end
+    end
+    shared
 end
 
 # The state at the end of the sweep: an exponential fold's running maximum, and the

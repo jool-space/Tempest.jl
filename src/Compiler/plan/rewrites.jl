@@ -20,7 +20,9 @@
 The graph with its sums over a sum's product exchanged where that reads a sum
 it computes, then its sums relative to a statistic made relative folds, and
 pointwise functions of them composed into the folds' observes, until neither
-finds anything. The graph's `rewrites` notes each, and `explain` prints them.
+finds anything; then the statistics something else still reads computed
+where the relative folds over the same `y` are. The graph's `rewrites` notes
+each, and `explain` prints them.
 """
 function rewrite(graph::IndexGraph)
     # A sum is found by its factors before the online rewrite makes it a
@@ -32,7 +34,7 @@ function rewrite(graph::IndexGraph)
     # exponential is relative to it only then.
     while true
         next = compose_observes(relative_sums(graph))
-        length(next.rewrites) == length(graph.rewrites) && return compact(next)
+        length(next.rewrites) == length(graph.rewrites) && return compact(kept_statistics(next))
         graph = next
     end
 end
@@ -460,6 +462,86 @@ function relative!(b::Builder, graph, r, F, fr::Frame, (extras, observe))
     kept = iteration_index(d, identity_index(v.dims), map(_ -> constant(0), d.reduced))
     scale = sort(new_factors(b, [(through(o, kept, Domain(v.dims)), power) for (o, power) in rest[.!along]]); by = f -> -f[2])
     product!(b, [(Read(id, identity_index(v.dims)), 1); scale], v.dims, v.eltype, v.scalar).value
+end
+
+# A statistic of `y` that something still reads after the sums relative to it
+# have become relative folds, where a relative fold over more axes folds the
+# same `y` under the same law: the group that computes that fold has the
+# statistic too, as FlashAttention's forward writes the log-sum-exp beside its
+# output for the backward. The statistic becomes the same fold over the
+# relative fold's iteration, which does not vary along the axes it does not
+# keep, read at the first of them; nothing computes it apart.
+function kept_statistics(graph::IndexGraph)
+    live = live_values(graph)
+    found = Dict{Int, Tuple{Int, Tuple{Vararg{Affine}}}}()
+    for F in eachindex(graph.values)
+        live[F] && graph.values[F].definition isa Reduction || continue
+        fr = frame(graph, F)
+        fr === nothing && continue
+        for R in eachindex(graph.values)
+            live[R] && R != F || continue
+            e = graph.values[R].definition
+            e isa Reduction{<:Relative} && e.fold.law == fr.law && length(e.iteration) > length(fr.iteration) || continue
+            index = embedding(graph, fr, R)
+            index === nothing && continue
+            found[F] = (R, index)
+            break
+        end
+    end
+    isempty(found) && return graph
+    first(rebuild(graph) do b, id
+        haskey(found, id) || return nothing
+        kept!(b, graph, id, found[id]...)
+    end)
+end
+
+# The iteration index of the frame's fold over relative fold `R`'s domain at
+# which the frame's `y` is `R`'s, its reduced axes `R`'s, each of its other
+# axes one of `R`'s other axes of the same extent; nothing when there is none.
+# Axes of the same extent are told apart by `y`, as attention's keys and
+# queries are.
+function embedding(graph, fr::Frame, R)
+    e = graph.values[R].definition
+    domain = Domain(e.iteration)
+    y = element_y(graph, e.operand, domain)
+    kept = [k for k in eachindex(fr.iteration) if !(k in fr.reduced)]
+    others = [k for k in eachindex(e.iteration) if !(k in e.reduced)]
+    length(fr.reduced) == length(e.reduced) && length(kept) <= length(others) || return nothing
+    function search(chosen)
+        if length(chosen) == length(kept)
+            index = ntuple(length(fr.iteration)) do k
+                j = findfirst(==(k), fr.reduced)
+                var(j === nothing ? chosen[findfirst(==(k), kept)] : e.reduced[j])
+            end
+            all(j -> fr.iteration[fr.reduced[j]] == e.iteration[e.reduced[j]], eachindex(fr.reduced)) || return nothing
+            return through(fr.y, index, domain) == y ? index : nothing
+        end
+        k = kept[length(chosen) + 1]
+        for a in others
+            (a in chosen || e.iteration[a] != fr.iteration[k]) && continue
+            found = search([chosen; a])
+            found === nothing || return found
+        end
+        nothing
+    end
+    search(Int[])
+end
+
+# Statistic `F` as fold `R`'s group computes it: the fold over `R`'s iteration,
+# its operand read at `index`, and its value at `F`'s positions, `R`'s other
+# kept axes at zero.
+function kept!(b::Builder, graph, F, R, index)
+    v, w = graph.values[F], graph.values[R]
+    d, e = v.definition, w.definition
+    over = add!(b, Reduction(d.fold, remap(through(d.operand, index, Domain(e.iteration)), b.ids), e.iteration, e.reduced), w.dims, v.eltype)
+    kept = [k for k in eachindex(d.iteration) if !(k in d.reduced)]
+    slice = map(k for k in eachindex(e.iteration) if !(k in e.reduced)) do a
+        j = findfirst(k -> index[k] == var(a), kept)
+        j === nothing ? constant(0) : var(j)
+    end
+    id = add!(b, Pointwise(identity, (Read(over, Tuple(slice)),)), v.dims, v.eltype, v.scalar)
+    push!(b.rewrites, id => string("the ", fold_name(d.fold), " of y computed beside a relative fold of y over more axes"))
+    id
 end
 
 law_note(::Exponential) = "online softmax"
