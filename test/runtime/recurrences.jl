@@ -39,6 +39,10 @@
         @test C.recurrence_axes(p.graph, g) == (axis = 3, parallel = [2], inner = [1, 4])
         @test g.domain == (3, 2, 5, 4) && length(g.outputs) == 3 && p.stored[last(g.outputs)] == stores
     end
+    # The reversed loop's group keeps the forward's axes: a map of what it
+    # stores, read outside it, it leaves to that reader to recompute.
+    p = C.plan(C.lower(trace(grad(chunks), inputs(5)...)))
+    @test [g.domain for g in p.groups if g.kind === :recurrence] == [(3, 2, 5, 4), (3, 2, 5, 4)]
     kernels(f, n) = length(prepare(trace(f, inputs(n)...), inputs(n)...).kernels)
     @test kernels(chunks, 5) == kernels(chunks, 9) && kernels(grad(chunks), 5) == kernels(grad(chunks), 9)
     if CUDA_FUNCTIONAL

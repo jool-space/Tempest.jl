@@ -370,7 +370,8 @@ function storing(graph::IndexGraph; recompute = (), store = ())
     # outside it reads, the value the state is carried from among them: its
     # group stores them at each step. The rest it recomputes at each step,
     # the value it is carried from becoming the state one step on (see
-    # `recurrence_group`).
+    # `recurrence_group`); so does a map of what is stored, which a reader
+    # outside recomputes too.
     cycles = recurrences(graph)
     if !isempty(cycles)
         users = readers(graph)
@@ -378,7 +379,9 @@ function storing(graph::IndexGraph; recompute = (), store = ())
             stored[c] = true
             for w in cycle
                 w == c && continue
+                d = values[w].definition
                 stored[w] = w in results || materialized[w] || any(u -> live[u] && !(u in cycle), users[w])
+                stored[w] && w != f && d isa Pointwise && all(o -> !(o isa Read) || stored[o.value], d.operands) && (stored[w] = false)
             end
         end
     end
