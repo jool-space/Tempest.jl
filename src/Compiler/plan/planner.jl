@@ -766,12 +766,18 @@ function recomputable_folds(graph, kept = Set{Int}())
 end
 
 # Whether fold `v` reads a fold of `selected` through maps that stay unstored.
+# A map among `selected`, one the partition recomputes in the backward, is
+# walked through like any other, since recomputing it nests no sweep. Taken
+# for a fold, the widening of BFloat16 attention's rounded output, which its
+# output's gradient reads, kept the sum over features of the probabilities'
+# gradient from the proposals, and the training step stored that sum, as
+# large as the scores: 1114 μs at TF32, against 777 proposed.
 function recomputes(values, v, selected, results, materialized)
     pending, seen = [v], Set([v])
     while !isempty(pending)
         for o in reads(values[pop!(pending)].definition)
             u = o.value
-            u in selected && return true
+            u in selected && values[u].definition isa Reduction && return true
             values[u].definition isa Pointwise && !(u in results) && !materialized[u] && !(u in seen) || continue
             push!(seen, u)
             push!(pending, u)
