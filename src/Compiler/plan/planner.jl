@@ -392,8 +392,27 @@ function storing(graph::IndexGraph; recompute = (), store = ())
         all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
         all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
     end
+    # A stored half-precision value widened to Float32 is widened where it is
+    # read, from the half value: a reader loads half the bytes, and a product
+    # takes the half value on the half tensor cores (see `widened`), where it
+    # would take a stored Float32 copy at Float32's precision. BFloat16
+    # attention with its output rounded, as cuDNN computes it, stored its
+    # output's gradient so for the product into the values' gradient: the
+    # step took 515 μs at TF32 and 900 at full precision, 412 and 430 now.
+    for id in eachindex(values)
+        d = values[id].definition
+        stored[id] && widened(graph, d) && !(id in results) && !materialized[id] || continue
+        o = only(d.operands)
+        o isa Read && stored[o.value] && (stored[id] = false)
+    end
     (; graph, stored, live, results, materialized)
 end
+
+# Whether `d` widens a half-precision value to Float32, as `Float32.(k)` does
+# before a product: a product takes the half value as it is, its products
+# exact in Float32, and the tensor cores accumulate them in Float32.
+widened(graph, d) = d isa Pointwise && d.f isa Cast{Float32} && length(d.operands) == 1 &&
+    eltype_of(graph, only(d.operands)) <: HalfFloat
 
 # Whether `d` is a slice of a fold: the fold read at constants along some of
 # its axes. It is stored, so that what reads it reads the slice and not the

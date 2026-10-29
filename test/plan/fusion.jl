@@ -2,7 +2,8 @@
 # writes into an allocation plan with their readers, and a slice that misses
 # a write reads past it, folds over other axes and a scatter's sum by key join
 # the kernel computing their elements, no kernel joins a fold its reads wait
-# on, and no backward product recomputes a factor inside it.
+# on, and no backward product recomputes a factor inside it but a widening of
+# a half-precision value.
 include("../fixtures/programs.jl")
 
 # A scan is the sweep of a kernel along the axes it scans: a map before it is
@@ -122,6 +123,37 @@ end
     end
     @test ((32, 8), :Pointwise) in saved(Float32)
     @test saved(BFloat16) == saved(Float16) == saved(Float32)
+end
+
+# A half-precision value widened to Float32 is the exception: a product takes
+# the half value as it is, so the widening is recomputed wherever it is read,
+# and never stored. Attention as cuDNN computes it, its scores in Float32 over
+# BFloat16 queries and keys and its output rounded, saved Float32 copies of
+# the queries and keys and stored its output's gradient in Float32; and the
+# maps the partition recomputes hid the sums over features from the cover's
+# proposals, so its training step stored the scores and their probabilities.
+@testset "a widened half-precision value is recomputed where it is read" begin
+    function scored(q, k, v)
+        s = C.contract(Float32.(k), Float32.(q), (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.25f0
+        s = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf32)
+        eltype(q).(C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4)))
+    end
+    q, k, v = map(s -> BFloat16.(data(16, 2, 70, 2; scale = s)), (0.1, 0.2, 0.3))
+    graph = C.rewrite(C.lower(differentiate(trace((q, k, v) -> sum(abs2, Float32.(scored(q, k, v))), q, k, v))))
+    widening(v) = (d = graph.values[v].definition; d isa C.Pointwise && d.f isa C.Cast{Float32} && C.eltype_of(graph, only(d.operands)) == BFloat16)
+    # The queries, the keys, and the rounded output the loss reads.
+    saved, recomputed = C.partition(graph)
+    @test !any(widening, saved)
+    @test count(widening, recomputed) == 3
+    # Nothing stores a widening, whatever else is recomputed.
+    s = C.storing(graph; recompute = recomputed)
+    @test !any(v -> s.stored[v] && widening(v), eachindex(graph.values))
+    # The recomputed maps take no fold from the proposals, and with every
+    # proposal taken nothing the size of the scores is stored.
+    folds = C.recomputable_folds(graph, Set(recomputed))
+    @test folds == C.recomputable_folds(graph)
+    p = C.plan(graph; recompute = union(recomputed, folds))
+    @test all(v -> !p.stored[v] || prod(p.graph.values[v].dims) < 70 * 70, eachindex(p.graph.values))
 end
 
 # A scatter by index arrays is a sum by key, which joins the kernel computing

@@ -40,7 +40,7 @@ function partition(graph::IndexGraph)
         d = values[v].definition
         free = d isa Union{Input, ConstantArray}
         banned = free || d isa Union{Keyed, Scan, Carried} || materialized[v] || d isa Reduction && 4 * value_bytes(values[v]) < reduced_bytes(graph, v) ||
-            factor_of_backward_product(graph, users, live, v)
+            factor_of_backward_product(graph, users, live, v) && !widened(graph, d)
         alone = d isa Pointwise && count(u -> live[u] && !graph.backward[u], users[v]) == 1
         edge!(flow, inside(v), outside(v), free ? 0.0 : value_bytes(values[v]) * (alone ? 2.0 : 1.0))
         banned && edge!(flow, source, inside(v), Inf)
@@ -61,7 +61,13 @@ end
 # value is written by the backward anyway (PyTorch's "materialized in
 # backward"). A product at the index level is a sum fold of a pointwise
 # product of two factors, each converted to Float32 first when it is half
-# precision.
+# precision. That conversion is the exception (`widened`): a product takes
+# the half value as it is, so recomputing the conversion costs it nothing,
+# where saving it stores a Float32 copy that the products then read at
+# Float32's precision, off the half tensor cores. BFloat16 attention with its
+# scores computed from `Float32.(k)` and `Float32.(q)`, as cuDNN computes it,
+# saved both copies, and its training step took 777 μs at TF32 and 3038 at
+# full precision, against 515 and 900 with the conversions recomputed.
 function factor_of_backward_product(graph, users, live, v)
     any(users[v]) do u
         live[u] && graph.backward[u] || return false
