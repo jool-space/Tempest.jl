@@ -65,18 +65,26 @@ function (c::Compilation)()
 end
 
 # The CUBIN of `f` for `tt` compiled through cuTile, and what its compilation
-# used of Tempest's code: the dependencies of the kernel's generic inference,
-# whose edges cover any constant-seeded one's.
+# used of Tempest's code.
 function compile_binary(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy), @nospecialize(groups), arch)
     Base.invokelatest(f, tt) do f, tt
-        argtypes, constants = ct.unwrap_argtypes(f, tt)
-        job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
-            name = ENTRY, alias_groups = groups)
-        cubin = ct.invoke_frozen(ct.compile_or_lookup, job).cubin
-        cache = ct.inference_cache(job)
-        code = ct.invoke_frozen(ct.infer, cache, job.source)
-        (cubin, Tempest.Compiler.dependencies(code, mi -> get(cache, mi, nothing)))
+        job = tile_job(f, tt, occupancy, groups, arch)
+        (ct.invoke_frozen(ct.compile_or_lookup, job).cubin, job_dependencies(job))
     end
+end
+
+# cuTile's compilation of `f` for `tt`, which its code runs in cuTile's own world.
+function tile_job(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy), @nospecialize(groups), arch)
+    argtypes, constants = ct.unwrap_argtypes(f, tt)
+    ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy, name = ENTRY, alias_groups = groups)
+end
+
+# What a job's compilation used of Tempest's code: the dependencies of the
+# kernel's generic inference, whose edges cover any constant-seeded one's.
+function job_dependencies(job)
+    cache = ct.inference_cache(job)
+    code = ct.invoke_frozen(ct.infer, cache, job.source)
+    Tempest.Compiler.dependencies(code, mi -> get(cache, mi, nothing))
 end
 
 # A kernel's function, loaded once per context for the kernel, its argument

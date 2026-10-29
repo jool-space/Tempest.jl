@@ -1,11 +1,15 @@
 # Work the generator does while it precompiles, without a GPU: preparing
 # small programs for CUDA without building them, which plans, claims,
 # estimates and decides; then emitting their kernels and naming them for the
-# kernel cache, and compiling the chosen ones through cuTile for an
-# architecture the machine need not have. cuTile's compiler is compiled so
-# here, with Tempest's methods defined, which void cuTile's own compiled code
-# (its inference loop, 2.4 s of the first kernel a session compiled). Loading
-# and launching need a device, so they compile in the session.
+# kernel cache, and taking the chosen ones through cuTile's front end to Tile
+# IR, for an architecture the machine need not have. cuTile's compiler is
+# compiled so here, with Tempest's methods defined, which void cuTile's own
+# compiled code: without it a session's first kernels spent 13 s compiling
+# Julia. It takes every chosen kernel, since cuTile compiles its emitter again
+# for each intrinsic signature and tile type, which one kernel of each kind
+# leaves to the session (1.6 s of attention's). Not tileiras, which compiles
+# no Julia and would keep its CUBINs in the object cache. Loading and
+# launching need a device, so they compile in the session.
 
 using PrecompileTools: PrecompileTools, @setup_workload, @compile_workload
 
@@ -71,6 +75,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
                         foreach(a -> flatten!(Any[], a), arrays)
                     end
                 end
+                # cuTile reads the version of the bytecode it emits from tileiras.
                 target.precision === :full && ct.tileiras_available() || continue
                 for (g, d) in zip(Tempest.Compiler.group_views(ex), ex.decisions)
                     d !== nothing && d.choice.implementation isa cuTileGenerator || continue
@@ -78,7 +83,11 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
                     for k in schedule_kernels(Context(g, d.choice.claim.schedule), workspaces)
                         arrays = unbacked_arguments(g, k, workspaces)
                         f = Tempest.Compiler.generated(source(k), Workload)
-                        compile_binary(f, Tuple{map(Core.Typeof, arrays)...}, k.occupancy, alias_groups(arrays), WORKLOAD_ARCH)
+                        Base.invokelatest(f, Tuple{map(Core.Typeof, arrays)...}) do f, tt
+                            job = tile_job(f, tt, k.occupancy, alias_groups(arrays), WORKLOAD_ARCH)
+                            ct.invoke_frozen(ct.emit_tile, job)
+                            job_dependencies(job)
+                        end
                     end
                 end
             end
