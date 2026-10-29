@@ -37,26 +37,37 @@ end
 # Tempest compiles again only the kernels whose code it changed. A failure has
 # no inference to read that from, and is kept under the whole key.
 function compiled_binary(@nospecialize(f), @nospecialize(tt), occupancy, groups, arch)
-    parts = ("cuTile kernel", f, tt, occupancy, groups, arch, ct.tileiras_version(), ct.bytecode_version(), ENTRY)
+    parts = Any["cuTile kernel", f, tt, occupancy, groups, arch, ct.tileiras_version(), ct.bytecode_version(), ENTRY]
     key = Tempest.Compiler.content_key(parts...; checked = true)
-    Tempest.Compiler.cached_kernel(key) do
-        # A kernel cuTile cannot express fails the same way next time.
-        failed = Tempest.Compiler.content_key(parts...)
-        Tempest.Compiler.cached_failure(failed)
-        cubin, dependencies = try
-            compile_binary(f, tt, occupancy, groups, arch)
-        catch err
-            err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(failed, sprint(showerror, err))
-            rethrow()
-        end
-        Tempest.Compiler.store_kernel(key, ENTRY, cubin; dependencies)
+    Tempest.Compiler.cached_kernel(Compilation(parts, key), key)
+end
+
+# A kernel's compilation, as the cache runs it on a miss: one type for every
+# kernel, where a closure over the kernel's function and argument types would
+# be a type of each kernel's, compiled again for it.
+struct Compilation
+    parts::Vector{Any}
+    key::String
+end
+
+function (c::Compilation)()
+    _, f, tt, occupancy, groups, arch = c.parts
+    # A kernel cuTile cannot express fails the same way next time.
+    failed = Tempest.Compiler.content_key(c.parts...)
+    Tempest.Compiler.cached_failure(failed)
+    cubin, dependencies = try
+        compile_binary(f, tt, occupancy, groups, arch)
+    catch err
+        err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(failed, sprint(showerror, err))
+        rethrow()
     end
+    Tempest.Compiler.store_kernel(c.key, ENTRY, cubin; dependencies)
 end
 
 # The CUBIN of `f` for `tt` compiled through cuTile, and what its compilation
 # used of Tempest's code: the dependencies of the kernel's generic inference,
 # whose edges cover any constant-seeded one's.
-function compile_binary(@nospecialize(f), @nospecialize(tt), occupancy, groups, arch)
+function compile_binary(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy), @nospecialize(groups), arch)
     Base.invokelatest(f, tt) do f, tt
         argtypes, constants = ct.unwrap_argtypes(f, tt)
         job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,

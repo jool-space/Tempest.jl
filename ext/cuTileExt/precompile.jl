@@ -84,4 +84,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
             end
         end
     end
+    # What runs a compilation on a cache miss, which the workload leaves out
+    # since it would write the cache: 0.4 s of a session's first kernel.
+    precompile(Tuple{Compilation})
 end
