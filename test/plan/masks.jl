@@ -35,4 +35,15 @@
     # A length of 64 bits is no formula: its range would overflow one's.
     h = C.lower(trace((s, n) -> upto(s, n), s, Int64.(n)))
     @test C.masked(h, length(h.values)) === nothing
+    # A window, keys at most the query and fewer than 3 before it: a position
+    # compared with an integer, queries − keys − 2 ≤ 0 beside the causal mask.
+    i, j = reshape(1:6, :, 1), reshape(1:6, 1, :)
+    h = C.lower(trace(s -> ifelse.((i .<= j) .& (j .- i .< 3), s, -Inf32), s))
+    window = [IR.add(IR.var(1), IR.scale(IR.var(2), -1), d), IR.add(IR.add(IR.scale(IR.var(1), -1), IR.var(2), d), -2, d)]
+    @test C.masked(h, length(h.values)) !== nothing && Set(first(C.masked(h, length(h.values)))) == Set(window)
+    # A conjunction with a condition that is no formula, keys of the query's
+    # document, fails wherever its causal part fails: it masks by that part.
+    doc = [1, 1, 1, 2, 2, 2]
+    h = C.lower(trace((s, doc) -> ifelse.((i .<= j) .& (reshape(doc, :, 1) .== reshape(doc, 1, :)), s, -Inf32), s, doc))
+    @test C.masked(h, length(h.values)) !== nothing && first(C.masked(h, length(h.values))) == [window[1]]
 end

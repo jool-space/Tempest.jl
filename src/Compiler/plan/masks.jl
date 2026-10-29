@@ -27,24 +27,27 @@ function masked(graph::IndexGraph, v)
 end
 
 # The mask a value read at `index` is a condition for, when its definition
-# conjoins comparisons of index formulas.
+# conjoins comparisons of index formulas: those of its comparisons that are,
+# when others are not, since the conjunction fails wherever one of them does.
 function mask_of(graph::IndexGraph, v, index, d::Domain, depth = 0)
     depth < 32 || return nothing
     def = graph.values[v].definition
     def isa Pointwise || return nothing
     through(e) = substitute(e, index, d)
     if def.f === (&)
-        parts = map(o -> o isa Read ? mask_of(graph, o.value, map(through, o.index), d, depth + 1) : nothing, def.operands)
-        return any(isnothing, parts) ? nothing : reduce(vcat, parts)
+        parts = filter(!isnothing, map(o -> o isa Read ? mask_of(graph, o.value, map(through, o.index), d, depth + 1) : nothing, def.operands))
+        return isempty(parts) ? nothing : reduce(vcat, parts)
     end
     def.f in (<=, <, >=, >) && length(def.operands) == 2 && any(o -> o isa IndexOperand, def.operands) || return nothing
     a, b = map(o -> compared(graph, o, through, d), def.operands)
     a === nothing || b === nothing ? nothing : comparison_mask(def.f, a, b, d)
 end
 
-# A side of a comparison with a position, as a formula: a position, or an
-# integer read from a value (see `held_formula`).
+# A side of a comparison with a position, as a formula: a position, an
+# integer read from a value (see `held_formula`), or an integer, as a window's
+# width is.
 compared(graph, o::IndexOperand, through, d) = through(o.expr)
+compared(graph, o::Literal{<:Integer}, through, d) = constant(o.value)
 compared(graph, o::Read, through, d) = held_formula(o.value, map(through, o.index), graph.values[o.value].eltype, d)
 compared(graph, o, through, d) = nothing
 

@@ -14,21 +14,24 @@
 # stored value's definition is read through to the formula.
 
 # The mask a term is a condition for, when it conjoins comparisons of index
-# formulas (see `Tempest.Compiler.masked`).
+# formulas: those of them that are, when others are not (see
+# `Tempest.Compiler.masked`).
 function mask_of(c::Context, t, d::Domain)
     t isa Apply || return nothing
     if t.f === (&)
-        parts = map(a -> mask_of(c, a, d), t.args)
-        return any(isnothing, parts) ? nothing : reduce(vcat, parts)
+        parts = filter(!isnothing, map(a -> mask_of(c, a, d), t.args))
+        return isempty(parts) ? nothing : reduce(vcat, parts)
     end
     t.f in (<=, <, >=, >) && length(t.args) == 2 && any(a -> a isa Ix, t.args) || return nothing
     a, b = map(a -> compared(c, a, d), t.args)
     a === nothing || b === nothing ? nothing : IR.comparison_mask(t.f, a, b, d)
 end
 
-# A side of a comparison with a position, as a formula: a position, or an
-# integer loaded from a value (see `Tempest.Compiler.IR.held_formula`).
+# A side of a comparison with a position, as a formula: a position, an
+# integer loaded from a value (see `Tempest.Compiler.IR.held_formula`), or an
+# integer.
 compared(c::Context, t::Ix, d) = t.expr
+compared(c::Context, t::Lit{<:Integer}, d) = Affine(Int(t.value), ())
 compared(c::Context, t::Load, d) = IR.held_formula(t.value, t.index, c.g.values[t.value].eltype, d)
 compared(c::Context, t, d) = nothing
 
