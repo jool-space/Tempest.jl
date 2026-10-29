@@ -41,7 +41,13 @@ implementation takes part only when it is given, and with none at all,
 products in Float32, `:tf32` allows TF32 tensor cores for them, and
 `:tf32x3` splits each Float32 factor into two TF32 parts and sums three
 tensor-core products (close to Float32 accuracy). Half-precision products
-always accumulate in Float32. `online` permits the online softmax (see
+always accumulate in Float32, and a product of a half-precision value, read
+through its conversion to Float32, and a Float32 one is a half-precision
+product under any `precision`, the Float32 factor rounded to the half type:
+a BFloat16 attention's backward rounds its probabilities and their gradient
+so, as FlashAttention and cuDNN do, where the CPU multiplies in Float32 as
+the program does. The target trades that precision for speed as `cu` does,
+which makes arrays Float32. `online` permits the online softmax (see
 `rewrite`): a sum weighted by a softmax accumulates in one pass with the
 softmax's maximum, rescaled as it grows, which changes rounding.
 `rounded_backward` lets a backward read a forward's sum as the program rounds
