@@ -384,8 +384,16 @@ end
 ## What a kernel depends on of Tempest's own code
 
 # Tempest and its extensions, whose code a checked key leaves out; not the
-# kernels Tempest generates, whose source the key holds.
-own_code(m::Module) = m !== Generated && (r = Base.moduleroot(m); r === ROOT || pkgdir(r) == pkgdir(ROOT))
+# kernels Tempest generates, whose source the key holds. Asked of every
+# method, global and type a kernel's inference reached, so the answer is
+# kept per module: `pkgdir` takes the loading lock, on which kernels compiled
+# side by side waited.
+own_code(m::Module) = m !== Generated && (r = Base.moduleroot(m); r === ROOT || own_root(r))
+
+const OWN = IdDict{Module, Bool}()
+const OWN_LOCK = ReentrantLock()
+
+own_root(r::Module) = @lock OWN_LOCK get!(() -> pkgdir(r) == pkgdir(ROOT), OWN, r)
 
 const ROOT = Base.moduleroot(@__MODULE__)
 
