@@ -1,5 +1,8 @@
 # Tempest.jl
 
+> [!NOTE]  
+> This package is in active development.
+
 Tempest compiles Julia array programs into fused GPU kernels. A whole training
 step, with the loss, its gradient and the optimizer, is traced once from plain
 Julia, planned into kernels, and replayed as one CUDA graph. Kernel packages
