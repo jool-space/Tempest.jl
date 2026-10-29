@@ -28,6 +28,27 @@ flat(x) = filter(!isnothing, C.leaves(x))
     end
 end
 
+# Slices concatenated in order are the array they were taken from, read
+# through a formula, along the axis they were taken along or another: the
+# select between them, and its adjoint, the sum of what each slice receives,
+# compute no value. Slices out of order, or of different arrays, select.
+@testset "pieces that cover a value" begin
+    x, w = data(4, 3, 5), data(20, 3; scale = 0.3)
+    slices(x, order) = [x[:, :, t] for t in order]
+    selects(graph) = any(((v, l),) -> l && v.definition isa C.Pointwise && v.definition.f === ifelse,
+        zip(graph.values, C.live_values(graph)))
+    for (f, covers) in (((x, w) -> sum(abs2, vcat(slices(x, 1:5)...) .* w), true),
+            ((x, w) -> sum(abs2, hcat(slices(x, 1:5)...) .* reshape(w, 4, 15)), true),
+            ((x, w) -> sum(abs2, vcat(slices(x, [2, 1, 3, 4, 5])...) .* w), false),
+            ((x, w) -> sum(abs2, vcat(slices(x, 1:4)..., w[1:4, :]) .* w), false))
+        for p in (trace(f, x, w), differentiate(trace(f, x, w)))
+            graph = C.lower(p)
+            @test agree(C.interpret(graph, x, w), flat(interpret(p, x, w)))
+            @test selects(graph) != covers
+        end
+    end
+end
+
 # An index out of range is an error in the interpreters.
 @testset "gathers out of range" begin
     x = data(8, 6)

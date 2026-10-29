@@ -215,6 +215,98 @@ end
 position_formula(o::Literal{<:Integer}, at, d::Domain) = o.value isa Bool ? nothing : constant(o.value)
 position_formula(o::Operand, at, d::Domain) = nothing
 
+# Pieces that cover a value together are a formula, as a scatter that covers
+# its result is: a select between reads of one value, or a sum of such reads
+# each selected over zero, where each read is the first a step on and is
+# selected where one formula of the position lies in a block of its own, the
+# blocks one width apart and covering the formula's range, is that value read
+# at the block the position lies in. Slices concatenated are one, the results
+# of a recurrence's steps concatenated say, and so is their adjoint, a sum of
+# what each slice receives, scattered. Nothing for any other definition.
+function covering(values, def::Pointwise, d::Domain, T)
+    def.f === ifelse || def.f === (+) || return nothing
+    found = pieces(values, def, identity_index(d.extents), d)
+    found === nothing && return nothing
+    ps = first(found)
+    length(ps) >= 2 && all(p -> p.read.value == ps[1].read.value, ps) && values[ps[1].read.value].eltype === T || return nothing
+    # The formula the masks bound, from either side.
+    any(p -> isempty(p.mask), ps) && return nothing
+    f = first(first(ps).mask)
+    e = Affine(0, f.terms)
+    isempty(e.terms) && return nothing
+    e = e.terms[1].second < 0 ? scale(e, -1) : e
+    lo, hi = affine_range(e, d)
+    blocks = map(ps) do p
+        a, b = lo, hi
+        for m in p.mask
+            m.terms == e.terms ? (b = min(b, -m.constant)) : m.terms == scale(e, -1).terms ? (a = max(a, m.constant)) : return nothing
+        end
+        (a, b)
+    end
+    any(isnothing, blocks) && return nothing
+    order = sortperm(blocks)
+    width = blocks[order[1]][2] - blocks[order[1]][1] + 1
+    width >= 1 || return nothing
+    for (j, k) in enumerate(order)
+        a, b = blocks[k]
+        a == lo + (j - 1) * width && b == min(a + width - 1, hi) || return nothing
+    end
+    blocks[order[end]][2] == hi || return nothing
+    base, next = ps[order[1]].read.index, ps[order[2]].read.index
+    steps = map((x, y) -> add(y, scale(x, -1), d), base, next)
+    all(isconstant, steps) || return nothing
+    for (j, k) in enumerate(order)
+        ps[k].read.index == map((x, s) -> add(x, (j - 1) * s.constant, d), base, steps) || return nothing
+    end
+    block = fdiv(add(e, -lo, d), width, d)
+    Read(ps[1].read.value, map((x, s) -> add(x, mul(block, s.constant, d), d), base, steps))
+end
+
+# The pieces `def`, its variables at `at`, selects between: each a read and the
+# mask, formulas at most zero, where it is selected; and what `def` is where
+# none is, zero for a sum. Nothing when it is no such select or sum.
+function pieces(values, def::Pointwise, at, d::Domain)
+    through(o::Read) = Read(o.value, map(e -> substitute(e, at, d), o.index))
+    through(o) = o
+    inner(o) = o isa Read && values[o.value].definition isa Pointwise ?
+        pieces(values, values[o.value].definition, through(o).index, d) : nothing
+    if def.f === ifelse && length(def.operands) == 3
+        c, x, y = def.operands
+        m = block_mask(values, c, at, d)
+        (m === nothing || !(x isa Read)) && return nothing
+        rest = inner(y)
+        piece = (; mask = m, read = through(x))
+        return rest === nothing ? ([piece], through(y)) : ([piece; first(rest)], last(rest))
+    elseif def.f === (+) && length(def.operands) == 2
+        zeros = Any[]
+        for o in def.operands
+            p = inner(o)
+            p !== nothing && last(p) isa Literal && iszero(last(p).value) || return nothing
+            push!(zeros, p)
+        end
+        return ([first(zeros[1]); first(zeros[2])], last(zeros[1]))
+    end
+    nothing
+end
+
+# A condition read at `at` as a mask: comparisons of positions and their
+# conjunctions.
+function block_mask(values, o::Read, at, d::Domain)
+    def = values[o.value].definition
+    def isa Pointwise || return nothing
+    at = map(e -> substitute(e, at, d), o.index)
+    if def.f === (&)
+        parts = map(x -> block_mask(values, x, at, d), def.operands)
+        return any(isnothing, parts) ? nothing : reduce(vcat, parts)
+    end
+    def.f in (<, <=, >, >=, ==) && length(def.operands) == 2 || return nothing
+    a, b = map(x -> position_formula(x, at, d), def.operands)
+    a === nothing || b === nothing ? nothing : def.f === (==) ?
+        [comparison_mask(<=, a, b, d); comparison_mask(>=, a, b, d)] : comparison_mask(def.f, a, b, d)
+end
+block_mask(values, o::Literal{Bool}, at, d::Domain) = o.value ? Affine[] : nothing
+block_mask(values, o::Operand, at, d::Domain) = nothing
+
 # A node of shape `dims` filled out to a larger shape, as Julia broadcasts.
 fill_out(a::ValueAccess, dims, d) = ValueAccess(a.value, map(e -> substitute(e, broadcast_index(dims), d), a.index))
 fill_out(a::LiteralAccess, dims, d) = a
@@ -491,6 +583,8 @@ function lower(p::Program)
     # Two nodes with one definition are one value: a subexpression written
     # twice is computed once, and spellings that repeat it read the same value.
     function value!(definition, dims, T; scalar = false)
+        whole = !scalar && definition isa Pointwise ? covering(values, definition, Domain(dims), T) : nothing
+        whole === nothing || return ValueAccess(whole.value, whole.index)
         v = Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar)
         id = get!(numbered, v) do
             push!(values, v)
