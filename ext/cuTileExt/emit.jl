@@ -777,10 +777,21 @@ end
 spanned_shape(c::Context, t::Term) =
     ntuple(q -> any(k -> mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
 
+# A body that folds elementwise holds a step of itself in the tile, at most
+# `RECOMPUTED_ELEMENTS`: causal attention's backward recomputes its sum over
+# 64 features at 64 queries a step, 4096 elements, and softcapped attention's
+# folds 64 features for every pair of a 128×64 tile, 524288, which tileiras
+# lowered to 28 MB of PTX that ptxas had not compiled in 35 minutes (one of
+# 128×16 pairs, 131072, compiled in 47 s).
+const RECOMPUTED_ELEMENTS = 16384
+
 function fold_expressible(c::Context, t::Recomputed)
     val = c.g.values[t.value]
     tile_fold(val.fold, term_eltype(t.body, c.g)) && length(t.extents) == 1 || return false
-    terms_expressible(fold_context(c, t), (t.body,))
+    e = fold_context(c, t)
+    bilinear_over(e, val.fold, t.body, length(c.s.tiling) + 1) !== nothing ||
+        prod(spanned_shape(e, t.body)) <= RECOMPUTED_ELEMENTS || return false
+    terms_expressible(e, (t.body,))
 end
 
 # Whether the generator can lower every subterm of `roots`.
