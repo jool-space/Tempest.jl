@@ -42,9 +42,20 @@ end
 
 The partial derivatives of `y = f(xs...)` with respect to each argument, as
 `f`'s package states them through ChainRulesCore's `@scalar_rule`, `nothing`
-for an argument with none; `nothing` for a function with no statement. The
-ChainRulesCore extension adds the method that reads them.
+for an argument with none; `nothing` for a function with no statement:
+Flux's `xlogy`, NNlib's activations and SpecialFunctions' `erf` state theirs.
+They are taken as the function's own where it has none of its own, for a
+function whose code traces, whose derivative at a branch may not be the
+function's, and for one recorded whole, whose code cannot be differentiated.
 """
+function stated_derivatives(f, y::Traced, xs::Union{Traced, Number}...)
+    applicable(derivatives_given_output, y, f, xs...) || return nothing
+    # One row of partials for each of the function's results; a scalar
+    # function has one.
+    rows = derivatives_given_output(y, f, xs...)
+    length(rows) == 1 || return nothing
+    map(d -> d isa AbstractZero ? nothing : d, only(rows))
+end
 stated_derivatives(f, y, xs...) = nothing
 
 # A partial's contribution to its argument's cotangent, `g` times it: a

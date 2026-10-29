@@ -20,6 +20,12 @@ module Compiler
 using LinearAlgebra
 using BFloat16s: BFloat16
 using Republic: @republic
+# The derivatives packages state with `@scalar_rule` (`stated_derivatives`).
+# Loaded before the compiler, its methods on every number (`promote_rule` and
+# `+` for its zeros) are part of what the compiler's code is inferred with: a
+# session that loaded it after, as NNlib, Flux and Lux do, would compile that
+# code again.
+using ChainRulesCore: AbstractZero, derivatives_given_output
 
 public IR, Implement
 
