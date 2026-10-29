@@ -394,7 +394,8 @@ end
 # result's axes then the summed ones, the two operands (converted to Float32
 # when they are half precision) are multiplied and summed over the summed axes.
 # The result reads that reduction through a formula. Kernels recognize the
-# pattern; nothing else needs to.
+# pattern; nothing else needs to. A product that sums no axis, an outer
+# product, is the pointwise product itself.
 function contraction!(value!, op::Contract, inputs, input_dims, n)
     summed = [l for l in op.a if l in op.b && !(l in op.out)]
     labels = [collect(op.out); summed]
@@ -414,6 +415,10 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
     end
     product = value!(Pointwise(*, (factor(inputs[1], op.a), factor(inputs[2], op.b))), iteration, A)
     reduced = Tuple((length(op.out) + 1):length(labels))
+    if isempty(reduced)
+        A === n.eltype && return product
+        return value!(Pointwise(Cast{n.eltype}(), (Read(product.value, product.index),)), iteration, n.eltype)
+    end
     kept = ntuple(k -> k in reduced ? 1 : iteration[k], length(iteration))
     # The result's axes come first, so its value is read at the same variables.
     value!(Reduction(SumFold(), Read(product.value, product.index), iteration, reduced), kept, n.eltype)

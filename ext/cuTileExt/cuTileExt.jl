@@ -609,6 +609,9 @@ function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
         c = Context(g, s)
         fits(c) || return Claim[]
     end
+    # A pointwise kernel writes its outputs and scatters its folds by key; a
+    # group with another fold, one over no axes say, is not one.
+    s.sketch === :pointwise && any(r -> !g.values[r].keyed, g.reductions) && return Claim[]
     partial = partial_folds(c)
     # A resident kernel with folds that keep the swept axis covers several kept
     # tiles per block; each such fold reduces every kept axis.

@@ -24,6 +24,9 @@ flat(x) = filter(!isnothing, C.leaves(x))
             users = C.readers(graph)
             @test !any(k -> graph.values[k].definition isa C.Pointwise && graph.values[k].definition.f === identity &&
                             !isempty(users[k]), eachindex(graph.values))
+            # A product that sums no axis, an outer product, is the pointwise
+            # product, not a fold.
+            @test !any(v -> v.definition isa C.Reduction && isempty(v.definition.reduced), graph.values)
         end
     end
 end
