@@ -4,12 +4,14 @@
 # meeting the values on the half-precision tensor cores, as a product of a
 # half and a Float32 factor does in Tempest's own kernels, and the output
 # rounded to the operands' type; with and without a causal mask, at the scale
-# of one over the root of the features. A program that computes attention so
-# is realized by cuDNN where it is faster; one that rounds the scores, keeps
-# the output in Float32 or scales otherwise computes something else, and is
-# not. It supports the bindings whose arrays the engines read: features
-# contiguous, the query heads that share a key head next to one another, and
-# every array and row 16 bytes aligned.
+# of one over the root of the features; and the same with the log-sum-exp of
+# the scores beside the output, in Float32, as the engines write their
+# statistics. A program that computes attention so is realized by cuDNN where
+# it is faster; one that rounds the scores, keeps the output in Float32 or
+# scales otherwise computes something else, and is not. It supports the
+# bindings whose arrays the engines read: features contiguous, the query heads
+# that share a key head next to one another, and every array and row 16 bytes
+# aligned.
 module cuDNNExt
 
 using CUDACore
@@ -29,16 +31,24 @@ loaded(::Type{cuDNNAttention}) = true
 const D, G, H, M, B, N = 1, 2, 3, 4, 5, 6
 
 # Queries `q` are (features, query heads per key head, key heads, queries,
-# batch): query head `g + G·h` reads key head `h`, as cuDNN groups them.
-function attention(q, k, v; causal)
+# batch): query head `g + G·h` reads key head `h`, as cuDNN groups them. With
+# `statistics`, the log-sum-exp of each query's scores too, (1, query heads
+# per key head, key heads, queries, batch), as a training forward keeps it for
+# the backward.
+function attention(q, k, v; causal, statistics = false)
     s = contract(Float32.(k), Float32.(q), (D, H, N, B), (D, G, H, M, B), (N, G, H, M, B)) .* Float32(inv(sqrt(size(q, 1))))
     causal && (s = ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, -Inf32))
-    o = contract(v, exp.(s .- Tempest.logsumexp(s; dims = 1)), (D, H, N, B), (N, G, H, M, B), (D, G, H, M, B))
-    eltype(q).(o)
+    lse = Tempest.logsumexp(s; dims = 1)
+    o = contract(v, exp.(s .- lse), (D, H, N, B), (N, G, H, M, B), (D, G, H, M, B))
+    statistics ? (eltype(q).(o), lse) : eltype(q).(o)
 end
 
-const ATTENTION = Tuple(Template((q, k, v) -> attention(q, k, v; causal);
-    inputs = (q = (:d, :g, :h, :m, :b), k = (:d, :h, :n, :b), v = (:e, :h, :n, :b)), outputs = (:o,)) for causal in (false, true))
+# Without and with the statistics, each without and with the causal mask: the
+# `k`th is causal when `k` is even, and writes the statistics past the second.
+const ATTENTION = Tuple(Template((q, k, v) -> attention(q, k, v; causal, statistics);
+    inputs = (q = (:d, :g, :h, :m, :b), k = (:d, :h, :n, :b), v = (:e, :h, :n, :b)), outputs = statistics ? (:o, :lse) : (:o,))
+    for statistics in (false, true) for causal in (false, true))
+causal(b::Binding) = iseven(b.template)
 
 # Online: the engines rescale the softmax's sums as its maximum grows, which
 # a target that keeps the two passes does not permit.
@@ -51,12 +61,12 @@ struct Operand
 end
 
 # Queries or the output, their query heads one axis: the key heads step over
-# the heads of a group.
+# the heads of a group. The statistics are one feature wide.
 function heads(s::Strided)
-    d, g, h, m, b = s.size
-    sd, sg, sh, sm, sb = s.strides
+    d, g, h, m, b = length(s.size) == 5 ? s.size : (1, s.size...)
+    sd, sg, sh, sm, sb = length(s.strides) == 5 ? s.strides : (0, s.strides...)
     stride = g == 1 ? sh : h == 1 || sh == g * sg ? sg : nothing
-    stride === nothing ? nothing : Operand((d, g * h, m, b), (sd, stride, sm, sb))
+    stride === nothing ? nothing : Operand((d, g * h, m, b), (d == 1 ? 1 : sd, stride, sm, sb))
 end
 
 struct Sdpa
@@ -66,6 +76,7 @@ struct Sdpa
     k::Operand
     v::Operand
     o::Operand
+    stats::Union{Nothing, Operand}
 end
 
 const HALF = (Float16, BFloat16)
@@ -73,7 +84,9 @@ const HALF = (Float16, BFloat16)
 # The call that computes a binding, or nothing when the engines do not take
 # its arrays: half-precision, as many features in the keys as in the values,
 # a multiple of 8 up to 256 of them, contiguous, and every other stride and
-# where each array starts a multiple of 16 bytes.
+# where each array starts a multiple of 16 bytes. The statistics are Float32,
+# laid out as Tempest stores them, a query's heads next to one another, or
+# any other way: the engines write them through their strides.
 function sdpa(b::Binding)
     q, k, v, o = b.arrays.q, b.arrays.k, b.arrays.v, b.arrays.o
     T = q.eltype
@@ -85,7 +98,14 @@ function sdpa(b::Binding)
     K, V = Operand(k.size, k.strides), Operand(v.size, v.strides)
     all(x -> x.strides[1] == 1 && all(s -> s % 8 == 0, x.strides[2:4]), (Q, K, V, O)) || return nothing
     all(s -> s.offset % 8 == 0, (q, k, v, o)) || return nothing
-    Sdpa(T, b.template == 2, Q, K, V, O)
+    stats = nothing
+    if haskey(b.arrays, :lse)
+        lse = b.arrays.lse
+        lse.eltype === Float32 && lse.offset % 4 == 0 || return nothing
+        stats = heads(lse)
+        stats === nothing && return nothing
+    end
+    Sdpa(T, causal(b), Q, K, V, O, stats)
 end
 
 # A graph built for each call alike, on each device, or nothing when cuDNN
@@ -98,7 +118,9 @@ function graph(c::Sdpa)
         g = cuDNN.Graph(; io_dtype = c.eltype, intermediate_dtype = Float32, compute_dtype = Float32)
         operand(name, x; output = false) = cuDNN.tensor!(g; dims = x.dims, strides = x.strides, dtype = c.eltype, name, output)
         q, k, v, o = operand("Q", c.q), operand("K", c.k), operand("V", c.v), operand("O", c.o; output = true)
-        cuDNN.sdpa_fwd!(g, q, k, v; o, scale = cuDNN.scalar!(g, Float32; rank = 4, name = "Scale"), causal = c.causal)
+        stats = c.stats === nothing ? nothing :
+            cuDNN.tensor!(g; dims = c.stats.dims, strides = c.stats.strides, dtype = Float32, name = "Stats", output = true)
+        cuDNN.sdpa_fwd!(g, q, k, v; o, stats, scale = cuDNN.scalar!(g, Float32; rank = 4, name = "Scale"), causal = c.causal)
         try
             # Engines that keep the operands' types: none that rounds them further.
             cuDNN.build!(g; math_mode = CUDACore.DEFAULT_MATH, deterministic = true)
@@ -120,7 +142,7 @@ supports(::cuDNNAttention, ::CUDATarget, b::Binding) = (c = sdpa(b)) !== nothing
 function estimate(::cuDNNAttention, b::Binding, target, g)
     e = b.extents
     flops = 2.0 * (e.d + e.e) * e.g * e.h * e.m * e.b * e.n
-    [Work(g.bytes; flops = b.template == 2 ? flops / 2 : flops, factor = b.arrays.q.eltype)]
+    [Work(g.bytes; flops = causal(b) ? flops / 2 : flops, factor = b.arrays.q.eltype)]
 end
 
 # One handle per context, which carries the stream: execution plans do not
@@ -138,7 +160,8 @@ function Base.show(io::IO, a::BuiltAttention)
     c = a.call
     d, heads, queries, batch = c.q.dims
     print(io, "cuDNN attention", c.causal ? ", causal" : "", ", ", heads, " heads", c.k.dims[2] == heads ? "" : " over $(c.k.dims[2])",
-        " of ", d, " features, ", queries, " queries by ", c.k.dims[3], " keys", batch > 1 ? ", batch $batch" : "", ", ", c.eltype)
+        " of ", d, " features, ", queries, " queries by ", c.k.dims[3], " keys", batch > 1 ? ", batch $batch" : "", ", ", c.eltype,
+        c.stats === nothing ? "" : ", with its log-sum-exp")
 end
 
 # Every pointer the plan reads is fixed when it is built, in a variant pack:
@@ -151,6 +174,7 @@ function build(::cuDNNAttention, target::CUDATarget, b::Binding)
     workspace = CuArray{UInt8}(undef, g.workspace_size)
     scale, mask = Ref(Float32(inv(sqrt(c.q.dims[1])))), Ref(-Inf32)
     arrays = Dict("Q" => b.arrays.q, "K" => b.arrays.k, "V" => b.arrays.v, "O" => b.arrays.o)
+    c.stats === nothing || (arrays["Stats"] = b.arrays.lse)
     pointers = map(g.variant_tensors) do t
         t.name == "Scale" && return Base.unsafe_convert(Ptr{Float32}, scale)
         t.name == "MaskValue" && return Base.unsafe_convert(Ptr{Float32}, mask)
@@ -181,8 +205,8 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
         sample(T, dims...) = T.(reshape(sin.(1:prod(dims)), dims))
         q, k, v = sample(BFloat16, 64, 2, 2, 32, 1), sample(BFloat16, 64, 2, 32, 1), sample(BFloat16, 64, 2, 32, 1)
         @compile_workload begin
-            for causal in (false, true)
-                program = Tempest.Compiler.trace((q, k, v) -> attention(q, k, v; causal), q, k, v)
+            for causal in (false, true), statistics in (false, true)
+                program = Tempest.Compiler.trace((q, k, v) -> attention(q, k, v; causal, statistics), q, k, v)
                 ex = Tempest.Compiler.prepare(program, q, k, v; target = CUDATarget(cuDNNAttention()), build = false)
                 Tempest.explain(devnull, ex)
             end

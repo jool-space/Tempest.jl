@@ -89,8 +89,12 @@ end
 # value of `b` each value of `a` is, each load's and stored member's index on
 # both sides and each index formula's, for the axes to be found from. A fold
 # recomputed in a term adds the axes it reduces to its side's, after the
-# domain's, each with its extent and the fold (`extra`); its body numbers
-# them after its reader's variables, which `vars` maps to the side's axes.
+# domain's, each with its extent, the fold and where it is read (`extra`); its
+# body numbers them after its reader's variables, which `vars` maps to the
+# side's axes. The same fold recomputed again where it is read already, as
+# attention's scores are in the weighted sum and beside it in the log-sum-exp
+# a training forward keeps, reduces the axes its first copy added: its loads
+# are the first copy's, and each array is one view.
 mutable struct Unifier
     a::GroupView
     b::GroupView
@@ -98,7 +102,7 @@ mutable struct Unifier
     values::Dict{Int, Int}
     reads::Vector{Tuple{Int, Tuple{Vararg{Affine}}, Int, Tuple{Vararg{Affine}}}}
     formulas::Vector{Tuple{Affine, Affine}}
-    extra::Tuple{Vector{Tuple{Int, Int}}, Vector{Tuple{Int, Int}}}
+    extra::Tuple{Vector{Tuple{Int, Int, Any}}, Vector{Tuple{Int, Int, Any}}}
     vars::Tuple{Vector{Int}, Vector{Int}}
 end
 
@@ -176,7 +180,10 @@ function unify_body!(@nospecialize(then), u::Unifier, a::Recomputed, b::Recomput
     outer = u.vars
     inner = map((1, 2), (a, b)) do i, t
         n = length(side_domain(u, i))
-        append!(u.extra[i], ((e, t.value) for e in t.extents))
+        at = (t.value, side_index(u, i, t.index))
+        k = findfirst(x -> x[3] == at, u.extra[i])
+        k === nothing || return [outer[i]; (n - length(u.extra[i]) + k) .+ (0:(length(t.extents) - 1))]
+        append!(u.extra[i], ((e, t.value, at) for e in t.extents))
         [outer[i]; (n + 1):(n + length(t.extents))]
     end
     u.vars = inner

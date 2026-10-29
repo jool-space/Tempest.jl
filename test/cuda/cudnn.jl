@@ -1,22 +1,26 @@
 # Attention on cuDNN: a library whose templates are attention as cuDNN's SDPA
 # engines compute it, the scores and softmax in Float32 and the output in the
-# operands' type. A program that computes attention so, in either half type,
-# with heads grouped or not, masked or not, is one cuDNN call, and agrees with
-# the program; one that computes something else, or whose arrays the engines
-# cannot read, is Tempest's, and so is any on a target that keeps the
-# softmax's two passes.
+# operands' type, with or without the log-sum-exp beside it. A program that
+# computes attention so, in either half type, with heads grouped or not,
+# masked or not, is one cuDNN call, and agrees with the program; one that
+# computes something else, or whose arrays the engines cannot read, is
+# Tempest's, and so is any on a target that keeps the softmax's two passes.
 include("../fixtures/programs.jl")
 include("../fixtures/operations.jl")
 
 const LABELS = (d = 1, g = 2, h = 3, m = 4, b = 5, n = 6)
-# As a model writes it: (features, heads, positions, batch).
-function sdpa(q, k, v; causal, round = true)
+# As a model writes it: (features, heads, positions, batch). With
+# `statistics`, the log-sum-exp of each query's scores too, (heads,
+# positions, batch), as a training forward keeps it.
+function sdpa(q, k, v; causal, round = true, statistics = false)
     (; d, g, h, m, b, n) = LABELS
     q5 = reshape(q, size(q, 1), size(q, 2) ÷ size(k, 2), size(k, 2), size(q, 3), size(q, 4))
     s = C.contract(Float32.(k), Float32.(q5), (d, h, n, b), (d, g, h, m, b), (n, g, h, m, b)) .* Float32(inv(sqrt(size(q, 1))))
     causal && (s = ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, -Inf32))
-    o = C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (d, h, n, b), (n, g, h, m, b), (d, g, h, m, b))
-    reshape(round ? eltype(q).(o) : o, size(q))
+    lse = T.logsumexp(s; dims = 1)
+    o = C.contract(v, exp.(s .- lse), (d, h, n, b), (n, g, h, m, b), (d, g, h, m, b))
+    o = reshape(round ? eltype(q).(o) : o, size(q))
+    statistics ? (o, reshape(lse, size(q, 2), size(q, 3), size(q, 4))) : o
 end
 
 @testset "attention on cuDNN" begin
@@ -54,4 +58,18 @@ end
     p = trace((q, k, v) -> sdpa(q, k, v; causal = true), q, k, v)
     ex = prepare(p, CuArray(q), CuArray(k), CuArray(v); target = T.CUDATarget(T.cuDNNAttention(), T.cuTileGenerator()))
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, k, v)); rtol = 1.0e-2)
+    # With the log-sum-exp: one call, its statistics written where Tempest
+    # stores them, a query's heads next to one another, which the engines
+    # write through their strides at no cost (58.9 μs with them, 59.6 without,
+    # at 64 features, 8 heads, 1024 positions, batch 2, causal).
+    for (H, heads, kv, positions, batch, causal) in ((BFloat16, 8, 2, 200, 2, true), (Float16, 4, 4, 128, 1, false))
+        q, k, v = half(H, 64, heads, positions, batch), half(H, 64, kv, positions, batch), half(H, 64, kv, positions, batch)
+        p = trace((q, k, v) -> sdpa(q, k, v; causal, statistics = true), q, k, v)
+        ex = prepare(p, CuArray(q), CuArray(k), CuArray(v); target = T.CUDATarget(T.cuDNNAttention()))
+        # Unmasked, the query positions may stand for heads of a group as
+        # well: one statistic per query, however the decision binds them.
+        call = only(called(ex)).call
+        @test call.causal == causal && call.stats !== nothing && prod(call.stats.dims) == heads * positions * batch
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, k, v)); rtol = 1.0e-2)
+    end
 end
