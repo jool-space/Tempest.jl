@@ -106,7 +106,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     IR.forget_terms!()
     forget_matches!()
     graph = lower(program)
-    permits_rewrites(target) && (graph = rewrite(graph))
+    permits_rewrites(target) && (graph = rewrite(graph; rounded = rounded_backward(target)))
     pairs = replacements(program, replaces)
     input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
     pinned = Set{Int}(recompute)

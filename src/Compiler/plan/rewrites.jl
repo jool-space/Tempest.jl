@@ -15,19 +15,21 @@
 # inside is one the program computes (see `exchanged_sums`).
 
 """
-    rewrite(graph) -> IndexGraph
+    rewrite(graph; rounded = false) -> IndexGraph
 
 The graph with its sums over a sum's product exchanged where that reads a sum
 it computes, then its sums relative to a statistic made relative folds, and
 pointwise functions of them composed into the folds' observes, until neither
 finds anything; then the statistics something else still reads computed
-where the relative folds over the same `y` are. The graph's `rewrites` notes
-each, and `explain` prints them.
+where the relative folds over the same `y` are. With `rounded`, an exchanged
+sum reads the sum it finds as the program rounds it to half precision, where
+it does (see `exchanged_sums`). The graph's `rewrites` notes each, and
+`explain` prints them.
 """
-function rewrite(graph::IndexGraph)
+function rewrite(graph::IndexGraph; rounded::Bool = false)
     # A sum is found by its factors before the online rewrite makes it a
     # relative fold.
-    graph = exchanged_sums(graph)
+    graph = exchanged_sums(graph; rounded)
     # Each rewrite can make another possible. Compositions nest, `m + log(s)`
     # over `log(s)`, and each pass composes one level; a log-sum-exp written
     # out is a statistic only once composed, and a sum weighted by its
@@ -211,13 +213,18 @@ end
 # not computed at all: FlashAttention-2's identity, where the softmax
 # backward's Σ_j p·dp, dp = Σ_d v·dO, is Σ_d dO·o, o = Σ_j p·v the forward's
 # output. Only where the exchanged sum runs over no more elements than the
-# sum it replaces.
-function exchanged_sums(graph::IndexGraph)
+# sum it replaces. With `rounded`, the sum it reads is the program's rounding
+# of it to half precision where the program rounds it, as the output of
+# attention in half precision is: FlashAttention's and cuDNN's backward read
+# the output so, and a forward that writes it rounded need not keep it in
+# Float32 too.
+function exchanged_sums(graph::IndexGraph; rounded::Bool = false)
     sums = Pair{Int, Vector{Tuple{Operand, Int}}}[]
     found = Dict{Int, Any}()
     for (r, v) in enumerate(graph.values)
         v.definition isa Reduction{SumFold} || continue
         e = exchange(graph, r, sums)
+        rounded && e !== nothing && (e = merge(e, (; sum = rounded_sum(graph, e.sum))))
         e === nothing || (found[r] = e)
         v.scalar || push!(sums, r => factors(graph, v.definition.operand, Domain(v.definition.iteration), v.eltype))
     end
@@ -305,6 +312,19 @@ function matched_axes(gs, fs, iteration, extents)
         nothing
     end
     match(1, zeros(Int, length(iteration)), Int[])
+end
+
+# The program's rounding of the sum `s` reads to half precision, read where
+# `s` reads the sum, or `s` itself when the program rounds it to none.
+function rounded_sum(graph, s::Read)
+    V = s.value
+    for (W, w) in enumerate(graph.values)
+        d = w.definition
+        d isa Pointwise && d.f isa Cast && w.eltype <: HalfFloat && length(d.operands) == 1 || continue
+        o = only(d.operands)
+        o isa Read && o.value == V && o.index == identity_index(graph.values[V].dims) && return Read(W, s.index)
+    end
+    s
 end
 
 # Sum `r` exchanged: the factors left outside and the sum read, over the

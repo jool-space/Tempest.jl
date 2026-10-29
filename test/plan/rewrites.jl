@@ -82,6 +82,36 @@ end
     @test agree(C.execute(recomputing(g), q, k, v), filter(!isnothing, C.leaves(interpret(p, q, k, v))))
 end
 
+# With `rounded`, the exchanged sum reads the output as a half-precision
+# forward rounds it, as FlashAttention's and cuDNN's backward read theirs: the
+# forward stores the rounded output, and not the Float32 sum as well. The
+# gradients of the queries and keys move, here by up to a BFloat16 ulp of
+# their largest element.
+@testset "a rounded backward reads the output as the forward rounds it" begin
+    q, k, v = map(x -> BFloat16.(single(x)), (data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2), data(4, 2, 6, 2; scale = 0.1)))
+    w = single(data(4, 2, 6, 2; scale = 0.05))
+    function attention(q, k, v)
+        s = C.contract(Float32.(k), Float32.(q), (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.5f0
+        s = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf32)
+        BFloat16.(weigh(v, exp.(s .- T.logsumexp(s; dims = 1))))
+    end
+    p = differentiate(trace((q, k, v, w) -> sum(Float32.(attention(q, k, v)) .* w), q, k, v, w))
+    exact, rounded = recomputing(C.rewrite(C.lower(p))), recomputing(C.rewrite(C.lower(p); rounded = true))
+    function weighted(plan)
+        folds = [plan.graph.values[r] for g in plan.groups for r in g.reductions]
+        [x.eltype for x in folds if x.definition.fold isa IR.Relative && x.definition.fold.observe != IR.LOGSUMEXP]
+    end
+    @test weighted(exact) == [Float32] && weighted(rounded) == [BFloat16]
+    @test C.structure(rounded).bytes < C.structure(exact).bytes
+    want = filter(!isnothing, C.leaves(interpret(p, q, k, v, w)))
+    @test agree(C.execute(exact, q, k, v, w), want; rtol = 1.0e-5)
+    # The gradients of the queries and keys read the rounded output; those of
+    # the values do not.
+    gap(a, b) = maximum(abs.(Float32.(a) .- Float32.(b))) / maximum(abs.(Float32.(b)))
+    gaps = map(gap, C.execute(rounded, q, k, v, w), want)
+    @test all(g -> 0 < g < 1.0e-2, gaps[2:3]) && gaps[4] == 0
+end
+
 # The backward reads the forward's log-sum-exp, which the online rewrite no
 # longer needs: the group of the weighted sum computes it beside the sum, as
 # FlashAttention's forward writes it, and stores its slice over the queries;

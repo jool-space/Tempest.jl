@@ -27,15 +27,20 @@ Base.getindex(::Shape, i...) = throw(ArgumentError("a template's argument has no
 # The axis names of a template, each once, in the order its inputs name them.
 axis_names(t::Template) = Tuple(unique(n for axes in values(t.inputs) for n in axes))
 
+# The rewrites a target permits, as a template is traced for it: none, those
+# of the online softmax, or those and a backward reading a forward's sums
+# rounded (see `CUDATarget`).
+rewrite_policy(target) = permits_rewrites(target) ? (rounded_backward(target) ? :rounded : :online) : :none
+
 # A template traced with inputs of element types `types` and axes of
-# `extents`, a named tuple, rewritten where the target permits (`rewrites`),
-# and planned with every fold recomputed where it can be: its one group's
-# view, and the values that are its inputs and its outputs, in order; nothing
-# when it is not one group that stores its outputs.
-function template_group(t::Template, rewrites::Bool, types, extents)
+# `extents`, a named tuple, rewritten where the target permits (`rewrites`,
+# its `rewrite_policy`), and planned with every fold recomputed where it can
+# be: its one group's view, and the values that are its inputs and its
+# outputs, in order; nothing when it is not one group that stores its outputs.
+function template_group(t::Template, rewrites::Symbol, types, extents)
     args = map((axes, T) -> Shape{T, length(axes)}(map(a -> extents[a], axes)), Tuple(values(t.inputs)), types)
     graph = lower(trace(t.f, args...))
-    rewrites && (graph = rewrite(graph))
+    rewrites === :none || (graph = rewrite(graph; rounded = rewrites === :rounded))
     p = plan(graph; recompute = recomputable_folds(graph))
     length(p.groups) == 1 || return nothing
     g = group_view(p, only(p.groups))
@@ -58,7 +63,7 @@ function template_group(t::Template, rewrites::Bool, types, extents)
 end
 
 const TEMPLATE_GROUPS = Dict{Any, Any}()
-const PROBE_GROUPS = Dict{Tuple{UInt, Bool}, Any}()
+const PROBE_GROUPS = Dict{Tuple{UInt, Symbol}, Any}()
 const MATCHES = Dict{Any, Vector{Binding}}()
 const LIBRARY_LOCK = ReentrantLock()
 
@@ -439,7 +444,7 @@ array has every axis its template names, of extent one where no axis of the
 group stands for it. More than one when axes of the template are used alike.
 """
 function match_template(t::Template, k, target, g::GroupView)
-    rewrites = permits_rewrites(target)
+    rewrites = rewrite_policy(target)
     probe = NamedTuple{axis_names(t)}(PROBE_EXTENTS[1:length(axis_names(t))])
     # Told apart from the template traced in Float32 before it is traced at
     # the group's types, which are numbers.
@@ -506,10 +511,10 @@ member_view(g, m) = GroupView(g.kind, g.domain, [m], Int[], Dict(m => g.terms[m]
 function bindings(l::Library, target, g)
     found = Binding[]
     for (k, t) in enumerate(templates(l, target))
-        shape = probe_group(t, permits_rewrites(target))
+        shape = probe_group(t, rewrite_policy(target))
         shape === nothing || shape.group.kind === g.kind && length(shape.group.reductions) == length(g.reductions) &&
             length(shape.group.outputs) == length(g.outputs) || continue
-        key = (objectid(t), k, permits_rewrites(target), g.kind, g.domain, Tuple(members(g)),
+        key = (objectid(t), k, rewrite_policy(target), g.kind, g.domain, Tuple(members(g)),
             Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(g.placement[m] for m in members(g)),
             Tuple(sort!([(v, x.eltype, x.dims, x.stored) for (v, x) in g.values])))
         bs = @lock LIBRARY_LOCK get(MATCHES, key, missing)
@@ -526,7 +531,7 @@ end
 # as attention's recomputes its scores: the cover then proposes recomputing
 # the folds of a plan, for the library to claim the groups that form.
 Implement.recomputes_folds(l::Library, target) = any(templates(l, target)) do t
-    tg = probe_group(t, permits_rewrites(target))
+    tg = probe_group(t, rewrite_policy(target))
     tg !== nothing && !isempty(recomputed_in(tg.group))
 end
 
@@ -566,7 +571,7 @@ with_buffers(bs::Vector{Binding}, buffers) = [with_buffers(b, buffers) for b in 
 function Implement.candidates(l::Library, target, p::Plan)
     shapes = Any[]
     for t in templates(l, target)
-        tg = probe_group(t, permits_rewrites(target))
+        tg = probe_group(t, rewrite_policy(target))
         (tg === nothing || members(tg.group) != tg.group.reductions || length(tg.group.reductions) != 1) && continue
         r = only(tg.group.reductions)
         push!(shapes, (tg.group.values[r].fold, term_shape(tg.group.terms[r])))

@@ -9,7 +9,7 @@
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, task_state, device_name,
     measurable, time_launch, calibrate, capture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
-    accumulate!, merge_lanes, implementations, numerics, permits_rewrites, deterministic, product_class
+    accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
 abstract type Target end
@@ -28,7 +28,7 @@ end
 Base.show(io::IO, t::CPUTarget) = print(io, "CPUTarget(", join(map(repr, t.implementations), ", "), ")")
 
 """
-    CUDATarget(implementations...; precision = :full, online = true, deterministic = true)
+    CUDATarget(implementations...; precision = :full, online = true, rounded_backward = false, deterministic = true)
 
 Run on an NVIDIA GPU; needs CUDACore loaded. The target uses the floor and
 the `implementations` given, as in `CUDATarget(cuTileGenerator())`, ties
@@ -44,6 +44,16 @@ tensor-core products (close to Float32 accuracy). Half-precision products
 always accumulate in Float32. `online` permits the online softmax (see
 `rewrite`): a sum weighted by a softmax accumulates in one pass with the
 softmax's maximum, rescaled as it grows, which changes rounding.
+`rounded_backward` lets a backward read a forward's sum as the program rounds
+it to half precision where the sums of the derivative are exchanged (see
+`exchanged_sums`): the softmax backward's Σ dO·o then reads the output o as a
+half-precision forward stores it, as FlashAttention and cuDNN read theirs,
+rather than in Float32, and the forward stores the rounded output only. It
+changes rounding: in BFloat16 at 64 features, 8 heads, 1024 positions, the
+gradients' largest error grows from 6.8e-3 to 8.6e-3 of their largest element
+when the output's cotangent comes from elsewhere, and from 6.2e-3 to 3.5e-2
+for a loss of the output's squares, where Σ dO·o nearly cancels the sums it
+is taken from.
 `deterministic` keeps a sum's rounding from depending on the order its
 blocks run in. With it false, a sweep may compute a sum in the sweep's
 orientation and add it into its value atomically, as FlashAttention-2's
@@ -57,18 +67,21 @@ struct CUDATarget <: Target
     precision::Symbol
     online::Bool
     implementations::Tuple{Vararg{Implementation}}
+    rounded_backward::Bool
     deterministic::Bool
 end
 
-CUDATarget(precision::Symbol, online::Bool, implementations::Tuple) = CUDATarget(precision, online, implementations, true)
+CUDATarget(precision::Symbol, online::Bool, implementations::Tuple) = CUDATarget(precision, online, implementations, false, true)
 
-function CUDATarget(implementations::Implementation...; precision::Symbol = :full, online::Bool = true, deterministic::Bool = true)
+function CUDATarget(implementations::Implementation...; precision::Symbol = :full, online::Bool = true,
+        rounded_backward::Bool = false, deterministic::Bool = true)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations, deterministic)
+    CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations, rounded_backward, deterministic)
 end
 
 Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", join(map(repr, t.implementations), ", "), "; ",
-    "precision = :", t.precision, t.online ? "" : ", online = false", t.deterministic ? "" : ", deterministic = false", ")")
+    "precision = :", t.precision, t.online ? "" : ", online = false",
+    t.rounded_backward ? ", rounded_backward = true" : "", t.deterministic ? "" : ", deterministic = false", ")")
 
 "The implementations a target uses beside the floor, in order."
 implementations(target::Union{CPUTarget, CUDATarget}) = target.implementations
@@ -94,11 +107,16 @@ end
 
 "The target's numerics, as part of the tuning record's key."
 numerics(::Target) = :default
-numerics(target::CUDATarget) = Symbol(target.precision, target.online ? "" : "-two-pass", target.deterministic ? "" : "-nondeterministic")
+numerics(target::CUDATarget) = Symbol(target.precision, target.online ? "" : "-two-pass",
+    target.rounded_backward ? "-rounded-backward" : "", target.deterministic ? "" : "-nondeterministic")
 
 "Whether a target permits the rewrites of sums that change rounding (see `rewrite`)."
 permits_rewrites(::Target) = true
 permits_rewrites(target::CUDATarget) = target.online
+
+"Whether a backward reads a forward's sum as the program rounds it (see `CUDATarget`)."
+rounded_backward(::Target) = false
+rounded_backward(target::CUDATarget) = permits_rewrites(target) && target.rounded_backward
 
 "Whether a target keeps a sum's rounding from depending on the order its blocks run in (see `CUDATarget`)."
 deterministic(::Target) = true
