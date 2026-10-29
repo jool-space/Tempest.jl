@@ -150,14 +150,16 @@ const GENERATED_SOURCES = IdDict{Any, Expr}()
 const GENERATED_LOCK = ReentrantLock()
 
 """
-    generated(source::Expr) -> function
+    generated(source::Expr, into = Generated) -> function
 
-Define the function `source`, an anonymous function expression, in the
-module `Generated`, keeping its source: in a `content_key` a generated
-function is its source, since its name differs between sessions.
+Define the function `source`, an anonymous function expression, in module
+`into`, keeping its source: in a `content_key` a generated function is its
+source, since its name differs between sessions. A package's precompile
+workload defines its kernels in a module of its own, since `Generated` is
+closed to it then.
 """
-function generated(source::Expr)
-    f = Core.eval(Generated, source)
+function generated(source::Expr, into::Module = Generated)
+    f = Core.eval(into, source)
     @lock GENERATED_LOCK GENERATED_SOURCES[typeof(f)] = source
     f
 end

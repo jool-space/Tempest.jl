@@ -1,13 +1,27 @@
 # Work the generator does while it precompiles, without a GPU: preparing
 # small programs for CUDA without building them, which plans, claims,
 # estimates and decides; then emitting their kernels and naming them for the
-# kernel cache. Loading and launching need a device, so they compile in the
-# session.
+# kernel cache, and compiling the chosen ones through cuTile for an
+# architecture the machine need not have. cuTile's compiler is compiled so
+# here, with Tempest's methods defined, which void cuTile's own compiled code
+# (its inference loop, 2.4 s of the first kernel a session compiled). Loading
+# and launching need a device, so they compile in the session.
 
 using PrecompileTools: PrecompileTools, @setup_workload, @compile_workload
 
 # A tile array over no memory, enough to name a kernel.
 unbacked_tile_array(T, spec) = ct.TileArray(Ptr{kernel_eltype(T)}(256), Int32.(spec.sizes), Int32.(spec.strides))
+
+# Kernel `k`'s arguments over no memory, for group `g`.
+unbacked_arguments(g, k, workspaces) = map(k.args) do spec
+    T = spec.buffer isa Int ? g.values[spec.buffer].eltype : workspaces[spec.buffer].eltype
+    unbacked_tile_array(T, spec)
+end
+
+# The kernels the workload compiles are defined here, since `Generated` is
+# closed to it, for an architecture tileiras compiles for without a device.
+module Workload end
+const WORKLOAD_ARCH = v"12.1"
 
 # An extension has no preferences of its own, since no project names it: its
 # workload follows Tempest's, so `[Tempest] precompile_workload = false` turns
@@ -52,12 +66,19 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
                 for g in Tempest.Compiler.group_views(ex), claim in claims(cuTileGenerator(), target, g)
                     workspaces = Dict{Any, Workspace}()
                     for k in schedule_kernels(Context(g, claim.schedule), workspaces)
-                        arrays = map(k.args) do spec
-                            T = spec.buffer isa Int ? g.values[spec.buffer].eltype : workspaces[spec.buffer].eltype
-                            unbacked_tile_array(T, spec)
-                        end
+                        arrays = unbacked_arguments(g, k, workspaces)
                         Tempest.Compiler.content_key("cuTile kernel", source(k), Tuple{map(Core.Typeof, arrays)...}, alias_groups(arrays); checked = true)
                         foreach(a -> flatten!(Any[], a), arrays)
+                    end
+                end
+                target.precision === :full && ct.tileiras_available() || continue
+                for (g, d) in zip(Tempest.Compiler.group_views(ex), ex.decisions)
+                    d !== nothing && d.choice.implementation isa cuTileGenerator || continue
+                    workspaces = Dict{Any, Workspace}()
+                    for k in schedule_kernels(Context(g, d.choice.claim.schedule), workspaces)
+                        arrays = unbacked_arguments(g, k, workspaces)
+                        f = Tempest.Compiler.generated(source(k), Workload)
+                        compile_binary(f, Tuple{map(Core.Typeof, arrays)...}, k.occupancy, alias_groups(arrays), WORKLOAD_ARCH)
                     end
                 end
             end

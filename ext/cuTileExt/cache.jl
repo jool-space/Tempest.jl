@@ -26,37 +26,46 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     FUNCTIONS[key] = compiled_function(f, tt, occupancy, groups)
 end
 
-# A kernel is keyed without Tempest's own code and stored with what its
+function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, groups)
+    entry, cubin = compiled_binary(f, tt, occupancy, groups, ct.device_sm_arch())
+    CuFunction(CuModule(cubin), entry)
+end
+
+# The CUBIN of `f` for `tt` on architecture `arch`, which needs no device. A
+# kernel is keyed without Tempest's own code and stored with what its
 # compilation used of it (`Tempest.Compiler.dependencies`), so that an edit to
 # Tempest compiles again only the kernels whose code it changed. A failure has
 # no inference to read that from, and is kept under the whole key.
-function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, groups)
-    arch = ct.device_sm_arch()
+function compiled_binary(@nospecialize(f), @nospecialize(tt), occupancy, groups, arch)
     parts = ("cuTile kernel", f, tt, occupancy, groups, arch, ct.tileiras_version(), ct.bytecode_version(), ENTRY)
     key = Tempest.Compiler.content_key(parts...; checked = true)
-    entry, cubin = Tempest.Compiler.cached_kernel(key) do
+    Tempest.Compiler.cached_kernel(key) do
         # A kernel cuTile cannot express fails the same way next time.
         failed = Tempest.Compiler.content_key(parts...)
         Tempest.Compiler.cached_failure(failed)
-        Base.invokelatest(f, tt) do f, tt
-            argtypes, constants = ct.unwrap_argtypes(f, tt)
-            job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
-                name = ENTRY, alias_groups = groups)
-            cubin = try
-                ct.invoke_frozen(ct.compile_or_lookup, job).cubin
-            catch err
-                err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(failed, sprint(showerror, err))
-                rethrow()
-            end
-            # The generic inference of the kernel, whose edges cover any
-            # constant-seeded one's.
-            cache = ct.inference_cache(job)
-            code = ct.invoke_frozen(ct.infer, cache, job.source)
-            dependencies = Tempest.Compiler.dependencies(code, mi -> get(cache, mi, nothing))
-            Tempest.Compiler.store_kernel(key, ENTRY, cubin; dependencies)
+        cubin, dependencies = try
+            compile_binary(f, tt, occupancy, groups, arch)
+        catch err
+            err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(failed, sprint(showerror, err))
+            rethrow()
         end
+        Tempest.Compiler.store_kernel(key, ENTRY, cubin; dependencies)
     end
-    CuFunction(CuModule(cubin), entry)
+end
+
+# The CUBIN of `f` for `tt` compiled through cuTile, and what its compilation
+# used of Tempest's code: the dependencies of the kernel's generic inference,
+# whose edges cover any constant-seeded one's.
+function compile_binary(@nospecialize(f), @nospecialize(tt), occupancy, groups, arch)
+    Base.invokelatest(f, tt) do f, tt
+        argtypes, constants = ct.unwrap_argtypes(f, tt)
+        job = ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy,
+            name = ENTRY, alias_groups = groups)
+        cubin = ct.invoke_frozen(ct.compile_or_lookup, job).cubin
+        cache = ct.inference_cache(job)
+        code = ct.invoke_frozen(ct.infer, cache, job.source)
+        (cubin, Tempest.Compiler.dependencies(code, mi -> get(cache, mi, nothing)))
+    end
 end
 
 # A kernel's function, loaded once per context for the kernel, its argument
