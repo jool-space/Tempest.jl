@@ -105,7 +105,9 @@ Keyed(fold, operand, iteration, key) = Keyed(fold, operand, iteration, key, noth
 """
 The state of a recurrence along `axis` of the value's domain: at the axis's
 first position `init`, read over the value's domain, and at each other the
-operand `from` read one position back. `from` reads a value computed from
+operand `from` read one position back; where `reverse`, at its last position
+`init` and at each other `from` one position on, as a recurrence's
+derivative steps through its steps. `from` reads a value computed from
 this one, later in the graph: the one read that does not follow the graph's
 order, so the two values and those between are computed position by position
 along the axis together (see `recurrence_regions`). `operands` leaves it out.
@@ -114,7 +116,10 @@ struct Carried <: Definition
     init::Operand
     from::Operand
     axis::Int
+    reverse::Bool
 end
+
+Carried(init, from, axis) = Carried(init, from, axis, false)
 
 """
 A value: its definition, the extents of its domain (none of them one; see
@@ -214,7 +219,7 @@ describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
 describe(d::Scan) = "scan($(scan_summary(d.fold, d.axes, d.reverse, d.exclusive)))"
-describe(d::Carried) = string("carried along ", d.axis, " from ", sprint(show_operand, d.from), " one back")
+describe(d::Carried) = string("carried along ", d.axis, " from ", sprint(show_operand, d.from), d.reverse ? " one on" : " one back")
 describe(d::Keyed) = "reduce($(fold_name(d.fold)) by key [$(join(map(string, d.key), ", "))] of $(d.iteration)" *
     (d.into === nothing ? ")" : string(" into ", sprint(show_operand, d.into), ")"))
 

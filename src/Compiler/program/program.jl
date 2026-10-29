@@ -151,16 +151,21 @@ A recurrence's step: a program whose arguments are the state's arrays, a slice
 of each scanned array and the values the step captures, in that order, as the
 inputs of the recurrence's nodes are; `steps` steps, the state's `k`th array
 carried by the step's `carried[k]`th result, the `k`th scanned array sliced
-along its axis `sliced[k]`. After the results its output structure names,
-the program's results are its state's arguments: a recurrence's node for one
-is the state where each step starts, which its derivative reads.
+along its axis `sliced[k]`; the steps run from the last to the first where
+`reverse`, as a recurrence's derivative runs them. After the results its
+output structure names, the program's results are its state's arguments: a
+recurrence's node for one is the state where each step starts, which its
+derivative reads.
 """
 struct LoopBody
     program::Program
     steps::Int
     carried::Vector{Int}
     sliced::Vector{Int}
+    reverse::Bool
 end
+
+LoopBody(program, steps, carried, sliced) = LoopBody(program, steps, carried, sliced, false)
 
 """
 A recurrence, as Base's `accumulate` over slices of arrays runs one: `body`
@@ -177,11 +182,13 @@ end
 A recurrence's state over its steps, along the node's last axis, as lowering
 splices a loop's step into the program (see `inline_loops`): its input, the
 state the loop starts from, at the first step, and at each other node `from`,
-the state the step computes, one step back. `from` comes after it, the one
-node read before it is computed, so only lowering sees one.
+the state the step computes, one step back; at the last step and one step on
+where the loop runs `reverse`. `from` comes after it, the one node read
+before it is computed, so only lowering sees one.
 """
 struct Carry <: Operation
     from::Int
+    reverse::Bool
 end
 
 op_name(op::Operation) = lowercase(string(nameof(typeof(op))))
@@ -190,7 +197,7 @@ op_detail(op::Constant) = op.value isa AbstractRange ? " " * repr(op.value) : op
 op_detail(op::Map) = " " * string(op.f)
 op_detail(op::Reduce) = " " * string(fold_name(op.fold)) * " over " * string(op.axes)
 op_detail(op::Accumulate) = " " * scan_summary(op.fold, op.axes, op.reverse, op.exclusive)
-op_detail(op::Loop) = string(" of ", op.body.steps, " steps, result ", op.result)
+op_detail(op::Loop) = string(" of ", op.body.steps, " steps", op.body.reverse ? " reversed" : "", ", result ", op.result)
 
 # A scan in words: its fold, its axes, and its direction where it is not the plain one.
 scan_summary(fold, axes, reverse, exclusive) =

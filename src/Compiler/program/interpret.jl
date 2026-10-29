@@ -112,12 +112,14 @@ function interpret(p::Program, args...)
 end
 
 # A recurrence's results, stacked along a last axis: its step run on the
-# state, a slice of each scanned array and the captures, as Base runs it.
+# state, a slice of each scanned array and the captures, as Base runs it, the
+# last step first where the loop runs reversed.
 function run_loop(body::LoopBody, xs)
     nstate, nscanned = length(body.carried), length(body.sliced)
     state = collect(Any, xs[1:nstate])
     scanned, captured = xs[(nstate + 1):(nstate + nscanned)], xs[(nstate + nscanned + 1):end]
-    steps = map(1:body.steps) do t
+    order = body.reverse ? (body.steps:-1:1) : (1:body.steps)
+    steps = map(order) do t
         slices = map((x, k) -> copy(selectdim(x, k, t)), scanned, body.sliced)
         out = interpret(body.program, state..., slices..., captured...)
         ys = Vector{Any}(undef, length(body.program.results))
@@ -127,6 +129,7 @@ function run_loop(body::LoopBody, xs)
         state = ys[body.carried]
         ys
     end
+    body.reverse && reverse!(steps)
     map(eachindex(body.program.results)) do r
         n = body.program.nodes[body.program.results[r]]
         n.scalar ? [y[r] for y in steps] : stack(y -> y[r], steps)

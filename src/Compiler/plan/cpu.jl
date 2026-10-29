@@ -40,25 +40,28 @@ function run_group!(g::Group, buffers, graph)
     run_pointwise!(g, buffers, graph)
 end
 
-# A step at a time: the state, where it starts at the first; then each other
-# member over its axes, the value the state is carried from last, which is
-# the state one step on.
+# A step at a time, the last first for a state carried in reverse: the
+# state, where it starts at the first step; then each other member over its
+# axes, the value the state is carried from last, which is the state at the
+# next step.
 function run_recurrence!(g::Group, buffers, graph)
     D = g.domain
     axis = recurrence_axes(graph, g).axis
     state = first(g.outputs)
-    from = graph.values[state].definition.from.value
+    carried = graph.values[state].definition
+    from = carried.from.value
     places = recurrence_places(graph, g.outputs).places
     foreach(m -> buffers[m] = Array{graph.values[m].eltype}(undef, graph.values[m].dims), g.outputs)
-    for n in 0:(D[axis] - 1), m in g.outputs
-        m == state && n > 0 && continue
+    order, next = carried.reverse ? ((D[axis] - 1):-1:0, -1) : (0:(D[axis] - 1), 1)
+    for n in order, m in g.outputs
+        m == state && n != first(order) && continue
         spans = map(k -> k != axis && any(e -> mentions(e, k), places[m]) ? D[k] : 1, Base.OneTo(length(D)))
         for I in CartesianIndices(Tuple(spans))
             x = Base.setindex(Tuple(I) .- 1, n, axis)
             y = evaluate_term(g.terms[m], x, nothing, buffers, nothing, graph)
             at = map(e -> evaluate_index(e, x), places[m])
             buffers[m][(at .+ 1)...] = y
-            m == from && n + 1 < D[axis] && (buffers[state][(Base.setindex(at, n + 1, axis) .+ 1)...] = y)
+            m == from && n != last(order) && (buffers[state][(Base.setindex(at, n + next, axis) .+ 1)...] = y)
         end
     end
 end

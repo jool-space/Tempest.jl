@@ -1,7 +1,8 @@
 # A recurrence's step, spliced into the program over a last axis of its
 # steps: its products are values over the steps like any others, and its
-# state one value, carried one step back from what the step computes. The
-# index level's interpreter, a pass per step, agrees with the program's.
+# state one value, carried one step back from what the step computes; its
+# derivative's, one step on. The index level's interpreter, a pass per step,
+# agrees with the program's.
 @testset "recurrences lowered" begin
     step((S, _), (w, u, kd, g)) = (g .* S .+ kd' * (u .- w * S), w * S)
     chunks(W, U, Kd, G, S0) = Tuple(x for t in accumulate(step, zip(eachslice(W; dims = 3), eachslice(U; dims = 3),
@@ -13,6 +14,17 @@
     state = only(v for v in g.values if v.definition isa C.Carried)
     @test state.dims == (3, 2, 5) && state.definition.axis == 3
     @test count(v -> v.definition isa C.Reduction && last(v.dims) == 5, g.values) == 2
+    @test agree(Tuple(C.interpret(g, W, U, Kd, G, S0)), C.leaves(interpret(p, W, U, Kd, G, S0)); rtol = 1.0e-12)
+    # Its derivative steps back through the same steps, its state carried
+    # from one step on: each array is read where the step it pulls back
+    # through read it, none back to front, so the step it runs again is the
+    # forward's own values, computed once.
+    squares(xs...) = sum(x -> sum(abs2, x), chunks(xs...))
+    p = trace((xs...) -> T.gradient(squares, xs...), W, U, Kd, G, S0)
+    g = C.lower(p)
+    @test [v.definition.reverse for v in g.values if v.definition isa C.Carried] == [false, true]
+    reads(d) = [o for o in [collect(C.operands(d)); d isa C.Carried ? [d.from] : []] if o isa C.Read]
+    @test !any(v -> any(o -> any(e -> any(t -> t.first isa C.Var && t.second < 0, e.terms), o.index), reads(v.definition)), g.values)
     @test agree(Tuple(C.interpret(g, W, U, Kd, G, S0)), C.leaves(interpret(p, W, U, Kd, G, S0)); rtol = 1.0e-12)
 
     cell(Wh, xs, h0) = Tuple(accumulate((h, x) -> tanh.(transpose(Wh) * h .+ x), eachslice(xs; dims = 2); init = h0))

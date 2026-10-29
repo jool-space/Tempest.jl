@@ -806,15 +806,16 @@ function recurrence(f, scanned, init, zipped)
 end
 
 """
-    traced_loop(f, scanned, init, zipped) -> (; stacked, scalar, result, steps)
+    traced_loop(f, scanned, init, zipped; reverse = false) -> (; stacked, scalar, result, steps)
 
-The recurrence `accumulate(f, slices; init)` traced as a loop: its step traced
-once into a `LoopBody`, and a `Loop` node for each of the step's results, the
-result at every step stacked along a last axis: `stacked`, one for each leaf
-of the step's `result` in order, `nothing` where the result is, and whether
-each is a number at each step (`scalar`).
+The recurrence `accumulate(f, slices; init)` traced as a loop, run from its
+last slice to its first where `reverse`: its step traced once into a
+`LoopBody`, and a `Loop` node for each of the step's results, the result at
+every step stacked along a last axis, at the step's position: `stacked`, one
+for each leaf of the step's `result` in order, `nothing` where the result
+is, and whether each is a number at each step (`scalar`).
 """
-function traced_loop(f, scanned, init, zipped)
+function traced_loop(f, scanned, init, zipped; reverse = false)
     arrays = map(parent, scanned)
     tape = first(arrays).tape
     all(a -> a.tape === tape, arrays) || throw(ArgumentError("accumulate's arrays were traced by different programs"))
@@ -891,7 +892,7 @@ function traced_loop(f, scanned, init, zipped)
     end)
     # After the step's results, the state at each step's start (see `LoopBody`).
     program = Program(nodes, collect(eachindex(arguments)), [results; 1:length(carried)], Tuple(eachindex(arguments)), output_structure)
-    loop = LoopBody(program, steps, [output_structure[k] for k in carried], collect(sliced))
+    loop = LoopBody(program, steps, [output_structure[k] for k in carried], collect(sliced), reverse)
     inputs = [Int[x.id for x in states if x !== nothing]; Int[a.id for a in arrays]; captured]
     stacked = map(eachindex(results)) do k
         n = nodes[results[k]]

@@ -656,7 +656,8 @@ function scan_kernel(c::Context)
 end
 
 # A recurrence's group: a block per tile of its parallel axes, stepping along
-# the state's axis with the state's tile. Each step computes each member but
+# the state's axis with the state's tile, from its last position for a state
+# carried in reverse. Each step computes each member but
 # the state as a tile, reading the state and the members before it from the
 # tiles it holds; then stores them where they are stored, and the state, and
 # carries the value the state is carried from, the last. A step that stores
@@ -674,8 +675,10 @@ function recurrence_kernel(c::Context)
     along(m) = [only(q for q in 1:n if mentions(e, q)) for e in c.g.placement[m]]
     shape(m) = ntuple(q -> q != p && q in along(m) ? tile(c)[q] : 1, n)
     as_tile(m, x) = :(convert($(ct.Tile){$(c.g.values[m].eltype)}, $(ct.broadcast_to)($(tile_of(x)), $(shape(m)))))
+    steps = c.s.tiling[p].extent
+    reverse = c.g.values[state].carried.reverse
     first_step = copy(indices)
-    first_step[p] = :(Int32(1))
+    first_step[p] = :(Int32($(reverse ? steps : 1)))
     names = emit_tiles!(k, st, c, [c.g.terms[state]], Dict{Term, Any}(), first_step...)
     s = gensym(:state)
     push!(st, :($s = $(as_tile(state, names[c.g.terms[state]]))))
@@ -695,9 +698,17 @@ function recurrence_kernel(c::Context)
     stored = [m for m in c.g.outputs[2:end] if c.g.values[m].stored]
     store_values!(k, loop, c, [stored; state], tiles, at...)
     push!(loop, :($s = $(tiles[c.g.terms[from]])))
-    push!(st, :(for $t in Int32(1):Int32($(c.s.tiling[p].extent))
-        $(loop...)
-    end))
+    if reverse
+        u = gensym(:count)
+        push!(st, :(for $u in Int32(1):Int32($steps)
+            $t = Int32($(steps + 1)) - $u
+            $(loop...)
+        end))
+    else
+        push!(st, :(for $t in Int32(1):Int32($steps)
+            $(loop...)
+        end))
+    end
     k
 end
 

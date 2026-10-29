@@ -70,7 +70,7 @@ end
 # A recurrence's state keeps its axis among the wide ones: its steps are more than one.
 function narrow(d::Carried, dims)
     n = narrowing(dims, wide_axes(dims))
-    Carried(narrow(d.init, n), narrow(d.from, n), findfirst(==(d.axis), wide_axes(dims)))
+    Carried(narrow(d.init, n), narrow(d.from, n), findfirst(==(d.axis), wide_axes(dims)), d.reverse)
 end
 
 # Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
@@ -529,7 +529,7 @@ function splice_step!(nodes, body::LoopBody, inputs)
         at[a] = if k <= nstate
             # One step: the state is where it starts.
             steps == 1 ? emit!(Reshape(), (inputs[k],), over(n), n.eltype) :
-                (push!(carries, emit!(Carry(0), (inputs[k],), over(n), n.eltype)); last(carries))
+                (push!(carries, emit!(Carry(0, body.reverse), (inputs[k],), over(n), n.eltype)); last(carries))
         elseif k <= nstate + nscanned
             axis = body.sliced[k - nstate]
             m = length(outer.dims)
@@ -570,7 +570,7 @@ function splice_step!(nodes, body::LoopBody, inputs)
     end
     for (k, c) in enumerate(carries)
         n = nodes[c]
-        nodes[c] = Node(Carry(at[step.results[body.carried[k]]]), n.inputs, n.dims, n.eltype, n.scalar)
+        nodes[c] = Node(Carry(at[step.results[body.carried[k]]], body.reverse), n.inputs, n.dims, n.eltype, n.scalar)
     end
     [at[r] for r in step.results]
 end
@@ -663,7 +663,7 @@ function lower(p::Program)
         n = nodes[id]
         d = Domain(n.dims)
         init = operand(access[only(n.inputs)], nodes[only(n.inputs)].dims, d)
-        values[v] = Value(narrow(Carried(init, operand(access[n.op.from], n.dims, d), length(n.dims)), n.dims), values[v].dims, n.eltype, false)
+        values[v] = Value(narrow(Carried(init, operand(access[n.op.from], n.dims, d), length(n.dims), n.op.reverse), n.dims), values[v].dims, n.eltype, false)
     end
     results = Operand[operand(access[r], nodes[r].dims, Domain(nodes[r].dims)) for r in p.results]
     IndexGraph(

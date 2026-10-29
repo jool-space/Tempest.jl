@@ -75,7 +75,7 @@ function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
     for (id, v) in enumerate(graph.values)
         keep[id] && v.definition isa Carried || continue
         w = b.values[b.ids[id]]
-        b.values[b.ids[id]] = Value(Carried(w.definition.init, remap(v.definition.from, b.ids), w.definition.axis), w.dims, w.eltype, w.scalar)
+        b.values[b.ids[id]] = Value(Carried(w.definition.init, remap(v.definition.from, b.ids), w.definition.axis, w.definition.reverse), w.dims, w.eltype, w.scalar)
     end
     notes = [[b.ids[v] => s for (v, s) in graph.rewrites if b.ids[v] != 0]; b.rewrites]
     g = IndexGraph(b.values, map(a -> b.ids[a], graph.arguments), Operand[remap(o, b.ids) for o in graph.results],
@@ -98,7 +98,7 @@ remap(d::Keyed, ids) = Keyed(d.fold, remap(d.operand, ids), d.iteration, map(e -
     d.into === nothing ? nothing : remap(d.into, ids))
 remap(d::Union{Input, ConstantArray}, ids) = d
 # What a state is carried from is remapped once the graph is rebuilt (see `rebuild`).
-remap(d::Carried, ids) = Carried(remap(d.init, ids), d.from, d.axis)
+remap(d::Carried, ids) = Carried(remap(d.init, ids), d.from, d.axis, d.reverse)
 
 # The values something reads: the results and what they read, inputs and
 # constant arrays.

@@ -48,13 +48,14 @@ evaluate_value(d::Definition, v, arrays, graph, arguments; first) = evaluate_val
 
 # The state at each step: where it starts, at the first step and in a
 # recurrence's first pass, before what it is carried from is computed; else
-# that, one step back.
+# that, one step back, or on for a state carried in reverse.
 function evaluate_value(d::Carried, v, arrays, graph, arguments; first = false)
     out = Array{v.eltype}(undef, v.dims)
+    start, back = d.reverse ? (v.dims[d.axis] - 1, 1) : (0, -1)
     for I in CartesianIndices(v.dims)
         x = Tuple(I) .- 1
-        out[I] = first || x[d.axis] == 0 ? read_operand(d.init, x, arrays, graph) :
-            read_operand(d.from, Base.setindex(x, x[d.axis] - 1, d.axis), arrays, graph)
+        out[I] = first || x[d.axis] == start ? read_operand(d.init, x, arrays, graph) :
+            read_operand(d.from, Base.setindex(x, x[d.axis] + back, d.axis), arrays, graph)
     end
     out
 end

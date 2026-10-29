@@ -18,8 +18,10 @@ for a value masked by formulas over its positions, `masked`: the formulas,
 each at most zero where the mask holds, and the number the value is where it
 fails (see `Tempest.Compiler.IR.comparison_mask` and
 `Tempest.Compiler.IR.masked_result`); and for a recurrence's state,
-`carried`: the axis it steps along and the value it is carried from, a load
-over its domain read one step back (see `Tempest.Compiler.Carried`).
+`carried`: the axis it steps along, the value it is carried from, a load
+over its domain read one step back, and whether it steps from the axis's
+last position to its first, reading one step on (`reverse`; see
+`Tempest.Compiler.Carried`).
 """
 struct ValueView
     eltype::DataType
@@ -32,7 +34,7 @@ struct ValueView
     into::Union{Nothing, Term}
     scan::Union{Nothing, @NamedTuple{reverse::Bool, exclusive::Bool}}
     masked::Union{Nothing, Tuple{Vector{Affine}, Any}}
-    carried::Union{Nothing, @NamedTuple{axis::Int, from::Term}}
+    carried::Union{Nothing, @NamedTuple{axis::Int, from::Term, reverse::Bool}}
 end
 
 """

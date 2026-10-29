@@ -375,9 +375,13 @@ function recurrence_kernel(graph, stored, g::Group, slots)
     c = EmitContext(graph, slots, vars, domain)
     (; axis, parallel) = recurrence_axes(graph, g)
     state = first(g.outputs)
-    from = graph.values[state].definition.from.value
+    carried = graph.values[state].definition
+    from = carried.from.value
     places = recurrence_places(graph, g.outputs).places
-    next = Base.setindex(places[from], add(var(axis), 1, domain), axis)
+    # A state carried in reverse steps from the axis's last position.
+    step = carried.reverse ? -1 : 1
+    first_step, last_step = carried.reverse ? (D[axis] - 1, 0) : (0, D[axis] - 1)
+    next = Base.setindex(places[from], add(var(axis), step, domain), axis)
     body = Expr(:block)
     delinearize_expr(body.args, :lin, parallel, D, vars)
     steps = Expr(:block)
@@ -389,14 +393,14 @@ function recurrence_kernel(graph, stored, g::Group, slots)
         x = names[g.terms[m]]
         stored[m] && push!(compute.args, store_expr(c, m, places[m], x))
         if m == from
-            push!(compute.args, :($(vars[axis]) + 1 < $(D[axis]) && $(store_expr(c, state, next, x))))
+            push!(compute.args, :($(vars[axis]) != $last_step && $(store_expr(c, state, next, x))))
         end
         loop = :(for position in 0:$(prod(k -> D[k], inner; init = 1) - 1)
             $compute
         end)
-        push!(steps.args, m == state ? :($(vars[axis]) == 0 && $loop) : loop)
+        push!(steps.args, m == state ? :($(vars[axis]) == $first_step && $loop) : loop)
     end
-    push!(body.args, :(for $(vars[axis]) in 0:$(D[axis] - 1)
+    push!(body.args, :(for $(vars[axis]) in $first_step:$step:$last_step
         $steps
     end))
     ScalarKernel(slots, prod(k -> D[k], parallel; init = 1), body)

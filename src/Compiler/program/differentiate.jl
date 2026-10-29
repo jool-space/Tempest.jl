@@ -199,14 +199,15 @@ pullback(op::Accumulate, n, id, g, tape) = (scan_pullback(op.fold, op, h(tape, o
 
 """
 The cotangents of the inputs of the recurrence `n` (a `Loop` node, its inputs
-as read anew), given its results' `cotangents`, by result: a recurrence, its
-derivative, through the steps last first. Each of its steps runs the step
-again from the state where it started, and pulls back through it the
-cotangent of the state after it, carried from the step after, and of the
-step's results; its results are the cotangents of the state before it,
-carried, of the step's slices, and of what the step captures, summed over the
-steps after. The steps run last first as a recurrence over the arrays
-reversed along their steps, an index the lowering folds into every read.
+as read anew), given its results' `cotangents`, by result: a recurrence over
+the same steps, run the other way. Each of its steps runs the step again
+from the state where it started, and pulls back through it the cotangent of
+the state after it, carried from the step after, and of the step's results;
+its results are the cotangents of the state before it, carried, of the
+step's slices, and of what the step captures, summed over the steps. Each
+step reads the arrays where the step it pulls back through read them, so
+what it runs again is what that step computed, which the lowering finds
+once.
 """
 function loop_pullback(n, cotangents, tape)
     body = n.op.body
@@ -220,7 +221,6 @@ function loop_pullback(n, cotangents, tape)
     scanned = filter(differentiates, (nstate + 1):(nstate + nscanned))
     captured = filter(differentiates, (nstate + nscanned + 1):length(inputs))
     array(x) = TracedArray(tape, x.id)
-    flip(x) = reverse(x; dims = ndims(x))
     # The state where each step starts, and each scanned array with its steps
     # last.
     starts = map(1:nstate) do j
@@ -232,7 +232,7 @@ function loop_pullback(n, cotangents, tape)
         k == ndims(x) ? x : permutedims(x, (1:(k - 1)..., (k + 1):ndims(x)..., k))
     end
     seeded = sort!(collect(keys(cotangents)))
-    reversed = [map(flip, starts); map(flip, lasts); [flip(array(cotangents[r])) for r in seeded]]
+    along = [starts; lasts; [array(cotangents[r]) for r in seeded]]
     captures = map(k -> h(tape, inputs[k]), (nstate + nscanned + 1):length(inputs))
     function zeros_of(id)
         a = tape.nodes[id]
@@ -256,14 +256,16 @@ function loop_pullback(n, cotangents, tape)
         Tuple(handle_of(found[k], k <= nstate + nscanned ? forward[k] : captures[k - nstate - nscanned]) for k in [states; scanned; captured])
     end
     start = Tuple([map(j -> zeros_of(inputs[j]), states); fill(nothing, length(scanned) + length(captured))])
-    (; stacked) = traced_loop(back, Tuple(map(x -> eachslice(x; dims = ndims(x)), reversed)), start, true)
+    (; stacked) = traced_loop(back, Tuple(map(x -> eachslice(x; dims = ndims(x)), along)), start, true; reverse = !body.reverse)
     contributions = Any[nothing for _ in inputs]
+    # The cotangent of the state the loop starts from, at the step it runs first.
+    first_step = body.reverse ? steps : 1
     for (i, j) in enumerate(states)
         x = stacked[i]
-        contributions[j] = h(tape, (ndims(x) == 1 ? x[steps] : x[ntuple(_ -> Colon(), ndims(x) - 1)..., steps]).id)
+        contributions[j] = h(tape, (ndims(x) == 1 ? x[first_step] : x[ntuple(_ -> Colon(), ndims(x) - 1)..., first_step]).id)
     end
     for (i, k) in enumerate(scanned)
-        x, a = flip(stacked[length(states) + i]), body.sliced[k - nstate]
+        x, a = stacked[length(states) + i], body.sliced[k - nstate]
         m = ndims(x)
         contributions[k] = h(tape, (a == m ? x : permutedims(x, (1:(a - 1)..., m, a:(m - 1)...))).id)
     end
