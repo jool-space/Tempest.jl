@@ -312,7 +312,7 @@ end
 
 # Recomputed folds that do not move along the swept axis are computed once,
 # before the sweep.
-function hoist_folds!(k, st, c::Context, roots, scope, indices)
+Base.@nospecializeinfer function hoist_folds!(k, st, c::Context, @nospecialize(roots), @nospecialize(scope), @nospecialize(indices))
     axes = reduce(vcat, (c.s.tiling[q].axes for q in swept(c.s)))
     for t in subterms(roots; known = t -> haskey(scope, t))
         t isa Recomputed || continue

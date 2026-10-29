@@ -157,7 +157,7 @@ const PLANS = 4
 
 # The program planned by decider `d` and, with `build`, built on buffers of
 # its own, its inputs not yet bound: `prepare` once its graph is lowered.
-function planned(program, d, inputs, pairs, input, by_reference, build)
+function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, build)
     target = d.target
     p, considered = cover(d)
     search!(d, p)

@@ -1,4 +1,9 @@
 # Emitting tile programs from a group and its schedule.
+#
+# Index names and tile shapes reach the emitters as tuples of symbols and
+# expressions whose types differ with each kernel's rank and spelling, so
+# the emitters take them unspecialized and compile once rather than for each
+# kernel's (`@nospecialize`).
 
 "A kernel argument: a buffer as a strided view."
 struct ArgSpec
@@ -57,7 +62,7 @@ end
 counted(v, indices) = map((n, i) -> n == 0 ? i : :(Int32($(n + 1)) - $i), v.reversed, Tuple(indices))
 
 # `at` is the one-based offset per block of a view that has one.
-function load_nd(sym, v, tiles, indices, at = nothing)
+Base.@nospecializeinfer function load_nd(sym, v, @nospecialize(tiles), @nospecialize(indices), @nospecialize(at = nothing))
     indices = counted(v, indices)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     extra, one = v.dynamic === nothing ? ((), ()) : ((at,), (1,))
@@ -95,7 +100,7 @@ end
 tile_of(x) = x isa Number ? :($(ct.Tile)($x)) : x
 
 # With `add`, the tile is added into the view atomically rather than stored.
-function store_nd(sym, v, tiles, indices, value; add = false)
+Base.@nospecializeinfer function store_nd(sym, v, @nospecialize(tiles), @nospecialize(indices), @nospecialize(value); add = false)
     indices = counted(v, indices)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     tile = :($(ct.broadcast_to)($(tile_of(value)), $full))
@@ -241,7 +246,7 @@ index_tile(k, c::Context, a::Indirect, indices) =
 # from a value (a gather) or it is such an index and no view, the buffer's
 # elements at addresses computed lane by lane, zero outside the domain as a
 # view's padding is.
-function load_tile(k::TileKernel, c::Context, t::Load, indices)
+Base.@nospecializeinfer function load_tile(k::TileKernel, c::Context, t::Load, @nospecialize(indices))
     if haskey(c.held, t.value)
         x = held_tile(c, t, indices)
         x === nothing || return x
@@ -362,7 +367,7 @@ store_expr(sym, spans, ta, tb, ia, ib, value) = :($(tile_store)(
 # Statements for `roots`, each subterm once, at the tile of block indices
 # `indices` (one per tile axis). `names` maps terms already in scope (loads
 # hoisted out of a loop, reductions) to their symbols.
-function emit_tiles!(k::TileKernel, statements, c::Context, roots, names, indices...)
+Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Context, @nospecialize(roots), @nospecialize(names), @nospecialize(indices...))
     for t in subterms(roots; known = t -> haskey(names, t))
         if t isa Lit
             names[t] = t.value
@@ -587,7 +592,7 @@ flat_spec(c::Context, r) = ArgSpec(r, 0, (storage_length(c.g.values[r]),), (1,))
 # `indices` into their values at their keys, the lanes inside the domain: a
 # sum's add atomically, box by box where it can, a write's are stored, one of
 # those landing at a position winning.
-function scatter_tiles!(k, st, c::Context, rs, names, indices)
+Base.@nospecializeinfer function scatter_tiles!(k, st, c::Context, rs, @nospecialize(names), @nospecialize(indices))
     isempty(rs) && return
     emit_tiles!(k, st, c, [c.g.terms[r] for r in rs], names, indices...)
     valid = tile_mask!(st, c, indices)
@@ -696,7 +701,7 @@ end
 fold_key(r) = (:fold, r)
 
 # Load the values of folds `rs` at the tile of block indices `indices`.
-function load_folds!(k, st, c::Context, rs, names, indices, workspaces)
+Base.@nospecializeinfer function load_folds!(k, st, c::Context, rs, @nospecialize(names), @nospecialize(indices), workspaces)
     for r in rs
         v, spec = fold_spec!(c, r, workspaces)
         index = ntuple(i -> i in fold_tiles(c, r) ? :(Int32(1)) : indices[i], length(c.s.tiling))
@@ -733,7 +738,7 @@ function store_partial!(k, st, c::Context, r, state, indices, slot, slots, works
 end
 
 # The partial state of each fold in `rs` over the tile at `indices`.
-function tile_states!(k, st, c::Context, rs, names, indices)
+Base.@nospecializeinfer function tile_states!(k, st, c::Context, rs, @nospecialize(names), @nospecialize(indices))
     states = Dict{Int, Vector{Symbol}}()
     isempty(rs) && return states
     emit_tiles!(k, st, c, [c.g.terms[r] for r in rs], names, indices...)
@@ -766,7 +771,7 @@ output_view(c::Context, m) = view_of(c.g, m, c.g.placement[m], groups(c)...)
 
 # Store values the group computes (outputs, or reductions as `Stat`s) at the
 # tile of block indices `indices`.
-function store_values!(k, st, c, vs, names, indices...)
+Base.@nospecializeinfer function store_values!(k, st, c, vs, @nospecialize(names), @nospecialize(indices...))
     for m in vs
         v = output_view(c, m)
         value = m in c.g.reductions ? names[Stat(m)] : names[c.g.terms[m]]
@@ -815,7 +820,7 @@ end
 
 # The tile axes a term's loads, positions and recomputed folds span, or
 # nothing if it reads reductions.
-function term_spans(c::Context, t::Term)
+Base.@nospecializeinfer function term_spans(c::Context, @nospecialize(t::Term))
     spans = fill(false, length(c.s.tiling))
     for s in subterms((t,))
         s isa Stat && return nothing
@@ -963,7 +968,7 @@ end
 # piece: as a recurrence's step computes what it reads of its state whole,
 # flash-linear-attention's `v_new` (computing it in each step's lanes instead
 # runs four times as many products, each a quarter the size, 1.5× slower).
-function emit_fold!(k, st, c::Context, t::Recomputed, indices)
+Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @nospecialize(indices))
     e = fold_context(c, t)
     n = length(c.s.tiling)
     p = n + 1

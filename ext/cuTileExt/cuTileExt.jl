@@ -836,7 +836,7 @@ end
 # at: those of its term over the tiling, and inside recomputed folds over the
 # tiling the fold extends. A tuple is no work; a product's own multiply is
 # priced as flops, not here; a shifted sum's weight is an exponential.
-function applied!(counts, c, roots; inner = counts)
+function applied!(counts, c, @nospecialize(roots); inner = counts)
     for t in subterms(roots)
         if t isa Recomputed
             # A recomputed product's multiply is its flops, priced as such; its
@@ -856,7 +856,7 @@ end
 # a product's sweep: the factors of its sums, without the multiply that the
 # tensor cores do, and the exponential of each element an exponential fold
 # weighs. Any other schedule streams everything.
-function applied(c, roots)
+Base.@nospecializeinfer function applied(c, @nospecialize(roots))
     sorted(counts) = sort!(collect(counts); by = p -> string(p.first))
     streaming, swept, inner = Dict{Any, Float64}(), Dict{Any, Float64}(), Dict{Any, Float64}()
     if c.s.sketch !== :product
