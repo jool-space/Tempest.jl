@@ -26,7 +26,9 @@
 # tile when they fit, and the depth of its steps is its own question.
 # `TEMPEST_PRODUCT_TILE=m,n,k` names one tile instead, with no variants, for
 # experiments. The products inside a recomputed fold step at the depth
-# measured best for the class: 16 at full precision, 32 otherwise.
+# measured best for the class: 16 at full precision, 32 otherwise; a
+# schedule's options may name another, a variant measured as the tiles are
+# (see `product_variants`).
 product_step(precision, T) = T === Float32 && precision === :full ? 16 : 32
 
 full_precision(target, T) = T === Float32 && target.precision === :full
@@ -93,10 +95,10 @@ end
 
 # The claim under tile `(tm, tn, tk)`, its sum split `split` ways, over
 # `tiling`; nothing when the generator cannot express the group over it.
-function product_claim(g::GroupView, tiling, tm, tn, tk, split, precision)
+function product_claim(g::GroupView, tiling, tm, tn, tk, split, precision; options = PLAIN)
     M, K, N = tiling[1:3]
     t = [TileAxis(M.axes, M.extent, tm, false), TileAxis(K.axes, K.extent, tk, true), TileAxis(N.axes, N.extent, tn, false), tiling[4:end]...]
-    s = TileSchedule(:product, t, split, nothing, 8, precision)
+    s = TileSchedule(:product, t, split, nothing, 8, precision, options)
     c = Context(g, s)
     all(r -> products_of(c, r), g.reductions) && any(r -> has_product(c, r), g.reductions) && expressible_over(c) ? Claim(s) : nothing
 end
@@ -128,7 +130,8 @@ function product_claims(target, g::GroupView)
         append!(tiling, [TileAxis(a, extent(a), 1, true) for a in others])
         found = Claim[]
         for (tm, tn, tk) in product_tiles(target, facts.T, mt, nt, kt; recomputing)
-            c = product_claim(g, tiling, tm, tn, tk, product_split(tiling, tm, tn, tk, may_split), target.precision)
+            c = product_claim(g, tiling, tm, tn, tk, product_split(tiling, tm, tn, tk, may_split), target.precision;
+                options = something(named_options(), PLAIN))
             c === nothing || push!(found, c)
         end
         isempty(found) || return found
@@ -137,7 +140,13 @@ function product_claims(target, g::GroupView)
 end
 
 # The variants of a product claim, offered once it measures best: the other
-# depths at its output tile, split as it is, and its sum split the other way.
+# depths at its output tile, split as it is, and its sum split the other way;
+# and, for a product that recomputes a fold, its other options at its tile
+# (`product_options`), and the products inside what it recomputes twice as
+# deep as the class's steps, or back at them. A split sum transposes nothing.
+# Transposed with eight worker warps, attention's backward took 395 μs with
+# its scores' products 64 deep against 418 at 32 (1024 positions, 64
+# features, causal, TF32); plainly, 603 against 594.
 function product_variants(target, g::GroupView, c::Claim)
     s = c.schedule
     s.sketch === :product && isempty(get(ENV, "TEMPEST_PRODUCT_TILE", "")) || return Claim[]
@@ -151,10 +160,49 @@ function product_variants(target, g::GroupView, c::Claim)
     found = Claim[]
     for (tk, split) in unique(tiles)
         (tk, split) == (K.tile, s.splits) && continue
-        x = product_claim(g, s.tiling, M.tile, N.tile, tk, split, s.precision)
+        options = split > 1 ? ProductOptions(s.options.workers, false, s.options.inner) : s.options
+        x = product_claim(g, s.tiling, M.tile, N.tile, tk, split, s.precision; options)
+        x === nothing || push!(found, x)
+    end
+    !isempty(facts.recomputed) && named_options() === nothing || return found
+    o = s.options
+    step = product_step(s.precision, facts.T)
+    deeper = any(t -> any(>(step), t.extents), facts.recomputed) ? [ProductOptions(o.workers, o.transposes, o.inner > 0 ? 0 : 2step)] : ProductOptions[]
+    for options in [[ProductOptions(x.workers, x.transposes, o.inner) for x in product_options(target, g, s)]; deeper]
+        options == o && continue
+        x = product_claim(g, s.tiling, M.tile, N.tile, K.tile, s.splits, s.precision; options)
         x === nothing || push!(found, x)
     end
     found
+end
+
+# `TEMPEST_PRODUCT_OPTIONS` names every product's options instead, with no
+# variants of them, for experiments: its worker warps or `default`, then
+# `transposed` to add its transposed folds, and the depth of the products
+# inside what it recomputes, as `8,transposed,64`.
+function named_options()
+    text = get(ENV, "TEMPEST_PRODUCT_OPTIONS", "")
+    isempty(text) && return nothing
+    parts = split(text, ",")
+    depth = something(findfirst(x -> tryparse(Int, x) !== nothing, parts[2:end]), 0)
+    ProductOptions(parts[1] == "default" ? nothing : parse(Int, parts[1]), "transposed" in parts,
+        depth == 0 ? 0 : parse(Int, parts[depth + 1]))
+end
+
+# The options a product's sweep may take: tileiras's worker warps as it
+# chooses them, or eight; each with its transposed folds added, where its
+# schedule has any (see `transposing`) and the target lets a sum's rounding
+# depend on the order of its additions (`deterministic`). Offered together,
+# since they are measured together: at 1024 positions, 64 features, causal,
+# TF32, attention's backward took 594 μs plainly, 808 with eight worker
+# warps, 1180 transposed, which spilled 1728 bytes a thread, and 418
+# transposed with eight worker warps.
+function product_options(target, g::GroupView, s::TileSchedule)
+    options = [ProductOptions(w, false) for w in (nothing, 8)]
+    s.splits == 1 && !Tempest.Compiler.deterministic(target) || return options
+    transposed = TileSchedule(s.sketch, s.tiling, s.splits, s.occupancy, s.swizzle, s.precision, ProductOptions(nothing, true))
+    isempty(added_folds(transposing(Context(g, transposed)))) && return options
+    [options; [ProductOptions(w, true) for w in (nothing, 8)]]
 end
 
 # A product of a matrix and one column, a matrix-vector product, has no kept

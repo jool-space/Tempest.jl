@@ -26,7 +26,10 @@ using Tempest.Compiler: Plan, group_views
 # group a sketch can schedule, which can be made once this extension loads.
 Implement.loaded(::Type{cuTileGenerator}) = true
 
-in_place(::cuTileGenerator, claim) = true
+# A fold added atomically from a transposed sweep starts from zeros written
+# before the sweep reads anything, so its value may not be an argument's
+# storage that the sweep reads.
+in_place(::cuTileGenerator, claim) = !claim.schedule.options.transposes
 
 # Defaults measured on GB10 (48 SMs, 24 MiB L2) by the earlier cuTile schedules.
 const RESIDENT_ROWS = 4096       # columns up to this many rows stay in one tile
@@ -57,6 +60,24 @@ end
 TileAxis(axes, extent, tile, reduced) = TileAxis(axes, extent, tile, reduced, 1)
 with_chunk(ax::TileAxis, chunk) = TileAxis(ax.axes, ax.extent, ax.tile, ax.reduced, chunk)
 
+"""
+How a product's sweep is realized beyond its tiles: tileiras's worker warps
+(`workers`, a hint, or nothing for tileiras's own choice); whether a fold
+whose term reads the sweep's tiles transposed is computed in the sweep's
+orientation and added into its value atomically (`transposes`, see
+`transposing`); and the depth of each step of the products inside the folds
+it recomputes (`inner`, or zero for the class's, `product_step`).
+"""
+struct ProductOptions
+    workers::Union{Nothing, Int}
+    transposes::Bool
+    inner::Int
+end
+
+ProductOptions(workers, transposes) = ProductOptions(workers, transposes, 0)
+
+const PLAIN = ProductOptions(nothing, false)
+
 struct TileSchedule
     sketch::Symbol            # :pointwise, :resident, :streamed, :split, :full
     tiling::Vector{TileAxis}
@@ -64,7 +85,11 @@ struct TileSchedule
     occupancy::Union{Nothing, Int}
     swizzle::Int              # grouping of the first two kept axes on the grid; 0 for a plain grid
     precision::Symbol         # of products: :full or :tf32
+    options::ProductOptions
 end
+
+TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision) =
+    TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision, PLAIN)
 
 # The two-axis sketches over groups A and B, `reduced` naming the reduced one
 # (1 or 2), both (3) or neither (0).
@@ -124,6 +149,9 @@ function Base.show(io::IO, s::TileSchedule)
         print(io, ", tile ", m.tile, "×", n.tile, "×", k.tile, ", ",
             s.precision === :tf32 ? "TF32" : s.precision === :tf32x3 ? "3×TF32" : "full precision")
         s.splits > 1 && print(io, ", summing split ", s.splits, " ways")
+        s.options.workers === nothing || print(io, ", ", s.options.workers, " worker warps")
+        s.options.transposes && print(io, ", transposed folds added")
+        s.options.inner > 0 && print(io, ", inner products ", s.options.inner, " deep")
         return
     end
     print(io, s.sketch, " ", join(extent(s), "×"), ", tile ", join(tiles(s), "×"))
@@ -685,8 +713,11 @@ function applied(c, roots)
         return (sorted(streaming), Pair{Any, Float64}[], sorted(inner))
     end
     factors = Term[]
+    added = added_folds(c)
     for r in c.g.reductions
-        sums = fold_sums(c, r)
+        # A fold the sweep adds into its value is a product over its own
+        # tile axis (see `add_step!`).
+        sums = r in added ? [(c.g.terms[r], bilinear_over(c, SumFold(), c.g.terms[r], only(fold_tiles(c, r))))] : fold_sums(c, r)
         if sums === nothing
             push!(factors, c.g.terms[r])
         else
@@ -718,7 +749,10 @@ end
 # elements it combines, a sum reading them too.
 function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
-    c = Context(g, s)
+    # A transposed fold is priced as the kernel computes it, in the sweep's
+    # orientation, sharing what the sweep recomputes.
+    c = transposing(Context(g, s))
+    g = c.g
     workspaces = Dict{Any, Workspace}()
     kernels = schedule_kernels(c, workspaces; held = [r for r in keyed_folds(c) if g.values[r].into isa Load])
     roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
@@ -782,6 +816,7 @@ end
 include("emit.jl")
 include("cache.jl")
 include("mask.jl")
+include("transpose.jl")
 include("build.jl")
 include("contract.jl")
 include("lowers.jl")

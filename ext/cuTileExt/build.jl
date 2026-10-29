@@ -124,6 +124,8 @@ end
 function unsplit_kernel(c::Context, workspaces, slots)
     k = TileKernel(string(c.s.sketch), (), c.s.occupancy)
     st = k.body
+    workers = c.s.options.workers
+    workers === nothing || push!(st, Expr(:meta, :cuTile, :num_worker_warps, workers))
     indices, grid, chunks, bases = block_indices!(st, c)
     k.grid = grid
     p = sweep_axis(c.s)
@@ -131,7 +133,10 @@ function unsplit_kernel(c::Context, workspaces, slots)
     n = sweeps(c.s)
     resident = n == 1
     one32 = :(Int32(1))
-    partial = partial_folds(c)
+    # Folds over a kept axis the sweep adds into their values at each step
+    # (see `added_folds`), the first phase's; the others leave partial states.
+    added = added_folds(c)
+    partial = filter(!in(added), partial_folds(c))
     held(r) = resident || all(q -> q in fold_tiles(c, r), swept(c.s))
     # Slots of a fold's partial states: the blocks along the kept axes it reduces.
     kept = [i for i in eachindex(c.s.tiling) if !c.s.tiling[i].reduced]
@@ -155,7 +160,8 @@ function unsplit_kernel(c::Context, workspaces, slots)
     writes = unique([[r for r in c.g.reductions if c.g.values[r].stored]; c.g.outputs])
     ruled = resident || length(reduction_phases(c)) != 1 ? nothing : ruled_out(k, c, writes, indices)
     ruled === nothing || (k.name *= ", masked tiles skipped")
-    for phase in reduction_phases(c)
+    for (q, phase) in enumerate(reduction_phases(c))
+        adding = q == 1 ? added : Int[]
         sums = Dict(r => fold_sums(c, r) for r in phase)
         # Folds of a resident tile that do not sum fold it directly; folds
         # whose sums another holds are that one's (see `shared_sums`).
@@ -172,7 +178,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
         roots = phase_roots(c, stepping, sums)
         resident || hoist_folds!(k, body, c, roots, scope, at(one32))
         # Folds whose masks rule out different steps each take theirs alone.
-        classes = resident ? nothing : mask_classes(k, c, stepping, p, indices, n)
+        classes = resident ? nothing : mask_classes(k, c, [stepping; adding], p, indices, n)
         classes === nothing || (k.name *= ", folds stepping by their masks")
         states = Dict{Int, Vector{Any}}()
         if classes === nothing
@@ -186,12 +192,14 @@ function unsplit_kernel(c::Context, workspaces, slots)
                     states[r] = direct_state!(loop, f, A, x, valid1, p)
                 end
             end
+            foreach(r -> add_step!(k, loop, c, r, scope, at(t)), adding)
         else
             class_steps!(k, loop, c, classes, sums, accumulators, scope, valid, at(t), t)
         end
+        isempty(adding) || (k.name *= ", transposed folds added")
         if !resident
             # Steps a mask rules out for every fold of the phase are skipped.
-            live = live_steps(k, c, stepping, p, indices, n)
+            live = live_steps(k, c, [stepping; adding], p, indices, n)
             lo, hi = live === nothing ? (:(Int32(1)), :(Int32($n))) : live
             live === nothing || (k.name *= ", masked steps skipped")
             sweep = :(for $t in $lo:$hi
@@ -277,12 +285,15 @@ function mask_classes(k, c::Context, phase, p, indices, n)
 end
 
 # Step `t` of each class's folds, in the steps the class takes alone: its
-# tiles computed in the step, apart from the other classes'.
+# tiles computed in the step, apart from the other classes'. A fold the sweep
+# adds into its value (see `added_folds`) has no sums of the phase.
 function class_steps!(k, loop, c::Context, classes, sums, accumulators, scope, valid, indices, t)
     for (rs, (lo, hi)) in classes
         step, inner = Any[], merge(Dict{Term, Any}(), scope)
-        emit_tiles!(k, step, c, phase_roots(c, rs, sums), inner, indices...)
-        foreach(r -> fold_step!(k, step, c, r, sums[r], accumulators[r], inner, valid, indices), rs)
+        summed = filter(r -> haskey(sums, r), rs)
+        emit_tiles!(k, step, c, phase_roots(c, summed, sums), inner, indices...)
+        foreach(r -> fold_step!(k, step, c, r, sums[r], accumulators[r], inner, valid, indices), summed)
+        foreach(r -> add_step!(k, step, c, r, inner, indices), filter(r -> !haskey(sums, r), rs))
         push!(loop, :(if $lo <= $t && $t <= $hi
             $(step...)
         end))
@@ -715,14 +726,15 @@ end
 # The kernels of a schedule; a fold by key in `held` starts from what its
 # storage holds, with no launch before its elements.
 function schedule_kernels(c::Context, workspaces; held = ())
-    initial = [initial_states_kernel(c, r) for r in keyed_folds(c) if !(r in held)]
+    c = transposing(c)
+    initial = [initial_states_kernel(c, r) for r in [keyed_folds(c); added_folds(c)] if !(r in held)]
     c.s.sketch === :pointwise && return [initial; pointwise_kernel(c)]
     c.s.sketch === :scan && return [scan_kernel(c)]
     c.s.sketch === :recurrence && return [recurrence_kernel(c)]
     slots = Dict{Int, Int}()
     kernels = c.s.sketch in (:resident, :streamed) || (c.s.sketch === :product && c.s.splits == 1) ?
         unsplit_kernel(c, workspaces, slots) : split_kernels(c, workspaces, slots)
-    [initial; kernels; merge_kernels(c, partial_folds(c), slots, workspaces)]
+    [initial; kernels; merge_kernels(c, filter(!in(added_folds(c)), partial_folds(c)), slots, workspaces)]
 end
 
 function tile_array(buffer::CuArray{T}, spec::ArgSpec) where {T}

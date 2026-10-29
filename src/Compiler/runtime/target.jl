@@ -9,7 +9,7 @@
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, task_state, device_name,
     measurable, time_launch, calibrate, capture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
-    accumulate!, merge_lanes, implementations, numerics, permits_rewrites, product_class
+    accumulate!, merge_lanes, implementations, numerics, permits_rewrites, deterministic, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
 abstract type Target end
@@ -28,7 +28,7 @@ end
 Base.show(io::IO, t::CPUTarget) = print(io, "CPUTarget(", join(map(repr, t.implementations), ", "), ")")
 
 """
-    CUDATarget(implementations...; precision = :full, online = true)
+    CUDATarget(implementations...; precision = :full, online = true, deterministic = true)
 
 Run on an NVIDIA GPU; needs CUDACore loaded. The target uses the floor and
 the `implementations` given, as in `CUDATarget(cuTileGenerator())`, ties
@@ -44,20 +44,31 @@ tensor-core products (close to Float32 accuracy). Half-precision products
 always accumulate in Float32. `online` permits the online softmax (see
 `rewrite`): a sum weighted by a softmax accumulates in one pass with the
 softmax's maximum, rescaled as it grows, which changes rounding.
+`deterministic` keeps a sum's rounding from depending on the order its
+blocks run in. With it false, a sweep may compute a sum in the sweep's
+orientation and add it into its value atomically, as FlashAttention-2's
+backward adds the queries' gradient: attention's training step in Float32
+at 1024 positions, 64 features, 8 heads, causal and TF32 then takes 449 μs
+against 741, and the gradient differs from run to run in its last bits. A
+sum by key, as an embedding's gradient is, accumulates atomically either
+way.
 """
 struct CUDATarget <: Target
     precision::Symbol
     online::Bool
     implementations::Tuple{Vararg{Implementation}}
+    deterministic::Bool
 end
 
-function CUDATarget(implementations::Implementation...; precision::Symbol = :full, online::Bool = true)
+CUDATarget(precision::Symbol, online::Bool, implementations::Tuple) = CUDATarget(precision, online, implementations, true)
+
+function CUDATarget(implementations::Implementation...; precision::Symbol = :full, online::Bool = true, deterministic::Bool = true)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations)
+    CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations, deterministic)
 end
 
 Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", join(map(repr, t.implementations), ", "), "; ",
-    "precision = :", t.precision, t.online ? "" : ", online = false", ")")
+    "precision = :", t.precision, t.online ? "" : ", online = false", t.deterministic ? "" : ", deterministic = false", ")")
 
 "The implementations a target uses beside the floor, in order."
 implementations(target::Union{CPUTarget, CUDATarget}) = target.implementations
@@ -83,11 +94,15 @@ end
 
 "The target's numerics, as part of the tuning record's key."
 numerics(::Target) = :default
-numerics(target::CUDATarget) = target.online ? target.precision : Symbol(target.precision, "-two-pass")
+numerics(target::CUDATarget) = Symbol(target.precision, target.online ? "" : "-two-pass", target.deterministic ? "" : "-nondeterministic")
 
 "Whether a target permits the rewrites of sums that change rounding (see `rewrite`)."
 permits_rewrites(::Target) = true
 permits_rewrites(target::CUDATarget) = target.online
+
+"Whether a target keeps a sum's rounding from depending on the order its blocks run in (see `CUDATarget`)."
+deterministic(::Target) = true
+deterministic(target::CUDATarget) = target.deterministic
 
 ## Storage.
 

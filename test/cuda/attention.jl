@@ -70,12 +70,32 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
     # log-sum-exp in a sweep over keys of its own, and nothing the size of
     # the scores stored. The key gradients sum over the queries after each
     # key and the query gradients over the keys before each query, in one
-    # sweep, each fold stepping where its mask leaves it work.
+    # sweep: each fold stepping where its mask leaves it work. A target that
+    # lets a sum's rounding depend on the order of its additions may
+    # transpose the query gradients instead (below), as the search finds
+    # faster.
     ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(d, T.CUDATarget(T.cuTileGenerator())))
     @test all(d -> !(d isa C.FloorKernels), ex.kernels)
     @test all(v -> !ex.plan.stored[v] || prod(ex.plan.graph.values[v].dims) < 70 * 70, eachindex(ex.plan.graph.values))
     @test any(d -> occursin("folds stepping by their masks", string(d)), ex.kernels)
+    @test !any(d -> occursin("transposed folds added", string(d)), ex.kernels)
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+    loose = T.CUDATarget(T.cuTileGenerator(); deterministic = false)
+    ex = prepare(d, map(CuArray, (q, k, v))...; target = loose, recompute = streaming(d, loose))
+    @test any(d -> occursin("folds stepping by their masks", string(d)) || occursin("transposed folds added", string(d)), ex.kernels)
+    @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+    # Transposed, as FlashAttention-2's backward: the query gradients, their
+    # kept and summed positions exchanged, read the tiles the key gradients
+    # do, and each step adds its product over the block's keys into them,
+    # also at a step past the last query and a block past the last key.
+    for tile in ("64,16,32", "32,16,64")
+        ex = withenv("TEMPEST_PRODUCT_OPTIONS" => "8,transposed", "TEMPEST_PRODUCT_TILE" => tile) do
+            prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(d, T.CUDATarget(T.cuTileGenerator())))
+        end
+        @test any(d -> occursin("transposed folds added", string(d)), ex.kernels)
+        @test !any(d -> occursin("folds stepping by their masks", string(d)), ex.kernels)
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+    end
     # With grouped heads, the products into the key and value gradients sum
     # over the query heads of a group and the queries, which no strided
     # axis spans: the queries are tiled and the heads swept in turn.

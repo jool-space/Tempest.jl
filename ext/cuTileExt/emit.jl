@@ -72,16 +72,18 @@ end
 # A value as a tile: a constant term is a number when the kernel is generated.
 tile_of(x) = x isa Number ? :($(ct.Tile)($x)) : x
 
-function store_nd(sym, v, tiles, indices, value)
+# With `add`, the tile is added into the view atomically rather than stored.
+function store_nd(sym, v, tiles, indices, value; add = false)
     indices = counted(v, indices)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     tile = :($(ct.broadcast_to)($(tile_of(value)), $full))
-    any(v.spans) || return :($(tile_store)($sym; index = (Int32(1),), tile = reshape($tile, (1,))))
+    put(index, tile) = add ? :($(ct.atomic_store_add)($sym, $index, $tile)) : :($(tile_store)($sym; index = $index, tile = $tile))
+    any(v.spans) || return put(:((Int32(1),)), :(reshape($tile, (1,))))
     order = storage_order(v)
     shape, index = compact(v.spans, tiles), compact(v.spans, indices)
     shape == full || (tile = :(reshape($tile, $shape)))
     order == 1:length(order) || (tile = :(permutedims($tile, $(Tuple(order)))))
-    :($(tile_store)($sym; index = ($(index[order]...),), tile = $tile))
+    put(:(($(index[order]...),)), tile)
 end
 
 struct Workspace
@@ -829,7 +831,8 @@ function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE, chosen = la
     chosen && return e
     f = c.g.values[t.value].fold
     if bilinear_over(e, f, t.body, length(s.tiling) + 1) !== nothing
-        return fold_context(c, t; lanes = product_step(s.precision, term_eltype(product_factor(e, t.body.args[1]), c.g)))
+        depth = s.options.inner > 0 ? s.options.inner : product_step(s.precision, term_eltype(product_factor(e, t.body.args[1]), c.g))
+        return fold_context(c, t; lanes = depth)
     end
     any(x -> x isa Recomputed, subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
     fold_context(c, t; lanes = s.tiling[sweep_axis(s)].tile)
