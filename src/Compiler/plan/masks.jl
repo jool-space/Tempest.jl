@@ -47,7 +47,7 @@ end
 # integer read from a value (see `held_formula`), or an integer, as a window's
 # width is.
 compared(graph, o::IndexOperand, through, d) = through(o.expr)
-compared(graph, o::Literal{<:Integer}, through, d) = constant(o.value)
+compared(graph, o::Literal{<:Integer}, through, d) = constant(Int(o.value))
 compared(graph, o::Read, through, d) = held_formula(o.value, map(through, o.index), graph.values[o.value].eltype, d)
 compared(graph, o, through, d) = nothing
 

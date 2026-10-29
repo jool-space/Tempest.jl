@@ -195,7 +195,7 @@ end
 # A fold recomputed where it is read: its operand over the domain extended by
 # its reduced axes.
 function fold_term(graph, stored, g, v, index, domain)
-    d = graph.values[v].definition
+    d = graph.values[v].definition::Reduction
     base = length(domain)
     extents = Tuple(d.iteration[k] for k in d.reduced)
     iteration = iteration_index(d, index, ntuple(j -> var(base + j), length(d.reduced)))
@@ -693,8 +693,10 @@ function recurrences(graph)
     found = Tuple{Int, Int, Vector{Int}}[]
     for (c, v) in enumerate(graph.values)
         d = v.definition
-        d isa Carried && d.from isa Read && d.from.value > c || continue
-        push!(found, (c, d.from.value, recurrence_cycle(graph, c, d.from.value)))
+        d isa Carried || continue
+        from = d.from
+        from isa Read && from.value > c || continue
+        push!(found, (c, from.value, recurrence_cycle(graph, c, from.value)))
     end
     found
 end
@@ -733,8 +735,8 @@ lies along the state's columns and chunks, its rows an axis of its own.
 function recurrence_places(graph, members)
     values = graph.values
     c = first(members)
-    d = values[c].definition
-    f = d.from.value
+    d = values[c].definition::Carried
+    f = (d.from::Read).value
     D = values[c].dims
     along = Dict{Int, Vector{Int}}(c => collect(eachindex(D)))
     for w in recurrence_cycle(graph, c, f)

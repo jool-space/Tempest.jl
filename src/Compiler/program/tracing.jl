@@ -72,11 +72,11 @@ Base.show(io::IO, ::MIME"text/plain", x::TracedArray) = show(io, x)
 Base.show(io::IO, x::Traced{T}) where {T} = print(io, "Traced{$T}(%", x.id, ")")
 
 function broadcast_dims(@nospecialize(dims...))
-    n = maximum(length, dims; init = 0)
+    n = maximum(length, dims; init = 0)::Int
     ntuple(n) do k
         extent = 1
         for d in dims
-            e = k <= length(d) ? d[k] : 1
+            e = (k <= length(d) ? d[k] : 1)::Int
             e == 1 && continue
             extent == 1 || extent == e || throw(DimensionMismatch("cannot broadcast shapes $(dims)"))
             extent = e
@@ -155,7 +155,7 @@ function record_map(@nospecialize(f), @nospecialize(args...))
     simplified = simplify(f, args...)
     simplified === nothing || return simplified
     tape = tape_of(args...)
-    ids = map(a -> operand_id(tape, a), args)
+    ids = Tuple(Int[operand_id(tape, a) for a in args])
     nodes = tape.nodes
     dims = broadcast_dims(map(i -> nodes[i].dims, ids)...)
     T = Base.promote_op(f, map(i -> nodes[i].eltype, ids)...)
@@ -568,7 +568,7 @@ Base.length(::Traced{CartesianIndex{N}}) where {N} = N
 function linear_at(c::Traced{CartesianIndex{N}}, dims) where {N}
     op = node(c).op
     op isa Map{CartesianAt{dims}} && return Traced(c.tape, only(node(c).inputs))
-    foldl((i, d) -> i + (c[d] - 1) * prod(dims[1:(d - 1)]), 2:N; init = c[1])
+    foldl((i, d) -> i + (c[d] - 1) * prod(dims[1:(d - 1)]), 2:length(dims); init = c[1])
 end
 linear_at(c::TracedArray{CartesianIndex{N}}, dims) where {N} = TracedArray(c.tape, linear_at(handle(c), dims).id)
 

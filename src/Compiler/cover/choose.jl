@@ -57,6 +57,9 @@ end
 
 mutable struct Decider
     target::Any
+    # Whether the target times kernels, asked once: the target's package
+    # defines it, so code inferred before it loads would be compiled again.
+    measurable::Bool
     graph::IndexGraph
     measure::Symbol
     rates::Rates
@@ -91,7 +94,7 @@ function Decider(target, graph; measure = :close, recompute = (), keep = ())
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     calibration = load_record(calibration_path)
     r = dry ? rates(target) : target_rates(target)
-    Decider(target, graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
+    Decider(target, measurable(target), graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
         Set{Int}(recompute), Set{Int}(keep), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
         Dict{Any, Vector{Choice}}(), Dict{String, Failure}())
 end
@@ -107,7 +110,7 @@ function forget_decisions!(d::Decider)
 end
 
 # Keep a claim on a group that failed to build.
-fail!(d::Decider, p::Plan, g::Group, o::Choice, err) = d.failed[o.key] = Failure(label(o.implementation), canonical(p, g), reason(err))
+fail!(d::Decider, p::Plan, g::Group, o::Choice, err) = d.failed[o.key] = Failure(label(o.implementation)::String, canonical(p, g), reason(err))
 
 # Why a build failed, in a line: the first of its message's that does not
 # only announce the lines after it, as "kernel compilation produced 2
@@ -132,7 +135,7 @@ level(measure::Bool) = measure ? :close : :none
 level(measure::Symbol) = measure
 
 "Whether the decider may time claims and fit rates on its target: not when dry."
-measures(d::Decider) = d.measure !== :dry && measurable(d.target)
+measures(d::Decider) = d.measure !== :dry && d.measurable
 
 # A group within one preparation: its kind, members, terms and what it stores.
 # One concrete type, so that the sets and tables of identities compile once.
@@ -424,7 +427,8 @@ function buffers!(d::Decider, p::Plan, g::Group)
     d.buffers
 end
 
-zeroed!(x) = (fill!(reinterpret(UInt8, x), 0x00); x)
+# Inferred for no buffer type, which the target's package defines.
+Base.@nospecializeinfer zeroed!(@nospecialize x) = (fill!(reinterpret(UInt8, x), 0x00); x)
 
 # A kernel timed on a buffer reads it as data, and an integer as the program
 # does. A bound compared with positions is at the far end of them, so that

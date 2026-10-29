@@ -93,14 +93,7 @@ function linear_index(dims, d::Domain)
     linear
 end
 
-function delinearize(linear, dims, d::Domain)
-    stride = 1
-    map(dims) do n
-        e = fmod(fdiv(linear, stride, d), n, d)
-        stride *= n
-        e
-    end
-end
+delinearize(linear, dims, d::Domain) = map((n, stride) -> fmod(fdiv(linear, stride, d), n, d), dims, dense_strides(dims))
 
 # The index of a layout node's input, for each index of the node, as
 # expressions over the node's domain. `held(i, axis, extent)` is the index
@@ -117,20 +110,21 @@ function layout_index(op::Permute, dims, parentdims, d, held)
 end
 
 function layout_index(op::Select, dims, parentdims, d, held)
+    index = Vector{Affine}(undef, length(op.indices))
     axis = 0
-    ntuple(length(op.indices)) do p
-        i = op.indices[p]
+    for (p, i) in enumerate(op.indices)
         if i isa Integer
-            constant(i - 1)
+            index[p] = constant(Int(i) - 1)
         elseif i isa AbstractRange
             axis += 1
-            add(scale(var(axis), step(i)), first(i) - 1, d)
+            index[p] = add(scale(var(axis), Int(step(i))), Int(first(i)) - 1, d)
         else
             e, rank = held(i, axis, parentdims[p])
-            axis += rank
-            e
+            axis += rank::Int
+            index[p] = e
         end
     end
+    Tuple(index)
 end
 
 # The zero-based index that an array of one-based indices into an axis of
@@ -144,7 +138,7 @@ function held_index(a::ValueAccess, at, d, values, extent)
     add(normalize(0, (Indirect(a.value, index, lo, hi) => 1,), d), -1, d)
 end
 held_index(a::IndexAccess, at, d, values, extent) = add(substitute(a.expr, at, d), -1, d)
-held_index(a::LiteralAccess, at, d, values, extent) = constant(a.value - 1)
+held_index(a::LiteralAccess, at, d, values, extent) = constant(Int(a.value) - 1)
 
 compose(a::ValueAccess, index, d) = ValueAccess(a.value, map(e -> substitute(e, index, d), a.index))
 compose(a::LiteralAccess, index, d) = a
@@ -212,7 +206,7 @@ function position_formula(o::IndexOperand{T}, at, d::Domain) where {T}
     lo, hi = affine_range(e, d)
     typemin(T) <= lo && hi <= typemax(T) ? e : nothing
 end
-position_formula(o::Literal{<:Integer}, at, d::Domain) = o.value isa Bool ? nothing : constant(o.value)
+position_formula(o::Literal{<:Integer}, at, d::Domain) = o.value isa Bool ? nothing : constant(Int(o.value))
 position_formula(o::Operand, at, d::Domain) = nothing
 
 # Pieces that cover a value together are a formula, as a scatter that covers
@@ -330,7 +324,7 @@ function placement!(value!, indices, input, otherwise, n, d)
         end
         # The distance from the range's first position, along its step.
         a = abs(step(s))
-        o = step(s) > 0 ? add(i[k], 1 - first(s), d) : add(scale(i[k], -1), first(s) - 1, d)
+        o = step(s) > 0 ? add(i[k], 1 - Int(first(s)), d) : add(scale(i[k], -1), Int(first(s)) - 1, d)
         push!(source, fmod(fdiv(o, a, d), length(s), d))
         lo, hi = affine_range(o, d)
         lo < 0 && condition!(>=, o, 0)
@@ -433,7 +427,7 @@ end
 function index_arithmetic(f, inputs, input_dims, n, d)
     n.eltype <: Integer && any(a -> a isa IndexAccess, inputs) || return nothing
     all(a -> a isa IndexAccess || a isa LiteralAccess && a.value isa Integer, inputs) || return nothing
-    es = map((a, dims) -> a isa LiteralAccess ? constant(a.value) : substitute(a.expr, broadcast_index(dims), d), inputs, input_dims)
+    es = map((a, dims) -> a isa LiteralAccess ? constant(Int(a.value)) : substitute(a.expr, broadcast_index(dims), d), inputs, input_dims)
     binary = length(es) == 2
     e = if f === (+) && binary
         add(es[1], es[2], d)
@@ -616,7 +610,7 @@ function lower(p::Program)
         access[id] = if op isa Constant && op.value isa AbstractRange
             # A range is the index itself: `first + step·i`.
             r = op.value
-            IndexAccess(add(mul(only(identity_index(n.dims)), step(r), d), first(r), d), n.eltype)
+            IndexAccess(add(mul(only(identity_index(n.dims)), Int(step(r)), d), Int(first(r)), d), n.eltype)
         elseif op isa Constant
             op.value isa AbstractArray ? value!(ConstantArray(op.value), n) : LiteralAccess(op.value)
         elseif op isa Map && all(a -> a isa LiteralAccess, inputs)

@@ -20,7 +20,7 @@ reachable(a::ArgSpec) = min(prod(a.sizes; init = 1), 1 + sum(((n, s),) -> (n - 1
 # kernel's tile axes in registers (a transposed operand is loaded in storage
 # order, then permuted).
 compact(spans, xs) = Tuple(x for (s, x) in zip(spans, xs) if s)
-storage_order(v) = sortperm(collect(compact(v.spans, v.strides)))
+storage_order(v) = sortperm(Int[x for (s, x) in zip(v.spans, v.strides) if s])
 
 # Kernels read and write memory through these. A Bool buffer reaches a kernel
 # as bytes (`tile_array`), a 0 or 1 each as Julia stores a Bool, compared with
@@ -485,7 +485,7 @@ function combine!(st, f, A, acc, parts, valid = nothing)
             name
         end
     end
-    n = length(acc)
+    n = length(acc)::Int
     merged = [gensym(:acc) for _ in acc]
     foreach(i -> push!(st, :($(merged[i]) = $(Combine{i, n}(f)).($(acc...), $(parts...)))), 1:n)
     foreach((a, m) -> push!(st, :($a = $m)), acc, merged)

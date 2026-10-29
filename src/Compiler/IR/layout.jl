@@ -10,14 +10,8 @@ storage_length(v) = v.scalar || isempty(v.dims) ? 1 : prod(v.dims)
 "The axes of `dims` wider than one."
 wide_axes(dims) = Tuple(k for k in eachindex(dims) if dims[k] != 1)
 
-function dense_strides(dims)
-    s = 1
-    map(dims) do n
-        stride = s
-        s *= n
-        stride
-    end
-end
+"The stride of each axis of `dims` stored densely: the product of the extents before it."
+dense_strides(dims) = Base.front(cumprod((1, dims...)))
 
 """
     address(v, index, domain) -> Affine

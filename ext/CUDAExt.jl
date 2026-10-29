@@ -236,7 +236,7 @@ multiprocessors() = get!(() -> CUDACore.attribute(CUDACore.device(), CUDACore.DE
 # side by side in a block, as many of a warp's as divide them, so that a warp
 # reads neighbouring elements; otherwise a block is one item's part, a warp of
 # lanes at least, which read neighbouring positions.
-function Tempest.Compiler.floor_split(::CUDATarget, items, positions, adjacent)
+function Tempest.Compiler.floor_split(::CUDATarget, items::Int, positions::Int, adjacent::Bool)
     resident = RESIDENT_LANES * multiprocessors()
     (items == 0 || items >= resident || positions <= SHORT_FOLD) && return nothing
     wanted = min(cld(resident, items), cld(positions, 4))

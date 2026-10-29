@@ -441,8 +441,10 @@ end
 
 # The state at the end of the sweep: an exponential fold's running maximum, and the
 # sums.
-sum_state(c::Context, sums, acc) = Any[acc[1:(end - length(sums))];
-    [product === nothing ? a : from_matrix(c, a, product[3], product[4]) for ((_, product), a) in zip(sums, acc[(end - length(sums) + 1):end])]]
+function sum_state(c::Context, sums, acc)
+    k = length(acc)::Int - length(sums)::Int
+    Any[acc[1:k]; [product === nothing ? a : from_matrix(c, a, product[3], product[4]) for ((_, product), a) in zip(sums, acc[(k + 1):end])]]
+end
 
 # A group's fold in a sweep along the schedule's swept axis: its sums, its
 # accumulators, a step, and its state at the end; for folds that do not sum,

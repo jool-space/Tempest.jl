@@ -46,8 +46,8 @@ atom_key(a::Mod) = (2, affine_key(a.e), a.d)
 atom_key(a::Indirect) = (3, a.value, map(affine_key, a.index), a.lo, a.hi)
 affine_key(a::Affine) = (a.constant, map(t -> (atom_key(t.first), t.second), a.terms))
 
-constant(c::Integer) = Affine(Int(c), ())
-var(n::Integer) = Affine(0, (Var(n) => 1,))
+constant(c::Int) = Affine(c, ())
+var(n::Int) = Affine(0, (Var(n) => 1,))
 isconstant(a::Affine) = isempty(a.terms)
 
 """
@@ -132,12 +132,12 @@ function quotient(m::Mod, d::Domain)
     q.constant == 0 && length(q.terms) == 1 && q.terms[1].second == 1 ? q.terms[1].first : Div(m.e, m.d)
 end
 
-scale(a::Affine, c::Integer) =
+scale(a::Affine, c::Int) =
     c == 0 ? constant(0) : Affine(a.constant * c, map(t -> t.first => t.second * c, a.terms))
 
 add(a::Affine, b::Affine, d::Domain) = normalize(a.constant + b.constant, (a.terms..., b.terms...), d)
-add(a::Affine, c::Integer, d::Domain) = normalize(a.constant + c, a.terms, d)
-mul(a::Affine, c::Integer, d::Domain) = normalize(a.constant * c, scale(a, c).terms, d)
+add(a::Affine, c::Int, d::Domain) = normalize(a.constant + c, a.terms, d)
+mul(a::Affine, c::Int, d::Domain) = normalize(a.constant * c, scale(a, c).terms, d)
 
 # Split `e` into `q·k + r` where every term of `q·k` is divisible by `k`.
 function split_divisible(e::Affine, k::Int)
