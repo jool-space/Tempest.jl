@@ -58,10 +58,20 @@ function product_facts(target, g::GroupView)
     first_product = findfirst(r -> product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)
     first_product === nothing && return nothing
     with_product = g.reductions[first_product]
-    factor = product_factor(Context(g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full)),
-        first(product_factors(g.values[with_product].fold, g.terms[with_product])))
+    c = Context(g, TileSchedule(:product, TileAxis[], 1, nothing, 0, :full))
     recomputed = [s for r in g.reductions for s in subterms((g.terms[r],)) if s isa Recomputed]
-    (T = term_eltype(factor, g), recomputed, sums = all(f -> f isa SumFold, folds))
+    (T = product_eltype(c, product_factors(g.values[with_product].fold, g.terms[with_product])), recomputed,
+        sums = all(f -> f isa SumFold, folds))
+end
+
+# The type a product of factors `x` and `y` runs in: a half type when either
+# is one, read through its conversion to Float32, since the other then rounds
+# to it (see `accumulate_product!`). Priced and tiled by its first factor
+# alone, BFloat16 attention's backward at full precision, whose first product
+# weighs a Float32 probability, was estimated at 3570 μs and measured at 320.
+function product_eltype(c::Context, (x, y))
+    Tx, Ty = term_eltype(product_factor(c, x), c.g), term_eltype(product_factor(c, y), c.g)
+    Tx <: HalfFloat || !(Ty <: HalfFloat) ? Tx : Ty
 end
 
 # Whether a product's sum over the `swept` axes may be split among blocks: not

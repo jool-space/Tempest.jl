@@ -744,8 +744,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
         m, k, n = (ax.extent for ax in s.tiling[1:3])
         b = prod((ax.extent for ax in s.tiling[4:end]); init = 1) # the batch, and M and N axes on the grid
         r = g.reductions[findfirst(r -> product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)]
-        t = first(product_factors(g.values[r].fold, g.terms[r]))
-        2.0 * m * n * k * b * sum(r -> live[r], g.reductions), term_eltype(t isa Apply && t.f isa Cast{Float32} ? only(t.args) : t, g)
+        2.0 * m * n * k * b * sum(r -> live[r], g.reductions), product_eltype(c, product_factors(g.values[r].fold, g.terms[r]))
     else
         0.0, Float32
     end
