@@ -158,7 +158,9 @@ end
 """
 A load or store: a value's buffer as a strided view over collapsed groups of
 axes. A load may add an offset computed per block (`dynamic`): any formula of
-the axes the grid binds, below `reach`.
+the axes the grid binds, below `reach`. A group the grid binds may run
+backward through the buffer: the view counts its positions from the end
+(`reversed`, their number, zero for a group read forward).
 """
 struct View
     value::Int
@@ -167,9 +169,10 @@ struct View
     spans::Tuple{Vararg{Bool}} # whether the view extends along each group
     dynamic::Union{Nothing, Affine}
     reach::Int
+    reversed::Tuple{Vararg{Int}}
 end
 
-View(value, offset, strides, spans) = View(value, offset, strides, spans, nothing, 0)
+View(value, offset, strides, spans) = View(value, offset, strides, spans, nothing, 0, map(_ -> 0, strides))
 
 # The view of value `v` read at `index` over the groups of axes; nothing when the
 # address does not chain within a group, depends on an axis outside the
@@ -182,9 +185,18 @@ function view_of(g::GroupView, v, index, groups...; scalar = ())
     e = address(g.values[v], index, domain)
     rest = [t for t in e.terms if !(t.first isa Var)]
     e = Affine(e.constant, Tuple(t for t in e.terms if t.first isa Var))
+    reversed = zeros(Int, length(groups))
     for i in scalar
         s = group_stride(e, groups[i], g.domain)
         s !== nothing && s >= 0 && continue
+        if s !== nothing
+            # Counted from the end, forward: a reversed axis, a recurrence's
+            # derivative stepping back through the steps.
+            n = prod(k -> g.domain[k], groups[i]; init = 1)
+            e = Affine(e.constant + s * (n - 1), Tuple(t.first.n in groups[i] ? t.first => -t.second : t for t in e.terms))
+            reversed[i] = n
+            continue
+        end
         append!(rest, [t for t in e.terms if t.first.n in groups[i]])
         e = Affine(e.constant, Tuple(t for t in e.terms if !(t.first.n in groups[i])))
     end
@@ -196,6 +208,13 @@ function view_of(g::GroupView, v, index, groups...; scalar = ())
         isempty(indirect_values(dynamic)) || return nothing
         all(k -> k in bound || g.domain[k] == 1 || !mentions(dynamic, k), eachindex(g.domain)) || return nothing
         lo, hi = affine_range(dynamic, domain)
+        # A formula that falls below zero, a position counted back from the
+        # end as a reversed axis's, takes the address's constant with it.
+        if lo < 0 && lo + e.constant >= 0
+            lo, hi = lo + e.constant, hi + e.constant
+            dynamic = Affine(e.constant, dynamic.terms)
+            e = Affine(0, e.terms)
+        end
         lo >= 0 || return nothing
         reach = hi + 1
     end
@@ -204,7 +223,8 @@ function view_of(g::GroupView, v, index, groups...; scalar = ())
     end
     strides = map(grp -> group_stride(e, grp, g.domain), groups)
     any(s -> s === nothing || s < 0, strides) && return nothing
-    View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach)
+    e.constant >= 0 || return nothing
+    View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach, Tuple(reversed))
 end
 
 const TILE_TYPES = Union{Float32, Float16, BFloat16, Bool, Int32, Int64}

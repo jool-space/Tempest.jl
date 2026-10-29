@@ -48,12 +48,13 @@
     if CUDA_FUNCTIONAL
         # In Float32 the generator steps through it, the state's tile on chip,
         # in one kernel; at a state's size, reading it in pieces of that tile.
+        # Its gradient's loop in another, reading the steps from the last.
         state(c, dk, dv, n) = (data(c, dk, n; scale = 0.3), data(c, dv, n; scale = 0.2), data(c, dk, n; scale = 0.01),
             0.5 .+ 0.1 .* data(1, 1, n), data(dk, dv; scale = 0.4))
-        for args in (inputs(5), state(64, 128, 128, 3))
-            ex = prepare(trace(chunks, map(single, args)...), map(x -> CuArray(single(x)), args)...)
-            @test count(k -> occursin("cuTile recurrence", string(k)), ex.kernels) == 1
-            @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(chunks, args...), args...)); rtol = 1.0e-4)
+        for args in (inputs(5), state(64, 128, 128, 3)), (f, loops) in ((chunks, 1), (grad(chunks), 2))
+            ex = prepare(trace(f, map(single, args)...), map(x -> CuArray(single(x)), args)...)
+            @test count(k -> occursin("cuTile recurrence", string(k)), ex.kernels) == loops
+            @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(f, args...), args...)); rtol = 1.0e-4)
         end
     end
 end

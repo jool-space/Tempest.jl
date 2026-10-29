@@ -51,8 +51,12 @@ function spec(v, extents)
     ArgSpec(v.value, v.offset, (compact(v.spans, extents)[order]..., sizes...), (compact(v.spans, v.strides)[order]..., strides...))
 end
 
+# The block indices of a view's groups, those it counts from the end counted so.
+counted(v, indices) = map((n, i) -> n == 0 ? i : :(Int32($(n + 1)) - $i), v.reversed, Tuple(indices))
+
 # `at` is the one-based offset per block of a view that has one.
 function load_nd(sym, v, tiles, indices, at = nothing)
+    indices = counted(v, indices)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     extra, one = v.dynamic === nothing ? ((), ()) : ((at,), (1,))
     any(v.spans) || return :(reshape($(tile_load)($sym; index = (Int32(1), $(extra...)), shape = (1, $(one...))), $full))
@@ -69,6 +73,7 @@ end
 tile_of(x) = x isa Number ? :($(ct.Tile)($x)) : x
 
 function store_nd(sym, v, tiles, indices, value)
+    indices = counted(v, indices)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     tile = :($(ct.broadcast_to)($(tile_of(value)), $full))
     any(v.spans) || return :($(tile_store)($sym; index = (Int32(1),), tile = reshape($tile, (1,))))
