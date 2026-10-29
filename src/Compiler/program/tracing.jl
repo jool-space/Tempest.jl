@@ -793,6 +793,28 @@ const STEP_WRITE = "a step of `accumulate` writes an array made before it: each 
     it once per step without the loop stating it. Carry the array in the state instead"
 
 function recurrence(f, scanned, init, zipped)
+    (; stacked, scalar, result, steps) = traced_loop(f, scanned, init, zipped)
+    map(1:steps) do t
+        k = 0
+        rebuild(result) do _
+            k += 1
+            x = stacked[k]
+            x === nothing && return nothing
+            scalar[k] ? x[t] : x[ntuple(_ -> Colon(), ndims(x) - 1)..., t]
+        end
+    end
+end
+
+"""
+    traced_loop(f, scanned, init, zipped) -> (; stacked, scalar, result, steps)
+
+The recurrence `accumulate(f, slices; init)` traced as a loop: its step traced
+once into a `LoopBody`, and a `Loop` node for each of the step's results, the
+result at every step stacked along a last axis: `stacked`, one for each leaf
+of the step's `result` in order, `nothing` where the result is, and whether
+each is a number at each step (`scalar`).
+"""
+function traced_loop(f, scanned, init, zipped)
     arrays = map(parent, scanned)
     tape = first(arrays).tape
     all(a -> a.tape === tape, arrays) || throw(ArgumentError("accumulate's arrays were traced by different programs"))
@@ -867,23 +889,16 @@ function recurrence(f, scanned, init, zipped)
         push!(results, renumbered[o])
         length(results)
     end)
-    program = Program(nodes, collect(eachindex(arguments)), results, Tuple(eachindex(arguments)), output_structure)
+    # After the step's results, the state at each step's start (see `LoopBody`).
+    program = Program(nodes, collect(eachindex(arguments)), [results; 1:length(carried)], Tuple(eachindex(arguments)), output_structure)
     loop = LoopBody(program, steps, [output_structure[k] for k in carried], collect(sliced))
     inputs = [Int[x.id for x in states if x !== nothing]; Int[a.id for a in arrays]; captured]
     stacked = map(eachindex(results)) do k
         n = nodes[results[k]]
-        id = record!(tape, Loop(loop, k), inputs, n.scalar ? (steps,) : (n.dims..., steps), n.eltype)
-        TracedArray(tape, id)
+        TracedArray(tape, record!(tape, Loop(loop, k), inputs, n.scalar ? (steps,) : (n.dims..., steps), n.eltype))
     end
-    map(1:steps) do t
-        k = 0
-        rebuild(result) do _
-            r = output_structure[k += 1]
-            r === nothing && return nothing
-            x = stacked[r]
-            nodes[results[r]].scalar ? x[t] : x[ntuple(_ -> Colon(), ndims(x) - 1)..., t]
-        end
-    end
+    (; stacked = map(r -> r === nothing ? nothing : stacked[r], collect(output_structure)),
+        scalar = map(r -> r !== nothing && nodes[results[r]].scalar, collect(output_structure)), result, steps)
 end
 
 constant_handle(tape, x::Number) = Traced(tape, constant!(tape, x))

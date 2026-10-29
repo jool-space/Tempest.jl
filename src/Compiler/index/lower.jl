@@ -394,8 +394,12 @@ function inline_loops(p::Program)
     backward = BitSet()
     for (id, n) in enumerate(p.nodes)
         if n.op isa Loop
-            id in p.backward && throw(ArgumentError("a recurrence in a program's backward is not supported yet"))
-            new[id] = get!(() -> splice_step!(nodes, n.op.body, map(i -> new[i], n.inputs)), spliced, n.op.body)[n.op.result]
+            new[id] = get!(spliced, n.op.body) do
+                from = length(nodes) + 1
+                results = splice_step!(nodes, n.op.body, map(i -> new[i], n.inputs))
+                id in p.backward && union!(backward, from:length(nodes))
+                results
+            end[n.op.result]
         else
             push!(nodes, Node(n.op, map(i -> new[i], n.inputs), n.dims, n.eltype, n.scalar))
             new[id] = length(nodes)
@@ -416,7 +420,7 @@ function splice_step!(nodes, body::LoopBody, inputs)
     # broadcasts it: its axes, then axes of extent one, then the steps.
     function broadcast(id, r, rank)
         n = nodes[id]
-        rank >= r && return id
+        r >= rank && return id
         emit!(Reshape(), (id,), (n.dims[1:(end - 1)]..., ntuple(_ -> 1, rank - r)..., steps), n.eltype)
     end
     rank(n::Node) = n.scalar ? 0 : length(n.dims)

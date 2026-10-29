@@ -196,7 +196,95 @@ end
 IR.fold_observe(::Recurrence{K}, s) where {K} = ntuple(r -> s[K * K + r], Val(K))
 
 pullback(op::Accumulate, n, id, g, tape) = (scan_pullback(op.fold, op, h(tape, only(n.inputs)), g, tape),)
-pullback(op::Loop, n, id, g, tape) = throw(ArgumentError("differentiating a recurrence, `accumulate` over slices, is not supported yet"))
+
+"""
+The cotangents of the inputs of the recurrence `n` (a `Loop` node, its inputs
+as read anew), given its results' `cotangents`, by result: a recurrence, its
+derivative, through the steps last first. Each of its steps runs the step
+again from the state where it started, and pulls back through it the
+cotangent of the state after it, carried from the step after, and of the
+step's results; its results are the cotangents of the state before it,
+carried, of the step's slices, and of what the step captures, summed over the
+steps after. The steps run last first as a recurrence over the arrays
+reversed along their steps, an index the lowering folds into every read.
+"""
+function loop_pullback(n, cotangents, tape)
+    body = n.op.body
+    step = body.program
+    nstate, nscanned, steps = length(body.carried), length(body.sliced), body.steps
+    inputs = collect(n.inputs)
+    results = length(step.results) - nstate
+    argument(k) = step.nodes[step.arguments[k]]
+    differentiates(k) = differentiable(tape.nodes[inputs[k]].eltype)
+    states = filter(differentiates, 1:nstate)
+    scanned = filter(differentiates, (nstate + 1):(nstate + nscanned))
+    captured = filter(differentiates, (nstate + nscanned + 1):length(inputs))
+    array(x) = TracedArray(tape, x.id)
+    flip(x) = reverse(x; dims = ndims(x))
+    # The state where each step starts, and each scanned array with its steps
+    # last.
+    starts = map(1:nstate) do j
+        a = argument(j)
+        TracedArray(tape, record!(tape, Loop(body, results + j), inputs, a.scalar ? (steps,) : (a.dims..., steps), a.eltype))
+    end
+    lasts = map(1:nscanned) do i
+        x, k = TracedArray(tape, inputs[nstate + i]), body.sliced[i]
+        k == ndims(x) ? x : permutedims(x, (1:(k - 1)..., (k + 1):ndims(x)..., k))
+    end
+    seeded = sort!(collect(keys(cotangents)))
+    reversed = [map(flip, starts); map(flip, lasts); [flip(array(cotangents[r])) for r in seeded]]
+    captures = map(k -> h(tape, inputs[k]), (nstate + nscanned + 1):length(inputs))
+    function zeros_of(id)
+        a = tape.nodes[id]
+        z = constant!(tape, zero(a.eltype))
+        a.scalar ? Traced(tape, z) : TracedArray(tape, record!(tape, Map(identity), (z,), a.dims, a.eltype))
+    end
+    handle_of(c, like) = c === nothing ? zeros_of(like.id) : node(like).scalar ? Traced(tape, c.id) : array(c)
+    function back(carried, xs)
+        k = 0
+        slice(scalar) = (x = xs[k += 1]; scalar ? x[] : x)
+        forward = [map(j -> slice(argument(j).scalar), 1:nstate); map(i -> slice(false), 1:nscanned)]
+        given = Dict(r => slice(step.nodes[step.results[r]].scalar) for r in seeded)
+        seeds = map(1:results) do r
+            c = get(given, r, nothing)
+            j = findfirst(==(r), body.carried)
+            j !== nothing && j in states ? plus(h(tape, carried[findfirst(==(j), states)].id), c === nothing ? nothing : h(tape, c.id)) :
+                c === nothing ? nothing : h(tape, c.id)
+        end
+        arguments = Any[map(x -> h(tape, x.id), forward); captures]
+        found = vjp!(tape, (a...) -> Tuple(replay!(tape, step, a)[1:results]), arguments, Tuple(seeds))
+        Tuple(handle_of(found[k], k <= nstate + nscanned ? forward[k] : captures[k - nstate - nscanned]) for k in [states; scanned; captured])
+    end
+    start = Tuple([map(j -> zeros_of(inputs[j]), states); fill(nothing, length(scanned) + length(captured))])
+    (; stacked) = traced_loop(back, Tuple(map(x -> eachslice(x; dims = ndims(x)), reversed)), start, true)
+    contributions = Any[nothing for _ in inputs]
+    for (i, j) in enumerate(states)
+        x = stacked[i]
+        contributions[j] = h(tape, (ndims(x) == 1 ? x[steps] : x[ntuple(_ -> Colon(), ndims(x) - 1)..., steps]).id)
+    end
+    for (i, k) in enumerate(scanned)
+        x, a = flip(stacked[length(states) + i]), body.sliced[k - nstate]
+        m = ndims(x)
+        contributions[k] = h(tape, (a == m ? x : permutedims(x, (1:(a - 1)..., m, a:(m - 1)...))).id)
+    end
+    for (i, k) in enumerate(captured)
+        x, c = stacked[length(states) + length(scanned) + i], tape.nodes[inputs[k]]
+        total = c.scalar ? sum(x) : reshape(sum(x; dims = ndims(x)), c.dims)
+        contributions[k] = h(tape, total.id)
+    end
+    contributions
+end
+
+"The nodes of program `p` recorded on `inputs`, handles of its arguments: a handle of each of its results."
+function replay!(tape, p::Program, inputs)
+    at = zeros(Int, length(p.nodes))
+    foreach((a, x) -> at[a] = x.id, p.arguments, inputs)
+    for (id, n) in enumerate(p.nodes)
+        n.op isa Argument && continue
+        at[id] = record!(tape, n.op, map(i -> at[i], n.inputs), n.dims, n.eltype; scalar = n.scalar)
+    end
+    map(r -> h(tape, at[r]), p.results)
+end
 
 # A sum's prefixes: each element enters every prefix after it, so its
 # cotangent is the sum of theirs, the scan of the cotangent the other way.
@@ -550,7 +638,16 @@ function pull!(tape, cotangents, range, keep, shifts = BitSet(), at = Dict{Int, 
         (keep[id] && haskey(cotangents, id)) || continue
         # The rule reads the node and its inputs where they are read anew.
         read = Node(n.op, map(i -> get(at, i, i), n.inputs), n.dims, n.eltype, n.scalar)
-        contributions = pullback(n.op, read, get(at, id, id), cotangents[id], tape)
+        contributions = if n.op isa Loop
+            # A recurrence's results pull back together, at the first of them
+            # the pass reaches: every reader of any of them comes after them all.
+            loops = [j for j in range if keep[j] && haskey(cotangents, j) && tape.nodes[j].op isa Loop &&
+                tape.nodes[j].op.body === n.op.body && tape.nodes[j].inputs == n.inputs]
+            any(>(id), loops) ? map(_ -> nothing, n.inputs) :
+                loop_pullback(read, Dict(tape.nodes[j].op.result => cotangents[j] for j in loops), tape)
+        else
+            pullback(n.op, read, get(at, id, id), cotangents[id], tape)
+        end
         for (input, c) in zip(n.inputs, contributions)
             (c === nothing || input in shifts) && continue
             # A constant operand has no cotangent.

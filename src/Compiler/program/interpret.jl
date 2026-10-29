@@ -122,6 +122,8 @@ function run_loop(body::LoopBody, xs)
         out = interpret(body.program, state..., slices..., captured...)
         ys = Vector{Any}(undef, length(body.program.results))
         foreach((y, r) -> r === nothing || (ys[r] = y), out, body.program.output_structure)
+        # The results after those are the state where the step starts.
+        ys[(end - nstate + 1):end] = state
         state = ys[body.carried]
         ys
     end

@@ -151,7 +151,9 @@ A recurrence's step: a program whose arguments are the state's arrays, a slice
 of each scanned array and the values the step captures, in that order, as the
 inputs of the recurrence's nodes are; `steps` steps, the state's `k`th array
 carried by the step's `carried[k]`th result, the `k`th scanned array sliced
-along its axis `sliced[k]`.
+along its axis `sliced[k]`. After the results its output structure names,
+the program's results are its state's arguments: a recurrence's node for one
+is the state where each step starts, which its derivative reads.
 """
 struct LoopBody
     program::Program

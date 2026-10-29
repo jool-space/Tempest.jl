@@ -2,9 +2,10 @@
 # cycle read outside it and what the state is carried from, a step at a
 # time, an item per position its step does not read them across; what each
 # step computes besides is planned as any value over the steps, reading what
-# the group stored, a batch over them. On the
-# CPU, and on CUDA, by the floor and beside the generators, which step
-# through it holding its state on chip; its kernels do not grow with its steps.
+# the group stored, a batch over them; its gradient a recurrence over the
+# steps reversed. On the CPU, and on CUDA, by the floor and beside the
+# generators, which step through it holding its state on chip; its kernels,
+# and its gradient's, do not grow with its steps.
 @testset "recurrences prepared" begin
     step((S, _), (w, u, kd, g)) = (g .* S .+ kd' * (u .- w * S), w * S)
     chunks(W, U, Kd, G, S0) = (r = accumulate(step, zip(eachslice(W; dims = 3), eachslice(U; dims = 3),
@@ -21,6 +22,13 @@
         ex = prepare(p, map(device, args)...)
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(f, args...), args...)); rtol)
     end
+    # Its gradient prepared: the reversed loop is a recurrence too.
+    grad(f) = (xs...) -> T.gradient((ys...) -> sum(x -> sum(abs2, x), f(ys...)), xs...)
+    for (f, args) in cases, (device, rtol) in devices
+        p = trace(grad(f), map(x -> device(x) isa CuArray{Float32} ? single(x) : x, args)...)
+        ex = prepare(p, map(device, args)...)
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(grad(f), args...), args...)); rtol)
+    end
     # The product each step returns is of its cycle: the group stores it at
     # each step, along the state's columns and steps, its rows an axis of
     # their own. The state one step on it stores where it is returned.
@@ -31,8 +39,8 @@
         @test C.recurrence_axes(p.graph, g) == (axis = 3, parallel = [2], inner = [1, 4])
         @test g.domain == (3, 2, 5, 4) && length(g.outputs) == 3 && p.stored[last(g.outputs)] == stores
     end
-    kernels(n) = length(prepare(trace(chunks, inputs(n)...), inputs(n)...).kernels)
-    @test kernels(5) == kernels(9)
+    kernels(f, n) = length(prepare(trace(f, inputs(n)...), inputs(n)...).kernels)
+    @test kernels(chunks, 5) == kernels(chunks, 9) && kernels(grad(chunks), 5) == kernels(grad(chunks), 9)
     if CUDA_FUNCTIONAL
         # In Float32 the generator steps through it, the state's tile on chip,
         # in one kernel; at a state's size, reading it in pieces of that tile.
