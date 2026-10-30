@@ -375,6 +375,8 @@ end
 # first, and its sums scale by how much it rose; lanes past the swept extent
 # weigh nothing. Then each sum adds its terms.
 function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices, p)
+    # Tiles that cover the swept axis exactly have no lanes past it.
+    c.s.tiling[p].extent % c.s.tiling[p].tile == 0 && (valid = nothing)
     rise = nothing
     if f isa Relative{Exponential}
         y = first(shifted_parts(c, body))
@@ -382,7 +384,7 @@ function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices,
         x = as_accumulator(st, scope[y], T, term_eltype(y, c.g), spanned_shape(c, y))
         m = first(acc)
         masked, top, shift, rise, w = gensym(:y), gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
-        push!(st, :($masked = ifelse.($valid, $x, $(T(-Inf)))))
+        push!(st, :($masked = $(valid === nothing ? x : :(ifelse.($valid, $x, $(T(-Inf)))))))
         push!(st, :($top = max.($m, maximum($masked; dims = $p))))
         push!(st, :($shift = $(lse_shift).($top)))
         push!(st, :($rise = exp.($m .- $shift)))
@@ -393,7 +395,8 @@ function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices,
     for ((term, product), a) in zip(sums, acc[(end - length(sums) + 1):end])
         if product === nothing
             emit_tiles!(k, st, c, [term], scope, indices...)
-            push!(st, :($a = $a .* $rise .+ sum(ifelse.($valid, $(scope[term]), $(zero(term.eltype))); dims = $p)))
+            x = valid === nothing ? scope[term] : :(ifelse.($valid, $(scope[term]), $(zero(term.eltype))))
+            push!(st, :($a = $a .* $rise .+ sum($x; dims = $p)))
         else
             rise === nothing || push!(st, :($a = $a .* $(matrix_tile(c, rise, product[3], product[4]))))
             accumulate_product!(st, c, scope, product, a, indices[p], p)
