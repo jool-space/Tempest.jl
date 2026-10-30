@@ -14,7 +14,9 @@
 
 Scaled dot-product attention over `(features, heads, positions, batch)` arrays,
 with grouped-query attention when `k` and `v` have fewer heads than `q`. Three
-dimensional arrays are one head.
+dimensional arrays are one head. In half precision it computes as
+FlashAttention and cuDNN do: the scores and softmax in Float32, from the
+queries and keys converted to it, and the output rounded to their type.
 """
 function attention(q, k, v; causal::Bool = false, scale::Real = inv(sqrt(size(q, 1))))
     if ndims(q) == ndims(k) == ndims(v) == 3
@@ -45,9 +47,14 @@ const D_, G_, H_, M_, B_, N_ = 1, 2, 3, 4, 5, 6
 
 grouped(x, kv) = reshape(x, size(x, 1), size(x, 2) ÷ kv, kv, size(x, 3), size(x, 4))
 
-# Scores (n, g, h, m, b), scaled, keys after a query masked out when causal.
+# A half-precision array converted to Float32, as a product on the tensor
+# cores takes it; any other as it is.
+widened(x) = sizeof(eltype(x)) < 4 ? Float32.(x) : x
+
+# Scores (n, g, h, m, b), scaled, keys after a query masked out when causal;
+# Float32 for half-precision queries and keys.
 function attention_scores(q, k; causal, scale)
-    s = Tempest.Compiler.contract(k, grouped(q, size(k, 2)), (D_, H_, N_, B_), (D_, G_, H_, M_, B_), (N_, G_, H_, M_, B_)) .* scale
+    s = Tempest.Compiler.contract(widened(k), widened(grouped(q, size(k, 2))), (D_, H_, N_, B_), (D_, G_, H_, M_, B_), (N_, G_, H_, M_, B_)) .* scale
     causal || return s
     ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, typemin(eltype(s)))
 end
@@ -56,12 +63,14 @@ end
     attention_forward(q, k, v; causal, scale) -> (o, lse)
 
 Attention's output and the log-sum-exp of each query's scores, of size
-`(1, heads, queries, batch)`.
+`(1, heads, queries, batch)`. The output is rounded to a half-precision
+query's type, the log-sum-exp is not.
 """
 function attention_forward(q, k, v; causal, scale)
     s = attention_scores(q, k; causal, scale)
     lse = Tempest.logsumexp(s; dims = 1)
     o = Tempest.Compiler.contract(v, exp.(s .- lse), (D_, H_, N_, B_), (N_, G_, H_, M_, B_), (D_, G_, H_, M_, B_))
+    sizeof(eltype(q)) < 4 && (o = eltype(q).(o))
     (o = reshape(o, size(q, 1), size(q, 2), size(q, 3), size(q, 4)), lse = reshape(lse, 1, size(q, 2), size(q, 3), size(q, 4)))
 end
 

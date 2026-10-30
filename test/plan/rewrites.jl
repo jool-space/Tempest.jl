@@ -62,9 +62,9 @@ end
     @test h.values[fold.operand.value].eltype == Tuple{BFloat16, Float32, Float32}
     @test IR.fold_types(fold.fold, Tuple{BFloat16, Float32, Float32}).result == BFloat16
     @test agree(C.execute(recomputing(h), qh, kh, vh), [interpret(trace(half, qh, kh, vh), qh, kh, vh)]; rtol = 1.0e-2)
-    # Scores scaled by a Float32 are Float32, and the product of the values
-    # in BFloat16 with the weights is one too: the same fold, with the values
-    # converted where they are read.
+    # The fixture's scores are Float32, from the queries and keys converted,
+    # and so is the product of the values in BFloat16 with the weights: the
+    # same fold, with the values converted where they are read.
     @test length(C.rewrite(C.lower(trace((q, k, v) -> Ops.attention(q, k, v; causal = true), qh, kh, vh))).rewrites) == 1
 end
 

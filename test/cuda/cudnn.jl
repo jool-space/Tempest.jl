@@ -43,10 +43,10 @@ end
     q, k, v = half(BFloat16, 64, 4, 128, 2), half(BFloat16, 64, 2, 128, 2), half(BFloat16, 64, 2, 128, 2)
     claimed(f, args...; target = T.CUDATarget(T.cuDNNAttention())) = !isempty(called(prepare(trace(f, args...), map(CuArray, args)...; target)))
     @test claimed((q, k, v) -> sdpa(q, k, v; causal = true), q, k, v)
-    # Another function: the output kept in Float32, or attention as the
-    # fixture spells it, its scores rounded to BFloat16.
+    # Attention as the fixture spells it computes the same; with the output
+    # kept in Float32 it is another function.
+    @test claimed((q, k, v) -> attention(q, k, v; causal = true), q, k, v)
     @test !claimed((q, k, v) -> sdpa(q, k, v; causal = true, round = false), q, k, v)
-    @test !claimed((q, k, v) -> attention(q, k, v; causal = true), q, k, v)
     # Arrays the engines do not read: Float32, features not a multiple of 8,
     # or keys stored positions first.
     @test !claimed((q, k, v) -> sdpa(q, k, v; causal = true), map(single, (q, k, v))...)
