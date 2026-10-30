@@ -124,6 +124,8 @@ Tempest.Compiler.IR.Indirect
 Tempest.Compiler.IR.is_affine
 Tempest.Compiler.IR.indirect_values
 Tempest.Compiler.IR.substitute
+Tempest.Compiler.IR.fdiv
+Tempest.Compiler.IR.fmod
 ```
 
 ### Layout

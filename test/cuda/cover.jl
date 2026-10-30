@@ -120,9 +120,11 @@ end
 @testset "products grouped with a product by a constant" begin
     # Products of one factor with several, grouped as one kernel and the
     # first by a constant zero, which no product claim takes, are a streamed
-    # reduction in the generator's plan: a tile per row of the first factor
-    # and head, each reading every other factor of its head whole. Each is
-    # read by 64 tiles, and the estimate counts the 63 reads after the first.
+    # reduction in the generator's plan, in either of two schedules: a tile
+    # per row of the first factor and head, each reading every other factor
+    # of its head whole; or a tile of two columns, rows and all, each reading
+    # the first factor's head whole, a tile at a time. Each factor is read by
+    # 64 tiles, and the estimate counts the 63 reads after the first.
     q = single(data(64, 128, 16; scale = 0.1))
     states = [single(data(128, 128, 16; scale = 0.01 * k)) for k in 1:4]
     head(q, s) = C.contract(q, s, (1, 4, 3), (4, 2, 3), (1, 2, 3))
@@ -132,9 +134,9 @@ end
     base = C.generator_plan(d)
     g = only(base.groups)
     x = C.decide(d, base, g)
-    @test x.choice.claim.schedule.sketch === :streamed
-    work = C.estimate(x.choice.implementation, x.choice.claim, target, C.group_view(base, g))
-    @test maximum(w -> w.reread, work) == 63 * sum(sizeof, states)
+    @test all(o -> o.claim.schedule.sketch === :streamed, x.options)
+    reread(o) = maximum(w -> w.reread, C.estimate(o.implementation, o.claim, target, C.group_view(base, g)))
+    @test sort(map(reread, x.options)) == [63 * sizeof(q), 63 * sum(sizeof, states)]
     # cuTile proposes the four products as one group, a product's, and the
     # cover takes it: the product by zero is a kernel of its own.
     plan, _ = C.cover(d)

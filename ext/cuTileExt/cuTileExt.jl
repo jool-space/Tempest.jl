@@ -255,6 +255,103 @@ function view_of(g::GroupView, v, index, groups...; scalar = ())
     View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach, Tuple(reversed))
 end
 
+"""
+A load's view of one tile at a time, where no view of whole groups reads it
+(see `view_of`): each group's position the first of its block's tile plus a
+lane, the address is a stride per lane and an offset per block (`dynamic`,
+over the groups' blocks counted from zero, variable `i` group `i`'s). A read
+of a position's remainder and quotient by a divisor of the tile, a reshape's
+of the chunks of a sequence say, splits the lane into two: the tile is
+loaded as a matrix and reshaped. Each lane axis is `(group, extent, stride)`,
+a group's innermost first; `spans` whether the view extends along each group.
+The offset is a multiple of `align`, which the view states, so that the
+compiler knows each tile's alignment, as a view of whole groups lets it know.
+"""
+struct LocalView
+    value::Int
+    lanes::Vector{Tuple{Int, Int, Int}}
+    spans::Tuple{Vararg{Bool}}
+    dynamic::Affine
+    reach::Int
+    align::Int
+end
+
+# The view of value `v` read at `index` a tile at a time; nothing when some
+# group's tiles do not cover it exactly, as a lane past its extent would read
+# outside the buffer, or the address is no stride per lane.
+function local_view(g::GroupView, v, index, tiling)
+    all(ax -> ax.extent % ax.tile == 0, tiling) || return nothing
+    e = address(g.values[v], index, Domain(g.domain))
+    isempty(indirect_values(e)) || return nothing
+    view = lane_view(g, v, e, tiling, Dict{Int, Int}())
+    view isa Vector || return view
+    # A lane read through a remainder or quotient by a divisor of its tile is
+    # two lanes, that divisor's and the rest.
+    splits = Dict{Int, Int}()
+    for (i, m) in view
+        t = tiling[i].tile
+        m < t && t % m == 0 && get(splits, i, m) == m || return nothing
+        splits[i] = m
+    end
+    view = lane_view(g, v, e, tiling, splits)
+    view isa LocalView ? view : nothing
+end
+
+# The address `e` over each group's block and lanes, the lanes of group `i`
+# split by `splits[i]`: a `LocalView`; or, when an atom reads a lane, the
+# divisors of the atoms that do, by group, to split by; nothing otherwise.
+function lane_view(g::GroupView, v, e, tiling, splits)
+    G = length(tiling)
+    extents = Int[ax.extent ÷ ax.tile for ax in tiling]
+    lanes = Tuple{Int, Int, Int}[]
+    # Each group's position: the first of its block's tile, plus the lane.
+    positions = map(enumerate(tiling)) do (i, ax)
+        m = get(splits, i, 0)
+        parts = m == 0 ? [ax.tile] : [m, ax.tile ÷ m]
+        terms = Pair{Any, Int}[Var(i) => ax.tile]
+        for (p, scale) in zip(parts, cumprod([1; parts[1:(end - 1)]]))
+            push!(extents, p)
+            push!(lanes, (i, p, 0))
+            push!(terms, Var(length(extents)) => scale)
+        end
+        terms
+    end
+    d = Domain(Tuple(extents))
+    lane_vars = (G + 1):length(extents)
+    at = map(eachindex(g.domain)) do k
+        i = findfirst(ax -> k in ax.axes, tiling)
+        i === nothing && return Affine(0, ())
+        ax = tiling[i]
+        q = findfirst(==(k), ax.axes)
+        below = prod(j -> g.domain[j], ax.axes[1:(q - 1)]; init = 1)
+        y = IR.fdiv(Affine(0, Tuple(positions[i])), below, d)
+        q < length(ax.axes) ? IR.fmod(y, g.domain[k], d) : y
+    end
+    e = IR.substitute(e, Tuple(at), d)
+    divisors = Pair{Int, Int}[]
+    strides = zeros(Int, length(lanes))
+    rest = Pair{Any, Int}[]
+    for (atom, c) in e.terms
+        if atom isa Var && atom.n in lane_vars
+            strides[atom.n - G] += c
+        elseif any(j -> mentions(atom, j), lane_vars)
+            atom isa Union{Div, Mod} || return nothing
+            push!(divisors, lanes[findfirst(j -> mentions(atom, j), lane_vars)][1] => atom.d)
+        else
+            push!(rest, atom => c)
+        end
+    end
+    isempty(divisors) || return divisors
+    any(<(0), strides) && return nothing
+    dynamic = Affine(e.constant, Tuple(rest))
+    lo, hi = affine_range(dynamic, d)
+    lo >= 0 && hi < typemax(Int32) || return nothing
+    lanes = [(i, n, s) for ((i, n, _), s) in zip(lanes, strides)]
+    align = gcd(dynamic.constant, map(t -> t.second, dynamic.terms)...)
+    align == 0 && (align = 1)
+    LocalView(v, lanes, ntuple(i -> any(l -> l[1] == i && l[3] != 0, lanes), G), dynamic, hi + 1, align)
+end
+
 const TILE_TYPES = Union{Float32, Float16, BFloat16, Bool, Int32, Int64}
 
 # Tile types, and tuples of them: a fold's element of several components.
@@ -620,7 +717,7 @@ function recurrence_claims(target, g::GroupView)
     found
 end
 
-function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
+function claims(generator::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind === :scan && return scan_claims(g)
     g.kind === :recurrence && return recurrence_claims(target, g)
     g.kind in (:pointwise, :reduction) || return Claim[]
@@ -632,27 +729,36 @@ function claims(::cuTileGenerator, target::CUDATarget, g::GroupView)
     recomputing(g) && return recomputing_claims(target, g, A, B, C, reduced)
     s = default_schedule(g, A, B, C, reduced)
     c = Context(g, s)
-    if !fits(c)
-        s = refined(c)
-        c = Context(g, s)
-        fits(c) || return Claim[]
-    end
+    # A schedule that reads a value a tile at a time reads again, from tile to
+    # tile, what a view of whole axes reads once: its refinement, which cuts
+    # the kept axes where a view does not chain, is a claim too. The two
+    # compute alike; the first moves the fewer bytes, rereads counted.
+    schedules = !fits(c) ? [refined(c)] : tile_at_a_time(c) ? [s, refined(c)] : [s]
+    tiles(x) = [(ax.axes, ax.tile) for ax in x.tiling]
+    schedules = [x for (i, x) in enumerate(schedules) if (x === s || fits(Context(g, x))) && !any(y -> tiles(y) == tiles(x), schedules[1:(i - 1)])]
+    isempty(schedules) && return Claim[]
     # A pointwise kernel writes its outputs and scatters its folds by key; a
     # group with another fold, one over no axes say, is not one.
     s.sketch === :pointwise && any(r -> !g.values[r].keyed, g.reductions) && return Claim[]
-    partial = partial_folds(c)
-    # A resident kernel with folds that keep the swept axis covers several kept
-    # tiles per block; each such fold reduces every kept axis.
-    if s.sketch === :resident && any(r -> !(sweep_axis(s) in fold_tiles(c, r)), partial)
-        kept = findfirst(ax -> !ax.reduced, s.tiling)
-        if kept !== nothing && all(r -> kept in fold_tiles(c, r), partial)
-            chunk = max(1, cld(cld(s.tiling[kept].extent, s.tiling[kept].tile), PARTIAL_BLOCKS))
-            tiling = copy(s.tiling)
-            tiling[kept] = with_chunk(tiling[kept], chunk)
-            s = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
-        end
-    end
-    [Claim(s)]
+    moved(claim) = sum(w -> w.bytes + w.reread, estimate(generator, claim, target, g); init = 0.0)
+    sort!([Claim(chunked(Context(g, x))) for x in schedules]; by = moved)
+end
+
+# Whether a schedule reads some value a tile at a time (see `local_view`).
+tile_at_a_time(c) = any(l -> !gathers(l) && load_view(c, l.value, l.index) isa LocalView,
+    (l for m in members(c.g) for l in loads(c.g.terms[m])))
+
+# A resident kernel with folds that keep the swept axis covers several kept
+# tiles per block; each such fold reduces every kept axis.
+function chunked(c)
+    s, partial = c.s, partial_folds(c)
+    s.sketch === :resident && any(r -> !(sweep_axis(s) in fold_tiles(c, r)), partial) || return s
+    kept = findfirst(ax -> !ax.reduced, s.tiling)
+    kept !== nothing && all(r -> kept in fold_tiles(c, r), partial) || return s
+    chunk = max(1, cld(cld(s.tiling[kept].extent, s.tiling[kept].tile), PARTIAL_BLOCKS))
+    tiling = copy(s.tiling)
+    tiling[kept] = with_chunk(tiling[kept], chunk)
+    TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
 end
 
 """
@@ -741,6 +847,27 @@ function applied(c, roots)
     (sorted(streaming), sorted(swept), sorted(inner))
 end
 
+# The blocks along kept tile axis `ax` that read what one of them reads
+# through load `t`: those that differ only in axes `t` does not mention. A
+# tile covering the innermost of several axes and part of the next leaves
+# blocks along that axis's rest and the axes above; a tile that does not
+# divide them is priced as if it covered every axis the load mentions.
+function reading_blocks(t, ax, domain)
+    rest, n = ax.tile, 1
+    for a in ax.axes
+        e = domain[a]
+        if rest > 1 && rest % e == 0
+            rest ÷= e
+        elseif rest == 1 || e % rest == 0
+            mentions(t, a) || (n *= e ÷ rest)
+            rest = 1
+        else
+            return any(a -> mentions(t, a), ax.axes) ? 1 : cld(ax.extent, ax.tile)
+        end
+    end
+    n
+end
+
 # A schedule's launches: each of its kernels, moving the bytes of its
 # arguments over the blocks of its grid. The first after the folds by key's
 # initial states computes the group's products and the folds it recomputes.
@@ -787,13 +914,13 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     # when it mentions none of them: a value is read as often as its most
     # read load is. A product's tiles reuse what they read through the cache,
     # by design, and are priced on their line.
-    kept_tiles = [(ax.axes, cld(ax.extent, ax.tile)) for ax in s.tiling if !ax.reduced]
+    kept = [ax for ax in s.tiling if !ax.reduced]
     function times_read(v)
         s.sketch === :product && return 1
         n = 1
         for m in members(g), t in (haskey(g.terms, m) ? loads(g.terms[m]) : Load[])
             t.value == v || continue
-            along = prod((k for (axes, k) in kept_tiles if !any(a -> mentions(t, a), axes)); init = 1)
+            along = prod(ax -> reading_blocks(t, ax, g.domain), kept; init = 1)
             split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
             n = max(n, along * split)
         end

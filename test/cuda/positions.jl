@@ -34,6 +34,29 @@ const POSITIONAL = [
     end
 end
 
+# Reads through the remainder and quotient of a position by a divisor of its
+# tile load a tile at a time, at an offset per block, and gather nothing: a
+# sequence's chunks as a batch, chunks back into a sequence, and slices
+# concatenated, read as the array they were taken from.
+const CHUNKED = [
+    ("chunks as a batch", x -> sum(abs2, reshape(permutedims(reshape(x, 8, 64, 16, 4), (1, 2, 4, 3)), 8, 64, 64) .* 2),
+     (data(8, 1024, 4),)),
+    ("chunks into a sequence", x -> reshape(permutedims(reshape(x .* 2, 64, 16, 32), (1, 3, 2)), 64 * 32, 16), (data(64, 16, 32),)),
+    ("slices concatenated", x -> vcat([x[:, :, t] for t in 1:16]...) .+ 1, (data(64, 256, 16),)),
+]
+
+@testset "reads of chunks on cuTile" begin
+    ext = Base.get_extension(Tempest, :cuTileExt)
+    @testset "$name" for (name, f, args) in CHUNKED
+        args = map(single, args)
+        p = trace(f, args...)
+        ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(T.cuTileGenerator()))
+        @test all(d -> d isa ext.BuiltTiles, ex.kernels)
+        @test !any(d -> any(t -> occursin("tile_gather", string(ext.source(t))), d.kernels), ex.kernels)
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 1.0e-5)
+    end
+end
+
 # The dropout fixture's hash, wrapping Int32 multiplies and logical shifts on
 # tiles, is claimed by the generator and then fails to build: the assembler
 # rejects the bytecode cuTile emits for it. The floor runs it, correct, and

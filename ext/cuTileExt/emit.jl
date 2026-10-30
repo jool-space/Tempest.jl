@@ -69,6 +69,26 @@ function load_nd(sym, v, tiles, indices, at = nothing)
     shape == full ? loaded : :(reshape($loaded, $full))
 end
 
+# A tile-at-a-time view's tile: its lanes loaded in storage order at the
+# block's offset, put back in the groups' order, each group's lanes merged
+# into its tile axis, those of a group it extends along filled out first.
+function load_nd(sym, v::LocalView, tiles, indices, at)
+    full = map((s, t) -> s ? t : 1, v.spans, tiles)
+    spanned = [l for l in v.lanes if l[3] != 0]
+    isempty(spanned) && return :(reshape($(tile_load)($sym; index = (Int32(1), $at), shape = (1, 1)), $full))
+    order = sortperm([l[3] for l in spanned])
+    shape = Tuple(l[2] for l in spanned)
+    ones = ntuple(_ -> :(Int32(1)), length(spanned))
+    loaded = :(reshape($(tile_load)($sym; index = ($(ones...), $at), shape = $((shape[order]..., 1)),
+        padding_mode = $(ct.PaddingMode.Zero)), $(shape[order])))
+    order == 1:length(order) || (loaded = :(permutedims($loaded, $(Tuple(invperm(order))))))
+    lanes = Tuple(l[3] != 0 ? l[2] : 1 for l in v.lanes)
+    filled = Tuple(v.spans[l[1]] ? l[2] : 1 for l in v.lanes)
+    loaded = :(reshape($loaded, $lanes))
+    lanes == filled || (loaded = :($(ct.broadcast_to)($loaded, $filled)))
+    :(reshape($loaded, $full))
+end
+
 # A value as a tile: a constant term is a number when the kernel is generated.
 tile_of(x) = x isa Number ? :($(ct.Tile)($x)) : x
 
@@ -134,10 +154,23 @@ reduced_dims(c::Context) = code(c.s) == 3 ? (1, 2) : only(swept(c.s))
 
 value_spec(c::Context, v::View) = spec(v, extent(c.s))
 
+# A tile-at-a-time view: its lanes in the order of their strides, then its
+# offset per block.
+function value_spec(c::Context, v::LocalView)
+    spanned = [l for l in v.lanes if l[3] != 0]
+    blocks = cld(v.reach, v.align)
+    isempty(spanned) && return ArgSpec(v.value, 0, (1, blocks), (1, v.align))
+    sort!(spanned; by = l -> l[3])
+    ArgSpec(v.value, 0, (map(l -> l[2], spanned)..., blocks), (map(l -> l[3], spanned)..., v.align))
+end
+
 # Tile axes of extent one per tile are bound by the grid (or a loop): one index
 # per block, so a load may depend on them through any formula.
 scalar_groups(c::Context) = Tuple(i for (i, ax) in enumerate(c.s.tiling) if ax.tile == 1)
-load_view(c::Context, v, index) = view_of(c.g, v, index, groups(c)...; scalar = scalar_groups(c))
+function load_view(c::Context, v, index)
+    view = view_of(c.g, v, index, groups(c)...; scalar = scalar_groups(c))
+    view === nothing ? local_view(c.g, v, index, c.s.tiling) : view
+end
 
 # Positions. Domain variable `n` at the tile of block indices `indices`: the
 # lanes of its tile axis, their collapsed index decoded into the axes of the
@@ -269,6 +302,17 @@ block_scalar(c::Context, a::Div, indices) = :(fld($(block_scalar(c, a.e, indices
 block_scalar(c::Context, a::Mod, indices) = :(mod($(block_scalar(c, a.e, indices)), Int32($(a.d))))
 
 offset_at(c::Context, v::View, indices) = v.dynamic === nothing ? nothing : :(Int32(1) + $(block_scalar(c, v.dynamic, indices)))
+offset_at(c::Context, v::LocalView, indices) = :(Int32(1) + $(block_number(IR.Affine(v.dynamic.constant ÷ v.align,
+    Tuple(a => k ÷ v.align for (a, k) in v.dynamic.terms)), indices)))
+
+# A formula of the groups' blocks, counted from zero, as a scalar per block.
+block_number(e::Affine, indices) =
+    foldl(e.terms; init = :(Int32($(e.constant)))) do x, (atom, k)
+        :($x + Int32($k) * $(block_number(atom, indices)))
+    end
+block_number(a::Var, indices) = :($(indices[a.n]) - Int32(1))
+block_number(a::Div, indices) = :(fld($(block_number(a.e, indices)), Int32($(a.d))))
+block_number(a::Mod, indices) = :(mod($(block_number(a.e, indices)), Int32($(a.d))))
 
 # The workspace views of split schedules (partials, statistics) stay two-axis.
 function load_expr(sym, spans, ta, tb, ia, ib)
