@@ -33,11 +33,13 @@ end
         q, k, v = half(H, d, heads, positions, batch), half(H, d, kv, positions, batch), half(H, d, kv, positions, batch)
         p = trace((q, k, v) -> sdpa(q, k, v; causal), q, k, v)
         ex = prepare(p, CuArray(q), CuArray(k), CuArray(v); target = T.CUDATarget(T.cuDNNAttention()))
-        # Heads and batch are interchangeable to attention: cuDNN is offered
-        # either way, and the decision measures them.
+        # Heads and batch are interchangeable to attention, and unmasked the
+        # query positions are too: cuDNN is offered each way, and the
+        # decision measures them.
         call = only(called(ex)).call
-        @test call.causal == causal && call.q.dims[[1, 3]] == call.k.dims[[1, 3]] == (d, positions)
-        @test call.q.dims[2] * call.q.dims[4] == heads * batch && call.k.dims[2] * call.k.dims[4] == kv * batch
+        @test call.causal == causal && call.q.dims[1] == call.k.dims[1] == d && call.k.dims[3] == positions
+        @test prod(call.q.dims[2:4]) == heads * positions * batch && call.k.dims[2] * call.k.dims[4] == kv * batch
+        @test !causal || call.q.dims[3] == positions
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, k, v)); rtol = 1.0e-2)
     end
     q, k, v = half(BFloat16, 64, 4, 128, 2), half(BFloat16, 64, 2, 128, 2), half(BFloat16, 64, 2, 128, 2)
