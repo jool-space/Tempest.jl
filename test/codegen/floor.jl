@@ -111,7 +111,35 @@ rtol_of(args) = any(x -> x isa AbstractArray{Float16}, args) ? 1.0e-3 : 1.0e-8
     end
 end
 
+# A fold over fewer positions than its kernel's domain, MLA's dV over the
+# values' 4 features beside dK and dQ over the 6 of the queries and keys
+# (see `restricted`), is computed and stored at its own alone: on the CPU,
+# its items split among lanes too, and on CUDA. Read at the domain's other
+# positions, the values' features would be the next head's.
+mla_args = (data(6, 2, 9, 2; scale = 0.3), data(6, 2, 9, 2; scale = 0.2), data(4, 2, 9, 2; scale = 0.1))
+mla_step = differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), mla_args...))
+mla_recomputed(target) = C.recomputable_folds(C.permits_rewrites(target) ?
+    C.rewrite(C.lower(mla_step); rounded = C.rounded_backward(target)) : C.lower(mla_step))
+restricting(ex) = any(g -> any(r -> C.restricted(ex.plan.graph, g, r), g.reductions), ex.plan.groups)
+
+@testset "a fold over fewer positions on the CPU floor" begin
+    for target in (T.CPUTarget(RecomputeOnTheFloor()), ThreeParts())
+        ex = prepare(mla_step, mla_args...; target, recompute = mla_recomputed(target))
+        @test restricting(ex)
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(mla_step, mla_args...))))
+    end
+end
+
 if CUDA_FUNCTIONAL
+    @testset "a fold over fewer positions on the CUDA floor" begin
+        target = floor_alone()
+        ex = prepare(mla_step, map(CuArray, mla_args)...; target, recompute = mla_recomputed(target))
+        @test all(d -> d isa C.FloorKernels, ex.kernels)
+        @test restricting(ex)
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(mla_step, mla_args...)));
+            rtol = 1.0e-8)
+    end
+
     @testset "folds split among lanes on CUDA" begin
         @testset "$name" for (name, f, args) in split_cases
             for p in split_programs(f, args)

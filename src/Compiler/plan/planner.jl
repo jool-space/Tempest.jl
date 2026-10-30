@@ -22,6 +22,12 @@
 # A fold by key joins a reduction's group over its iteration, as a fold over
 # other than the primary axes does: it combines each element at its key, is
 # complete only when the group's work is, and nothing in the group reads it.
+#
+# A fold over fewer positions along axes it keeps may join a reduction's
+# group over a domain that holds them, where it shares a fold it recomputes
+# with the group's folds, as MLA's dV, over 64 features, shares the scores
+# with dK and dQ, over 96 (see `joint_domain`): it is computed over its own
+# positions, and nothing in the group reads it.
 
 struct Group
     kind::Symbol # :reduction, :scan or :pointwise
@@ -85,7 +91,8 @@ end
 # value over the whole domain or at the positions of the primary folds, or a
 # slice of one of its folds where the fold keeps it; or nothing. A scan's
 # group keeps everything but its folds over its whole domain. A fold by key
-# keeps each element at its key.
+# keeps each element at its key. A fold over fewer positions than the domain
+# (see `restricted`) keeps its own.
 function placement(graph, g::Group, v)
     g.kind === :recurrence && return v in g.outputs ? recurrence_places(graph, g.outputs).places[v] : nothing
     val = graph.values[v]
@@ -94,9 +101,18 @@ function placement(graph, g::Group, v)
     g.kind === :scan && !(d isa Reduction) && return val.dims == g.domain ? identity_index(g.domain) : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
-    map(k -> g.domain[k], kept) == val.dims && return map(var, kept)
+    extents = v in g.reductions && d isa Reduction ? d.iteration : g.domain
+    map(k -> extents[k], kept) == val.dims && return map(var, kept)
     v in g.reductions ? nothing : slice_placement(graph, g, v)
 end
+
+"""
+Whether fold `r` of reduction group `g` covers fewer positions than the
+group's domain: its iteration lies within the domain, shorter along axes it
+keeps (see `joint_domain`).
+"""
+restricted(graph, g::Group, r) =
+    g.kind === :reduction && r in g.reductions && (d = graph.values[r].definition) isa Reduction && d.iteration != g.domain
 
 # A slice of a fold of the group: the fold read at a variable of the slice
 # along some of its axes and at constants along the others, kept where the
@@ -154,6 +170,8 @@ function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain)
     g.kind === :recurrence && v in g.outputs && return Load(v, index)
     if v in g.reductions
         g.kind === :scan && d isa Reduction && throw(OutsideGroup())
+        # A fold over fewer positions than the domain has no value elsewhere.
+        restricted(graph, g, v) && throw(OutsideGroup())
         primary(graph, g, v) && kept_at(graph, g, v, index) || throw(OutsideGroup())
         return Stat(v)
     end
@@ -256,8 +274,10 @@ end
 
 # Try to add a fold or an output to a group. Its term must stay inside the
 # group's domain, nothing it loads may depend on the group, nothing the group
-# loads may depend on it, and no member may already load it.
-function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
+# loads may depend on it, and no member may already load it. With
+# `recomputing`, a fold joins a group whose folds would then cover different
+# positions only where it shares what they recompute (see `mixes`).
+function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomputing = true)
     val = graph.values[v]
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
@@ -276,6 +296,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold)
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
     isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads) || return false
+    fold && !mixes(graph, g, v, t; recomputing) && return false
     group = Set(members(g))
     depends(graph, deps, reads, group) && return false
     # Nor may what the group reads from other kernels depend on `v`.
@@ -516,8 +537,15 @@ function group_values(graph, stored, live, results, fixed)
                 k += 1
                 live[other] && owner[other] == 0 && !(other in members(g)) || continue
                 od = values[other].definition
-                added = od isa Union{Reduction, Scan, Keyed} ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
-                    od isa Pointwise && other > id && !awaits_sweep(graph, deps, g, other) && try_add!(graph, stored, deps, g, other; fold = false)
+                added = if g.kind === :reduction && od isa Reduction
+                    # A fold over other positions widens the domain, if it joins.
+                    domain = joint_domain(graph, g, other)
+                    h = domain === nothing ? nothing : domain == g.domain ? g : with_domain(g, domain)
+                    h !== nothing && try_add!(graph, stored, deps, h, other; fold = true) && (g = h; true)
+                else
+                    od isa Union{Reduction, Scan, Keyed} ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
+                        od isa Pointwise && other > id && !awaits_sweep(graph, deps, g, other) && try_add!(graph, stored, deps, g, other; fold = false)
+                end
                 added || continue
                 changed = true
                 reach!(frontier, followers, stored, [other; stored_reads(g.terms[other])], after)
@@ -586,6 +614,69 @@ function sweeps_with(graph, g::Group, v)
     e = graph.values[first(g.reductions)].definition
     d isa Reduction && return d.iteration == g.domain && d.reduced == e.axes
     graph.values[v].dims == g.domain && d.axes == e.axes && d.reverse == e.reverse
+end
+
+"""
+The domain of reduction group `g` with fold `v` among its folds: the group's
+where `v` iterates over it; for a fold over other extents along axes it
+keeps, alike along those it sums, the box that holds both, over which each
+fold of the group is computed at its own positions (see `restricted` and
+`mixes`); nothing otherwise. MLA's backward sums dV over the values' 64
+features, and dK and dQ over the 96 of the queries and keys, each
+recomputing the scores: one kernel recomputes them once.
+"""
+function joint_domain(graph, g::Group, v)
+    d = graph.values[v].definition
+    g.kind === :reduction && d isa Union{Reduction, Keyed} || return nothing
+    d.iteration == g.domain && return g.domain
+    d isa Reduction && length(d.iteration) == length(g.domain) && all(k -> d.iteration[k] == g.domain[k], d.reduced) ||
+        return nothing
+    domain = map(max, d.iteration, g.domain)
+    # A fold by key combines each element of the whole domain.
+    domain == g.domain || all(r -> graph.values[r].definition isa Reduction, g.reductions) || return nothing
+    domain
+end
+
+"Group `g` over `domain`, its members as they are."
+with_domain(g::Group, domain) = Group(g.kind, domain, copy(g.reductions), copy(g.outputs), copy(g.terms), copy(g.phase))
+
+"""
+Whether fold `v`, of term `t`, may join reduction group `g`, whose domain
+holds its positions: always, where every fold of the group then iterates
+over the domain. A group whose folds cover different positions computes
+each fold's term over the whole domain, as a tile does, and keeps it at the
+fold's own positions; so each fold over fewer positions (`restricted`) sums
+the group's primary axes and reads none of its folds, no member reads it,
+and the outputs lie over the domain. What such a fold shares with the
+others is the reason it shares their kernel: with `recomputing`, each one
+recomputes a fold another fold of the group recomputes, as attention's dV,
+dK and dQ recompute the scores. Shared, it is the same fold at positions
+that move along no axis where either fold covers fewer than the domain: so
+the work a fold does past its own positions is its own product's, as dV's
+over 64 features where dK and dQ have 96, and not the shared fold's. An
+MLP's weight gradients recompute its hidden layer too, at its units along
+the axis where the other covers fewer: they stay apart. Without
+`recomputing`, the group is a proposal's, which the cover prices.
+"""
+function mixes(graph, g::Group, v, t; recomputing)
+    d = graph.values[v].definition
+    narrowed = filter(r -> restricted(graph, g, r), g.reductions)
+    d isa Reduction && d.iteration != g.domain && push!(narrowed, v)
+    isempty(narrowed) && return true
+    terms = Dict{Int, Term}(m => g.terms[m] for m in members(g))
+    terms[v] = t
+    axes = isempty(g.reductions) ? d.reduced : primary_axes(graph, g)
+    all(r -> graph.values[r].definition.reduced == axes && isempty(stats(terms[r])), narrowed) || return false
+    all(m -> isdisjoint(stats(terms[m]), narrowed), keys(terms)) || return false
+    all(m -> placement(graph, g, m) !== nothing, g.outputs) || return false
+    recomputing || return true
+    folds = [g.reductions; v]
+    narrower(r) = (e = graph.values[r].definition.iteration; [k for k in eachindex(e) if e[k] != g.domain[k]])
+    function recomputed(r, axes)
+        Set(s.value for s in subterms((terms[r],); nested = true) if s isa Recomputed && !any(k -> mentions(s, k), axes))
+    end
+    shares(r, o) = (axes = [narrower(r); narrower(o)]; !isdisjoint(recomputed(r, axes), recomputed(o, axes)))
+    all(r -> any(o -> o != r && shares(r, o), folds), narrowed)
 end
 
 # Whether map `v` waits for another sweep: it reads a scan of another
@@ -720,15 +811,22 @@ Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%
 # over the domain of its folds, wherever they come in the set, or with no fold
 # a pointwise group over the first value's domain. A candidate spanning
 # several domains waits for groups that span them: a kernel is maps and folds
-# over one domain.
+# over one domain, each fold at its own positions within it.
 function fixed_group(graph, stored, deps, set)
     values = graph.values
     all(v -> deps.owner[v] == 0, set) || throw(NotAGroup(set))
     folds = filter(v -> values[v].definition isa Reduction, set)
-    g = isempty(folds) ? Group(:pointwise, values[first(set)].dims) : Group(:reduction, values[first(folds)].definition.iteration)
+    # Folds over other extents along axes they keep share the box that holds
+    # them (see `joint_domain`).
+    domain = isempty(folds) ? values[first(set)].dims : values[first(folds)].definition.iteration
+    for v in folds
+        extents = values[v].definition.iteration
+        length(extents) == length(domain) && (domain = map(max, domain, extents))
+    end
+    g = isempty(folds) ? Group(:pointwise, domain) : Group(:reduction, domain)
     for v in set
         dv = values[v].definition
-        added = dv isa Reduction ? dv.iteration == g.domain && try_add!(graph, stored, deps, g, v; fold = true) :
+        added = dv isa Reduction ? joint_domain(graph, g, v) == g.domain && try_add!(graph, stored, deps, g, v; fold = true, recomputing = false) :
             dv isa Pointwise && stored[v] && try_add!(graph, stored, deps, g, v; fold = false)
         added || throw(NotAGroup(set))
     end

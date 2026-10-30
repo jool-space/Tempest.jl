@@ -1,5 +1,6 @@
 # Attention on cuTile: generated from its reference as one kernel, its
-# gradient as FlashAttention's backward, and decode over a cache read up to
+# gradient as FlashAttention's backward, also with other features for the
+# values than the queries and keys, and decode over a cache read up to
 # lengths the device holds; and a layer's gradient whose sums recompute the
 # product they read.
 
@@ -141,6 +142,36 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
     ex = prepare(p, map(CuArray, (q, k, v, x))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(p, T.CUDATarget(T.cuTileGenerator())))
     @test length(ex.kernels) == 1 && !(only(ex.kernels) isa C.FloorKernels)
     @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, x)]; rtol = 1.0e-4)
+end
+
+# Values with other features than the queries and keys, as MLA's: the
+# gradients of the values, the keys and the queries are one kernel, which
+# recomputes the scores once, over the larger features, the gradients over
+# fewer computed and stored at their own (see `own_domain`). Stepping by the
+# masks on a deterministic target; transposed on another, the query
+# gradients added from the sweep whichever features they have, the features
+# in one tile or in two, the second past the fewer features.
+@testset "attention's gradient with other features for the values" begin
+    for (dqk, dv) in ((24, 16), (16, 24))
+        q, k, v = single(data(dqk, 2, 70, 2; scale = 0.1)), single(data(dqk, 2, 70, 2; scale = 0.2)), single(data(dv, 2, 70, 2; scale = 0.3))
+        d = differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), q, k, v))
+        want = filter(!isnothing, C.leaves(interpret(d, q, k, v)))
+        mixed(ex) = any(g -> any(r -> C.restricted(ex.plan.graph, g, r), g.reductions), ex.plan.groups)
+        strict = T.CUDATarget(T.cuTileGenerator(); deterministic = true)
+        ex = prepare(d, map(CuArray, (q, k, v))...; target = strict, recompute = streaming(d, strict))
+        @test all(d -> !(d isa C.FloorKernels), ex.kernels)
+        @test mixed(ex)
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), want; rtol = 1.0e-4)
+        for tile in ("64,16,32", "64,32,32")
+            target = T.CUDATarget(T.cuTileGenerator())
+            ex = withenv("TEMPEST_PRODUCT_OPTIONS" => "8,transposed", "TEMPEST_PRODUCT_TILE" => tile) do
+                prepare(d, map(CuArray, (q, k, v))...; target, recompute = streaming(d, target))
+            end
+            @test mixed(ex)
+            @test any(d -> occursin("transposed folds added", string(d)), ex.kernels)
+            @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), want; rtol = 1.0e-4)
+        end
+    end
 end
 
 # A layer's gradient whose sums recompute the hidden product they read:

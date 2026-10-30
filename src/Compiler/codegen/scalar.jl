@@ -148,6 +148,37 @@ end
 store_expr(c, v, index, value) =
     :(@inbounds $(buffer(c, v))[$(affine_expr(address(c.graph.values[v], index, c.domain), c)) + 1] = $value)
 
+# A fold over fewer positions than its group's domain (see `restricted`) is
+# computed and stored at its own alone: the condition an item's kept position
+# meets, or nothing for any other fold.
+function inside_expr(graph, g::Group, r, c)
+    restricted(graph, g, r) || return nothing
+    own = graph.values[r].definition.iteration
+    foldl((a, b) -> :($a && $b), (:($(c.vars[k]) < $(own[k])) for k in eachindex(own) if own[k] < g.domain[k]))
+end
+
+guarded(condition, statement) = condition === nothing ? statement : :(if $condition
+    $statement
+end)
+
+# Statements that fold the terms of `rs`, each into its state in `states`,
+# at a position of the sweep: the terms emitted by `emit_terms!` with
+# `options`, but those of a fold over fewer positions than the domain, which
+# are emitted apart, and only at its own positions, where its loads stay
+# within the values they read.
+function fold_steps!(statements, graph, g::Group, rs, terms, states, c; options...)
+    whole = [r for r in rs if !restricted(graph, g, r)]
+    names = emit_terms!(statements, [terms[r] for r in whole], c; options...)
+    for r in rs
+        fold = graph.values[r].definition.fold
+        A = fold_types(fold, term_eltype(terms[r], graph)).accumulator
+        step = Expr(:block)
+        at = r in whole ? names : emit_terms!(step.args, [terms[r]], c; names = copy(names))
+        push!(step.args, :($(states[r]) = $fold_combine($fold, $(states[r]), $fold_lift($fold, convert($A, $(at[terms[r]]))))))
+        push!(statements, guarded(inside_expr(graph, g, r, c), step))
+    end
+end
+
 function scalar_kernel(graph, stored, g::Group, slots)
     g.kind === :scan && return scan_kernel(graph, stored, g, slots)
     g.kind === :recurrence && return recurrence_kernel(graph, stored, g, slots)
@@ -182,12 +213,7 @@ function scalar_kernel(graph, stored, g::Group, slots)
             push!(s, :($(states[r]) = $fold_init($fold, $A)))
         end
         delinearize_expr(loop.args, :sweep, reduced, D, vars)
-        names = emit_terms!(loop.args, [g.terms[r] for r in phase_reductions], c; hoisted = s, swept = reduced)
-        for r in phase_reductions
-            fold = graph.values[r].definition.fold
-            A = fold_types(fold, term_eltype(g.terms[r], graph)).accumulator
-            push!(loop.args, :($(states[r]) = $fold_combine($fold, $(states[r]), $fold_lift($fold, convert($A, $(names[g.terms[r]]))))))
-        end
+        fold_steps!(loop.args, graph, g, phase_reductions, g.terms, states, c; hoisted = s, swept = reduced)
         push!(s, :(for sweep in 0:$(count - 1)
             $loop
         end))
@@ -199,7 +225,7 @@ function scalar_kernel(graph, stored, g::Group, slots)
     # Reductions other kernels read, and outputs shaped like a reduction, once.
     foreach(k -> push!(s, :($(vars[k]) = 0)), reduced)
     for r in folds
-        stored[r] && push!(s, store_expr(c, r, placement(graph, g, r), stat_name(c, r)))
+        stored[r] && push!(s, guarded(inside_expr(graph, g, r, c), store_expr(c, r, placement(graph, g, r), stat_name(c, r))))
     end
     statistic_outputs = [m for m in g.outputs if graph.values[m].dims != D && !(m in g.reductions)]
     names = emit_terms!(s, [g.terms[m] for m in statistic_outputs], c)
@@ -277,7 +303,7 @@ function split_kernels(graph, g::Group, slots, split::Split, folds, terms, phase
         if p === nothing
             once = Expr(:block)
             foreach(k -> push!(once.args, :($(vars[k]) = 0)), reduced)
-            foreach(r -> push!(once.args, store_expr(c, r, placement(graph, g, r), stat_name(c, r))), stores)
+            foreach(r -> push!(once.args, guarded(inside_expr(graph, g, r, c), store_expr(c, r, placement(graph, g, r), stat_name(c, r)))), stores)
             names = emit_terms!(once.args, [g.terms[m] for m in statistics], c)
             foreach(m -> push!(once.args, store_expr(c, m, placement(graph, g, m), names[g.terms[m]])), statistics)
             push!(s, :(if part == 0 && lane == 0
@@ -298,11 +324,7 @@ function split_kernels(graph, g::Group, slots, split::Split, folds, terms, phase
             foreach(r -> push!(s, :($(states[r]) = $fold_init($(fold(r)), $(types(r).accumulator)))), current)
             loop = Expr(:block)
             delinearize_expr(loop.args, :sweep, reduced, D, vars)
-            names = emit_terms!(loop.args, [terms[r] for r in current], c; hoisted = s, swept = reduced)
-            for r in current
-                f, A = fold(r), types(r).accumulator
-                push!(loop.args, :($(states[r]) = $fold_combine($f, $(states[r]), $fold_lift($f, convert($A, $(names[terms[r]]))))))
-            end
+            fold_steps!(loop.args, graph, g, current, terms, states, c; hoisted = s, swept = reduced)
             push!(s, :(for sweep in $(lane_positions(count))
                 $loop
             end))

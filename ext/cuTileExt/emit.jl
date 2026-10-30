@@ -43,10 +43,12 @@ tile_scatter(a::Bytes, lanes, x; kws...) = ct.scatter(a, lanes, convert(ct.Tile{
 kernel_eltype(T) = T === Bool ? UInt8 : T
 
 # A view's offset per block, if it has one, is one more axis of unit stride
-# after the others, loaded at that offset with extent one.
+# after the others, loaded at that offset with extent one. A view that ends
+# before its group does (see `view_limits`) has the positions it has.
 function spec(v, extents)
     sizes, strides = v.dynamic === nothing ? ((), ()) : ((v.reach,), (1,))
     any(v.spans) || return ArgSpec(v.value, v.offset, (1, sizes...), (1, strides...))
+    extents = map((n, l) -> l == 0 ? n : min(n, l), extents, v.limits)
     order = storage_order(v)
     ArgSpec(v.value, v.offset, (compact(v.spans, extents)[order]..., sizes...), (compact(v.spans, v.strides)[order]..., strides...))
 end
@@ -290,6 +292,10 @@ function held_tile(c::Context, t::Load, indices)
 end
 
 gathers(t::Load) = any(e -> !isempty(indirect_values(e)), t.index)
+
+# Whether term `t` addresses memory element by element where a view may not:
+# a load that gathers or wraps, or a position read through an index.
+addressed(t::Term) = t isa Load ? gathers(t) || wraps(t) : t isa Ix && !isempty(indirect_values(t.expr))
 
 indirect_atoms(e::Affine) = [x for (a, _) in e.terms for x in indirect_atoms(a)]
 indirect_atoms(::Var) = Indirect[]

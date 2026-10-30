@@ -82,7 +82,8 @@ function run_pointwise!(g::Group, buffers, graph)
     end
 end
 
-# Every fold over its own axes, in phase order; then the outputs.
+# Every fold over its own axes, in phase order, at its own positions (see
+# `restricted`); then the outputs.
 function run_reduction!(g::Group, buffers, graph)
     D = g.domain
     stats = Dict{Int, Any}()
@@ -92,8 +93,9 @@ function run_reduction!(g::Group, buffers, graph)
         fold = val.definition.fold
         axes = val.definition.reduced
         A = fold_types(fold, term_eltype(g.terms[r], graph)).accumulator
-        kept = kept_dims(D, axes)
-        swept = ntuple(k -> k in axes ? D[k] : 1, length(D))
+        own = val.definition.iteration
+        kept = kept_dims(own, axes)
+        swept = ntuple(k -> k in axes ? own[k] : 1, length(D))
         out = Array{val.eltype}(undef, kept)
         for K in CartesianIndices(kept)
             state = fold_init(fold, A)

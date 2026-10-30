@@ -2,8 +2,9 @@
 # writes into an allocation plan with their readers, and a slice that misses
 # a write reads past it, folds over other axes and a scatter's sum by key join
 # the kernel computing their elements, no kernel joins a fold its reads wait
-# on, and no backward product recomputes a factor inside it but a widening of
-# a half-precision value.
+# on, no backward product recomputes a factor inside it but a widening of a
+# half-precision value, and a fold over fewer positions joins the kernel of
+# folds that recompute what it does.
 include("../fixtures/programs.jl")
 
 # A scan is the sweep of a kernel along the axes it scans: a map before it is
@@ -177,4 +178,33 @@ end
             !(p.graph.values[v].definition isa C.Input) && !(v in results), eachindex(p.graph.values))
         @test agree(C.execute(p, args...), filter(!isnothing, C.leaves(interpret(differentiate(trace(f, args...)), args...))))
     end
+end
+
+# A fold over fewer positions along an axis it keeps joins the kernel of folds
+# that recompute a fold it does: MLA's backward sums dV over the values'
+# features beside dK and dQ over those of the queries and keys, each
+# recomputing the scores, in one group over the larger extent, each fold at
+# its own positions (see `joint_domain`), whichever is larger. Products of one
+# input into rows of other extents recompute nothing: a kernel each.
+@testset "a fold over fewer positions joins a kernel that recomputes what it does" begin
+    for (dqk, dv) in ((6, 4), (4, 6))
+        args = (data(dqk, 2, 11, 2; scale = 0.1), data(dqk, 2, 11, 2; scale = 0.2), data(dv, 2, 11, 2; scale = 0.3))
+        d = differentiate(trace((q, k, v) -> sum(abs2, Ops.attention(q, k, v; causal = true)), args...))
+        graph = C.rewrite(C.lower(d))
+        p = C.plan(graph; recompute = C.recomputable_folds(graph))
+        mixed = [g for g in p.groups if any(r -> C.restricted(p.graph, g, r), g.reductions)]
+        @test length(mixed) == 1
+        g = only(mixed)
+        @test g.domain[1] == max(dqk, dv)
+        @test sort([p.graph.values[r].dims[1] for r in g.reductions]) == sort([dv, dqk, dqk])
+        @test agree(C.execute(p, args...), filter(!isnothing, C.leaves(interpret(d, args...))))
+    end
+    p = C.plan(C.lower(trace((x, a, b) -> (a * x, b * x), data(6, 9), data(8, 6), data(5, 6))))
+    @test length(p.groups) == 2
+    # An MLP's weight gradients recompute its hidden layer at its units, along
+    # the first axis of one and the second of the other: no group mixes them.
+    args = (data(6, 9; scale = 0.5), data(8, 6; scale = 0.05), data(8; scale = 0.1), data(5, 8; scale = 0.05), data(5; scale = 0.1))
+    graph = C.rewrite(C.lower(differentiate(trace((x, w1, b1, w2, b2) -> sum(abs2, w2 * tanh.(w1 * x .+ b1) .+ b2), args...))))
+    p = C.plan(graph; recompute = C.recomputable_folds(graph))
+    @test !any(g -> any(r -> C.restricted(p.graph, g, r), g.reductions), p.groups)
 end

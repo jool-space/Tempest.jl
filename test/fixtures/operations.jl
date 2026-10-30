@@ -64,14 +64,15 @@ end
 
 Attention's output and the log-sum-exp of each query's scores, of size
 `(1, heads, queries, batch)`. The output is rounded to a half-precision
-query's type, the log-sum-exp is not.
+query's type, the log-sum-exp is not. The values may have other features
+than the queries and keys, as MLA's do; the output has the values'.
 """
 function attention_forward(q, k, v; causal, scale)
     s = attention_scores(q, k; causal, scale)
     lse = Tempest.logsumexp(s; dims = 1)
     o = Tempest.Compiler.contract(v, exp.(s .- lse), (D_, H_, N_, B_), (N_, G_, H_, M_, B_), (D_, G_, H_, M_, B_))
     sizeof(eltype(q)) < 4 && (o = eltype(q).(o))
-    (o = reshape(o, size(q, 1), size(q, 2), size(q, 3), size(q, 4)), lse = reshape(lse, 1, size(q, 2), size(q, 3), size(q, 4)))
+    (o = reshape(o, size(v, 1), size(q, 2), size(q, 3), size(q, 4)), lse = reshape(lse, 1, size(q, 2), size(q, 3), size(q, 4)))
 end
 
 # Dropout as plain array code: a pointwise function of the element, the seed

@@ -499,8 +499,9 @@ function instances(l::Library, target, g)
     allequal(map(layout_key, bs)) && supports(l, target, bs) ? bs : nothing
 end
 
-# Fold `m` of a group as a group of its own over the same domain.
-member_view(g, m) = GroupView(g.kind, g.domain, [m], Int[], Dict(m => g.terms[m]), Dict(m => get(g.phase, m, 1)),
+# Fold `m` of a group as a group of its own over its own positions (see
+# `own_domain`).
+member_view(g, m) = GroupView(g.kind, own_domain(g, m), [m], Int[], Dict(m => g.terms[m]), Dict(m => get(g.phase, m, 1)),
     g.primary_axes, g.values, Dict(m => g.placement[m]), g.bytes, g.reference)
 
 # A group's binding to each of the library's templates it computes. Matched
@@ -510,6 +511,8 @@ member_view(g, m) = GroupView(g.kind, g.domain, [m], Int[], Dict(m => g.terms[m]
 # prices.
 function bindings(l::Library, target, g)
     found = Binding[]
+    # A template's group is over one domain, each of its folds over all of it.
+    all(r -> own_domain(g, r) == g.domain, g.reductions) || return found
     for (k, t) in enumerate(templates(l, target))
         shape = probe_group(t, rewrite_policy(target))
         shape === nothing || shape.group.kind === g.kind && length(shape.group.reductions) == length(g.reductions) &&

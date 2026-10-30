@@ -3,7 +3,7 @@
 # as data. The plan stays the compiler's: a view holds what claims, their
 # estimates and their builds read, and nothing an implementation could change.
 
-public GroupView, ValueView, members, product_axes
+public GroupView, ValueView, members, own_domain, product_axes
 
 """
 What a view holds of a value: its element type and dims, whether it is a
@@ -42,7 +42,8 @@ end
 
 A group of the plan as implementations see it. A group computes its members
 over one domain: `reductions`, its folds, and `outputs`, its other values, each
-defined by its term in `terms`. A `:recurrence` group's outputs are a
+defined by its term in `terms`; a fold may cover fewer of the domain's
+positions (see `own_domain`). A `:recurrence` group's outputs are a
 recurrence's state, its term where the state starts; the values of its cycle
 it stores, in order; and last the value the state is carried from, the state
 one step on, stored only where something else reads it. Each step computes
@@ -76,6 +77,26 @@ GroupView(kind::Symbol, domain, values) = GroupView(kind, domain, Int[], Int[], 
 
 "The values a group computes, its folds first."
 members(g::GroupView) = [g.reductions; g.outputs]
+
+"""
+    own_domain(group, m) -> extents
+
+The positions member `m` of a group covers: the group's domain, or, for a fold
+over fewer positions along axes it keeps, its own within the domain, as MLA's
+dV, over the values' 64 features, in the group of dK and dQ, over the 96 of
+the queries and keys. Such a fold's term is a term over the domain, but only
+at its own positions does it read within what it reads, and only there is it
+kept; nothing in the group reads it.
+"""
+function own_domain(g::GroupView, m)
+    v = g.values[m]
+    m in g.reductions && !v.keyed || return g.domain
+    kept = [k for k in eachindex(g.domain) if !(k in v.reduced)]
+    length(kept) == length(v.dims) || return g.domain
+    extents = collect(g.domain)
+    extents[kept] .= v.dims
+    Tuple(extents)
+end
 
 """
     recurrence_axes(g::GroupView) -> (; axis, parallel, inner)

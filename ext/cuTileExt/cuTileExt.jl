@@ -188,7 +188,9 @@ A load or store: a value's buffer as a strided view over collapsed groups of
 axes. A load may add an offset computed per block (`dynamic`): any formula of
 the axes the grid binds, below `reach`. A group the grid binds may run
 backward through the buffer: the view counts its positions from the end
-(`reversed`, their number, zero for a group read forward).
+(`reversed`, their number, zero for a group read forward). A view may end
+before its group does (`limits`, the positions it has along each group, zero
+for all of them; see `view_limits`).
 """
 struct View
     value::Int
@@ -198,9 +200,40 @@ struct View
     dynamic::Union{Nothing, Affine}
     reach::Int
     reversed::Tuple{Vararg{Int}}
+    limits::Tuple{Vararg{Int}}
 end
 
-View(value, offset, strides, spans) = View(value, offset, strides, spans, nothing, 0, map(_ -> 0, strides))
+View(value, offset, strides, spans) = View(value, offset, strides, spans, nothing, 0, map(_ -> 0, strides), map(_ -> 0, strides))
+
+"""
+    view_limits(g, v, index, groups) -> limits or nothing
+
+Where value `v`, read or kept at `index`, would be addressed past its own
+extent along an axis, as a fold over fewer positions than its group's domain
+is at the domain's others (see `own_domain`): the positions it has along each
+group, zero where it has all of them. Each such axis is a group of its own,
+read at its position plus a constant, so that the view ends at the value's
+extent: a load reads padding past it, and a store drops what lies there.
+Nothing when an axis read past the extent is not so.
+"""
+function view_limits(g::GroupView, v, index, groups)
+    limits = zeros(Int, length(groups))
+    val = g.values[v]
+    (val.scalar || isempty(val.dims)) && return limits
+    domain = Domain(g.domain)
+    for (p, x) in enumerate(index)
+        lo, hi = affine_range(x, domain)
+        0 <= lo && hi < val.dims[p] && continue
+        length(x.terms) == 1 && x.terms[1].first isa Var && x.terms[1].second == 1 && 0 <= x.constant < val.dims[p] ||
+            return nothing
+        k = x.terms[1].first.n
+        i = findfirst(grp -> k in grp, groups)
+        i !== nothing && collect(groups[i]) == [k] || return nothing
+        n = val.dims[p] - x.constant
+        limits[i] = limits[i] == 0 ? n : min(limits[i], n)
+    end
+    limits
+end
 
 # The view of value `v` read at `index` over the groups of axes; nothing when the
 # address does not chain within a group, depends on an axis outside the
@@ -210,6 +243,8 @@ View(value, offset, strides, spans) = View(value, offset, strides, spans, nothin
 # address over such a group that does not chain.
 function view_of(g::GroupView, v, index, groups...; scalar = ())
     domain = Domain(g.domain)
+    limits = view_limits(g, v, index, groups)
+    limits === nothing && return nothing
     e = address(g.values[v], index, domain)
     rest = [t for t in e.terms if !(t.first isa Var)]
     e = Affine(e.constant, Tuple(t for t in e.terms if t.first isa Var))
@@ -252,7 +287,9 @@ function view_of(g::GroupView, v, index, groups...; scalar = ())
     strides = map(grp -> group_stride(e, grp, g.domain), groups)
     any(s -> s === nothing || s < 0, strides) && return nothing
     e.constant >= 0 || return nothing
-    View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach, Tuple(reversed))
+    # A group the view ends early along is read forward, at a stride.
+    all(i -> limits[i] == 0 || reversed[i] == 0 && strides[i] > 0, eachindex(limits)) || return nothing
+    View(v, e.constant, Tuple(strides), Tuple(map(!=(0), strides)), dynamic, reach, Tuple(reversed), Tuple(limits))
 end
 
 """
@@ -281,6 +318,9 @@ end
 # outside the buffer, or the address is no stride per lane.
 function local_view(g::GroupView, v, index, tiling)
     all(ax -> ax.extent % ax.tile == 0, tiling) || return nothing
+    # Nor one that would read past the value's extent (see `view_limits`).
+    limits = view_limits(g, v, index, [ax.axes for ax in tiling])
+    limits !== nothing && all(==(0), limits) || return nothing
     e = address(g.values[v], index, Domain(g.domain))
     isempty(indirect_values(e)) || return nothing
     view = lane_view(g, v, e, tiling, Dict{Int, Int}())
@@ -721,6 +761,11 @@ function claims(generator::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind === :scan && return scan_claims(g)
     g.kind === :recurrence && return recurrence_claims(target, g)
     g.kind in (:pointwise, :reduction) || return Claim[]
+    # A fold over fewer positions than the domain (see `own_domain`) is read
+    # past its own elsewhere: a view ends at what it reads (`view_limits`),
+    # but an address a gather or a wrapped read computes has no such end.
+    any(r -> own_domain(g, r) != g.domain && any(addressed, subterms((g.terms[r],); nested = true)), g.reductions) &&
+        return Claim[]
     products = product_claims(target, g)
     isempty(products) || return products
     expressible(g) || return Claim[]
