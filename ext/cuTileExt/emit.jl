@@ -112,6 +112,8 @@ struct Workspace
     length::Int
 end
 
+# `before`: launches the kernel reads the workspaces of, each under its
+# workspace's key (see `before!`).
 mutable struct TileKernel
     name::String
     args::Vector{ArgSpec}
@@ -119,9 +121,33 @@ mutable struct TileKernel
     body::Vector{Any}
     grid::Tuple{Vararg{Int}}
     occupancy::Union{Nothing, Int}
+    before::Vector{Pair{Any, Tuple{Workspace, TileKernel}}}
 end
 
-TileKernel(name, grid, occupancy) = TileKernel(name, ArgSpec[], Dict{ArgSpec, Symbol}(), Any[], grid, occupancy)
+TileKernel(name, grid, occupancy) =
+    TileKernel(name, ArgSpec[], Dict{ArgSpec, Symbol}(), Any[], grid, occupancy, Pair{Any, Tuple{Workspace, TileKernel}}[])
+
+# Workspace `w`, under `key`, written by the kernel `f` returns, launched
+# before `k`: once however many of `k`'s reads ask for it.
+function before!(f, k::TileKernel, key, w::Workspace)
+    any(b -> b.first == key, k.before) || push!(k.before, key => (w, f()))
+    argument!(k, ArgSpec(key, 0, (w.length,), (1,)))
+end
+
+# Kernels in launch order, each after those it reads the workspaces of, each
+# of those once, with their workspaces registered.
+function with_before(kernels, workspaces)
+    ordered = TileKernel[]
+    for k in kernels
+        for (key, (w, b)) in k.before
+            haskey(workspaces, key) && continue
+            workspaces[key] = w
+            push!(ordered, b)
+        end
+        push!(ordered, k)
+    end
+    ordered
+end
 
 function argument!(k::TileKernel, spec::ArgSpec)
     get!(k.symbols, spec) do

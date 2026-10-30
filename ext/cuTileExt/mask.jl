@@ -103,9 +103,13 @@ function live_steps(k, c::Context, phase, p, indices, n)
         mask = mask_condition(c, r)
         mask === nothing && return nothing
         lo, hi = Any[:(Int32(1))], Any[:(Int32($n))]
+        bounded = false
         for e in mask
             bounds = step_bounds(k, c, e, p, indices)
-            bounds === nothing && return nothing
+            # A comparison the block cannot bound leaves its steps live, and
+            # the others rule out theirs: the mask is their conjunction.
+            bounds === nothing && continue
+            bounded = true
             α, β = bounds
             # Live where α·(t − 1) + β ≤ 0.
             if α > 0
@@ -116,6 +120,7 @@ function live_steps(k, c::Context, phase, p, indices, n)
                 push!(hi, :(ifelse($β <= Int32(0), Int32($n), Int32(0))))
             end
         end
+        bounded || return nothing
         push!(los, :(max($(lo...)))); push!(his, :(min($(hi...))))
     end
     (:(min($(los...))), :(max($(his...))))
@@ -128,13 +133,16 @@ The share of the pairs of a block and a step of the sweep that fold `r`
 takes, each tile's lowest of its mask's formulas bounding it as `live_steps`
 does: what an estimate prices of a sweep whose masked steps are skipped. One
 when the fold has no such mask, its tile is resident, a variable shares its
-tile axis or lies on another swept one, or a formula reads an integer the
-device holds, which a kernel is timed at the far end of (`held_integers`).
+tile axis or lies on another swept one. A formula that reads an integer the
+device holds rules out nothing here, as a kernel is timed at the far end of
+it (`held_integers`).
 """
 function live_fraction(c::Context, r)
     sweeps(c.s) > 1 || return 1.0
     mask = mask_condition(c, r)
     mask === nothing && return 1.0
+    mask = filter(e -> all(((atom, _),) -> atom isa Var, e.terms), mask)
+    isempty(mask) && return 1.0
     p = sweep_axis(c.s)
     axes = Int[]
     for e in mask, (atom, _) in e.terms
@@ -210,7 +218,7 @@ function step_bounds(k, c::Context, e::Affine, p, indices)
     β = Any[:(Int32($(e.constant)))]
     for (atom, coefficient) in e.terms
         if atom isa Indirect
-            held = block_read(k, c, atom, indices)
+            held = block_read(k, c, atom, indices, coefficient)
             held === nothing && return nothing
             push!(β, :(Int32($coefficient) * $held))
             continue
@@ -234,20 +242,57 @@ function step_bounds(k, c::Context, e::Affine, p, indices)
 end
 
 # An integer read at an index the grid binds, as an Int32 the block loads
-# once: every variable of the index on a kept tile axis of one lane, so that
-# neither the lanes nor the sweep move it. Nothing otherwise, when the
-# integer is not stored, or when it may not fit an Int32.
-function block_read(k, c::Context, a::Indirect, indices)
+# once: every variable of the index on a kept tile axis, so that the sweep
+# does not move it. Where the lanes of the block's tile move it, as each
+# query's document starts at a key of its own, the integer at which
+# `coefficient` times it is lowest over them, the least for a positive
+# coefficient and the greatest for a negative one: a launch before the
+# kernel finds it for every tile and the block reads its own (see
+# `lanes_extreme`). Nothing otherwise, when the integer is not stored, or
+# when it may not fit an Int32.
+function block_read(k, c::Context, a::Indirect, indices, coefficient)
     c.g.values[a.value].stored || return nothing
     T = c.g.values[a.value].eltype
     typemin(Int32) <= typemin(T) && typemax(T) <= typemax(Int32) || return nothing
+    axes, lanes = Int[], false
     for e in a.index, (atom, _) in e.terms
         atom isa Var || return nothing
         i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
         i === nothing && continue
-        c.s.tiling[i].tile == 1 && !c.s.tiling[i].reduced || return nothing
+        c.s.tiling[i].reduced && return nothing
+        i in axes || push!(axes, i)
+        lanes |= c.s.tiling[i].tile > 1
     end
-    flat = argument!(k, ArgSpec(a.value, 0, (storage_length(c.g.values[a.value]),), (1,)))
-    at = block_scalar(c, address(c.g.values[a.value], a.index, Domain(c.g.domain)), indices)
-    :(Int32($flat[Int32(1) + $at]))
+    if !lanes
+        flat = argument!(k, ArgSpec(a.value, 0, (storage_length(c.g.values[a.value]),), (1,)))
+        at = block_scalar(c, address(c.g.values[a.value], a.index, Domain(c.g.domain)), indices)
+        return :(Int32($flat[Int32(1) + $at]))
+    end
+    sort!(axes)
+    counts = tile_counts(c, axes)
+    key = (:extreme, a, coefficient > 0, axes, counts)
+    flat = before!(() -> lanes_extreme(c, a, coefficient > 0, axes, counts, key), k, key, Workspace(key, T, prod(counts)))
+    at = foldl(eachindex(axes); init = :(Int32(1))) do x, j
+        :($x + ($(indices[axes[j]]) - Int32(1)) * Int32($(prod(counts[1:(j - 1)]; init = 1))))
+    end
+    :(Int32($flat[$at]))
+end
+
+# The least (`least`) or greatest of integer `a` over the lanes of each tile
+# of tile axes `axes`, one block a tile, into the workspace under `key` in
+# the order of the tiles. The tile's in-kernel reduction would make the
+# kernel that reads it spill its registers. Lanes past the extent load zeros,
+# which only widen what the extreme bounds.
+function lanes_extreme(c::Context, a::Indirect, least, axes, counts, key)
+    k = TileKernel(least ? "least of a mask's integer" : "greatest of a mask's integer", (prod(counts),), nothing)
+    c = Context(c.g, c.s)
+    indices = Vector{Any}(fill(:(Int32(1)), length(c.s.tiling)))
+    indices[axes] = linear_indices!(k.body, counts, :tile_)
+    names, t = Dict{Term, Any}(), Load(a.value, a.index)
+    emit_tiles!(k, k.body, c, [t], names, indices...)
+    n = length(c.s.tiling)
+    extreme = :($(least ? minimum : maximum)($(names[t]); dims = $(Tuple(1:n))))
+    flat = argument!(k, ArgSpec(key, 0, (prod(counts),), (1,)))
+    push!(k.body, :($(tile_store)($flat; index = ($(ct.bid)(1),), tile = reshape($extreme, (1,)))))
+    k
 end

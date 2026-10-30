@@ -141,6 +141,36 @@ end
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, x, w1, b1, w2, b2))); rtol = 1.0e-4)
 end
 
+# Documents packed in sequences, as FlashAttention's variable-length
+# batches give them: each query sees the keys from where its document
+# starts, which the device holds, up to itself. A block of queries sweeps
+# the keys from the least of their documents' starts, which a launch before
+# it finds, and their mask rules out the rest lane by lane.
+@testset "attention over packed documents" begin
+    function packed(q, k, v, start)
+        s = C.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.25f0
+        i, j = reshape(1:size(s, 1), :, 1, 1), reshape(1:size(s, 3), 1, 1, :)
+        s = ifelse.((i .<= j) .& (i .>= reshape(start, 1, 1, size(start)...)), s, -Inf32)
+        C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
+    end
+    n = 300
+    q, k, v = single(data(16, 2, n, 2; scale = 0.1)), single(data(16, 2, n, 2; scale = 0.2)), single(data(16, 2, n, 2; scale = 0.3))
+    starts(lengths) = Int32[sum(lengths[1:(i - 1)]) + 1 for i in eachindex(lengths) for _ in 1:lengths[i]]
+    start = hcat(starts([90, 1, 130, 40, 39]), starts([7, 200, 93]))
+    p = trace(packed, q, k, v, start)
+    target = T.CUDATarget(T.cuTileGenerator())
+    ex = prepare(p, map(CuArray, (q, k, v, start))...; target, recompute = streaming(p, target))
+    @test occursin("masked steps skipped", string(only(ex.kernels)))
+    # One document a sequence, and one a position.
+    for s in (start, ones(Int32, n, 2), Int32.(repeat(1:n, 1, 2)))
+        bind!(ex, 4 => CuArray(s))
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v, s)]; rtol = 1.0e-4)
+    end
+    d = differentiate(trace((q, k, v, start) -> sum(abs2, packed(q, k, v, start)), q, k, v, start))
+    ex = prepare(d, map(CuArray, (q, k, v, start))...; target)
+    @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v, start))); rtol = 1.0e-4)
+end
+
 # Decode attention: one query per head over a cache of keys, each
 # sequence's read up to a length the device holds, with query heads
 # grouped over key heads as Vallmo's cache holds them, (features,

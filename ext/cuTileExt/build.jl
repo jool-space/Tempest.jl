@@ -742,7 +742,7 @@ function schedule_kernels(c::Context, workspaces; held = ())
     slots = Dict{Int, Int}()
     kernels = c.s.sketch in (:resident, :streamed) || (c.s.sketch === :product && c.s.splits == 1) ?
         unsplit_kernel(c, workspaces, slots) : split_kernels(c, workspaces, slots)
-    [initial; kernels; merge_kernels(c, filter(!in(added), partial_folds(c)), slots, workspaces); after]
+    with_before([initial; kernels; merge_kernels(c, filter(!in(added), partial_folds(c)), slots, workspaces); after], workspaces)
 end
 
 function tile_array(buffer::CuArray{T}, spec::ArgSpec) where {T}

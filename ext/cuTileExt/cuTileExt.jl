@@ -929,7 +929,8 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     end
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
     streaming, swept, inner = applied(c, roots)
-    main = findfirst(k -> k.name != INITIAL_STATES, kernels)
+    prior = [b for k in kernels for (_, (_, b)) in k.before]
+    main = findfirst(k -> k.name != INITIAL_STATES && !any(b -> b === k, prior), kernels)
     combined(r) = (g.values[r].fold isa Overwrite ? 1 : 2) * prod(k -> g.domain[k], g.values[r].reduced; init = 1)
     elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) : reachable(a)
     map(enumerate(kernels)) do (i, kernel)
