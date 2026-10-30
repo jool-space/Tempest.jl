@@ -57,9 +57,9 @@ half-precision forward stores it, as FlashAttention and cuDNN read theirs,
 rather than in Float32, and the forward stores the rounded output only. With
 it false the backward reads the sum as the program computes it: in BFloat16
 at 64 features, 8 heads, 1024 positions, the gradients' largest error is
-6.8e-3 of their largest element rather than 8.6e-3 when the output's
-cotangent comes from elsewhere, and 6.2e-3 rather than 3.5e-2 for a loss of
-the output's squares, where Σ dO·o nearly cancels the sums it is taken from.
+6.2e-3 of their largest element rather than 6.8e-3 for a loss of the
+output's squares, where Σ dO·o nearly cancels the sums it is taken from,
+and 5.5e-3 either way when the output's cotangent comes from elsewhere.
 `deterministic` keeps a sum's rounding from depending on the order its
 blocks run in. Without it a sweep may compute a sum in the sweep's
 orientation and add it into its value atomically, as FlashAttention-2's

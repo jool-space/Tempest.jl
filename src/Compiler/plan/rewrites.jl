@@ -335,13 +335,29 @@ function exchanged!(b::Builder, graph, r, e)
     domain = Domain(dims)
     renumber = ntuple(k -> (p = findfirst(==(k), e.kept)) === nothing ? constant(0) : var(p), length(e.extents))
     outside = new_factors(b, [(through(o, renumber, domain), power) for (o, power) in e.outside])
-    fs = sort([outside; (remap(e.sum, b.ids), 1)]; by = f -> -f[2])
+    fs = sort([outside; (widened_sum!(b, remap(e.sum, b.ids), v.eltype), 1)]; by = f -> -f[2])
     g = product!(b, fs, dims, v.eltype)
     reduced = Tuple((length(v.dims) + 1):length(dims))
     id = add!(b, Reduction(v.definition.fold, g, dims, reduced), v.dims, v.eltype, v.scalar)
     push!(b.rewrites, id => "sums exchanged: Σ a·(Σ b) is Σ (Σ a·b), a sum computed already")
     e.negated || return id
     add!(b, Pointwise(-, (Read(id, identity_index(v.dims)),)), v.dims, v.eltype, v.scalar)
+end
+
+# The sum an exchanged sum reads, converted to its type `T` where it is read
+# as the program rounds it (see `rounded_sum`): the products with it are then
+# exact, as they are with the sum itself, where two half-precision factors
+# would round each product. FlashAttention's backward sums the products of
+# the rounded output and its gradient in Float32 so. With them rounded,
+# BFloat16 attention's query gradients for a loss of the output's squares
+# moved by 9.9e-3 of their largest element, and by 3.5e-2 with the sum
+# recomputed where it is read, against 6.8e-3 now and 6.2e-3 reading the
+# output in Float32.
+function widened_sum!(b::Builder, s::Read, T)
+    w = b.values[s.value]
+    w.eltype === T && return s
+    id = add!(b, Pointwise(Cast{T}(), (Read(s.value, identity_index(w.dims)),)), w.dims, T, w.scalar)
+    Read(id, s.index)
 end
 
 """

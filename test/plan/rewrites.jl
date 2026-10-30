@@ -102,6 +102,12 @@ end
         [x.eltype for x in folds if x.definition.fold isa IR.Relative && x.definition.fold.observe != IR.LOGSUMEXP]
     end
     @test weighted(exact) == [Float32] && weighted(rounded) == [BFloat16]
+    # Its products with the output's gradient are exact: the rounded output
+    # is read converted to Float32, not multiplied in BFloat16.
+    g = C.rewrite(C.lower(p); rounded = true)
+    D = only(id for (id, note) in g.rewrites if occursin("sums exchanged", note))
+    product = g.values[g.values[D].definition.operand.value].definition
+    @test product.f === (*) && any(o -> C.eltype_of(g, o) === Float32, product.operands)
     @test C.structure(rounded).bytes < C.structure(exact).bytes
     want = filter(!isnothing, C.leaves(interpret(p, q, k, v, w)))
     @test agree(C.execute(exact, q, k, v, w), want; rtol = 1.0e-5)
