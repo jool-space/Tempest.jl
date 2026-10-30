@@ -70,18 +70,17 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
     # log-sum-exp in a sweep over keys of its own, and nothing the size of
     # the scores stored. The key gradients sum over the queries after each
     # key and the query gradients over the keys before each query, in one
-    # sweep: each fold stepping where its mask leaves it work. A target that
-    # lets a sum's rounding depend on the order of its additions may
-    # transpose the query gradients instead (below), as the search finds
-    # faster.
-    ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(d, T.CUDATarget(T.cuTileGenerator())))
+    # sweep: each fold stepping where its mask leaves it work, on a
+    # deterministic target. Another may transpose the query gradients
+    # instead (below), as the search finds faster.
+    strict = T.CUDATarget(T.cuTileGenerator(); deterministic = true)
+    ex = prepare(d, map(CuArray, (q, k, v))...; target = strict, recompute = streaming(d, strict))
     @test all(d -> !(d isa C.FloorKernels), ex.kernels)
     @test all(v -> !ex.plan.stored[v] || prod(ex.plan.graph.values[v].dims) < 70 * 70, eachindex(ex.plan.graph.values))
     @test any(d -> occursin("folds stepping by their masks", string(d)), ex.kernels)
     @test !any(d -> occursin("transposed folds added", string(d)), ex.kernels)
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
-    loose = T.CUDATarget(T.cuTileGenerator(); deterministic = false)
-    ex = prepare(d, map(CuArray, (q, k, v))...; target = loose, recompute = streaming(d, loose))
+    ex = prepare(d, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(d, T.CUDATarget(T.cuTileGenerator())))
     @test any(d -> occursin("folds stepping by their masks", string(d)) || occursin("transposed folds added", string(d)), ex.kernels)
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
     # Transposed, as FlashAttention-2's backward: the query gradients, their
