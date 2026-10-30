@@ -29,10 +29,12 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
             @test !(kernel isa C.FloorKernels)
             @test occursin("online softmax", string(kernel)) == online
             # A causal mask is a formula: the steps it rules out are
-            # skipped, where the queries have a tile axis of their own.
-            # Grouped heads may share it with the group, which the
-            # formula's bound over a tile cannot see through.
+            # skipped, where the queries have a tile axis of their own,
+            # and the blocks of later queries, which sweep more of them,
+            # start first. Grouped heads may share it with the group,
+            # which the formula's bound over a tile cannot see through.
             (!causal || H == KV) && @test occursin("masked steps skipped", string(kernel)) == causal
+            (!causal || H == KV) && @test occursin("heaviest blocks first", string(kernel)) == causal
             @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k, v)]; rtol = 1.0e-4)
         end
     end

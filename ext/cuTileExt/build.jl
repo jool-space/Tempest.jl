@@ -47,16 +47,18 @@ end
 # dimension each, those beyond the grid's `limit` of dimensions sharing its
 # last. A kept axis whose blocks cover several tiles (its `chunk`) indexes them
 # in a loop: `chunks` lists (axis, loop variable, chunk), and `bases` the block
-# index of each kept axis before chunking.
-function block_indices!(st, c::Context; limit = 3)
+# index of each kept axis before chunking. The `heavy` axis, with whether it
+# is reversed (see `heavy_axis`), varies slowest of all, outside the swizzle.
+function block_indices!(st, c::Context; limit = 3, heavy = nothing)
     s = c.s
     kept = [i for i in eachindex(s.tiling) if !s.tiling[i].reduced]
+    heavy === nothing || (kept = [filter(!=(first(heavy)), kept); first(heavy)])
     blocks(i) = cld(cld(s.tiling[i].extent, s.tiling[i].tile), s.tiling[i].chunk)
     indices = Vector{Any}(fill(:(Int32(1)), length(s.tiling)))
     grid = Int[]
     chunks = Tuple{Int, Symbol, Int}[]
     rest = kept
-    if s.swizzle > 0 && length(kept) >= 2
+    if s.swizzle > 0 && length(kept) >= 2 && (heavy === nothing || length(kept) > 2)
         i, j = kept[1], kept[2]
         ti, tj = s.tiling[i], s.tiling[j]
         push!(st, :((block_i, block_j) = $swizzle(Int32($(ti.extent)), Int32($(tj.extent)), Int32($(ti.tile)),
@@ -81,6 +83,10 @@ function block_indices!(st, c::Context; limit = 3)
             indices[i] = name
         end
         push!(grid, prod(blocks, shared))
+    end
+    if heavy !== nothing && last(heavy)
+        i = first(heavy)
+        push!(st, :($(indices[i]) = Int32($(blocks(i)) + 1) - $(indices[i])))
     end
     bases = copy(indices)
     for i in kept
@@ -127,7 +133,9 @@ function unsplit_kernel(c::Context, workspaces, slots)
     st = k.body
     workers = c.s.options.workers
     workers === nothing || push!(st, Expr(:meta, :cuTile, :num_worker_warps, workers))
-    indices, grid, chunks, bases = block_indices!(st, c)
+    heavy = heavy_axis(c, reduce(vcat, reduction_phases(c); init = Int[]))
+    indices, grid, chunks, bases = block_indices!(st, c; heavy)
+    heavy === nothing || (k.name *= ", heaviest blocks first")
     k.grid = grid
     p = sweep_axis(c.s)
     at(t) = step_indices(c.s, indices, t)

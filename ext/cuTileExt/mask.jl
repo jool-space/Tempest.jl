@@ -126,6 +126,41 @@ function live_steps(k, c::Context, phase, p, indices, n)
     (:(min($(los...))), :(max($(his...))))
 end
 
+# Whether each pair of tiles along `axes` that a fold's mask leaves live, at
+# the tiles' lowest of its formulas: the tile axes its comparisons of
+# positions mention, the swept one among them, and a Bool for each pair of
+# their tiles. Nothing when the fold has no such mask, a variable shares its
+# tile axis or lies on another swept one, or there are too many tiles.
+function live_tiles(c::Context, r)
+    mask = mask_condition(c, r)
+    mask === nothing && return nothing
+    mask = filter(e -> all(((atom, _),) -> atom isa Var, e.terms), mask)
+    isempty(mask) && return nothing
+    p = sweep_axis(c.s)
+    axes = Int[]
+    for e in mask, (atom, _) in e.terms
+        i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
+        i === nothing && continue
+        ax = c.s.tiling[i]
+        ax.axes == [atom.n] && (i == p || !ax.reduced) || return nothing
+        i in axes || push!(axes, i)
+    end
+    counts = [cld(c.s.tiling[i].extent, c.s.tiling[i].tile) for i in axes]
+    prod(counts; init = 1) <= 1 << 20 || return nothing
+    # The lowest of formula `e` over the tiles at `at`, one per axis of `axes`.
+    function lowest(e, at)
+        x = e.constant
+        for (atom, coefficient) in e.terms
+            i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
+            i === nothing && continue
+            tile = c.s.tiling[i].tile
+            x += coefficient * tile * (at[findfirst(==(i), axes)] - 1) + min(coefficient, 0) * (tile - 1)
+        end
+        x
+    end
+    axes, [all(e -> lowest(e, Tuple(at)) <= 0, mask) for at in CartesianIndices(Tuple(counts))]
+end
+
 """
     live_fraction(c, r) -> Float64
 
@@ -139,35 +174,40 @@ it (`held_integers`).
 """
 function live_fraction(c::Context, r)
     sweeps(c.s) > 1 || return 1.0
-    mask = mask_condition(c, r)
-    mask === nothing && return 1.0
-    mask = filter(e -> all(((atom, _),) -> atom isa Var, e.terms), mask)
-    isempty(mask) && return 1.0
+    live = live_tiles(c, r)
+    live === nothing ? 1.0 : sum(last(live)) / length(last(live))
+end
+
+"""
+    heavy_axis(c, folds) -> (i, reversed) or nothing
+
+The kept tile axis along which the steps the masks of `folds` leave a block
+differ, as a causal mask leaves a block of later queries more keys: its
+blocks vary slowest in the grid, so that the block scheduler starts the
+heaviest first, those of its later tiles when `reversed`, as FlashAttention
+3 orders causal blocks. Causal attention's blocks of 128 queries over 1024
+positions, 8 heads and a batch of 2, in the grid's order, kept the busiest
+of the GB10's 48 SMs sweeping 68 steps against 48 on average: 121.7 μs,
+96.6 heaviest first (TF32, 64 features). Nothing when the masks leave every
+block alike, or mention more than one kept axis.
+"""
+function heavy_axis(c::Context, folds)
+    sweeps(c.s) > 1 || return nothing
     p = sweep_axis(c.s)
-    axes = Int[]
-    for e in mask, (atom, _) in e.terms
-        atom isa Var || return 1.0
-        i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
-        i === nothing && continue
-        ax = c.s.tiling[i]
-        ax.axes == [atom.n] && (i == p || !ax.reduced) || return 1.0
-        i in axes || push!(axes, i)
+    axis, work = nothing, nothing
+    for r in folds
+        live = live_tiles(c, r)
+        live === nothing && continue
+        axes, tiles = live
+        kept = filter(!=(p), axes)
+        length(kept) == 1 && p in axes || return nothing
+        axis === nothing || axis == only(kept) || return nothing
+        axis = only(kept)
+        w = vec(sum(tiles; dims = findfirst(==(p), axes)))
+        work = work === nothing ? w : max.(work, w)
     end
-    counts = [cld(c.s.tiling[i].extent, c.s.tiling[i].tile) for i in axes]
-    total = prod(counts; init = 1)
-    total <= 1 << 20 || return 1.0
-    # The lowest of formula `e` over the tiles at `at`, one per axis of `axes`.
-    function lowest(e, at)
-        x = e.constant
-        for (atom, coefficient) in e.terms
-            i = findfirst(ax -> atom.n in ax.axes, c.s.tiling)
-            i === nothing && continue
-            tile = c.s.tiling[i].tile
-            x += coefficient * tile * (at[findfirst(==(i), axes)] - 1) + min(coefficient, 0) * (tile - 1)
-        end
-        x
-    end
-    count(at -> all(e -> lowest(e, at) <= 0, mask), Iterators.product((1:n for n in counts)...)) / total
+    (work === nothing || maximum(work) < 1.25 * minimum(work)) && return nothing
+    (axis, last(work) > first(work))
 end
 
 """
