@@ -878,10 +878,11 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
     # A transposed fold is priced as the kernel computes it, in the sweep's
     # orientation, sharing what the sweep recomputes.
-    c = transposing(Context(g, s))
+    plain = Context(g, s)
+    c = transposing(plain)
     g = c.g
     workspaces = Dict{Any, Workspace}()
-    kernels = schedule_kernels(c, workspaces; held = [r for r in keyed_folds(c) if g.values[r].into isa Load])
+    kernels = schedule_kernels(plain, workspaces; held = [r for r in keyed_folds(c) if g.values[r].into isa Load])
     roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
     # A fold whose mask skips steps of its sweep (`live_steps`) does its sums,
     # and the folds it recomputes, and loads what it reads along the sweep, in

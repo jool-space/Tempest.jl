@@ -15,7 +15,7 @@ const GENERATED_ATTENTION = [
 
 # The folds a program's streaming plan recomputes where they are read, as
 # numbered in the graph `prepare` plans for `target`.
-streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewrite(C.lower(p)) : C.lower(p))
+streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewrite(C.lower(p); rounded = C.rounded_backward(target)) : C.lower(p))
 
 @testset "attention generated on cuTile" begin
     @testset "$name" for (name, (D, H, KV, S, B), causal) in GENERATED_ATTENTION
@@ -94,6 +94,22 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
         @test any(d -> occursin("transposed folds added", string(d)), ex.kernels)
         @test !any(d -> occursin("folds stepping by their masks", string(d)), ex.kernels)
         @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
+    end
+    # In BFloat16 the query gradients are the rounding of a sum no kernel
+    # stores: the sweep adds into a Float32 workspace, and a launch after it
+    # rounds the sums into the gradients, as the plain sweep's are but for
+    # the order of the additions.
+    qb, kb, vb = map(x -> BFloat16.(x), (q, k, v))
+    db = differentiate(trace((q, k, v) -> sum(abs2, Float32.(Ops.attention(q, k, v; causal = true))), qb, kb, vb))
+    widened(xs) = [Float32.(on_host(x)) for x in filter(!isnothing, C.leaves(xs))]
+    strict = T.CUDATarget(T.cuTileGenerator(); deterministic = true)
+    plain = widened(outputs(execute!(prepare(db, map(CuArray, (qb, kb, vb))...; target = strict, recompute = streaming(db, strict)))))
+    for tile in ("64,16,32", "32,16,64")
+        ex = withenv("TEMPEST_PRODUCT_OPTIONS" => "8,transposed", "TEMPEST_PRODUCT_TILE" => tile) do
+            prepare(db, map(CuArray, (qb, kb, vb))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(db, T.CUDATarget(T.cuTileGenerator())))
+        end
+        @test any(d -> occursin("transposed folds added", string(d)) && occursin("outputs of the folds added", string(d)), ex.kernels)
+        @test agree(widened(outputs(execute!(ex))), plain; rtol = 1.0e-2)
     end
     # With grouped heads, the products into the key and value gradients sum
     # over the query heads of a group and the queries, which no strided

@@ -13,6 +13,7 @@ end
 # their folds' initial state: a launch before any element combines into them.
 function initial_states_kernel(c::Context, r)
     val = c.g.values[r]
+    flat = val.stored ? flat_spec(c, r) : ArgSpec(fold_key(r), 0, (storage_length(val),), (1,))
     k = TileKernel(INITIAL_STATES, (cld(storage_length(val), POINTWISE_ELEMENTS),), nothing)
     index = :(($(ct.bid)(1),))
     t = val.into
@@ -23,7 +24,7 @@ function initial_states_kernel(c::Context, r)
         init = t isa Lit ? convert(val.eltype, t.value) : only(fold_init(fold_of(c, r), val.eltype))
         :($(ct.broadcast_to)($(ct.Tile)($init), ($POINTWISE_ELEMENTS,)))
     end
-    push!(k.body, :($(tile_store)($(argument!(k, flat_spec(c, r))); index = $index, tile = $contents)))
+    push!(k.body, :($(tile_store)($(argument!(k, flat)); index = $index, tile = $contents)))
     k
 end
 
@@ -157,7 +158,8 @@ function unsplit_kernel(c::Context, workspaces, slots)
     valid1 = resident && any(elementwise, reduction_phases(c)) ? valid_mask!(body, c, at(one32)[p]) : nothing
     # A block whose tile the masks of everything it stores rule out sweeps
     # nothing, and stores their literals.
-    writes = unique([[r for r in c.g.reductions if c.g.values[r].stored]; c.g.outputs])
+    late = late_outputs(c)
+    writes = unique([[r for r in c.g.reductions if c.g.values[r].stored]; filter(!in(late), c.g.outputs)])
     ruled = resident || length(reduction_phases(c)) != 1 ? nothing : ruled_out(k, c, writes, indices)
     ruled === nothing || (k.name *= ", masked tiles skipped")
     for (q, phase) in enumerate(reduction_phases(c))
@@ -224,10 +226,10 @@ function unsplit_kernel(c::Context, workspaces, slots)
         store_values!(k, body, c, stored, names, at(one32)...)
     end
     scope = resident ? names : merge(Dict{Term, Any}(), statistics)
-    ms = statistic_outputs(c)
+    ms = filter(!in(late), statistic_outputs(c))
     emit_tiles!(k, body, c, [c.g.terms[m] for m in ms], scope, at(one32)...)
     store_values!(k, body, c, ms, scope, at(one32)...)
-    outputs = full_outputs(c)
+    outputs = filter(!in(late), full_outputs(c))
     if resident
         emit_tiles!(k, body, c, [c.g.terms[m] for m in outputs], names, at(one32)...)
         store_values!(k, body, c, outputs, names, at(one32)...)
@@ -724,17 +726,23 @@ function recurrence_kernel(c::Context)
 end
 
 # The kernels of a schedule; a fold by key in `held` starts from what its
-# storage holds, with no launch before its elements.
+# storage holds, with no launch before its elements. A fold a transposed
+# sweep adds into is in a workspace when it is not stored, and what reads it
+# is computed after the sweep, in the schedule's own orientation.
 function schedule_kernels(c::Context, workspaces; held = ())
-    c = transposing(c)
-    initial = [initial_states_kernel(c, r) for r in [keyed_folds(c); added_folds(c)] if !(r in held)]
+    plain, c = c, transposing(c)
+    added = added_folds(c)
+    foreach(r -> fold_spec!(c, r, workspaces), added)
+    late = late_outputs(c)
+    after = isempty(late) ? TileKernel[] : [late_kernel(plain, late, added, workspaces)]
+    initial = [initial_states_kernel(c, r) for r in [keyed_folds(c); added] if !(r in held)]
     c.s.sketch === :pointwise && return [initial; pointwise_kernel(c)]
     c.s.sketch === :scan && return [scan_kernel(c)]
     c.s.sketch === :recurrence && return [recurrence_kernel(c)]
     slots = Dict{Int, Int}()
     kernels = c.s.sketch in (:resident, :streamed) || (c.s.sketch === :product && c.s.splits == 1) ?
         unsplit_kernel(c, workspaces, slots) : split_kernels(c, workspaces, slots)
-    [initial; kernels; merge_kernels(c, filter(!in(added_folds(c)), partial_folds(c)), slots, workspaces)]
+    [initial; kernels; merge_kernels(c, filter(!in(added), partial_folds(c)), slots, workspaces); after]
 end
 
 function tile_array(buffer::CuArray{T}, spec::ArgSpec) where {T}

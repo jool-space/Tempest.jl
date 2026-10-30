@@ -649,13 +649,19 @@ fold_tile_shape(c::Context, r) = ntuple(i -> i in fold_tiles(c, r) ? 1 : tile(c)
 # A fold's value as a view over the tiling: its own buffer when stored, else a
 # workspace of its shape (a fold that later launches read).
 function fold_spec!(c::Context, r, workspaces)
+    v, spec = fold_view(c, r)
+    val = c.g.values[r]
+    val.stored || (workspaces[spec.buffer] = Workspace(spec.buffer, val.eltype, storage_length(val)))
+    (v, spec)
+end
+
+function fold_view(c::Context, r)
     v = output_view(c, r)
     spec = value_spec(c, v)
-    c.g.values[r].stored && return (v, spec)
-    key = (:fold, r)
-    workspaces[key] = Workspace(key, c.g.values[r].eltype, storage_length(c.g.values[r]))
-    (v, ArgSpec(key, spec.offset, spec.sizes, spec.strides))
+    c.g.values[r].stored ? (v, spec) : (v, ArgSpec(fold_key(r), spec.offset, spec.sizes, spec.strides))
 end
+
+fold_key(r) = (:fold, r)
 
 # Load the values of folds `rs` at the tile of block indices `indices`.
 function load_folds!(k, st, c::Context, rs, names, indices, workspaces)
