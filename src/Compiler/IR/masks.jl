@@ -39,9 +39,10 @@ end
 What `f` gives, as a `T`, where a mask fails, from its arguments there, each
 a number, `:finite` or nothing (unknown): a number when the numbers decide
 it, as a zero factor or an infinite summand does, in exact arithmetic;
-`:finite` for sums, products and the functions here of finite arguments,
-which an overflow could make infinite, so that a program whose unmasked
-positions overflow computes a different nothing here.
+`:finite` for sums, products, quotients by a nonzero number and the
+functions here of finite arguments, which an overflow could make infinite,
+so that a program whose unmasked positions overflow computes a different
+nothing here.
 """
 function masked_result(f, T, args)
     any(isnothing, args) && return nothing
@@ -58,6 +59,13 @@ function masked_result(f, T, args)
         a isa Number && isinf(a) && return b isa Number && isinf(b) ? nothing : convert(T, a)
         b isa Number && isinf(b) && return convert(T, -b)
         return :finite
+    elseif f === (/) && length(args) == 2
+        # Softcapped attention's gradient divides by the cap, cap·tanh(s/cap):
+        # with the quotient unknown, its backward swept the steps its causal
+        # mask rules out, and its training step took 888 μs against 563
+        # (1024 positions, 64 features, 8 heads, TF32).
+        b = args[2]
+        return b isa Number && isfinite(b) && !iszero(b) ? :finite : nothing
     end
     f in (exp, tanh, abs, abs2, max, min) || f isa Cast ? (all(a -> a === :finite || isfinite(a), args) ? :finite : nothing) : nothing
 end

@@ -95,6 +95,20 @@ streaming(p, target) = C.recomputable_folds(C.permits_rewrites(target) ? C.rewri
         @test !any(d -> occursin("folds stepping by their masks", string(d)), ex.kernels)
         @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(d, q, k, v))); rtol = 1.0e-4)
     end
+    # Softcapped scores, cap·tanh(s/cap): their gradient divides by the cap,
+    # which leaves it zero where the mask fails, so the transposed sweep
+    # skips the steps the mask rules out, as plain attention's does.
+    function softcapped(q, k, v)
+        s = 30.0f0 .* tanh.(C.contract(k, q, (1, 2, 3, 4), (1, 2, 5, 4), (3, 2, 5, 4)) .* 0.25f0 ./ 30.0f0)
+        s = ifelse.(reshape(1:size(s, 1), :, 1, 1) .<= reshape(1:size(s, 3), 1, 1, :), s, -Inf32)
+        C.contract(v, exp.(s .- T.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 2, 5, 4), (1, 2, 5, 4))
+    end
+    dc = differentiate(trace((q, k, v) -> sum(abs2, softcapped(q, k, v)), q, k, v))
+    ex = withenv("TEMPEST_PRODUCT_OPTIONS" => "8,transposed", "TEMPEST_PRODUCT_TILE" => "64,16,32") do
+        prepare(dc, map(CuArray, (q, k, v))...; target = T.CUDATarget(T.cuTileGenerator()), recompute = streaming(dc, T.CUDATarget(T.cuTileGenerator())))
+    end
+    @test any(d -> occursin("transposed folds added, masked steps skipped", string(d)), ex.kernels)
+    @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(dc, q, k, v))); rtol = 1.0e-4)
     # In BFloat16 the query gradients are the rounding of a sum no kernel
     # stores: the sweep adds into a Float32 workspace, and a launch after it
     # rounds the sums into the gradients, as the plain sweep's are but for

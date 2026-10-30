@@ -21,6 +21,14 @@
     # A sum of one and something unmasked is minus infinity there.
     h = C.lower(trace(s -> causal(s) .+ s, s))
     @test C.masked(h, length(h.values)) !== nothing && C.masked(h, length(h.values))[2] == -Inf32
+    # A quotient by a nonzero number is zero where its dividend is: the
+    # gradient of softcapped scores, cap·tanh(s/cap), divides by the cap. A
+    # quotient by something unmasked may divide by zero.
+    zeroed(s) = ifelse.(reshape(1:size(s, 1), :, 1) .<= reshape(1:size(s, 2), 1, :), s, 0.0f0)
+    h = C.lower(trace(s -> zeroed(s) .* (1 .- tanh.(s ./ 30.0f0) .* tanh.(s ./ 30.0f0)) ./ 30.0f0, s))
+    @test C.masked(h, length(h.values)) !== nothing && C.masked(h, length(h.values))[2] == 0.0f0
+    h = C.lower(trace(s -> zeroed(s) ./ s, s))
+    @test C.masked(h, length(h.values)) === nothing
     # A position compared with an integer the program reads, a length per
     # column as decode holds on the device, masks too: the formula reads the
     # length, keys − length ≤ 0.
