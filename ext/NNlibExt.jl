@@ -24,6 +24,10 @@ function NNlib.softplus(x::Traced)
     ifelse(negative, zero(x), x) + log1p(exp(ifelse(negative, x, -x)))
 end
 
+# Inside `Tempest.gradient`, as inside Zygote's: Flux's normalisations and
+# dropout train there.
+NNlib.within_gradient(x::TracedArray) = Tempest.Compiler.differentiating(x)
+
 # A batch of one is shared by every batch of the other factor.
 function batched_product(a, b)
     size(a, 3) == size(b, 3) && return contract(a, b, (1, 2, 4), (2, 3, 4), (1, 3, 4))

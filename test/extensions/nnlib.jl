@@ -40,6 +40,11 @@ const NNLIB = [
     a, b = data(3, 4, 2), data(4, 5, 2; scale = 0.3)
     @test interpret(trace(x -> NNlib.batched_mul(x, b), a), a) ≈ NNlib.batched_mul(a, b)
     @test interpret(trace(x -> NNlib.batched_mul(a, x), b), b) ≈ NNlib.batched_mul(a, b)
+    # Inside a gradient, as NNlib's `within_gradient` says of Zygote's.
+    x = data(4)
+    @test interpret(trace(x -> NNlib.within_gradient(x) ? 2 .* x : x, x), x) == x
+    @test interpret(trace(x -> T.gradient(x -> sum(NNlib.within_gradient(x) ? 2 .* x : x), x), x), x)[2] == fill(2.0, 4)
+    @test interpret(trace(x -> T.gradient(x -> sum(x), x)[1] + sum(NNlib.within_gradient(x) ? 2 .* x : x), x), x) ≈ 2 * sum(x)
     # A traced softplus's derivative at zero is one half, as NNlib's is.
     @test interpret(differentiate(trace(x -> sum(NNlib.softplus.(x)), [0.0])), [0.0])[2] == [0.5]
     # The methods on traced arrays add no ambiguity.

@@ -114,11 +114,13 @@ mutable struct Tape
     # Of each recurrence's step being traced, the last node before it: a step
     # writes no array made before it (see `recurrence`).
     steps::Vector{Int}
+    # How many gradients' functions are being traced (see `differentiating`).
+    gradients::Int
 end
 
-Tape() = Tape(Node[], BitSet(), Int[])
-Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[])
-Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[])
+Tape() = Tape(Node[], BitSet(), Int[], 0)
+Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0)
+Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0)
 
 function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))

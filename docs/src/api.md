@@ -40,6 +40,7 @@ with these:
 Tempest.Compiler.TracedArray
 Tempest.Compiler.Traced
 Tempest.Compiler.contract
+Tempest.Compiler.differentiating
 ```
 
 ## Derivative rules

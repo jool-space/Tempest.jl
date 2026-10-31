@@ -5,7 +5,7 @@
 # each a handle or `nothing`, as a tuple element is the tuple of its
 # components (see `components`).
 
-public gradient, scalar_partials, stopgrad
+public gradient, scalar_partials, stopgrad, differentiating
 
 const Handle = Union{Traced, TracedArray}
 
@@ -773,7 +773,9 @@ function gradient(f, args...)
     end
     stand_ins = rebuild(stand_in, args)
     start = length(tape.nodes) + 1
+    tape.gradients += 1
     value = f(stand_ins...)
+    tape.gradients -= 1
     value isa Number && !(value isa Traced) && (value = Traced(tape, constant!(tape, value)))
     value isa Traced && value.tape === tape && node(value).scalar ||
         throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
@@ -785,6 +787,15 @@ function gradient(f, args...)
     end
     (value, gradients...)
 end
+
+"""
+    Tempest.Compiler.differentiating(x) -> Bool
+
+Whether `x`, traced, is traced inside the function of a `Tempest.gradient`,
+as a layer that trains differently from how it infers asks: NNlib's
+`within_gradient` is this on traced arrays.
+"""
+differentiating(x::Handle) = x.tape.gradients > 0
 
 """
     Tempest.stopgrad(x) -> x
