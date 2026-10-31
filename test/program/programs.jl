@@ -68,6 +68,10 @@ end
     w, b = data(8, 8; scale = 0.2), data(8)
     loss, g = interpret(trace((w, x) -> T.gradient(q -> sum(abs2, q.w * x .+ q.b), (; w, b)), w, x), w, x)
     @test g.w ≈ 2 .* (w * x .+ b) * x' && g.b ≈ vec(sum(2 .* (w * x .+ b); dims = 2))
+    # Arguments none of which is traced, as a layer without weights has, and a
+    # function closing over traced values: the gradient is the program's.
+    loss, g = interpret(trace(x -> T.gradient(p -> p.k * sum(abs2, x), (; k = 2)), x), x)
+    @test loss ≈ 2 * sum(abs2, x) && g == (; k = nothing)
 end
 
 # A stopped gradient is its input in value and a constant to every derivative:

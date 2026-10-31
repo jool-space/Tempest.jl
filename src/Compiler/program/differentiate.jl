@@ -754,9 +754,11 @@ is a function like any other, traced and prepared as one program:
 What `f` closes over is a constant to the gradient.
 """
 function gradient(f, args...)
-    k = findfirst(x -> x isa Union{Traced, TracedArray}, leaves(args))
-    k === nothing && return interpret(differentiate(trace(f, args...)), args...)
-    tape = leaves(args)[k].tape
+    # The program being traced: an argument's, or, when no argument is traced,
+    # as for a layer without weights, the one of the values `f` closes over.
+    traced = filter(x -> x isa Union{Traced, TracedArray}, leaves((args, fields(f))))
+    isempty(traced) && return interpret(differentiate(trace(f, args...)), args...)
+    tape = first(traced).tape
     # Each floating-point argument enters as a node of its own, whose
     # cotangent the pass collects.
     function stand_in(x)
