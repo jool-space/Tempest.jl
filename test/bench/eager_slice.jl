@@ -203,7 +203,7 @@ function classify(err, frames)
     elseif any(in(names), RNG)
         "a global RNG"
     elseif :iterate in names || err isa BoundsError && occursin("CartesianIndex", message) ||
-           occursin("invalid index: Traced", message) || occursin(r"results are arrays and numbers, got \w+\{Any\}", message)
+           occursin("invalid index: Traced", message) || occursin(r"a \w+\{Any\} may hold traced values", message)
         "scalar loops"
     elseif err isa Base.CanonicalIndexError || err isa TypeError && err.got isa C.Traced ||
            err isa MethodError && nameof(err.f) in MUTATING

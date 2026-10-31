@@ -211,7 +211,7 @@ function planned(program, d, inputs, pairs, input, by_reference, build)
         p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
-    outs = rebuild(k -> k === nothing ? nothing : results[k], program.output_structure)
+    outs = rebuild(k -> k isa Int ? results[k] : k, program.output_structure)
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
         Any[b[1] for b in built], Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], copies, nothing, true)
 end
@@ -230,9 +230,9 @@ function replacements(program, replaces)
         structure_of(Returns(nothing), out) == structure_of(Returns(nothing), in) ||
             throw(ArgumentError("result $k cannot replace argument $j, whose structure differs"))
         for (r, a) in zip(leaves(out), leaves(in))
-            (r === nothing) == (a === nothing) ||
+            (r isa Int) == (a isa Int) ||
                 throw(ArgumentError("result $k cannot replace argument $j: one has an array or a number where the other has none"))
-            r === nothing && continue
+            r isa Int || continue
             x, y = program.nodes[program.results[r]], program.nodes[program.arguments[a]]
             (x.dims, x.eltype, x.scalar) == (y.dims, y.eltype, y.scalar) ||
                 throw(ArgumentError("result $k cannot replace argument $j: $(x.eltype)$(x.dims) in place of $(y.eltype)$(y.dims)"))

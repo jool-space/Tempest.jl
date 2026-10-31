@@ -54,7 +54,7 @@ function (c::Compiled)(@nospecialize(args...))
     ex = c.executable
     bind!(ex, args...)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
-    rebuild(k -> k === nothing ? nothing : fresh(ex.results[k], ex.plan.graph.result_scalar[k]), ex.program.output_structure)
+    rebuild(k -> k isa Int ? fresh(ex.results[k], ex.plan.graph.result_scalar[k]) : k, ex.program.output_structure)
 end
 
 # A result apart from the buffers the next call overwrites: a number where the

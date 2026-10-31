@@ -930,9 +930,8 @@ among `args`, also inside tuples, named tuples and structs, mutable ones too,
 become the program's inputs, except integers: they are constants, so that they
 can be sizes, and an integer that varies between executions is an array of one.
 Each struct is built anew around the stand-ins, so `f` never writes the
-caller's. The
-results are arrays and numbers in the same kinds of structure, and `nothing`
-stays `nothing`.
+caller's. The results are arrays and numbers in the same kinds of structure;
+any other leaf, `nothing` or a layer's function, is returned as it is.
 
 ```jldoctest
 julia> p = trace(x -> sum(abs2, x), [1.0, 2.0, 3.0])
@@ -942,6 +941,16 @@ Program with 3 nodes: Float64(3,) → Float64
   %3 = reduce sum over (1,) %2 :: Float64  [result]
 ```
 """
+# A constant among the results, returned as it is, unless it could hold traced
+# values: an array of other things than numbers, a dictionary, or a closure
+# over traced values.
+function kept(leaf)
+    holds = leaf isa Union{AbstractArray, AbstractDict} ||
+        leaf isa Function && any(x -> x isa Union{Traced, TracedArray}, leaves(fields(leaf)))
+    holds && throw(ArgumentError("a program's results are arrays, numbers and constants; a $(typeof(leaf)) may hold traced values"))
+    leaf
+end
+
 function trace(f, args...)
     tape = Tape()
     arguments = Int[]
@@ -963,15 +972,15 @@ function trace(f, args...)
     output = f(traced...)
     results = Int[]
     output_structure = structure_of(output) do leaf
-        # As a gradient has for an integer argument.
-        leaf === nothing && return nothing
+        # Any other leaf, `nothing` as a gradient has for an integer argument
+        # or a layer's function, is a constant of the results, which the
+        # structure holds in place of a result's position.
+        leaf isa Union{Traced, TracedArray, AbstractArray{<:Number}, Number} || return kept(leaf)
         id = if leaf isa Union{Traced, TracedArray}
             leaf.tape === tape || throw(ArgumentError("a result was traced by another program"))
             leaf.id
-        elseif leaf isa Number
-            constant!(tape, leaf)
         else
-            throw(ArgumentError("a program's results are arrays and numbers, got $(typeof(leaf))"))
+            constant!(tape, leaf)
         end
         push!(results, id)
         length(results)

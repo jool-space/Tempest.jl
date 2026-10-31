@@ -108,6 +108,19 @@ end
     @test compile(r -> (r, sum(r.decay)), rule)(rule)[1] isa Checked{:descent}
 end
 
+@testset "constants among the results" begin
+    # A struct among the results keeps its leaves that are no arrays or
+    # numbers, a layer's function say, as they are.
+    m, x = Dense(data(3, 4), data(3), tanh), data(4)
+    c = compile(m -> Dense(2 .* m.w, m.b, m.act), m)
+    @test c(m).act === tanh && c(m).w ≈ 2 .* m.w
+    # A constant array of numbers is a result like a computed one.
+    @test compile(x -> (x, [1.0, 2.0]), x)(x)[2] == [1.0, 2.0]
+    # A closure over traced arrays, or an array of them, would hand them out.
+    @test occursin("may hold traced values", message(() -> trace(x -> (y -> y .+ x), x)))
+    @test occursin("may hold traced values", message(() -> trace(x -> Any[x, x], x)))
+end
+
 @testset "mutable structs among the arguments" begin
     # A mutable struct's arrays are inputs, as an immutable one's are: the
     # compiled function takes another's, and a copy is no other argument.
