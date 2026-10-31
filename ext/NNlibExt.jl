@@ -1,19 +1,28 @@
 # NNlib's functions whose bodies do not trace, as methods on Tempest's traced
-# arrays: `softmax` and `logsoftmax` branch on array values, and `batched_mul`
-# loops over scalars. Each is written in Tempest's primitives, so it fuses with
-# its neighbours. Functions whose bodies trace as they are (the activations,
+# arrays and numbers: `softmax` and `logsoftmax` branch on array values,
+# `batched_mul` loops over scalars, and `softplus` branches on its argument.
+# Each is written in Tempest's primitives, so it fuses with its neighbours.
+# Functions whose bodies trace as they are (the other activations,
 # `logsumexp`) need nothing here. `dropout` is left out: what NNlib's global
 # random number generator means under tracing is an open question.
 module NNlibExt
 
 using Tempest, NNlib
 import Tempest: logsumexp
-import Tempest.Compiler: TracedArray, contract
+import Tempest.Compiler: TracedArray, Traced, contract
 
 # Written with the log-sum-exp, a softmax streams: a sum weighted by it
 # accumulates online.
 NNlib.softmax(x::TracedArray; dims = 1) = exp.(x .- logsumexp(x; dims))
 NNlib.logsoftmax(x::TracedArray; dims = 1) = x .- logsumexp(x; dims)
+
+# NNlib writes `softplus` without branches for Float32 and Float64 only, and a
+# traced number takes the same form: both terms switch below zero, so the
+# derivative at zero is one half. `logσ` and `mish` are written with it.
+function NNlib.softplus(x::Traced)
+    negative = x < 0
+    ifelse(negative, zero(x), x) + log1p(exp(ifelse(negative, x, -x)))
+end
 
 # A batch of one is shared by every batch of the other factor.
 function batched_product(a, b)

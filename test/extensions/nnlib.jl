@@ -14,6 +14,10 @@ const NNLIB = [
      (x, t) -> sum(exp.(x .- T.logsumexp(x; dims = 2)) .* t), (data(8, 6), data(8, 6; scale = 0.7))),
     ("logsoftmax", (x, t) -> sum(NNlib.logsoftmax(x) .* t),
      (x, t) -> sum((x .- T.logsumexp(x; dims = 1)) .* t), (data(8, 6), data(8, 6; scale = 0.7))),
+    ("softplus", x -> sum(NNlib.softplus.(x)),
+     x -> sum(max.(x, 0) .+ log1p.(exp.(.-abs.(x)))), (data(8, 6; scale = 3.0),)),
+    ("logσ and mish", x -> sum(NNlib.logσ.(x) .+ NNlib.mish.(x)),
+     x -> sum(.-(max.(.-x, 0) .+ log1p.(exp.(.-abs.(x)))) .+ x .* tanh.(max.(x, 0) .+ log1p.(exp.(.-abs.(x))))), (data(8, 6; scale = 3.0),)),
     ("batched_mul", (a, b) -> sum(abs2, NNlib.batched_mul(a, b)),
      (a, b) -> sum(abs2, batched(a, b)), (data(3, 4, 2), data(4, 5, 2; scale = 0.3))),
     ("batched_mul of transposes", (a, b) -> sum(abs2, NNlib.batched_mul(NNlib.batched_transpose(b), NNlib.batched_adjoint(a))),
@@ -36,8 +40,10 @@ const NNLIB = [
     a, b = data(3, 4, 2), data(4, 5, 2; scale = 0.3)
     @test interpret(trace(x -> NNlib.batched_mul(x, b), a), a) ≈ NNlib.batched_mul(a, b)
     @test interpret(trace(x -> NNlib.batched_mul(a, x), b), b) ≈ NNlib.batched_mul(a, b)
+    # A traced softplus's derivative at zero is one half, as NNlib's is.
+    @test interpret(differentiate(trace(x -> sum(NNlib.softplus.(x)), [0.0])), [0.0])[2] == [0.5]
     # The methods on traced arrays add no ambiguity.
-    for f in (NNlib.softmax, NNlib.logsoftmax, NNlib.batched_mul)
+    for f in (NNlib.softmax, NNlib.logsoftmax, NNlib.batched_mul, NNlib.softplus)
         ms = collect(methods(f))
         @test !any(Base.isambiguous(m, n) for m in ms for n in ms if m !== n)
     end
