@@ -54,6 +54,35 @@ const NNLIB = [
     end
 end
 
+# Pooling, against NNlib's loops on Julia arrays: the values,
+# and the gradients NNlib's own backward functions give.
+const POOLS = [
+    ("max 2×2", NNlib.maxpool, NNlib.∇maxpool, (6, 6, 2, 2), (2, 2), (;), (;)),
+    ("max 3×3, stride 2, padded", NNlib.maxpool, NNlib.∇maxpool, (7, 6, 2, 2), (3, 3), (; stride = 2, padding = 1), (;)),
+    ("max 2, ceil mode", NNlib.maxpool, NNlib.∇maxpool, (7, 3, 2), (2,), (; ceil_mode = true), (;)),
+    ("mean 2×2", NNlib.meanpool, NNlib.∇meanpool, (6, 6, 2, 2), (2, 2), (;), (;)),
+    ("mean 3×3, stride 2, padded", NNlib.meanpool, NNlib.∇meanpool, (7, 6, 2, 2), (3, 3), (; stride = 2, padding = 1), (;)),
+    ("mean, padding uncounted", NNlib.meanpool, NNlib.∇meanpool, (7, 6, 2, 2), (3, 3), (; stride = 2, padding = 1),
+     (; count_include_pad = false)),
+    ("mean over everything", NNlib.meanpool, NNlib.∇meanpool, (6, 5, 3, 2), (6, 5), (;), (;)),
+]
+
+
+@testset "pooling as NNlib computes it" begin
+    @testset "pool $name" for (name, pool, backward, dims, window, options, keywords) in POOLS
+        x = data(dims...; scale = 2.0)
+        pdims = NNlib.PoolDims(x, window; options...)
+        y = pool(x, pdims; keywords...)
+        t = data(size(y)...; scale = 0.5)
+        @test interpret(trace(x -> pool(x, pdims; keywords...), x), x) ≈ y
+        @test interpret(differentiate(trace(x -> sum(pool(x, pdims; keywords...) .* t), x)), x)[2] ≈ backward(t, y, x, pdims; keywords...)
+    end
+    for f in (NNlib.maxpool, NNlib.meanpool)
+        ms = collect(methods(f))
+        @test !any(Base.isambiguous(m, n) for m in ms for n in ms if m !== n)
+    end
+end
+
 if CUDA_FUNCTIONAL
     close(a, b; rtol) = all(map((x, y) -> isapprox(ndims(x) == 0 ? Array(x)[] : Array(x), y; rtol), a, b))
 

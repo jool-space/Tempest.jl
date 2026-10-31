@@ -1,6 +1,7 @@
 # NNlib's functions whose bodies do not trace, as methods on Tempest's traced
 # arrays and numbers: `softmax` and `logsoftmax` branch on array values,
-# `batched_mul` loops over scalars, and `softplus` branches on its argument.
+# `batched_mul` and pooling loop over scalars, and `softplus` branches on its
+# argument.
 # Each is written in Tempest's primitives, so it fuses with its neighbours.
 # Functions whose bodies trace as they are (the other activations,
 # `logsumexp`) need nothing here. `dropout` is left out: what NNlib's global
@@ -45,5 +46,47 @@ end
 # lazy one does.
 NNlib.batched_transpose(a::TracedArray{<:Real, 3}) = PermutedDimsArray(a, (2, 1, 3))
 NNlib.batched_adjoint(a::TracedArray{<:Real, 3}) = PermutedDimsArray(a, (2, 1, 3))
+
+# Pooling folds each window of `x`. Windows that tile their axes are blocks of a
+# reshape, folded over the blocks' axes; others are the slices that an offset
+# within the window selects of every window, strided as the windows are, and
+# combined elementwise. Padding holds the fold's neutral value, and reaches as
+# far as the last window does, past the input where ceil mode lets it run over.
+function pooled(fold, combine, neutral, x, pdims)
+    n = ndims(x) - 2
+    k, s, d = NNlib.kernel_size(pdims), NNlib.stride(pdims), NNlib.dilation(pdims)
+    out = NNlib.output_size(pdims)
+    x = padded(x, NNlib.padding(pdims), ntuple(i -> (out[i] - 1) * s[i] + (k[i] - 1) * d[i] + 1, n), neutral)
+    rest = size(x)[(n + 1):end]
+    if k == s && all(==(1), d)
+        tiled = x[ntuple(i -> 1:(out[i] * k[i]), n)..., :, :]
+        blocks = reshape(tiled, (Iterators.flatten(zip(k, out))..., rest...))
+        return reshape(fold(blocks; dims = ntuple(i -> 2i - 1, n)), (out..., rest...))
+    end
+    slices = map(CartesianIndices(k)) do o
+        x[ntuple(i -> range((o[i] - 1) * d[i] + 1; step = s[i], length = out[i]), n)..., :, :]
+    end
+    reduce((a, b) -> combine.(a, b), vec(slices))
+end
+
+# `x` with its spatial axes padded by `value`: low as `padding` says, high as far
+# as `reach`, or as `padding` says if it says more.
+function padded(x, padding, reach, value)
+    n = length(reach)
+    low = ntuple(i -> padding[2i - 1], n)
+    high = ntuple(i -> max(padding[2i], reach[i] - low[i] - size(x, i)), n)
+    all(==(0), low) && all(==(0), high) && return x
+    NNlib.pad_constant(x, (map(tuple, low, high)..., (0, 0), (0, 0)), value)
+end
+
+NNlib.maxpool(x::TracedArray{<:Real}, pdims::NNlib.PoolDims) = pooled(maximum, max, typemin(eltype(x)), x, pdims)
+
+function NNlib.meanpool(x::TracedArray{<:Real}, pdims::NNlib.PoolDims; count_include_pad = true)
+    total = pooled(sum, +, zero(eltype(x)), x, pdims)
+    count_include_pad && return total ./ prod(NNlib.kernel_size(pdims))
+    # How many of each window's elements are the input's: the same pooling of
+    # ones, untraced, a constant of the program.
+    total ./ pooled(sum, +, 0, ones(Int32, size(x)), pdims)
+end
 
 end
