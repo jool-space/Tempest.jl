@@ -12,6 +12,17 @@ struct Fixed
     w::Matrix{Float64}
 end
 
+# A rule whose constructor checks its numbers, as Optimisers' do, with a
+# parameter that is no field's type.
+struct Checked{kind, R, D}
+    rate::R
+    decay::D
+    function Checked{kind}(rate, decay) where {kind}
+        rate > 0 || throw(DomainError(rate, "the rate must be positive"))
+        new{kind, typeof(rate), typeof(decay)}(rate, decay)
+    end
+end
+
 loss(m, x) = sum(abs2, m(x))
 
 function finite_difference_weights(m, x)
@@ -79,6 +90,16 @@ end
     @test isapprox(gm.w, finite_difference_weights(other, x); rtol = 1.0e-5)
     # A struct whose fields cannot hold traced arrays says so.
     @test occursin("need types that are parameters", message(() -> trace(f -> sum(f.w), Fixed(data(2, 2)))))
+end
+
+@testset "structs are built without their constructors" begin
+    # Tracing builds each struct anew around traced fields, as `new` would: a
+    # constructor that checks its numbers, which a traced number cannot
+    # answer, does not run. Its parameters other than fields' types are kept.
+    rule = Checked{:descent}(0.1, (0.9, 0.99))
+    c = compile((r, x) -> r.rate * r.decay[1] .* x, rule, data(3))
+    @test c(Checked{:descent}(0.5, (0.9, 0.99)), [1.0, 2, 3]) ≈ 0.45 .* [1.0, 2, 3]
+    @test compile(r -> (r, sum(r.decay)), rule)(rule)[1] isa Checked{:descent}
 end
 
 if CUDA_FUNCTIONAL

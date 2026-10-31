@@ -258,15 +258,29 @@ end
 
 fields(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))
 
-# A struct of the kind of `T` with these fields, its type parameters found anew.
+# A struct of the kind of `T` with these fields, built as `new` builds one: its
+# constructors never run, since what they check of a number or an array a
+# traced one cannot answer, and the caller's struct passed their checks. A type
+# parameter that is a field's declared type is found anew from the field's
+# value; the struct's other parameters are kept.
 function construct(T, fields::NamedTuple)
-    try
-        Base.typename(T).wrapper(values(fields)...)
-    catch err
-        throw(ArgumentError("Tempest builds a $(nameof(T)) from new fields to trace through it, and its constructor " *
-            "failed; fields holding arrays or numbers need types that are parameters of the struct\n" * sprint(showerror, err)))
+    W = Base.typename(T).wrapper
+    B = Base.unwrap_unionall(W)
+    parameters = Any[T.parameters...]
+    for (k, v) in enumerate(values(fields))
+        j = findfirst(p -> p === fieldtype(B, k), B.parameters)
+        j === nothing || (parameters[j] = typeof(v))
     end
+    S = isempty(parameters) ? T : W{parameters...}
+    for (k, v) in enumerate(values(fields))
+        v isa fieldtype(S, k) || throw(ArgumentError("Tempest builds a $(nameof(T)) from new fields to trace through it, " *
+            "and its field $(fieldname(S, k))::$(fieldtype(S, k)) cannot hold a $(typeof(v)); fields holding arrays or " *
+            "numbers need types that are parameters of the struct"))
+    end
+    built(S, values(fields))
 end
+
+@generated built(::Type{S}, fields::Tuple) where {S} = Expr(:splatnew, S, :fields)
 
 leaves(x::Union{Tuple, NamedTuple}) = reduce(vcat, map(leaves, values(x)); init = Any[])
 leaves(x::Fields) = leaves(x.fields)
