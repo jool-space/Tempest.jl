@@ -54,7 +54,7 @@ const NNLIB = [
     end
 end
 
-# Pooling, against NNlib's loops on Julia arrays: the values,
+# Pooling and convolution, against NNlib's loops on Julia arrays: the values,
 # and the gradients NNlib's own backward functions give.
 const POOLS = [
     ("max 2×2", NNlib.maxpool, NNlib.∇maxpool, (6, 6, 2, 2), (2, 2), (;), (;)),
@@ -67,8 +67,16 @@ const POOLS = [
     ("mean over everything", NNlib.meanpool, NNlib.∇meanpool, (6, 5, 3, 2), (6, 5), (;), (;)),
 ]
 
+const CONVS = [
+    ("3×3", (;), (6, 6, 2, 2), (3, 3, 2, 4)),
+    ("3×3, stride 2, padded", (; stride = 2, padding = 1), (7, 6, 2, 2), (3, 3, 2, 4)),
+    ("3×3, dilated", (; dilation = 2), (8, 7, 2, 1), (3, 3, 2, 3)),
+    ("3×3, not flipped", (; flipkernel = true), (6, 6, 2, 2), (3, 3, 2, 4)),
+    ("3×3, two groups", (; groups = 2, padding = 1), (6, 6, 4, 2), (3, 3, 2, 6)),
+    ("1-D", (; padding = (2, 0)), (10, 2, 2), (3, 2, 4)),
+]
 
-@testset "pooling as NNlib computes it" begin
+@testset "pooling and convolution as NNlib computes them" begin
     @testset "pool $name" for (name, pool, backward, dims, window, options, keywords) in POOLS
         x = data(dims...; scale = 2.0)
         pdims = NNlib.PoolDims(x, window; options...)
@@ -77,7 +85,31 @@ const POOLS = [
         @test interpret(trace(x -> pool(x, pdims; keywords...), x), x) ≈ y
         @test interpret(differentiate(trace(x -> sum(pool(x, pdims; keywords...) .* t), x)), x)[2] ≈ backward(t, y, x, pdims; keywords...)
     end
-    for f in (NNlib.maxpool, NNlib.meanpool)
+    @testset "convolution $name" for (name, options, xdims, wdims) in CONVS
+        x, w = data(xdims...), data(wdims...; scale = 0.5)
+        cdims = NNlib.DenseConvDims(x, w; options...)
+        y = NNlib.conv(x, w, cdims)
+        t = data(size(y)...; scale = 0.5)
+        @test interpret(trace((x, w) -> NNlib.conv(x, w, cdims), x, w), x, w) ≈ y
+        _, dx, dw = interpret(differentiate(trace((x, w) -> sum(NNlib.conv(x, w, cdims) .* t), x, w)), x, w)
+        @test dx ≈ NNlib.∇conv_data(t, w, cdims) && dw ≈ NNlib.∇conv_filter(x, t, cdims)
+        # The transposed convolution, the data's gradient as a function of the
+        # output's: its own gradients are a convolution and the filter's.
+        u = data(size(x)...; scale = 0.5)
+        @test interpret(trace((t, w) -> NNlib.∇conv_data(t, w, cdims), t, w), t, w) ≈ NNlib.∇conv_data(t, w, cdims)
+        _, dt, dw = interpret(differentiate(trace((t, w) -> sum(NNlib.∇conv_data(t, w, cdims) .* u), t, w)), t, w)
+        @test dt ≈ NNlib.conv(u, w, cdims) && dw ≈ NNlib.∇conv_filter(u, t, cdims)
+    end
+    @testset "depthwise convolution" begin
+        x, w = data(6, 6, 2, 2), data(3, 3, 2, 2; scale = 0.5)
+        cdims = NNlib.DepthwiseConvDims(x, w; padding = 1)
+        y = NNlib.depthwiseconv(x, w, cdims)
+        t = data(size(y)...; scale = 0.5)
+        @test interpret(trace((x, w) -> NNlib.depthwiseconv(x, w, cdims), x, w), x, w) ≈ y
+        _, dx, dw = interpret(differentiate(trace((x, w) -> sum(NNlib.depthwiseconv(x, w, cdims) .* t), x, w)), x, w)
+        @test dx ≈ NNlib.∇depthwiseconv_data(t, w, cdims) && dw ≈ NNlib.∇depthwiseconv_filter(x, t, cdims)
+    end
+    for f in (NNlib.maxpool, NNlib.meanpool, NNlib.conv, NNlib.depthwiseconv, NNlib.∇conv_data)
         ms = collect(methods(f))
         @test !any(Base.isambiguous(m, n) for m in ms for n in ms if m !== n)
     end
@@ -92,6 +124,12 @@ if CUDA_FUNCTIONAL
             ex = prepare(trace(f, args...), map(CuArray, args)...)
             @test close(C.leaves(outputs(execute!(ex))), [f(args...)]; rtol = 1.0e-4)
         end
+        # A convolution and a pooling of it run as kernels too.
+        x, w = Float32.(data(8, 8, 2, 2)), Float32.(data(3, 3, 2, 4; scale = 0.5))
+        cdims, pdims = NNlib.DenseConvDims(x, w; padding = 1), NNlib.PoolDims((8, 8, 4, 2), (2, 2))
+        layer = (x, w) -> NNlib.maxpool(NNlib.conv(x, w, cdims), pdims)
+        ex = prepare(trace(layer, x, w), CuArray(x), CuArray(w))
+        @test close(C.leaves(outputs(execute!(ex))), [layer(x, w)]; rtol = 1.0e-4)
         # Attention written with NNlib's softmax is one generated kernel, as
         # it is with the log-sum-exp.
         scores(q, k) = NNlib.batched_mul(NNlib.batched_transpose(k), q) .* (1 / sqrt(Float32(size(q, 1))))

@@ -1,7 +1,7 @@
 # NNlib's functions whose bodies do not trace, as methods on Tempest's traced
 # arrays and numbers: `softmax` and `logsoftmax` branch on array values,
-# `batched_mul` and pooling loop over scalars, and `softplus` branches on its
-# argument.
+# `batched_mul`, pooling and convolution loop over scalars, and `softplus`
+# branches on its argument.
 # Each is written in Tempest's primitives, so it fuses with its neighbours.
 # Functions whose bodies trace as they are (the other activations,
 # `logsumexp`) need nothing here. `dropout` is left out: what NNlib's global
@@ -87,6 +87,46 @@ function NNlib.meanpool(x::TracedArray{<:Real}, pdims::NNlib.PoolDims; count_inc
     # How many of each window's elements are the input's: the same pooling of
     # ones, untraced, a constant of the program.
     total ./ pooled(sum, +, 0, ones(Int32, size(x)), pdims)
+end
+
+# A convolution sums over the kernel's offsets: at each, the slice of `x` its
+# windows select at that offset, padded with zeros, times the kernel's slice
+# there, summed over a group's input channels. Without `flipkernel` the kernel
+# is flipped, as a convolution's is.
+function convolved(x, w, cdims)
+    n = ndims(x) - 2
+    k, s, d = NNlib.kernel_size(cdims), NNlib.stride(cdims), NNlib.dilation(cdims)
+    out = NNlib.output_size(cdims)
+    groups = cdims isa NNlib.DepthwiseConvDims ? NNlib.channels_in(cdims) : NNlib.groupcount(cdims)
+    cin, cout, batch = NNlib.channels_in(cdims) ÷ groups, NNlib.channels_out(cdims) ÷ groups, size(x, n + 2)
+    x = padded(x, NNlib.padding(cdims), ntuple(i -> (out[i] - 1) * s[i] + (k[i] - 1) * d[i] + 1, n), zero(eltype(x)))
+    x = reshape(x, (size(x)[1:n]..., cin, groups, batch))
+    w = reshape(w, (k..., cin, cout, groups))
+    spatial = ntuple(identity, n)
+    terms = map(CartesianIndices(k)) do o
+        slice = x[ntuple(i -> range((o[i] - 1) * d[i] + 1; step = s[i], length = out[i]), n)..., :, :, :]
+        at = NNlib.flipkernel(cdims) ? Tuple(o) : k .- Tuple(o) .+ 1
+        contract(slice, w[at..., :, :, :], (spatial..., n + 1, n + 2, n + 3), (n + 1, n + 4, n + 2), (spatial..., n + 4, n + 2, n + 3))
+    end
+    reshape(reduce(+, vec(terms)), (out..., cout * groups, batch))
+end
+
+# The data's gradient of a convolution, as a transposed convolution is: what
+# Tempest's derivative of `convolved` gives, at any input, for `dy`.
+function convolved_data(dy, w, cdims)
+    x = zeros(eltype(dy), NNlib.input_size(cdims)..., NNlib.channels_in(cdims), size(dy, ndims(dy)))
+    Tempest.gradient(x -> sum(convolved(x, w, cdims) .* dy), x)[2]
+end
+
+# Each with a traced array, the other traced or not.
+for (A, B) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (AbstractArray, TracedArray))
+    @eval begin
+        NNlib.conv(x::$A{<:Any, N}, w::$B{<:Any, N}, cdims::NNlib.DenseConvDims; kwargs...) where {N} = convolved(x, w, cdims)
+        NNlib.depthwiseconv(x::$A{<:Any, N}, w::$B{<:Any, N}, cdims::NNlib.DepthwiseConvDims; kwargs...) where {N} =
+            convolved(x, w, cdims)
+        NNlib.∇conv_data(dy::$A{<:Any, N}, w::$B{<:Any, N}, cdims::NNlib.DenseConvDims; kwargs...) where {N} =
+            convolved_data(dy, w, cdims)
+    end
 end
 
 end
