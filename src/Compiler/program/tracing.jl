@@ -926,9 +926,11 @@ is_input(leaf) = leaf isa AbstractArray{<:Number} || leaf isa Number && !(leaf i
     trace(f, args...) -> Program
 
 Run `f` on stand-ins for `args` and record what it computes. Arrays and numbers
-among `args`, also inside tuples, named tuples and immutable structs, become the
-program's inputs, except integers: they are constants, so that they can be
-sizes, and an integer that varies between executions is an array of one. The
+among `args`, also inside tuples, named tuples and structs, mutable ones too,
+become the program's inputs, except integers: they are constants, so that they
+can be sizes, and an integer that varies between executions is an array of one.
+Each struct is built anew around the stand-ins, so `f` never writes the
+caller's. The
 results are arrays and numbers in the same kinds of structure, and `nothing`
 stays `nothing`.
 

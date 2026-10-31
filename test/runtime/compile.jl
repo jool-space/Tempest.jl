@@ -12,6 +12,12 @@ struct Fixed
     w::Matrix{Float64}
 end
 
+# A layer that keeps running statistics, mutable as Flux's normalisations are.
+mutable struct Running{V}
+    scale::V
+    mean::V
+end
+
 # A rule whose constructor checks its numbers, as Optimisers' do, with a
 # parameter that is no field's type.
 struct Checked{kind, R, D}
@@ -100,6 +106,31 @@ end
     c = compile((r, x) -> r.rate * r.decay[1] .* x, rule, data(3))
     @test c(Checked{:descent}(0.5, (0.9, 0.99)), [1.0, 2, 3]) ≈ 0.45 .* [1.0, 2, 3]
     @test compile(r -> (r, sum(r.decay)), rule)(rule)[1] isa Checked{:descent}
+end
+
+@testset "mutable structs among the arguments" begin
+    # A mutable struct's arrays are inputs, as an immutable one's are: the
+    # compiled function takes another's, and a copy is no other argument.
+    m, x = Running(data(3), data(3)), data(3)
+    p = trace((m, x) -> m.scale .* (x .- m.mean), m, x)
+    @test length(p.arguments) == 3
+    c = compile((m, x) -> m.scale .* (x .- m.mean), m, x)
+    other = Running(data(3; scale = 2.0), data(3; scale = 0.5))
+    @test c(other, x) ≈ other.scale .* (x .- other.mean)
+    @test c(deepcopy(m), x) ≈ m.scale .* (x .- m.mean)
+    _, gm, _ = compile((m, x) -> Tempest.gradient((m, x) -> sum(m.scale .* x), m, x), m, x)(m, x)
+    @test gm isa NamedTuple{(:scale, :mean)} && gm.scale ≈ x
+    # The traced code may write the struct it was given, as a layer updates
+    # its running statistics: the result is a struct of its own, and the
+    # caller's is as it was.
+    function update(m, x)
+        m.mean = 0.9 .* m.mean .+ 0.1 .* x
+        m
+    end
+    before = copy(m.mean)
+    after = compile(update, m, x)(m, x)
+    @test after isa Running && after !== m && after.mean ≈ 0.9 .* before .+ 0.1 .* x
+    @test m.mean == before
 end
 
 if CUDA_FUNCTIONAL

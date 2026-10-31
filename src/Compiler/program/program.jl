@@ -238,22 +238,24 @@ function Base.show(io::IO, ::MIME"text/plain", p::Program)
     show_nodes(io, p.nodes, p.results)
 end
 
-# Nested inputs and outputs: tuples, named tuples and immutable structs, down to
-# leaves. A program's structures record a struct as `Fields`, since the leaf
-# indices they hold could not be its fields.
+# Nested inputs and outputs: tuples, named tuples and structs, down to leaves. A
+# program's structures record a struct as `Fields`, since the leaf indices they
+# hold could not be its fields.
 
 "A struct in a structure: its type, and its fields."
 struct Fields{T}
     fields::NamedTuple
 end
 
-# Whether `x` is a struct to look inside. Mutable structs are leaves, as
-# closures are: their identity is theirs, and a program does not write them.
-# So are Tempest's own.
+# Whether `x` is a struct to look inside: mutable ones too, whose arrays are
+# inputs as an immutable struct's are. A program never writes the caller's
+# struct: tracing builds one of its own around the traced fields, which the
+# traced code may write, and a struct among the results is built anew. Closures
+# are leaves, and so are Tempest's own structs.
 function nested(x)
     T = typeof(x)
     !(x isa Union{AbstractArray, Number, Function, Type, Module, AbstractString, Symbol, AbstractDict, Tuple, NamedTuple}) &&
-        isstructtype(T) && !ismutabletype(T) && fieldcount(T) > 0 && Base.moduleroot(parentmodule(T)) !== Base.moduleroot(@__MODULE__)
+        isstructtype(T) && fieldcount(T) > 0 && Base.moduleroot(parentmodule(T)) !== Base.moduleroot(@__MODULE__)
 end
 
 fields(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))

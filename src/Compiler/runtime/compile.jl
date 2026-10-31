@@ -15,8 +15,8 @@ It returns what `f` returns, in arrays of its own, with numbers as numbers.
 option; `true` and `false` mean `:close` and `:none`.
 
 Which leaves of the arguments are inputs follows `trace`: arrays and numbers,
-also inside tuples, named tuples and immutable structs, except integers, which
-are constants. A call whose arguments differ in anything but the values of
+also inside tuples, named tuples and structs, mutable ones too, except
+integers, which are constants. A call whose arguments differ in anything but the values of
 inputs throws, naming the difference.
 
 ```jldoctest
