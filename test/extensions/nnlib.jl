@@ -109,7 +109,16 @@ const CONVS = [
         _, dx, dw = interpret(differentiate(trace((x, w) -> sum(NNlib.depthwiseconv(x, w, cdims) .* t), x, w)), x, w)
         @test dx ≈ NNlib.∇depthwiseconv_data(t, w, cdims) && dw ≈ NNlib.∇depthwiseconv_filter(x, t, cdims)
     end
-    for f in (NNlib.maxpool, NNlib.meanpool, NNlib.conv, NNlib.depthwiseconv, NNlib.∇conv_data)
+    @testset "linear upsampling, corners $(corners ? "" : "not ")aligned" for corners in (true, false)
+        x = data(4, 3, 2, 2)
+        y = NNlib.upsample_bilinear(x; size = (7, 6), align_corners = corners)
+        t = data(size(y)...; scale = 0.5)
+        @test interpret(trace(x -> NNlib.upsample_bilinear(x; size = (7, 6), align_corners = corners), x), x) ≈ y
+        g = interpret(differentiate(trace(x -> sum(NNlib.upsample_bilinear(x; size = (7, 6), align_corners = corners) .* t), x)), x)[2]
+        @test g ≈ NNlib.∇upsample_bilinear(t; size = (4, 3), align_corners = corners)
+        @test interpret(trace(x -> NNlib.upsample_linear(x, 2), data(5, 2, 1)), data(5, 2, 1)) ≈ NNlib.upsample_linear(data(5, 2, 1), 2)
+    end
+    for f in (NNlib.maxpool, NNlib.meanpool, NNlib.conv, NNlib.depthwiseconv, NNlib.∇conv_data, NNlib.upsample_linear)
         ms = collect(methods(f))
         @test !any(Base.isambiguous(m, n) for m in ms for n in ms if m !== n)
     end

@@ -1,7 +1,7 @@
 # NNlib's functions whose bodies do not trace, as methods on Tempest's traced
 # arrays and numbers: `softmax` and `logsoftmax` branch on array values,
-# `batched_mul`, pooling and convolution loop over scalars, and `softplus`
-# branches on its argument.
+# `batched_mul`, pooling, convolution and linear upsampling loop over
+# scalars, and `softplus` branches on its argument.
 # Each is written in Tempest's primitives, so it fuses with its neighbours.
 # Functions whose bodies trace as they are (the other activations,
 # `logsumexp`) need nothing here. `dropout` is left out: what NNlib's global
@@ -127,6 +127,23 @@ for (A, B) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (Abstra
         NNlib.∇conv_data(dy::$A{<:Any, N}, w::$B{<:Any, N}, cdims::NNlib.DenseConvDims; kwargs...) where {N} =
             convolved_data(dy, w, cdims)
     end
+end
+
+
+# Linear upsampling, bilinear and trilinear too, is separable: along each
+# spatial axis, a product with the matrix that NNlib's own upsampling makes of
+# the identity, untraced.
+function NNlib.upsample_linear(x::TracedArray{<:AbstractFloat, N}; size, align_corners::Bool = true) where {N}
+    out = Tuple(size)
+    Base.size(x)[1:(N - 2)] == out && return x
+    labels = ntuple(identity, N)
+    for i in 1:(N - 2)
+        n = Base.size(x, i)
+        unit = reshape(eltype(x).((1:n) .== (1:n)'), n, n, 1)
+        weights = reshape(NNlib.upsample_linear(unit; size = out[i], align_corners), out[i], n)
+        x = contract(weights, x, (N + 1, i), labels, ntuple(j -> j == i ? N + 1 : j, N))
+    end
+    x
 end
 
 end
