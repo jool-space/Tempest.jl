@@ -108,7 +108,7 @@ function interpret(p::Program, args...)
         xs = map(i -> values[i], n.inputs)
         values[id] = n.op isa Loop ? get!(() -> run_loop(n.op.body, xs), loops, n.op.body)[n.op.result] : evaluate(n.op, n, xs)
     end
-    rebuild(k -> k isa Int ? values[p.results[k]] : k, p.output_structure)
+    rebuild(k -> k isa Int ? values[p.results[k]] : constant_leaf(k), p.output_structure)
 end
 
 # A recurrence's results, stacked along a last axis: its step run on the

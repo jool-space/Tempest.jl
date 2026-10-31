@@ -211,7 +211,7 @@ function planned(program, d, inputs, pairs, input, by_reference, build)
         p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
-    outs = rebuild(k -> k isa Int ? results[k] : k, program.output_structure)
+    outs = rebuild(k -> k isa Int ? results[k] : constant_leaf(k), program.output_structure)
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
         Any[b[1] for b in built], Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], copies, nothing, true)
 end

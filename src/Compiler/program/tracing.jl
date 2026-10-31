@@ -948,7 +948,7 @@ function kept(leaf)
     holds = leaf isa Union{AbstractArray, AbstractDict} ||
         leaf isa Function && any(x -> x isa Union{Traced, TracedArray}, leaves(fields(leaf)))
     holds && throw(ArgumentError("a program's results are arrays, numbers and constants; a $(typeof(leaf)) may hold traced values"))
-    leaf
+    leaf === nothing ? nothing : Kept(leaf)
 end
 
 function trace(f, args...)
@@ -972,10 +972,11 @@ function trace(f, args...)
     output = f(traced...)
     results = Int[]
     output_structure = structure_of(output) do leaf
-        # Any other leaf, `nothing` as a gradient has for an integer argument
-        # or a layer's function, is a constant of the results, which the
-        # structure holds in place of a result's position.
-        leaf isa Union{Traced, TracedArray, AbstractArray{<:Number}, Number} || return kept(leaf)
+        # Any other leaf, `nothing` as a gradient has for an integer argument,
+        # a layer's function, or an integer, constant as among the arguments,
+        # is a constant of the results, which the structure holds in place of
+        # a result's position.
+        leaf isa Union{Traced, TracedArray, AbstractArray{<:Number}, Number} && !(leaf isa Integer) || return kept(leaf)
         id = if leaf isa Union{Traced, TracedArray}
             leaf.tape === tape || throw(ArgumentError("a result was traced by another program"))
             leaf.id

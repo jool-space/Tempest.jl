@@ -249,6 +249,16 @@ struct Fields{T}
     fields::NamedTuple
 end
 
+"A constant among a program's results, which its structure holds as it is."
+struct Kept
+    value::Any
+end
+
+# A leaf of a structure of results that is not a result's position: a constant,
+# or `nothing`.
+constant_leaf(k::Kept) = k.value
+constant_leaf(::Nothing) = nothing
+
 # Whether `x` is a struct to look inside: mutable ones too, whose arrays are
 # inputs as an immutable struct's are. A program never writes the caller's
 # struct: tracing builds one of its own around the traced fields, which the
