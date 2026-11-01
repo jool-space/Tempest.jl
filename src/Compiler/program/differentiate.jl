@@ -5,7 +5,7 @@
 # each a handle or `nothing`, as a tuple element is the tuple of its
 # components (see `components`).
 
-public gradient, scalar_partials, stopgrad, differentiating
+public gradient, scalar_partials, stated_derivatives, stopgrad, differentiating
 
 const Handle = Union{Traced, TracedArray}
 
@@ -22,8 +22,30 @@ a method for a function Tempest records whole (one that branches on its
 argument, say) to make it differentiable.
 """
 function scalar_partials(f, g, y, xs...)
-    throw(ArgumentError("no derivative rule for $f; define Tempest.scalar_partials(::typeof($f), g, y, xs...)"))
+    partials = stated_derivatives(f, y, xs...)
+    partials === nothing && throw(ArgumentError("no derivative rule for $f; define Tempest.scalar_partials(::typeof($f), g, y, xs...)"))
+    map(d -> scaled(g, d), partials)
 end
+
+"""
+    stated_derivatives(f, y, xs...) -> tuple or nothing
+
+The partial derivatives of `y = f(xs...)` with respect to each argument, as
+`f`'s package states them through ChainRulesCore's `@scalar_rule`, `nothing`
+for an argument with none; `nothing` for a function with no statement. The
+ChainRulesCore extension adds the method that reads them.
+"""
+stated_derivatives(f, y, xs...) = nothing
+
+# A stated partial times the cotangent: a constant one is the cotangent, a
+# constant zero no contribution, a condition the cotangent where it holds.
+scaled(g, ::Nothing) = nothing
+scaled(g, d::Number) = iszero(d) ? nothing : isone(d) ? g : g * d
+scaled(g, d::Traced) = node(d).eltype === Bool ? ifelse(d, g, zero(g)) : g * d
+
+# The result of a function with a stated derivative is the code's, but its
+# derivative is the statement's.
+scalar_partials(s::Stated, g, y, result, xs...) = (nothing, scalar_partials(s.f, g, y, xs...)...)
 
 const NONDIFFERENTIABLE = (
     sign, floor, ceil, round, trunc, isnan, isinf, isfinite, signbit, !, <, <=, >, >=, ==, !=,

@@ -280,7 +280,7 @@ function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
         resize!(tape.nodes, mark)
         nothing
     end
-    result isa Traced && return result
+    result isa Traced && return stated(f, result, args, tape)
     result isa Number && return Traced(tape, constant!(tape, result))
     # A tuple of handles is the tuple of its components, each traced.
     result isa Tuple && all(r -> r isa Union{Traced, Number}, result) && any(r -> r isa Traced, result) && return record_map(tuple, result...)
@@ -290,6 +290,37 @@ function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
     inputs = filter(a -> a isa Union{Traced, Number}, collect(args))
     g = length(inputs) == length(args) ? f : Bound(f, map(a -> a isa Union{Traced, Number} ? Slot() : a, args))
     record_map(g, inputs...)
+end
+
+"""
+`f`, whose derivative its author stated: a map of `f`'s result as the program
+computes it, and of `f`'s arguments, which is that result, differentiated by
+the statement instead of through the code that computed it.
+"""
+struct Stated{F}
+    f::F
+end
+(::Stated)(y, xs...) = y
+Base.show(io::IO, s::Stated) = print(io, s.f, ", stated")
+
+# A function whose author stated its derivative, as a package does with
+# ChainRulesCore's `@scalar_rule`, is recorded as its code computes it and
+# differentiated by the statement: Flux's `xlogy` guards `x log y` against
+# `x = 0` with a branch, whose derivative in `x` there, none, is not the
+# function's, `log y`. A statement that does not run on handles, one that
+# branches on its argument, leaves the derivative of the code.
+function stated(@nospecialize(f), y::Traced, @nospecialize(args), tape)
+    n = node(y)
+    n.op isa Map && n.op.f === f && return y
+    all(a -> a isa Traced ? !(node(a).eltype <: Tuple) && a.id != y.id : a isa Number, args) || return y
+    mark = length(tape.nodes)
+    partials = try
+        stated_derivatives(f, y, args...)
+    catch
+        nothing
+    end
+    resize!(tape.nodes, mark)
+    partials === nothing ? y : record_map(Stated(f), y, args...)
 end
 
 broadcast_handle(@nospecialize(bc::Broadcast.Broadcasted), tape) =

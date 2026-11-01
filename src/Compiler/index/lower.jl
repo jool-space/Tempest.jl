@@ -628,6 +628,9 @@ function lower(p::Program)
             # Filling out to a larger shape is a formula, as a layout is. A
             # stopped gradient is its input once the program is differentiated.
             fill_out(only(inputs), only(input_dims), d)
+        elseif op isa Map && op.f isa Stated
+            # So is a result whose derivative was stated.
+            fill_out(first(inputs), first(input_dims), d)
         elseif op isa Map
             value!(map_definition(op.f, map((a, dims) -> operand(a, dims, d), inputs, input_dims), n.eltype), n)
         elseif op isa Reduce

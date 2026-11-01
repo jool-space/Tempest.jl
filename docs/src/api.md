@@ -48,6 +48,7 @@ Tempest.Compiler.differentiating
 
 ```@docs
 Tempest.scalar_partials
+Tempest.Compiler.stated_derivatives
 Tempest.stopgrad
 ```
 
