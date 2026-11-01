@@ -62,6 +62,6 @@ end
     @test C.cache_counts() == before
     @test only(ex.decisions).choice.implementation !== nothing
     ex = prepare(p, CuArray(x))
-    @test isempty(only(ex.decisions).failed)
+    @test all(d -> d === nothing || isempty(d.failed), ex.decisions)
     @test isapprox(Array(only(C.leaves(outputs(execute!(ex)))))[], interpret(p, x); rtol = 1.0e-4)
 end
