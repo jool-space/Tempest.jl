@@ -60,7 +60,8 @@ that failed.
 program's results and its arguments, alike in structure, shapes and types:
 `(2 => 1, 3 => 2)` for a step `(params, state, batch) -> (loss, params, state)`.
 After each execution the argument holds the result, as if bound again, so the
-next execution reads it where it is. A result is written into the argument's
+next execution reads it where it is. An input the program writes is replaced
+so by what it writes. A result is written into the argument's
 storage when the kernel that writes it reads the argument only at the address
 it writes, and the kernels that read the argument otherwise can run first;
 else it is written apart and copied there after the last kernel. `explain`
@@ -165,7 +166,10 @@ function planned(program, d, inputs, pairs, input, by_reference, build)
     result_value(k) = p.graph.results[k].value
     # A result that is an argument's storage would change as another result replaces it.
     for k in eachindex(p.graph.results), (r, a) in pairs
-        k != r && result_value(k) == input[a] && throw(ArgumentError("result $k is argument $a, which result $r replaces"))
+        k != r && result_value(k) == input[a] || continue
+        (r => a) in program.writes &&
+            throw(ArgumentError("result $k is input $a as it was before the program wrote it, which a prepared program cannot return"))
+        throw(ArgumentError("result $k is argument $a, which result $r replaces"))
     end
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
@@ -222,9 +226,10 @@ runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prep
 slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
 
 # The results that replace arguments: pairs of a result's position among the
-# program's results and the argument's among its arguments, leaf by leaf.
+# program's results and the argument's among its arguments, leaf by leaf. The
+# program's writes into its inputs are among them.
 function replacements(program, replaces)
-    pairs = Pair{Int, Int}[]
+    pairs = copy(program.writes)
     for (k, j) in (replaces isa Pair ? (replaces,) : replaces)
         out, in = program.output_structure[k], program.input_structure[j]
         structure_of(Returns(nothing), out) == structure_of(Returns(nothing), in) ||

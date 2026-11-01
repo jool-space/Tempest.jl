@@ -133,8 +133,10 @@ end
 
 A traced program: its nodes, the nodes that are its inputs and results, the
 structures they came in, as nested tuples, named tuples and `Fields` of leaf
-indices, and the nodes that are its backward, where a reverse pass recorded
-them.
+indices, the nodes that are its backward, where a reverse pass recorded them,
+and its writes into its inputs: pairs `result => argument` of positions, each
+input's contents when the program ends, a result after those its output
+structure names.
 """
 struct Program
     nodes::Vector{Node}
@@ -143,10 +145,13 @@ struct Program
     input_structure::Any
     output_structure::Any
     backward::BitSet
+    writes::Vector{Pair{Int, Int}}
 end
 
 Program(nodes, arguments, results, input_structure, output_structure) =
     Program(nodes, arguments, results, input_structure, output_structure, BitSet())
+Program(nodes, arguments, results, input_structure, output_structure, backward) =
+    Program(nodes, arguments, results, input_structure, output_structure, backward, Pair{Int, Int}[])
 
 """
 A recurrence's step: a program whose arguments are the state's arrays, a slice
@@ -260,9 +265,11 @@ constant_leaf(k::Kept) = k.value
 constant_leaf(::Nothing) = nothing
 
 # Whether `x` is a struct to look inside: mutable ones too, whose arrays are
-# inputs as an immutable struct's are. A program never writes the caller's
-# struct: tracing builds one of its own around the traced fields, which the
-# traced code may write, and a struct among the results is built anew. Closures
+# inputs as an immutable struct's are. A program never sets the caller's
+# struct's fields: tracing builds one of its own around the traced fields,
+# whose fields the traced code may set, and a struct among the results is
+# built anew. What it writes into the arrays of one lands in them, as into any
+# input's. Closures
 # are leaves, and so are Tempest's own structs.
 function nested(x)
     T = typeof(x)
@@ -360,5 +367,5 @@ function prune(p::Program)
         new[id] = length(nodes)
     end
     Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure,
-        BitSet(new[i] for i in p.backward if keep[i]))
+        BitSet(new[i] for i in p.backward if keep[i]), p.writes)
 end

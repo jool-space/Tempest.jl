@@ -8,7 +8,8 @@ public compile, Compiled
 
 `f` traced on `args` and prepared, to be called like `f`: `compile(f, x)(y)`
 computes `f(y)` for any `y` alike `x` in structure, shapes and element types.
-It returns what `f` returns, in arrays of its own, with numbers as numbers.
+It returns what `f` returns, in arrays of its own, with numbers as numbers,
+and what `f` writes into an argument's arrays it leaves there, as `f` would.
 
 `measure` says which claims are timed when preparing, as for `prepare`:
 `:none` none, `:close` the options whose estimates are close, `:all` every
@@ -54,6 +55,11 @@ function (c::Compiled)(@nospecialize(args...))
     ex = c.executable
     bind!(ex, args...)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
+    # What the program wrote into an input, the caller's array takes.
+    if !isempty(ex.program.writes)
+        xs = argument_leaves(ex.program, args)
+        foreach(((_, a),) -> copyto!(vec(xs[a]), ex.arguments[a]), ex.program.writes)
+    end
     rebuild(k -> k isa Int ? fresh(ex.results[k], ex.plan.graph.result_scalar[k]) : constant_leaf(k), ex.program.output_structure)
 end
 

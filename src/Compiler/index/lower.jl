@@ -503,7 +503,7 @@ function inline_loops(p::Program)
             id in p.backward && push!(backward, new[id])
         end
     end
-    Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure, backward)
+    Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure, backward, p.writes)
 end
 
 # The nodes of a loop's step over its steps, appended to `nodes`, the loop's

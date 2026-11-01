@@ -705,7 +705,8 @@ end
 The program extended by its reverse pass. `program` must have one scalar
 result, the loss. The new program returns the loss and, in the structure of the
 inputs, the gradient with respect to every floating-point input (`nothing` for
-other inputs), with each struct a named tuple of its fields'.
+other inputs), with each struct a named tuple of its fields', at the inputs'
+contents before the program writes any of them; its writes are the program's.
 
 ```jldoctest
 julia> p = differentiate(trace(x -> sum(abs2, x), [1.0, 2.0, 3.0]));
@@ -718,7 +719,8 @@ function differentiate(p::Program)
     tape = Tape(copy(p.nodes), copy(p.backward))
     # A loss no input reaches is a constant of the results, a node here.
     s = p.output_structure
-    loss = s isa Kept && s.value isa Number ? constant!(tape, s.value) : s isa Int && length(p.results) == 1 ? only(p.results) : nothing
+    loss = s isa Kept && s.value isa Number ? constant!(tape, s.value) :
+        s isa Int && length(p.results) == 1 + length(p.writes) ? p.results[s] : nothing
     loss !== nothing && tape.nodes[loss].scalar || throw(ArgumentError("differentiate needs a program with one scalar result"))
     cotangents = reverse_pass!(tape, loss, eachindex(p.nodes))
     results = [loss]
@@ -730,8 +732,9 @@ function differentiate(p::Program)
         length(results)
     end
     gradients = tangent(result, p.input_structure)
+    writes = map(((r, a),) -> (push!(results, p.results[r]); length(results) => a), p.writes)
     # Rules may build what nothing reads, such as a constant operand's share.
-    prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...), tape.backward))
+    prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...), tape.backward, writes))
 end
 
 """
@@ -762,14 +765,16 @@ function gradient(f, args...)
     isempty(traced) && return interpret(differentiate(trace(f, args...)), args...)
     tape = first(traced).tape
     # Each floating-point array enters as a node of its own, whose cotangent
-    # the pass collects.
+    # the pass collects: the node the stand-in starts at, before `f` writes it.
+    entered = Tuple{TracedArray, Any, Int}[]
     function stand_in(x)
         x isa TracedArray && x.tape !== tape && throw(ArgumentError("the arguments of a gradient must be traced by one program"))
         x isa AbstractArray{<:AbstractFloat} || return x
         id = x isa TracedArray ? x.id : constant!(tape, x)
         n = tape.nodes[id]
-        # The function never writes its arguments, as a program its inputs.
-        TracedArray(tape, record!(tape, Map(identity), (id,), n.dims, n.eltype); input = true)
+        s = TracedArray(tape, record!(tape, Map(identity), (id,), n.dims, n.eltype))
+        push!(entered, (s, x, s.id))
+        s
     end
     stand_ins = rebuild(stand_in, args)
     start = length(tape.nodes) + 1
@@ -781,9 +786,17 @@ function gradient(f, args...)
         throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
     cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))
     gradients = tangent(stand_ins) do x
-        x isa TracedArray || return nothing
-        g = cotangent!(tape, cotangents, x.id)
+        k = findfirst(e -> e[1] === x, entered)
+        k === nothing && return nothing
+        g = cotangent!(tape, cotangents, entered[k][3])
         g === nothing ? nothing : TracedArray(tape, g.id)
+    end
+    # What `f` wrote into a stand-in it writes into the argument, as `f`
+    # would untraced; a constant of the program cannot change.
+    for (s, x, id) in entered
+        s.id == id && continue
+        x isa TracedArray || throw(ArgumentError("a gradient's function writes into an array that is a constant of the program; make it an input"))
+        write!(x, s.id)
     end
     (value, gradients...)
 end

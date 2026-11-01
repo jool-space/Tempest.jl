@@ -88,7 +88,8 @@ end
 
 Evaluate `program` on Julia arrays and numbers, in the structure of its
 results, node by node: the reference that prepared programs are tested
-against, with no plan and no kernels.
+against, with no plan and no kernels. What the program writes into an input
+it leaves in the caller's array.
 
 ```jldoctest
 julia> interpret(trace(sum, [1.0, 2.0]), [3.0, 4.0])
@@ -98,8 +99,11 @@ julia> interpret(trace(sum, [1.0, 2.0]), [3.0, 4.0])
 function interpret(p::Program, args...)
     inputs = argument_leaves(p, args)
     values = Vector{Any}(undef, length(p.nodes))
+    # An input the program writes is read from a copy, since the caller's
+    # array takes what is written once the program ends.
+    written = Set(last.(p.writes))
     for (k, id) in enumerate(p.arguments)
-        values[id] = inputs[k]
+        values[id] = k in written ? copy(inputs[k]) : inputs[k]
     end
     keep = live(p.nodes, p.results)
     loops = IdDict{LoopBody, Vector{Any}}()
@@ -108,6 +112,7 @@ function interpret(p::Program, args...)
         xs = map(i -> values[i], n.inputs)
         values[id] = n.op isa Loop ? get!(() -> run_loop(n.op.body, xs), loops, n.op.body)[n.op.result] : evaluate(n.op, n, xs)
     end
+    foreach(((r, a),) -> copyto!(inputs[a], values[p.results[r]]), p.writes)
     rebuild(k -> k isa Int ? values[p.results[k]] : constant_leaf(k), p.output_structure)
 end
 

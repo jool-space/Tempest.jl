@@ -1,5 +1,5 @@
 # Writes at the program level: into the arrays a program allocates, as
-# functional updates, and never into its inputs.
+# functional updates, and into its inputs, as writes into the caller's arrays.
 
 # Writes into arrays a program allocates are functional updates: each write
 # makes a new version of the array, later reads see the latest version, reads
@@ -33,19 +33,38 @@
     @test_throws ArgumentError trace((x, m) -> (y = copy(x); y[m] .= 0; y), x, x .> 0)
 end
 
-# The program's inputs, and anything that shares their memory, are never
-# written: a program is a function of its inputs.
-@testset "inputs are not written" begin
+# A write into an input, or into anything that shares its memory, is a write
+# into the caller's array: what the input holds when the program ends is a
+# result that replaces it, and the interpreter leaves it in the caller's array,
+# as the code does untraced.
+@testset "writes into inputs" begin
     x = data(8, 6)
-    message(f) = try trace(f, x); "" catch e sprint(showerror, e) end
+    function same(f, args...)
+        mine, theirs = deepcopy(args), deepcopy(args)
+        interpret(trace(f, args...), mine...) == f(theirs...) && mine == theirs
+    end
     for f in (x -> (x[1] = 0; x), x -> (x .= 2; x), x -> (fill!(x, 1); x), x -> (copyto!(x, ones(8, 6)); x),
               x -> (view(x, :, 1) .= 0; x), x -> (vec(x)[2] = 1; x), x -> (x'[1, 2] = 3; x), x -> (reshape(x, 6, 8) ./= 2; x))
-        @test startswith(message(f), "ArgumentError: mutation of the program's inputs is not supported")
+        @test same(f, x)
     end
-    # A copy of an input may be written.
-    @test interpret(trace(x -> (y = copy(x); y[1] = 0; y), x), x) == (y = copy(x); y[1] = 0; y)
-    # A gradient's function never writes its arguments, traced or run eagerly.
+    # Reads before a write keep the contents the program was given; the
+    # written contents are a result after those `f` returns.
+    @test same(x -> (s = sum(x); x .= 0.9 .* x .+ 0.1; (s, sum(x))), x)
+    @test same(x -> (y = copy(x); x[2] = 0; y), x)
+    p = trace((m, x) -> (m .= 0.9 .* m .+ 0.1 .* vec(sum(x; dims = 2)); sum(abs2, x)), data(8), x)
+    @test p.writes == [2 => 1] && p.output_structure == 1
+    # A gradient's function writes into its arguments, traced or run eagerly:
+    # what it writes lands in the argument, and the gradient is at the
+    # contents it was given.
     writes(p) = (p[1] = 0; sum(p))
-    @test startswith(message(x -> T.gradient(writes, x)), "ArgumentError: mutation of the program's inputs is not supported")
-    @test_throws ArgumentError T.gradient(writes, x)
+    @test same(x -> T.gradient(writes, x), x)
+    y = copy(x)
+    @test T.gradient(writes, y)[2] == (g = ones(8, 6); g[1] = 0; g) && y == (z = copy(x); z[1] = 0; z)
+    statistics(m, x) = (m .= 0.9 .* m .+ 0.1 .* vec(sum(x; dims = 2)); sum(abs2, x))
+    m = data(8; scale = 0.3)
+    mine = copy(m)
+    value, g = interpret(trace((m, x) -> T.gradient(x -> statistics(m, x), x), m, x), mine, x)
+    @test value ≈ sum(abs2, x) && g ≈ 2 .* x && mine ≈ 0.9 .* m .+ 0.1 .* vec(sum(x; dims = 2))
+    # A constant of the program cannot change.
+    @test occursin("a constant of the program", message(() -> trace(x -> T.gradient(w -> (w .= 0; sum(x)), data(3)), x)))
 end

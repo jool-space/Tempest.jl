@@ -42,8 +42,6 @@ mutable struct TracedArray{T, N} <: AbstractArray{T, N}
     const dims::NTuple{N, Int}
     # The array whose memory this one shares, or nothing.
     const layout::Union{Nothing, Layout}
-    # The program's inputs are never written.
-    const input::Bool
     # The layouts made from this array, which read its writes.
     const views::Vector{WeakRef}
 end
@@ -60,9 +58,9 @@ struct Traced{T} <: Real
     id::Int
 end
 
-TracedArray{T, N}(tape::Tape, id::Int, dims) where {T, N} = TracedArray{T, N}(tape, id, dims, nothing, false, WeakRef[])
-TracedArray(tape::Tape, id::Int; input = false) =
-    TracedArray{tape.nodes[id].eltype, length(tape.nodes[id].dims)}(tape, id, tape.nodes[id].dims, nothing, input, WeakRef[])
+TracedArray{T, N}(tape::Tape, id::Int, dims) where {T, N} = TracedArray{T, N}(tape, id, dims, nothing, WeakRef[])
+TracedArray(tape::Tape, id::Int) =
+    TracedArray{tape.nodes[id].eltype, length(tape.nodes[id].dims)}(tape, id, tape.nodes[id].dims, nothing, WeakRef[])
 Traced(tape::Tape, id::Int) = Traced{tape.nodes[id].eltype}(tape, id)
 
 node(x::Union{TracedArray, Traced}) = x.tape.nodes[x.id]
@@ -599,7 +597,7 @@ write into it writes into `x`. `op` is applied to `x` and the nodes `inputs`.
 """
 function layout(x::TracedArray, op, inputs, dims)
     id = record!(x.tape, op, (x.id, inputs...), dims, eltype(x))
-    y = TracedArray{eltype(x), length(dims)}(x.tape, id, Tuple(dims), Layout(x, op, Tuple(inputs)), false, WeakRef[])
+    y = TracedArray{eltype(x), length(dims)}(x.tape, id, Tuple(dims), Layout(x, op, Tuple(inputs)), WeakRef[])
     push!(x.views, WeakRef(y))
     y
 end
@@ -942,8 +940,14 @@ Run `f` on stand-ins for `args` and record what it computes. Arrays among
 the program's inputs. Numbers are constants, as configuration is: an integer
 can be a size, a layer's epsilon or a rule's rate is a number of the program,
 and a number that varies between executions is an array, `[x]` say. Each
-struct is built anew around the stand-ins, so `f` never writes the caller's. The results are arrays and numbers in the same kinds of structure;
-any other leaf, `nothing` or a layer's function, is returned as it is.
+struct is built anew around the stand-ins, so `f` never writes the caller's.
+The results are arrays and numbers in the same kinds of structure; any other
+leaf, `nothing` or a layer's function, is returned as it is.
+
+`f` may write into an input, as a layer updates its running statistics: what
+it wrote is the input's contents when the program ends, a result after those
+`f` returns, which replaces the input (see `Program`). Executed, the program
+leaves it in the caller's array, as `f` would.
 
 ```jldoctest
 julia> p = trace(x -> sum(abs2, x), [1.0, 2.0, 3.0])
@@ -956,11 +960,13 @@ Program with 3 nodes: Float64(3,) → Float64
 function trace(f, args...)
     tape = Tape()
     arguments = Int[]
+    inputs = TracedArray[]
     function stand_in(leaf)
         is_input(leaf) || return leaf
         id = record!(tape, Argument(), (), size(leaf), eltype(leaf))
         push!(arguments, id)
-        TracedArray(tape, id; input = true)
+        push!(inputs, TracedArray(tape, id))
+        last(inputs)
     end
     traced = rebuild(stand_in, args)
     position = Dict(id => k for (k, id) in enumerate(arguments))
@@ -982,5 +988,13 @@ function trace(f, args...)
         push!(results, id)
         length(results)
     end
-    prune(Program(tape.nodes, arguments, results, input_structure, output_structure, tape.backward))
+    # An input `f` wrote holds what it wrote when the program ends, as the
+    # caller's array does when `f` runs untraced: a result that replaces it.
+    writes = Pair{Int, Int}[]
+    for (k, x) in enumerate(inputs)
+        x.id == arguments[k] && continue
+        push!(results, x.id)
+        push!(writes, length(results) => k)
+    end
+    prune(Program(tape.nodes, arguments, results, input_structure, output_structure, tape.backward, writes))
 end

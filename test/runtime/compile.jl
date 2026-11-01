@@ -157,6 +157,36 @@ end
     @test m.mean == before
 end
 
+@testset "writes into the arguments" begin
+    # What the traced code writes into an argument's arrays, a layer's running
+    # statistics say, the caller's arrays hold after each call, as they would
+    # after the code ran untraced; reads before the write keep what was given.
+    function normalized(m, x)
+        μ = vec(sum(x; dims = 2)) ./ size(x, 2)
+        m.mean .= 0.9 .* m.mean .+ 0.1 .* μ
+        m.scale .* (x .- μ)
+    end
+    m, x = Running(data(3), data(3; scale = 0.5)), data(3, 4)
+    c = compile(normalized, m, x)
+    for _ in 1:2
+        mine, theirs = deepcopy(m), deepcopy(m)
+        @test c(mine, x) ≈ normalized(theirs, x) && mine.mean ≈ theirs.mean && mine.scale == theirs.scale
+        m = theirs
+    end
+    # Also through a gradient, whose value and gradient are at the arrays as
+    # they were given.
+    step(m, x) = Tempest.gradient((m, x) -> sum(abs2, normalized(m, x)), m, x)
+    g = compile(step, m, x)
+    mine, theirs = deepcopy(m), deepcopy(m)
+    value, gm, gx = g(mine, x)
+    @test value ≈ sum(abs2, normalized(deepcopy(m), x)) && gm.mean === nothing || all(iszero, gm.mean)
+    normalized(theirs, x)
+    @test mine.mean ≈ theirs.mean
+    # A result that is what an input held before the program wrote it is not
+    # yet one a prepared program returns.
+    @test occursin("as it was before the program wrote it", message(() -> compile(x -> (y = copy(x); x .= 1; (y, sum(x))), data(3))))
+end
+
 if CUDA_FUNCTIONAL
     @testset "compiled on CUDA" begin
         m, x = Dense(single(data(64, 32; scale = 0.3)), single(data(64)), tanh), single(data(32, 16; scale = 0.5))

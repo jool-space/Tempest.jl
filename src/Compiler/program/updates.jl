@@ -1,8 +1,6 @@
-# Writes into traced arrays, as functional updates. An array the traced code
-# allocates (with `similar`, `copy`, `zero` or `fill`, or as the result of any
-# operation on traced arrays) may be written: each write records the array's
-# new contents as a node and moves the array, with every array sharing its
-# memory, to it. Later reads see the latest contents; reads before a write keep
+# Writes into traced arrays, as functional updates. Any traced array may be
+# written: each write records the array's new contents as a node and moves the
+# array, with every array sharing its memory, to it. Later reads see the latest contents; reads before a write keep
 # what they read. A write of part of an array is an `Update`: the old contents
 # with the values written at the positions a selection by integers, ranges and
 # arrays of integers, traced or not, names. So the program states which
@@ -10,12 +8,10 @@
 # selects the values written. Where several land at one position, one of them
 # does, unspecified which, as in JAX.
 #
-# The program's inputs, and the arrays sharing their memory, are never written.
-
-const INPUT_WRITE = "mutation of the program's inputs is not supported: a traced program is a \
-    function of its inputs, which it reads and never writes, so a write into an input, or into a view, \
-    reshape or transpose of one, would change the caller's array without the program stating it. \
-    Write into a copy, such as `y = copy(x)`, and return it"
+#
+# A write into an input, or into a view, reshape or transpose of one, is a
+# write into the caller's array: the input's contents when the program ends
+# are a result that replaces it (see `trace`).
 
 # Allocation. Julia leaves the contents of `similar` undefined; in a traced
 # program they are zero, so reading them before a write is defined.
@@ -42,7 +38,6 @@ function write!(x::TracedArray, contents::Int)
     while owner.layout !== nothing
         owner = owner.layout.parent
     end
-    owner.input && throw(ArgumentError(INPUT_WRITE))
     isempty(owner.tape.steps) || owner.id > last(owner.tape.steps) || throw(ArgumentError(STEP_WRITE))
     while x.layout !== nothing
         (; parent, op, inputs) = x.layout
