@@ -72,6 +72,8 @@ end
     # function closing over traced values: the gradient is the program's.
     loss, g = interpret(trace(x -> T.gradient(p -> p.k * sum(abs2, x), (; k = 2)), x), x)
     @test loss ≈ 2 * sum(abs2, x) && g == (; k = nothing)
+    # A loss no argument reaches, run eagerly, is a constant with no gradient.
+    @test T.gradient(a -> 1.5, x) == (1.5, zero(x))
 end
 
 # A stopped gradient is its input in value and a constant to every derivative:

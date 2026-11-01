@@ -715,10 +715,11 @@ julia> interpret(p, [1.0, 2.0, 3.0])
 ```
 """
 function differentiate(p::Program)
-    length(p.results) == 1 && p.nodes[only(p.results)].scalar ||
-        throw(ArgumentError("differentiate needs a program with one scalar result"))
     tape = Tape(copy(p.nodes), copy(p.backward))
-    loss = only(p.results)
+    # A loss no input reaches is a constant of the results, a node here.
+    s = p.output_structure
+    loss = s isa Kept && s.value isa Number ? constant!(tape, s.value) : s isa Int && length(p.results) == 1 ? only(p.results) : nothing
+    loss !== nothing && tape.nodes[loss].scalar || throw(ArgumentError("differentiate needs a program with one scalar result"))
     cotangents = reverse_pass!(tape, loss, eachindex(p.nodes))
     results = [loss]
     function result(position)
