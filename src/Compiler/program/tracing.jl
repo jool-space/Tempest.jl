@@ -969,10 +969,10 @@ function trace(f, args...)
     results = Int[]
     output_structure = structure_of(output) do leaf
         # Any other leaf, `nothing` as a gradient has for an integer argument,
-        # a layer's function, or an integer, constant as among the arguments,
+        # a layer's function, or a number, constant as among the arguments,
         # is a constant of the results, which the structure holds in place of
         # a result's position.
-        leaf isa Union{Traced, TracedArray, AbstractArray{<:Number}, Number} && !(leaf isa Integer) || return kept(leaf)
+        leaf isa Union{Traced, TracedArray, AbstractArray{<:Number}} || return kept(leaf)
         id = if leaf isa Union{Traced, TracedArray}
             leaf.tape === tape || throw(ArgumentError("a result was traced by another program"))
             leaf.id

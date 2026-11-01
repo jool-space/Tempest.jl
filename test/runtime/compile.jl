@@ -121,9 +121,10 @@ end
     m, x = Dense(data(3, 4), data(3), tanh), data(4)
     c = compile(m -> Dense(2 .* m.w, m.b, m.act), m)
     @test c(m).act === tanh && c(m).w ≈ 2 .* m.w
-    # An integer is a constant among the results as among the arguments.
-    window = (size = (2, 3), x = data(4))
-    @test compile(w -> (; w.size, x = 2 .* w.x), window)(window).size === (2, 3)
+    # A number is a constant among the results as among the arguments.
+    window = (size = (2, 3), rate = 0.5, x = data(4))
+    r = compile(w -> (; w.size, w.rate, x = 2 .* w.x), window)(window)
+    @test r.size === (2, 3) && r.rate === 0.5 && r.x == 2 .* window.x
     # A constant array of numbers is a result like a computed one.
     @test compile(x -> (x, [1.0, 2.0]), x)(x)[2] == [1.0, 2.0]
     # A closure over traced arrays, or an array of them, would hand them out.
