@@ -75,6 +75,8 @@ Tempest.Compiler.target_for
 Tempest.Compiler.implementations
 Tempest.Compiler.numerics
 Tempest.Compiler.permits_rewrites
+Tempest.Compiler.rounded_backward
+Tempest.Compiler.deterministic
 Tempest.Compiler.product_class
 Tempest.Compiler.allocate
 Tempest.Compiler.upload
@@ -184,6 +186,7 @@ Tempest.Compiler.Implement.loaded
 Tempest.Compiler.Implement.GroupView
 Tempest.Compiler.Implement.ValueView
 Tempest.Compiler.Implement.members
+Tempest.Compiler.Implement.own_domain
 Tempest.Compiler.Implement.product_axes
 Tempest.Compiler.Implement.recurrence_axes
 Tempest.Compiler.Implement.claims
