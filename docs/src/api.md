@@ -39,6 +39,7 @@ with these:
 ```@docs
 Tempest.Compiler.TracedArray
 Tempest.Compiler.Traced
+Tempest.Compiler.record_map
 Tempest.Compiler.contract
 Tempest.Compiler.differentiating
 ```

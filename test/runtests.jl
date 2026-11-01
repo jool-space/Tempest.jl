@@ -3,7 +3,8 @@
 # as in `julia --project=test test/runtests.jl plan/` for the planner's tests.
 # A file covers one subject, in a directory named for the part of src/Compiler
 # it exercises: program/, index/, plan/, cover/, codegen/ and runtime/.
-# extensions/ holds NNlib's and Einops's functions on traced arrays, and cuda/
+# extensions/ holds NNlib's, Einops's and SpecialFunctions' functions on traced
+# arrays and numbers, and cuda/
 # what runs only on CUDA; decisions.jl, interfaces.jl and show.jl span the
 # parts. setup.jl is evaluated in every test's module; fixtures/ holds
 # programs that several tests include, and bench/ the scripts that time
@@ -41,7 +42,7 @@ end
 # earlier test on its worker happened to load.
 const init_code = quote
     using Tempest, Test, NNlib, CUDACore, Einops
-    import Statistics, cuBLAS, cuDNN, cuTile
+    import SpecialFunctions, Statistics, cuBLAS, cuDNN, cuTile
     include($(joinpath(@__DIR__, "setup.jl")))
 end
 

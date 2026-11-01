@@ -14,7 +14,7 @@
 # `write!`). Views, reshapes and transposes share the memory of the array they
 # are made from.
 
-public logsumexp, TracedArray, Traced, contract
+public logsumexp, TracedArray, Traced, contract, record_map
 
 """
 How a traced array shares the memory of `parent`: it is `op`, a selection, a
@@ -139,7 +139,15 @@ end
 # single node is recorded. So the tracer's entry points take their arguments
 # unspecialized and dispatch at run time, which costs a traced operation
 # about a microsecond.
-"Record `f` applied elementwise to the operands, broadcast together."
+"""
+    record_map(f, args...) -> Traced
+
+`f` applied elementwise to the operands, traced numbers and plain ones,
+broadcast together, recorded as one map: a primitive of the program, as
+`tanh` is, which every target runs as `f` on the elements. A package whose
+scalar function branches on its argument makes it a primitive with a method on
+`Traced` that records it so, and differentiable with a `scalar_partials` rule.
+"""
 function record_map(@nospecialize(f), @nospecialize(args...))
     simplified = simplify(f, args...)
     simplified === nothing || return simplified
