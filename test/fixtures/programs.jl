@@ -3,7 +3,7 @@
 
 swish(x) = x / (1 + exp(-x))
 leaky(x) = x > 0 ? x : oftype(x, 0.01) * x
-T.scalar_partials(::typeof(leaky), g, y, x) = (ifelse(x > 0, g, oftype(g, 0.01) * g),)
+T.scalar_partials(::typeof(leaky), y, x) = (ifelse(x > 0, one(x), oftype(x, 0.01)),)
 rmsnorm(x, w) = x ./ sqrt.(sum(abs2, x; dims = 1) ./ size(x, 1) .+ 1.0e-5) .* w
 softmax_columns(x) = exp.(x .- T.logsumexp(x; dims = 1))
 softmax_rows(x) = exp.(x .- T.logsumexp(x; dims = 2))

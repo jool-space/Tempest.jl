@@ -303,24 +303,16 @@ end
 (::Stated)(y, xs...) = y
 Base.show(io::IO, s::Stated) = print(io, s.f, ", stated")
 
-# A function whose author stated its derivative, as a package does with
-# ChainRulesCore's `@scalar_rule`, is recorded as its code computes it and
-# differentiated by the statement: Flux's `xlogy` guards `x log y` against
-# `x = 0` with a branch, whose derivative in `x` there, none, is not the
-# function's, `log y`. A statement that does not run on handles, one that
-# branches on its argument, leaves the derivative of the code.
+# A function whose derivative is stated, by a `scalar_partials` method or as
+# a package does with ChainRulesCore's `@scalar_rule`, is recorded as its code
+# computes it and differentiated by the statement: Flux's `xlogy` guards
+# `x log y` against `x = 0` with a branch, whose derivative in `x` there,
+# none, is not the function's, `log y`.
 function stated(@nospecialize(f), y::Traced, @nospecialize(args), tape)
     n = node(y)
     n.op isa Map && n.op.f === f && return y
     all(a -> a isa Traced ? !(node(a).eltype <: Tuple) && a.id != y.id : a isa Number, args) || return y
-    mark = length(tape.nodes)
-    partials = try
-        stated_derivatives(f, y, args...)
-    catch
-        nothing
-    end
-    resize!(tape.nodes, mark)
-    partials === nothing ? y : record_map(Stated(f), y, args...)
+    derivatives_stated(f, y, args...) ? record_map(Stated(f), y, args...) : y
 end
 
 broadcast_handle(@nospecialize(bc::Broadcast.Broadcasted), tape) =

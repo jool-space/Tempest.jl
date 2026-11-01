@@ -103,7 +103,7 @@ function (d::DropoutScale{T})(key::Integer, i::Integer) where {T}
 end
 
 # The scale depends only on integers.
-Tempest.scalar_partials(::DropoutScale, g, y, key, i) = (nothing, nothing)
+Tempest.scalar_partials(::DropoutScale, y, key, i) = (nothing, nothing)
 
 """
     dropout(x, seed; rate, stream = 0)

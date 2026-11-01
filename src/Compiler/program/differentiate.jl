@@ -13,18 +13,28 @@ h(tape, id) = Traced(tape, id)
 lit(x::Traced, v) = convert(node(x).eltype, v)
 
 """
-    scalar_partials(f, g, y, xs...) -> tuple
+    scalar_partials(f, y, xs...) -> tuple
 
-The contributions of `g`, the cotangent of `y = f(xs...)`, to each argument:
-one handle per argument, or `nothing` where the argument has no derivative.
-Arguments are elementwise handles; broadcasting is undone by the caller. Define
-a method for a function Tempest records whole (one that branches on its
-argument, say) to make it differentiable.
+The partial derivatives of `y = f(xs...)`, a function of numbers, with respect
+to each argument: a handle or number per argument, or `nothing` where the
+argument has none. `y` is the result, which a derivative such as `exp`'s
+reuses; the arguments are handles, or numbers where they are constants.
+
+    scalar_partials(::typeof(tanh), y, x) = (1 - y * y,)
+    scalar_partials(::typeof(/), y, a, b) = (1 / b, -y / b)
+
+The caller multiplies each partial into the cotangent of `y`: a condition
+selects it where it holds, a reciprocal `1 / x` divides it by `x`, and a
+partial no gradient needs is never computed. Define a method for a function
+Tempest records whole, one that branches on its argument, say, to make it
+differentiable, or for one whose code traces, to differentiate it by the
+statement where it is broadcast, where the code's derivative at a branch is
+not the function's.
 """
-function scalar_partials(f, g, y, xs...)
+function scalar_partials(f, y, xs...)
     partials = stated_derivatives(f, y, xs...)
-    partials === nothing && throw(ArgumentError("no derivative rule for $f; define Tempest.scalar_partials(::typeof($f), g, y, xs...)"))
-    map(d -> scaled(g, d), partials)
+    partials === nothing && throw(ArgumentError("no derivative rule for $f; define Tempest.scalar_partials(::typeof($f), y, xs...)"))
+    partials
 end
 
 """
@@ -37,66 +47,101 @@ ChainRulesCore extension adds the method that reads them.
 """
 stated_derivatives(f, y, xs...) = nothing
 
-# A stated partial times the cotangent: a constant one is the cotangent, a
-# constant zero no contribution, a condition the cotangent where it holds.
-scaled(g, ::Nothing) = nothing
-scaled(g, d::Number) = iszero(d) ? nothing : isone(d) ? g : g * d
-scaled(g, d::Traced) = node(d).eltype === Bool ? ifelse(d, g, zero(g)) : g * d
+# A partial's contribution to its argument's cotangent, `g` times it: a
+# constant one is `g`, a constant zero none, another constant one of `g`'s
+# type (`1 / n` of an integer `n` is a Float64), a condition `g` where it
+# holds; a reciprocal divides `g`, and a negation negates its contribution, so
+# a derivative stated as `1 / x` costs what `g / x` does.
+contribution(g, ::Nothing) = nothing
+contribution(g, d::Number) = iszero(d) ? nothing : isone(d) ? g : isone(-d) ? -g : g * lit(g, d)
+function contribution(g, d::Traced)
+    n = node(d)
+    n.eltype === Bool && return ifelse(d, g, zero(g))
+    n.op isa Map{typeof(-)} && length(n.inputs) == 1 && return -contribution(g, h(d.tape, only(n.inputs)))
+    n.op isa Map{typeof(inv)} && return g / h(d.tape, only(n.inputs))
+    numerator = n.op isa Map{typeof(/)} ? d.tape.nodes[n.inputs[1]].op : nothing
+    numerator isa Constant && isone(numerator.value) && return g / h(d.tape, n.inputs[2])
+    g * d
+end
 
 # The result of a function with a stated derivative is the code's, but its
 # derivative is the statement's.
-scalar_partials(s::Stated, g, y, result, xs...) = (nothing, scalar_partials(s.f, g, y, xs...)...)
+scalar_partials(s::Stated, y, result, xs...) = (nothing, scalar_partials(s.f, y, xs...)...)
+
+# Whether `f`'s derivative at `xs` is stated: by a method of its own, or by its
+# package in a statement that runs on handles; one that branches on its
+# argument leaves the derivative of the code.
+function derivatives_stated(f, y, xs...)
+    rule = which(scalar_partials, Tuple{Core.Typeof(f), Traced, map(Core.Typeof, xs)...})
+    rule === which(scalar_partials, Tuple{Any, Any, Vararg{Any}}) || return true
+    mark = length(y.tape.nodes)
+    partials = try
+        stated_derivatives(f, y, xs...)
+    catch
+        nothing
+    end
+    resize!(y.tape.nodes, mark)
+    partials !== nothing
+end
 
 const NONDIFFERENTIABLE = (
     sign, floor, ceil, round, trunc, isnan, isinf, isfinite, signbit, !, <, <=, >, >=, ==, !=,
     isless, &, |, xor, rem, mod, div, fld, cld,
 )
 for f in NONDIFFERENTIABLE
-    @eval scalar_partials(::typeof($f), g, y, xs...) = map(_ -> nothing, xs)
+    @eval scalar_partials(::typeof($f), y, xs...) = map(_ -> nothing, xs)
 end
 
-scalar_partials(::typeof(identity), g, y, x) = (g,)
-scalar_partials(::Cast, g, y, x) = (g,)
-scalar_partials(::typeof(+), g, y, a, b) = (g, g)
-scalar_partials(::typeof(-), g, y, a, b) = (g, -g)
-scalar_partials(::typeof(-), g, y, a) = (-g,)
-scalar_partials(::typeof(*), g, y, a, b) = (g * b, g * a)
-scalar_partials(::typeof(/), g, y, a, b) = (g / b, -(g * y) / b)
-scalar_partials(::typeof(muladd), g, y, a, b, c) = (g * b, g * a, g)
-scalar_partials(::typeof(^), g, y, a, b::Traced) =
-    (g * b * a^(b - 1), node(b).eltype <: Integer ? nothing : g * y * log(a))
-scalar_partials(::typeof(^), g, y, a, b::Real) = (g * b * a^(b - 1), nothing)
-scalar_partials(::typeof(exp), g, y, x) = (g * y,)
-scalar_partials(::typeof(exp2), g, y, x) = (g * y * lit(y, log(2)),)
-scalar_partials(::typeof(exp10), g, y, x) = (g * y * lit(y, log(10)),)
-scalar_partials(::typeof(expm1), g, y, x) = (g * (y + 1),)
-scalar_partials(::typeof(log), g, y, x) = (g / x,)
-scalar_partials(::typeof(log2), g, y, x) = (g / (x * lit(y, log(2))),)
-scalar_partials(::typeof(log10), g, y, x) = (g / (x * lit(y, log(10))),)
-scalar_partials(::typeof(log1p), g, y, x) = (g / (x + 1),)
-scalar_partials(::typeof(sqrt), g, y, x) = (g / (2 * y),)
-scalar_partials(::typeof(cbrt), g, y, x) = (g / (3 * y * y),)
-scalar_partials(::typeof(abs), g, y, x) = (g * sign(x),)
-scalar_partials(::typeof(abs2), g, y, x) = (g * (2 * x),)
-scalar_partials(::typeof(inv), g, y, x) = (-(g * y * y),)
-scalar_partials(::typeof(sin), g, y, x) = (g * cos(x),)
-scalar_partials(::typeof(cos), g, y, x) = (-(g * sin(x)),)
-scalar_partials(::typeof(tan), g, y, x) = (g * (1 + y * y),)
-scalar_partials(::typeof(sinh), g, y, x) = (g * cosh(x),)
-scalar_partials(::typeof(cosh), g, y, x) = (g * sinh(x),)
-scalar_partials(::typeof(tanh), g, y, x) = (g * (1 - y * y),)
-scalar_partials(::typeof(asin), g, y, x) = (g / sqrt(1 - x * x),)
-scalar_partials(::typeof(acos), g, y, x) = (-(g / sqrt(1 - x * x)),)
-scalar_partials(::typeof(atan), g, y, x) = (g / (1 + x * x),)
-scalar_partials(::typeof(asinh), g, y, x) = (g / sqrt(x * x + 1),)
-scalar_partials(::typeof(acosh), g, y, x) = (g / sqrt(x * x - 1),)
-scalar_partials(::typeof(atanh), g, y, x) = (g / (1 - x * x),)
-scalar_partials(::typeof(atan), g, y, a, b) = (g * b / (a * a + b * b), -(g * a) / (a * a + b * b))
-scalar_partials(::typeof(max), g, y, a, b) = (ifelse(a >= b, g, zero(g)), ifelse(a >= b, zero(g), g))
-scalar_partials(::typeof(min), g, y, a, b) = (ifelse(a <= b, g, zero(g)), ifelse(a <= b, zero(g), g))
-scalar_partials(::typeof(ifelse), g, y, c, a, b) = (nothing, ifelse(c, g, zero(g)), ifelse(c, zero(g), g))
-scalar_partials(::typeof(copysign), g, y, a, b) = (ifelse(signbit(a) == signbit(b), g, -g), nothing)
-scalar_partials(::typeof(flipsign), g, y, a, b) = (ifelse(signbit(b), -g, g), nothing)
+scalar_partials(::typeof(identity), y, x) = (1,)
+scalar_partials(::Cast, y, x) = (1,)
+scalar_partials(::typeof(+), y, a, b) = (1, 1)
+scalar_partials(::typeof(-), y, a, b) = (1, -1)
+scalar_partials(::typeof(-), y, a) = (-1,)
+scalar_partials(::typeof(*), y, a, b) = (b, a)
+scalar_partials(::typeof(/), y, a, b) = (1 / b, -y / b)
+scalar_partials(::typeof(muladd), y, a, b, c) = (b, a, 1)
+scalar_partials(::typeof(^), y, a, b::Traced) = (b * a^(b - 1), node(b).eltype <: Integer ? nothing : y * log(a))
+scalar_partials(::typeof(^), y, a, b::Real) = (b * a^(b - 1), nothing)
+scalar_partials(::typeof(exp), y, x) = (y,)
+scalar_partials(::typeof(exp2), y, x) = (y * lit(y, log(2)),)
+scalar_partials(::typeof(exp10), y, x) = (y * lit(y, log(10)),)
+scalar_partials(::typeof(expm1), y, x) = (y + 1,)
+scalar_partials(::typeof(log), y, x) = (1 / x,)
+scalar_partials(::typeof(log2), y, x) = (1 / (x * lit(y, log(2))),)
+scalar_partials(::typeof(log10), y, x) = (1 / (x * lit(y, log(10))),)
+scalar_partials(::typeof(log1p), y, x) = (1 / (x + 1),)
+scalar_partials(::typeof(sqrt), y, x) = (1 / (2 * y),)
+scalar_partials(::typeof(cbrt), y, x) = (1 / (3 * y * y),)
+scalar_partials(::typeof(abs), y, x) = (sign(x),)
+scalar_partials(::typeof(abs2), y, x) = (2 * x,)
+scalar_partials(::typeof(inv), y, x) = (-(y * y),)
+scalar_partials(::typeof(sin), y, x) = (cos(x),)
+scalar_partials(::typeof(cos), y, x) = (-sin(x),)
+scalar_partials(::typeof(tan), y, x) = (1 + y * y,)
+scalar_partials(::typeof(sinh), y, x) = (cosh(x),)
+scalar_partials(::typeof(cosh), y, x) = (sinh(x),)
+scalar_partials(::typeof(tanh), y, x) = (1 - y * y,)
+scalar_partials(::typeof(asin), y, x) = (1 / sqrt(1 - x * x),)
+scalar_partials(::typeof(acos), y, x) = (-(1 / sqrt(1 - x * x)),)
+scalar_partials(::typeof(atan), y, x) = (1 / (1 + x * x),)
+scalar_partials(::typeof(asinh), y, x) = (1 / sqrt(x * x + 1),)
+scalar_partials(::typeof(acosh), y, x) = (1 / sqrt(x * x - 1),)
+scalar_partials(::typeof(atanh), y, x) = (1 / (1 - x * x),)
+function scalar_partials(::typeof(atan), y, a, b)
+    u = a * a + b * b
+    (b / u, -a / u)
+end
+function scalar_partials(::typeof(max), y, a, b)
+    larger = a >= b
+    (larger, !larger)
+end
+function scalar_partials(::typeof(min), y, a, b)
+    smaller = a <= b
+    (smaller, !smaller)
+end
+scalar_partials(::typeof(ifelse), y, c, a, b) = (nothing, c, !c)
+scalar_partials(::typeof(copysign), y, a, b) = (ifelse(signbit(a) == signbit(b), one(y), -one(y)), nothing)
+scalar_partials(::typeof(flipsign), y, a, b) = (ifelse(signbit(b), -one(y), one(y)), nothing)
 
 # Constants among a map's inputs are plain numbers to its rule.
 function rule_argument(tape, id)
@@ -106,8 +151,7 @@ end
 
 function pullback(op::Map, n, id, g, tape)
     xs = map(i -> rule_argument(tape, i), n.inputs)
-    contributions = scalar_partials(op.f, g, h(tape, id), xs...)
-    map(c -> c isa Union{Traced, Tuple} ? c : nothing, contributions)
+    map(d -> contribution(g, d), scalar_partials(op.f, h(tape, id), xs...))
 end
 
 # A component's cotangent is its tuple's there, and a tuple's are its
@@ -849,4 +893,4 @@ stopgrad(x::TracedArray) = stopgrad.(x)
 # Anything not traced is a constant already.
 stopgrad(x) = rebuild(y -> y isa Handle ? stopgrad(y) : y, x)
 
-scalar_partials(::typeof(stopgrad), g, y, x) = (nothing,)
+scalar_partials(::typeof(stopgrad), y, x) = (nothing,)

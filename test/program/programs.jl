@@ -132,3 +132,22 @@ end
     @test loss ≈ sum(W * x) && g ≈ dx
     @test last(interpret(trace(x -> T.gradient(written, x), x), x)) ≈ masked
 end
+
+# `x log y`, zero where `x` is: the branch guards the product against `0 log 0`,
+# and its derivative in `x` there, none, is not the function's, `log y`.
+xlogy(x, y) = ifelse(iszero(x), zero(x * log(y)), x * log(y))
+T.scalar_partials(::typeof(xlogy), z, x, y) = (log(y), x / y)
+
+@testset "stated derivatives" begin
+    # A function whose code traces takes a statement of its derivative where
+    # it is broadcast, as a primitive takes it for its rule.
+    x, y = [0.0, 0.5, 2.0], [0.3, 1.5, 2.0]
+    _, gx, gy = T.gradient((x, y) -> sum(xlogy.(x, y)), x, y)
+    @test gx ≈ log.(y) && gy ≈ x ./ y
+    @test interpret(trace((x, y) -> xlogy.(x, y), x, y), x, y) == xlogy.(x, y)
+    @test T.gradient(x -> sum(leaky.(x)), [-1.0, 2.0])[2] ≈ [0.01, 1.0]
+    # A constant partial is in the cotangent's type: `1 / 3` of a quotient by
+    # an integer is a Float64, but a Float32 gradient stays one.
+    @test T.gradient(x -> sum(x ./ 3), Float32[1, 2])[2] isa Vector{Float32}
+    @test all(n -> n.eltype !== Float64, differentiate(trace(x -> sum(x ./ 3), Float32[1, 2])).nodes)
+end

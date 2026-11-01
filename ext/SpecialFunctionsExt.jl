@@ -15,7 +15,7 @@ SpecialFunctions.erfc(x::Traced) = record_map(erfc, x)
 
 # The derivative of `erf`, 2/√π e^(-x²), as `erfc`'s is its negation.
 gaussian(y::Traced{T}, x) where {T} = T(2 / sqrt(π)) * exp(-(x * x))
-scalar_partials(::typeof(erf), g, y, x) = (g * gaussian(y, x),)
-scalar_partials(::typeof(erfc), g, y, x) = (-(g * gaussian(y, x)),)
+scalar_partials(::typeof(erf), y, x) = (gaussian(y, x),)
+scalar_partials(::typeof(erfc), y, x) = (-gaussian(y, x),)
 
 end
