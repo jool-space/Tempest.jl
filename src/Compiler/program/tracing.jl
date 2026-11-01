@@ -924,6 +924,16 @@ end
 # rate, a size.
 is_input(leaf) = leaf isa AbstractArray{<:Number}
 
+# A constant among the results, returned as it is, unless it could hold traced
+# values: an array of other things than numbers, a dictionary, or a closure
+# over traced values.
+function kept(leaf)
+    holds = leaf isa Union{AbstractArray, AbstractDict} ||
+        leaf isa Function && any(x -> x isa Union{Traced, TracedArray}, leaves(fields(leaf)))
+    holds && throw(ArgumentError("a program's results are arrays, numbers and constants; a $(typeof(leaf)) may hold traced values"))
+    leaf === nothing ? nothing : Kept(leaf)
+end
+
 """
     trace(f, args...) -> Program
 
@@ -943,16 +953,6 @@ Program with 3 nodes: Float64(3,) → Float64
   %3 = reduce sum over (1,) %2 :: Float64  [result]
 ```
 """
-# A constant among the results, returned as it is, unless it could hold traced
-# values: an array of other things than numbers, a dictionary, or a closure
-# over traced values.
-function kept(leaf)
-    holds = leaf isa Union{AbstractArray, AbstractDict} ||
-        leaf isa Function && any(x -> x isa Union{Traced, TracedArray}, leaves(fields(leaf)))
-    holds && throw(ArgumentError("a program's results are arrays, numbers and constants; a $(typeof(leaf)) may hold traced values"))
-    leaf === nothing ? nothing : Kept(leaf)
-end
-
 function trace(f, args...)
     tape = Tape()
     arguments = Int[]
