@@ -180,19 +180,23 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         @test built > 0
         @test built <= distinct(ex.plan)
         # A fold's state is named by its place in the group, so layers alike
-        # share kernels however their values are numbered: the stack of 8
-        # builds none that the stack of 4 has not.
-        function built_by(L)
-            layers, x = stack(L, CuArray)
-            p = differentiate(trace(stack_loss, x, layers))
+        # share kernels however their values are numbered: the stack given
+        # its layers last to first, each read under another number, builds
+        # none that the stack has not. A deeper stack is no such test: the
+        # search reaches its first layers in another order, and the stack of
+        # 4 recomputed the first layer's product, a close call (55.5 μs
+        # against 55.7, estimated), where the stack of 8 joined its
+        # backward's kernels instead.
+        reversed_loss(layers, x) = sum(abs2, foldr((l, y) -> stack_layer(y, l), layers; init = x))
+        function built_by(f, args...)
+            p = differentiate(trace(f, args...))
             before = C.cache_counts()
-            prepare(p, x, layers; target = T.CUDATarget(T.cuTileGenerator()), measure = false)
+            prepare(p, args...; target = T.CUDATarget(T.cuTileGenerator()), measure = false)
             after = C.cache_counts()
-            (compiled = after.compiled - before.compiled, loaded = after.loaded - before.loaded)
+            (after.compiled - before.compiled) + (after.loaded - before.loaded)
         end
-        four = built_by(4)
-        @test four.compiled + four.loaded > 0
-        @test built_by(8) == (compiled = 0, loaded = 0)
+        @test built_by(stack_loss, x, layers) > 0
+        @test built_by(reversed_loss, reverse(layers), x) == 0
     end
     function per_layer_plan(L)
         layers, x = stack(L, identity)
@@ -274,9 +278,13 @@ one_wave(c, precision) = c.name == "linear, bias, GELU" && precision === :full
 # memory after it. Attention's backward with its scores and dp stored writes
 # p and ds from the log-sum-exp's kernel, where Δ no longer waits for it:
 # 4.2 MB read and 4.2 MB written, estimated at 35 μs and timed at 19, what
-# the reads take.
+# the reads take. In full precision the function's step misses so where the
+# backward would recompute the scores: the exponential, 2 MB read and 2 MB
+# written, is estimated at 18 μs and timed at 10, and that side of the
+# comparison at 326 to 428 μs from run to run, timed at 270, about the
+# close-call factor.
 const CACHED_WRITES = "a launch's writes priced at the bandwidth of its reads, where timed from memory they land in the cache (`fit_memory!`, src/Compiler/cover/calibrate.jl)"
-cached_writes(c, precision) = c.name in ("the function, a training step", "written out, a training step") && precision === :tf32
+cached_writes(c, precision) = c.name == "the function, a training step" || c.name == "written out, a training step" && precision === :tf32
 
 @testset "estimates that decide are within the close-call factor, or measured" begin
     @test !hasfield(Tempest.Compiler.Implement.Work, :rate)
