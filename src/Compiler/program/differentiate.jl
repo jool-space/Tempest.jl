@@ -737,10 +737,11 @@ end
     Tempest.gradient(f, args...) -> (value, gradients...)
 
 The value of `f(args...)`, a number, and its gradient with respect to each
-argument, in that argument's structure: an array or a number for each
-floating-point array or number, and `nothing` for anything else. A struct's
-gradient is a named tuple of its fields'. On Julia
-arrays this is `interpret(differentiate(trace(f, args...)), args...)`.
+argument, in that argument's structure: an array for each floating-point
+array, and `nothing` for anything else. Numbers are constants, among a
+gradient's arguments as among a program's, so a number to differentiate by is
+an array, `[x]` say. A struct's gradient is a named tuple of its fields'. On Julia arrays this is
+`interpret(differentiate(trace(f, args...)), args...)`.
 
 In traced code it differentiates `f` where it is called, so a training step
 is a function like any other, traced and prepared as one program:
@@ -759,17 +760,15 @@ function gradient(f, args...)
     traced = filter(x -> x isa Union{Traced, TracedArray}, leaves((args, fields(f))))
     isempty(traced) && return interpret(differentiate(trace(f, args...)), args...)
     tape = first(traced).tape
-    # Each floating-point argument enters as a node of its own, whose
-    # cotangent the pass collects.
+    # Each floating-point array enters as a node of its own, whose cotangent
+    # the pass collects.
     function stand_in(x)
-        x isa Union{Traced, TracedArray} && x.tape !== tape &&
-            throw(ArgumentError("the arguments of a gradient must be traced by one program"))
-        x isa Union{AbstractFloat, AbstractArray{<:AbstractFloat}} || return x
-        id = x isa Union{Traced, TracedArray} ? x.id : constant!(tape, x)
+        x isa TracedArray && x.tape !== tape && throw(ArgumentError("the arguments of a gradient must be traced by one program"))
+        x isa AbstractArray{<:AbstractFloat} || return x
+        id = x isa TracedArray ? x.id : constant!(tape, x)
         n = tape.nodes[id]
-        s = record!(tape, Map(identity), (id,), n.dims, n.eltype; scalar = n.scalar)
         # The function never writes its arguments, as a program its inputs.
-        n.scalar ? Traced(tape, s) : TracedArray(tape, s; input = true)
+        TracedArray(tape, record!(tape, Map(identity), (id,), n.dims, n.eltype); input = true)
     end
     stand_ins = rebuild(stand_in, args)
     start = length(tape.nodes) + 1
@@ -781,9 +780,9 @@ function gradient(f, args...)
         throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
     cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))
     gradients = tangent(stand_ins) do x
-        x isa Union{Traced, TracedArray} || return nothing
+        x isa TracedArray || return nothing
         g = cotangent!(tape, cotangents, x.id)
-        g === nothing ? nothing : node(g).scalar ? Traced(tape, g.id) : TracedArray(tape, g.id)
+        g === nothing ? nothing : TracedArray(tape, g.id)
     end
     (value, gradients...)
 end

@@ -34,7 +34,8 @@
     for (f, g, args) in ((chunks, (xs...) -> Tuple(x for t in unrolled(step, (last(xs), nothing), xs[1:4]...) for x in t), (W, U, Kd, G, S0)),
             (cell, (Wh, xs, h0) -> unrolled((h, (x,)) -> tanh.(transpose(transpose(Wh)) * h .+ x), h0, xs), (Wh, xs, h0)),
             (run, (xs, s0) -> unrolled((s, (x,)) -> s * 0.5 + sum(abs2, x), s0, xs), (data(3, 4), 0.25)))
-        @test all(map((a, b) -> isapprox(a, b; rtol = 1.0e-12), T.gradient(squares(f), args...), T.gradient(squares(g), args...)))
+        same(a, b) = a === nothing ? b === nothing : isapprox(a, b; rtol = 1.0e-12)
+        @test all(map(same, T.gradient(squares(f), args...), T.gradient(squares(g), args...)))
         bodies = unique(n.op.body for n in differentiate(trace(squares(f), args...)).nodes if n.op isa C.Loop)
         @test length(bodies) == 2 && all(b -> b.steps == size(args[end - 1], ndims(args[end - 1])), bodies)
     end

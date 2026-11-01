@@ -18,14 +18,13 @@ mutable struct Running{V}
     mean::V
 end
 
-# A rule whose constructor checks its numbers, as Optimisers' do, with a
-# parameter that is no field's type.
-struct Checked{kind, R, D}
-    rate::R
-    decay::D
-    function Checked{kind}(rate, decay) where {kind}
-        rate > 0 || throw(DomainError(rate, "the rate must be positive"))
-        new{kind, typeof(rate), typeof(decay)}(rate, decay)
+# A layer whose constructor checks its weights, with a parameter that is no
+# field's type.
+struct Checked{kind, W}
+    weights::W
+    function Checked{kind}(weights) where {kind}
+        all(>(0), weights) || throw(DomainError(weights, "the weights must be positive"))
+        new{kind, typeof(weights)}(weights)
     end
 end
 
@@ -64,16 +63,24 @@ end
     @test occursin("it takes 1 argument, not 2", message(() -> c(data(4), data(4))))
 end
 
-@testset "integers are constants" begin
+@testset "numbers are constants" begin
     p = trace((x, n) -> reshape(x, n, :), data(4), 2)
     @test length(p.arguments) == 1
     @test interpret(p, [1.0, 2, 3, 4], 2) == [1.0 3.0; 2.0 4.0]
     c = compile((x, n) -> reshape(x, n, :), data(4), 2)
     @test c([1.0, 2, 3, 4], 2) == [1.0 3.0; 2.0 4.0]
     @test occursin("argument 2 is the constant 4, not the constant 2", message(() -> c(data(4), 4)))
-    # Floating-point numbers stay inputs.
+    # So are floating-point numbers, as configuration is; one that varies
+    # between calls is an array.
     s = compile((x, a) -> a .* x, data(4), 2.0)
-    @test s([1.0, 1, 1, 1], 3.0) == [3.0, 3.0, 3.0, 3.0]
+    @test length(s.executable.program.arguments) == 1 && s([1.0, 1, 1, 1], 2.0) == [2.0, 2.0, 2.0, 2.0]
+    @test occursin("argument 2 is the constant 3.0, not the constant 2.0", message(() -> s([1.0, 1, 1, 1], 3.0)))
+    v = compile((x, a) -> a .* x, data(4), fill(2.0))
+    @test v([1.0, 1, 1, 1], fill(3.0)) == [3.0, 3.0, 3.0, 3.0]
+    # A gradient has nothing for a number, as for an integer, and one for an
+    # array of no dimensions.
+    @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], 2.0)[3] === nothing
+    @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], fill(2.0))[3] == fill(3.0)
 end
 
 @testset "structs among the arguments" begin
@@ -100,12 +107,12 @@ end
 
 @testset "structs are built without their constructors" begin
     # Tracing builds each struct anew around traced fields, as `new` would: a
-    # constructor that checks its numbers, which a traced number cannot
+    # constructor that checks its weights, which traced weights cannot
     # answer, does not run. Its parameters other than fields' types are kept.
-    rule = Checked{:descent}(0.1, (0.9, 0.99))
-    c = compile((r, x) -> r.rate * r.decay[1] .* x, rule, data(3))
-    @test c(Checked{:descent}(0.5, (0.9, 0.99)), [1.0, 2, 3]) ≈ 0.45 .* [1.0, 2, 3]
-    @test compile(r -> (r, sum(r.decay)), rule)(rule)[1] isa Checked{:descent}
+    layer = Checked{:scale}([1.0, 2.0, 3.0])
+    c = compile((l, x) -> l.weights .* x, layer, data(3))
+    @test c(Checked{:scale}([2.0, 2.0, 2.0]), [1.0, 2, 3]) == [2.0, 4.0, 6.0]
+    @test compile(l -> (l, sum(l.weights)), layer)(layer)[1] isa Checked{:scale}
 end
 
 @testset "constants among the results" begin

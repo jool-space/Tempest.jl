@@ -14,9 +14,9 @@ It returns what `f` returns, in arrays of its own, with numbers as numbers.
 `:none` none, `:close` the options whose estimates are close, `:all` every
 option; `true` and `false` mean `:close` and `:none`.
 
-Which leaves of the arguments are inputs follows `trace`: arrays and numbers,
-also inside tuples, named tuples and structs, mutable ones too, except
-integers, which are constants. A call whose arguments differ in anything but the values of
+Which leaves of the arguments are inputs follows `trace`: arrays, also inside
+tuples, named tuples and structs, mutable ones too. Numbers are constants; a
+number that varies between calls is an array, `[x]` say. A call whose arguments differ in anything but the values of
 inputs throws, naming the difference.
 
 ```jldoctest
@@ -61,14 +61,14 @@ end
 # program computed a number, else an array, though it have no dimensions.
 fresh(x, scalar) = scalar ? Array(x)[] : copy(x)
 
-"An input as a call must match it: its element type, and its size if an array."
+"An input as a call must match it: its element type and its size."
 struct InputType
     eltype::Type
-    dims::Union{Nothing, Tuple}
+    dims::Tuple
 end
 
 # The arguments as a call must match them: inputs by type, any other leaf as it is.
-signature(args) = structure_of(x -> is_input(x) ? InputType(eltype(x), x isa Number ? nothing : size(x)) : x, args)
+signature(args) = structure_of(x -> is_input(x) ? InputType(eltype(x), size(x)) : x, args)
 
 # Where `got` differs from `expected`, in words, or `nothing`.
 function difference(expected::Tuple, got::Tuple)
@@ -101,7 +101,7 @@ kind(::Tuple) = Tuple
 kind(::NamedTuple) = NamedTuple
 kind(::Fields{T}) where {T} = Base.typename(T).wrapper
 
-describe(x::InputType) = x.dims === nothing ? string("a ", x.eltype) : string("a ", x.eltype, " array of size ", x.dims)
+describe(x::InputType) = string("a ", x.eltype, " array of size ", x.dims)
 describe(x::Fields{T}) where {T} = string("a ", nameof(T))
 describe(x::Tuple) = string("a tuple of ", length(x))
 describe(x::NamedTuple) = string("a named tuple of ", join(keys(x), ", "))

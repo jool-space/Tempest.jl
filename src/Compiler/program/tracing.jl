@@ -919,18 +919,20 @@ end
 
 # Tracing a function.
 
-# What becomes a program's input among the leaves of its arguments.
-is_input(leaf) = leaf isa AbstractArray{<:Number} || leaf isa Number && !(leaf isa Integer)
+# What becomes a program's input among the leaves of its arguments: arrays.
+# Numbers are constants, as configuration is: a layer's epsilon, a rule's
+# rate, a size.
+is_input(leaf) = leaf isa AbstractArray{<:Number}
 
 """
     trace(f, args...) -> Program
 
-Run `f` on stand-ins for `args` and record what it computes. Arrays and numbers
-among `args`, also inside tuples, named tuples and structs, mutable ones too,
-become the program's inputs, except integers: they are constants, so that they
-can be sizes, and an integer that varies between executions is an array of one.
-Each struct is built anew around the stand-ins, so `f` never writes the
-caller's. The results are arrays and numbers in the same kinds of structure;
+Run `f` on stand-ins for `args` and record what it computes. Arrays among
+`args`, also inside tuples, named tuples and structs, mutable ones too, become
+the program's inputs. Numbers are constants, as configuration is: an integer
+can be a size, a layer's epsilon or a rule's rate is a number of the program,
+and a number that varies between executions is an array, `[x]` say. Each
+struct is built anew around the stand-ins, so `f` never writes the caller's. The results are arrays and numbers in the same kinds of structure;
 any other leaf, `nothing` or a layer's function, is returned as it is.
 
 ```jldoctest
@@ -955,16 +957,10 @@ function trace(f, args...)
     tape = Tape()
     arguments = Int[]
     function stand_in(leaf)
-        if leaf isa AbstractArray{<:Number}
-            id = record!(tape, Argument(), (), size(leaf), eltype(leaf))
-            push!(arguments, id)
-            return TracedArray(tape, id; input = true)
-        elseif is_input(leaf)
-            id = record!(tape, Argument(), (), (), typeof(leaf); scalar = true)
-            push!(arguments, id)
-            return Traced(tape, id)
-        end
-        leaf
+        is_input(leaf) || return leaf
+        id = record!(tape, Argument(), (), size(leaf), eltype(leaf))
+        push!(arguments, id)
+        TracedArray(tape, id; input = true)
     end
     traced = rebuild(stand_in, args)
     position = Dict(id => k for (k, id) in enumerate(arguments))

@@ -90,10 +90,10 @@ end
 # step after step with only the batch bound, writing every parameter and
 # moment into its own storage, and matches the interpreter step by step.
 function adam(params, state, grads; rate = 1.0f-2, β1 = 0.9f0, β2 = 0.999f0, ϵ = 1.0f-8)
-    t = state.t + 1
+    t = state.t .+ 1
     m = map((m, g) -> β1 .* m .+ (1 - β1) .* g, state.m, grads)
     v = map((v, g) -> β2 .* v .+ (1 - β2) .* g .^ 2, state.v, grads)
-    new = map((p, m, v) -> p .- rate .* (m ./ (1 - β1^t)) ./ (sqrt.(v ./ (1 - β2^t)) .+ ϵ), params, m, v)
+    new = map((p, m, v) -> p .- rate .* (m ./ (1 .- β1 .^ t)) ./ (sqrt.(v ./ (1 .- β2 .^ t)) .+ ϵ), params, m, v)
     new, (; m, v, t)
 end
 mlp_loss(p, batch) = sum(abs2, p.w2 * tanh.(p.w1 * batch.x .+ p.b1) .+ p.b2 .- batch.y) / size(batch.y, 2)
@@ -105,7 +105,9 @@ end
 
 params = map(single, (w1 = data(16, 8; scale = 0.3) ./ 4, b1 = data(16; scale = 0.2) ./ 4, w2 = data(4, 16; scale = 0.5) ./ 4,
     b2 = data(4; scale = 0.7) ./ 4))
-adam_state = (m = map(zero, params), v = map(zero, params), t = 0.0f0)
+# The step count changes every step, so it is an array: of one element, as
+# Julia's broadcasting returns an array of no dimensions as a number.
+adam_state = (m = map(zero, params), v = map(zero, params), t = zeros(Float32, 1))
 batches = [map(single, (x = data(8, 32; scale = 0.1k), y = data(4, 32; scale = 0.05k))) for k in 1:4]
 step_program = trace(training_step, params, adam_state, batches[1])
 

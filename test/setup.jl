@@ -25,9 +25,10 @@ data(dims...; scale = 1.0) = 2.0 .* sin.(scale .* reshape(Float64.(1:prod(dims))
 single(x) = x isa AbstractArray{<:AbstractFloat} ? Float32.(x) : x isa AbstractFloat ? Float32(x) : x
 
 # Results agree with a reference wherever they live, a number standing for an
-# array of no dimensions.
+# array of no dimensions, and `nothing` for `nothing`.
 on_host(x) = x isa AbstractArray ? (ndims(x) == 0 ? Array(x)[] : Array(x)) : x
-agree(a, b; rtol = 1.0e-10) = all(map((x, y) -> isapprox(on_host(x), on_host(y); rtol, atol = rtol * 1.0e-2), a, b))
+agree(a, b; rtol = 1.0e-10) =
+    all(map((x, y) -> x === nothing ? y === nothing : isapprox(on_host(x), on_host(y); rtol, atol = rtol * 1.0e-2), a, b))
 
 # What `f` throws, in words, or "" when it throws nothing.
 message(f) = try f(); "" catch err; sprint(showerror, err) end

@@ -180,7 +180,7 @@ function planned(program, d, inputs, pairs, input, by_reference, build)
     referenced = Vector{Any}(nothing, length(program.arguments))
     xs = argument_leaves(program, inputs)
     for j in by_reference, k in leaves(program.input_structure[j])
-        k === nothing || xs[k] isa Number || (referenced[k] = xs[k])
+        k === nothing || (referenced[k] = xs[k])
     end
     buffers = Vector{Any}(nothing, length(values))
     # Results in an argument's storage, and folds by key over the contents they
@@ -324,7 +324,7 @@ end
 function bind_leaves!(ex, positions, xs)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
     for (k, x) in zip(positions, xs)
-        k === nothing || x === ex.referenced[k] || copyto!(ex.arguments[k], x isa Number ? [x] : vec(x))
+        k === nothing || x === ex.referenced[k] || copyto!(ex.arguments[k], vec(x))
     end
     ex
 end
