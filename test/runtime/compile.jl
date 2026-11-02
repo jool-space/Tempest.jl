@@ -30,6 +30,13 @@ end
 
 loss(m, x) = sum(abs2, m(x))
 
+# Globals a compiled function may read by name, as a script's or the REPL's.
+held_weights = data(3, 4)
+held_layer = Dense(data(3, 4), data(3), tanh)
+const held_table = data(4)
+held_rate = 0.5
+held_step(x) = Tempest.gradient(m -> loss(m, x), held_layer)
+
 function finite_difference_weights(m, x)
     g = similar(m.w)
     for i in eachindex(m.w)
@@ -171,6 +178,33 @@ end
     # `f`'s own leaves are matched at each call, as the arguments are.
     push!(v, 1.0)
     @test occursin("f.v.contents is a Float64 array of size (5,), not a Float64 array of size (4,)", message(() -> boxed(x)))
+end
+
+@testset "globals the function reads" begin
+    x = data(4)
+    # A global holding arrays would be kept as it was when traced, `const` or
+    # not: refused, saying what to do instead.
+    @test occursin("reads the global held_weights, which holds arrays", message(() -> compile(x -> held_weights * x, x)))
+    @test occursin("reads the global held_layer", message(() -> compile(x -> held_layer(x), x)))
+    @test occursin("reads the global held_table", message(() -> compile(x -> held_table .* x, x)))
+    # Passed as an argument, it is an input.
+    @test compile((w, x) -> w * x, held_weights, x)(held_weights, x) ≈ held_weights * x
+    # A number is a constant, and one not declared `const` is checked at each call.
+    c = compile(x -> held_rate .* x, x)
+    @test c(x) ≈ 0.5 .* x
+    global held_rate = 0.25
+    @test occursin("the global held_rate is 0.25, not 0.5 as when traced", message(() -> c(x)))
+    global held_rate = 0.5
+    # Base's globals are its code's.
+    @test compile(x -> π .* x, x)(x) ≈ π .* x
+    # What a function the compiled one calls reads is not seen: the layer is
+    # kept as it was when traced. A gradient by constants cannot be refused
+    # instead, as a transposed convolution is one at zeros. Closed by a tracer
+    # that reads the code it runs, not only the values it is given.
+    step = compile(x -> held_step(x), x)
+    held_layer.w .*= 2
+    @test_broken step(x)[2].w ≈ held_step(x)[2].w
+    held_layer.w ./= 2
 end
 
 @testset "mutable structs among the arguments" begin
