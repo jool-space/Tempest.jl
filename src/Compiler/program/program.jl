@@ -269,11 +269,12 @@ constant_leaf(::Nothing) = nothing
 # struct's fields: tracing builds one of its own around the traced fields,
 # whose fields the traced code may set, and a struct among the results is
 # built anew. What it writes into the arrays of one lands in them, as into any
-# input's. Closures
-# are leaves, and so are Tempest's own structs.
+# input's. A closure is a struct whose fields are what it captures, a variable
+# assigned again held in a `Core.Box`, a mutable struct; a function without
+# fields is a leaf, and so are Tempest's own structs.
 function nested(x)
     T = typeof(x)
-    !(x isa Union{AbstractArray, Number, Function, Type, Module, AbstractString, Symbol, AbstractDict, Tuple, NamedTuple}) &&
+    !(x isa Union{AbstractArray, Number, Type, Module, AbstractString, Symbol, AbstractDict, Tuple, NamedTuple}) &&
         isstructtype(T) && fieldcount(T) > 0 && Base.moduleroot(parentmodule(T)) !== Base.moduleroot(@__MODULE__)
 end
 

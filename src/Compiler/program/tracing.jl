@@ -954,11 +954,10 @@ end
 is_input(leaf) = leaf isa AbstractArray{<:Number}
 
 # A constant among the results, returned as it is, unless it could hold traced
-# values: an array of other things than numbers, a dictionary, or a closure
-# over traced values.
+# values: an array of other things than numbers, or a dictionary. A closure
+# over traced values is a struct, built anew around the results.
 function kept(leaf)
-    holds = leaf isa Union{AbstractArray, AbstractDict} ||
-        leaf isa Function && any(x -> x isa Union{Traced, TracedArray}, leaves(fields(leaf)))
+    holds = leaf isa Union{AbstractArray, AbstractDict}
     holds && throw(ArgumentError("a program's results are arrays, numbers and constants; a $(typeof(leaf)) may hold traced values"))
     leaf === nothing ? nothing : Kept(leaf)
 end
@@ -974,6 +973,11 @@ and a number that varies between executions is an array, `[x]` say. Each
 struct is built anew around the stand-ins, so `f` never writes the caller's.
 The results are arrays and numbers in the same kinds of structure; any other
 leaf, `nothing` or a layer's function, is returned as it is.
+
+`f` itself is code here: the arrays it holds, a closure's captures or a
+callable struct's fields, are constants of the program, copied when traced.
+To make them inputs, pass `f` among the arguments, as `compile` does:
+`trace((f, x) -> f(x), f, x)`.
 
 `f` may write into an input, as a layer updates its running statistics: what
 it wrote is the input's contents when the program ends, a result after those

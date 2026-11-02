@@ -127,9 +127,50 @@ end
     @test r.size === (2, 3) && r.rate === 0.5 && r.x == 2 .* window.x
     # A constant array of numbers is a result like a computed one.
     @test compile(x -> (x, [1.0, 2.0]), x)(x)[2] == [1.0, 2.0]
-    # A closure over traced arrays, or an array of them, would hand them out.
-    @test occursin("may hold traced values", message(() -> trace(x -> (y -> y .+ x), x)))
+    # A closure is a struct of what it captures, built anew around results.
+    shift = compile(x -> (y -> y .+ 2 .* x), x)(x)
+    @test shift([1.0, 1.0, 1.0, 1.0]) ≈ 1 .+ 2 .* x
+    # An array of traced arrays would hand them out.
     @test occursin("may hold traced values", message(() -> trace(x -> Any[x, x], x)))
+end
+
+@testset "the function's arrays are inputs" begin
+    # `compile` traces the call `f(args...)` with `f` an argument like the
+    # others: what a closure captures and a callable struct's fields are read
+    # at each call, as the untraced function reads them.
+    w, x = data(3, 4; scale = 0.3), data(4)
+    c = compile(x -> w * x, x)
+    @test length(c.executable.program.arguments) == 2
+    w .= 2 .* w
+    @test c(x) ≈ w * x
+    # A captured variable that is assigned again is held in a box, whose
+    # contents are read at each call.
+    v = data(4)
+    scaled = x -> v .* x
+    boxed = compile(scaled, x)
+    v = data(4; scale = 2.0)
+    @test fieldtype(typeof(scaled), :v) === Core.Box && boxed(x) ≈ v .* x
+    # A layer compiles as itself, and a closure over a model as over arrays.
+    m = Dense(data(3, 4; scale = 0.3), data(3), tanh)
+    layer, step = compile(m, x), compile(x -> Tempest.gradient(loss, m, x), x)
+    m.w .= 0.5 .* m.w
+    @test layer(x) ≈ m(x)
+    value, gm, gx = step(x)
+    @test value ≈ loss(m, x) && isapprox(gm.w, finite_difference_weights(m, x); rtol = 1.0e-5)
+    # What the program writes into an array of `f`'s lands in it, as running
+    # statistics land in a layer's.
+    function normalized(m, x)
+        μ = vec(sum(x; dims = 2)) ./ size(x, 2)
+        m.mean .= 0.9 .* m.mean .+ 0.1 .* μ
+        m.scale .* (x .- μ)
+    end
+    r, y = Running(data(3), data(3; scale = 0.5)), data(3, 4)
+    theirs = deepcopy(r)
+    c = compile(y -> normalized(r, y), y)
+    @test c(y) ≈ normalized(theirs, y) && r.mean ≈ theirs.mean
+    # `f`'s own leaves are matched at each call, as the arguments are.
+    push!(v, 1.0)
+    @test occursin("f.v.contents is a Float64 array of size (5,), not a Float64 array of size (4,)", message(() -> boxed(x)))
 end
 
 @testset "mutable structs among the arguments" begin
