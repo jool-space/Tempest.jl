@@ -52,9 +52,10 @@ use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
 `explain(c)` shows it.
 """
 function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = :close, capture::Bool = true)
-    globals = read_globals(f, args)
+    passed = argument_arrays((f, args...))
+    globals = read_globals(f, args, passed)
     program, met = trace_meeting(call, f, args...)
-    refuse_held(met)
+    refuse_held(met, passed)
     ex = prepare(program, f, args...; target, measure)
     capture && capture!(ex)
     Compiled(f, ex, signature((f, args...)), globals)
@@ -67,12 +68,14 @@ call(f, args...) = f(args...)
 # The globals `f`'s own code reads by name that a call must find as they were:
 # those not declared `const`, with their values when traced. One holding arrays
 # throws, since the program would keep them as they were when traced, as a
-# model in a global would be. What a function `f` calls reads is not seen.
-function read_globals(f, args)
+# model in a global would be; `passed` are the arguments' arrays, to tell one
+# passed too. What a function `f` calls reads is `refuse_held`'s.
+function read_globals(f, args, passed)
     values = Pair{GlobalRef, Any}[]
     for g in named_globals(f, args)
         value = getglobal(g.mod, g.name)
-        any(is_input, leaves(value)) && throw(ArgumentError(holds_arrays(g.name)))
+        arrays = filter(is_input, leaves(value))
+        isempty(arrays) || throw(ArgumentError(holds_arrays(g.name, any(x -> wraps(passed, x), arrays))))
         isconst(g.mod, g.name) || push!(values, g => value)
     end
     values
@@ -95,15 +98,41 @@ named!(refs, x::Core.ReturnNode) = isdefined(x, :val) && named!(refs, x.val)
 named!(refs, x::Core.GotoIfNot) = named!(refs, x.cond)
 named!(refs, x) = nothing
 
-holds_arrays(name) = string("the function reads the global ", name, ", which holds arrays: compiled, it would keep ",
-    "them as they were when traced. Pass ", name, " as an argument, or bind it to a local the function captures")
+holds_arrays(name, passed) = string("the function reads the global ", name, ", which holds arrays: compiled, it would ",
+    "keep them as they were when traced. ", passed ? string(name, " is an argument too: read the argument rather than ",
+    "the global") : string("Pass ", name, " as an argument, or bind it to a local the function captures"))
+
+# The arguments' arrays, and those they wrap.
+function argument_arrays(args)
+    arrays = Base.IdSet{Any}()
+    for x in leaves(args)
+        is_input(x) || continue
+        while true
+            push!(arrays, x)
+            p = parent(x)
+            p === x && break
+            x = p
+        end
+    end
+    arrays
+end
+
+# Whether `x`, or an array it wraps, is among `arrays`.
+function wraps(arrays, x)
+    while true
+        x in arrays && return true
+        p = parent(x)
+        p === x && return false
+        x = p
+    end
+end
 
 # The arrays tracing met as constants that live in a global, refused as those
 # `f`'s own code names are: what a function `f` calls reads, seen by its arrays
 # rather than its name. The globals of every module loaded are looked through,
 # only when tracing met an array. A global a function assigned while traced
 # holds stand-ins of the program, and is refused first.
-function refuse_held(met)
+function refuse_held(met, passed)
     isempty(met) && return
     held = held_arrays()
     if !isempty(held.traced)
@@ -114,7 +143,7 @@ function refuse_held(met)
     end
     for x in met
         at = holder(held.arrays, x)
-        at === nothing || throw(ArgumentError(holds_arrays(global_name(at))))
+        at === nothing || throw(ArgumentError(holds_arrays(global_name(at), wraps(passed, x))))
     end
 end
 

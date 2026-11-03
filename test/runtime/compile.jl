@@ -37,6 +37,7 @@ const held_table = data(4)
 held_rate = 0.5
 held_step(x) = Tempest.gradient(m -> loss(m, x), held_layer)
 held_total = data(4)
+held_read(x) = held_layer(x)
 held_add!(x) = (global held_total = held_total .+ x; held_total)
 
 function finite_difference_weights(m, x)
@@ -201,6 +202,9 @@ end
     @test compile(x -> π .* x, x)(x) ≈ π .* x
     # What a function the compiled one calls reads is seen by its arrays.
     @test occursin("reads the global held_layer", message(() -> compile(x -> held_step(x), x)))
+    # Passed as an argument too, the global is still read by name: the argument is to be read instead.
+    @test occursin("held_layer is an argument too", message(() -> compile((m, x) -> m(x) .+ held_layer(x), held_layer, x)))
+    @test occursin("held_layer is an argument too", message(() -> compile((m, x) -> m(x) .+ held_read(x), held_layer, x)))
     # A global it assigns while traced holds stand-ins: refused, to be assigned again.
     total = held_total
     @test occursin("assigned the global held_total while traced", message(() -> compile(x -> held_add!(x), x)))
