@@ -159,15 +159,16 @@ blank_launch() = FloorLaunch(floor_function(blank, ((), 1))..., ((), 1), 1, 1)
 # times as long or a tenth changes one plan of the corpus's.
 const LAUNCH = 5.0e-7
 
-# The memory's peak, its clock's two transfers a cycle over the bus, and what
-# the cache holds twice as fast, as GB10 copies 4 MiB at 476 GB/s and 256 MiB
-# at 245. GB10 reports its LPDDR5X's clock at the transfer rate, 8533 MHz over
-# 256 bits, so its peak here is 546 GB/s, twice the datasheet's, which changes
-# no plan of the corpus's; a tenth of that changes eight.
+# The memory's peak: its transfers a second per pin, a bit each, over the
+# bus's pins; and what the cache holds twice as fast, as GB10 copies 4 MiB at
+# 476 GB/s and 256 MiB at 245. A discrete device reports its memory's clock,
+# which transfers twice a cycle; an integrated one, the system's memory, as
+# GB10 its LPDDR5X's transfer rate, 8533 MT/s over 256 pins, 273 GB/s.
 function Tempest.Compiler.device_rates(::CUDATarget)
     device = CUDACore.device()
     attribute(a) = Float64(CUDACore.attribute(device, a))
-    bandwidth = 2 * 1.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE) * attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8
+    transfers = (attribute(CUDACore.DEVICE_ATTRIBUTE_INTEGRATED) == 1 ? 1 : 2) * 1.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE)
+    bandwidth = transfers * attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8
     (launch = LAUNCH, cached = 2bandwidth, bandwidth,
      cache = attribute(CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE),
      blocks = attribute(CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
