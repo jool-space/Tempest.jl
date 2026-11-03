@@ -94,7 +94,7 @@ Tempest.Compiler.release
 Tempest.Compiler.device_name
 Tempest.Compiler.measurable
 Tempest.Compiler.time_launch
-Tempest.Compiler.calibrate
+Tempest.Compiler.device_rates
 ```
 
 ### Building kernels

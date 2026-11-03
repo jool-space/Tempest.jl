@@ -294,11 +294,9 @@ function calibrate!(target)
     applied!(d)
 end
 
-# The device's rates from its rates file, measured and kept there first when
-# the file has none. A target that cannot measure has fixed rates.
-function device_rates!(target, calibration, path)
+# The device's rates as it reports them. A target that cannot measure has fixed rates.
+function target_rates(target)
     measurable(target) || return rates(target)
-    haskey(calibration, "launch") || foreach(((k, v),) -> keep!(calibration, path, string(k), v), pairs(calibrate(target)))
-    c = calibration
-    Rates(c["launch"], c["cached"], c["bandwidth"], c["cache"], Int(c["blocks"]), NOISE)
+    r = device_rates(target)
+    Rates(r.launch, r.cached, r.bandwidth, r.cache, Int(r.blocks), NOISE)
 end

@@ -90,7 +90,7 @@ function Decider(target, graph; measure = :close, recompute = (), keep = ())
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     calibration = load_record(calibration_path)
-    r = dry ? rates(target) : device_rates!(target, calibration, calibration_path)
+    r = dry ? rates(target) : target_rates(target)
     Decider(target, graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
         Set{Int}(recompute), Set{Int}(keep), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
         Dict{Any, Vector{Choice}}(), Dict{String, Failure}())

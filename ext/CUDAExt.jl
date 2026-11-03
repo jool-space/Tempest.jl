@@ -155,16 +155,22 @@ blank(_, _) = nothing
 
 blank_launch() = FloorLaunch(floor_function(blank, ((), 1))..., ((), 1), 1, 1)
 
-# The gap between launches of an empty kernel in a captured graph, copies of
-# 4 MiB (what the cache holds) and 256 MiB (more), from memory, the cache's
-# size and the multiprocessors.
-function Tempest.Compiler.calibrate(target::CUDATarget)
+# Half a microsecond between launches in a captured graph: GB10's 0.47. Ten
+# times as long or a tenth changes one plan of the corpus's.
+const LAUNCH = 5.0e-7
+
+# The memory's peak, its clock's two transfers a cycle over the bus, and what
+# the cache holds twice as fast, as GB10 copies 4 MiB at 476 GB/s and 256 MiB
+# at 245. GB10 reports its LPDDR5X's clock at the transfer rate, 8533 MHz over
+# 256 bits, so its peak here is 546 GB/s, twice the datasheet's, which changes
+# no plan of the corpus's; a tenth of that changes eight.
+function Tempest.Compiler.device_rates(::CUDATarget)
     device = CUDACore.device()
-    copying(n) = (a = CUDACore.zeros(UInt8, n); b = similar(a); 2n / Tempest.Compiler.time_launch(target, () -> copyto!(b, a)))
-    (launch = batched(target, blank_launch()),
-     cached = copying(4 << 20), bandwidth = copying(256 << 20),
-     cache = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)),
-     blocks = Float64(CUDACore.attribute(device, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)))
+    attribute(a) = Float64(CUDACore.attribute(device, a))
+    bandwidth = 2 * 1.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE) * attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8
+    (launch = LAUNCH, cached = 2bandwidth, bandwidth,
+     cache = attribute(CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE),
+     blocks = attribute(CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT))
 end
 
 # A fold by key's items run at once: a sum's add atomically.

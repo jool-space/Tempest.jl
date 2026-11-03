@@ -1,8 +1,9 @@
 # What a launch costs: the device's rates, each package's line for products of
 # a class and its memory, and the seconds of a launch's work on them, after
-# XLA's GPU performance model. Rates, lines, memories and the price of each
-# scalar function are measured on first need (see calibrate.jl) and kept in
-# the rates file beside the tuning record.
+# XLA's GPU performance model. The rates are the device's as it reports them
+# (`device_rates`); lines, memories and the price of each scalar function are
+# measured on first need (see calibrate.jl) and kept in the rates file beside
+# the tuning record.
 
 """
 A device's rates for estimates: seconds per launch in a captured graph, bytes

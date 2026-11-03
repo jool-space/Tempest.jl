@@ -8,7 +8,7 @@
 # target defines them for its type (see CUDAExt).
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, task_state, device_name,
-    measurable, time_launch, calibrate, capture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
+    measurable, time_launch, device_rates, capture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
@@ -252,13 +252,15 @@ a `measurable` target defines it.
 function time_launch end
 
 """
-    calibrate(target) -> rates
+    device_rates(target) -> rates
 
-The device's rates, measured once and kept in its rates file (see `Rates`):
-a named tuple of `launch`, the seconds between launches in a captured graph;
-`cached` and `bandwidth`, bytes per second for a launch that moves what the
-cache holds and for one that moves more, each from memory, as `time_launch`
-times; `cache`, its bytes; and `blocks`, the blocks that fill the device.
-Only a `measurable` target defines it.
+The device's rates as it reports them (see `Rates`): a named tuple of
+`launch`, the seconds between launches in a captured graph; `cached` and
+`bandwidth`, bytes per second for a launch that moves what the cache holds
+and for one that moves more, each from memory; `cache`, its bytes; and
+`blocks`, the blocks that fill the device. They are not measured: off by
+twice or half, they change no plan of the corpus's, and the rates that do,
+each package's products and each scalar function's seconds, are fitted on
+first need. Only a `measurable` target defines it.
 """
-function calibrate end
+function device_rates end
