@@ -1,10 +1,13 @@
 {
   "private": true,
   "type": "module",
-  "description": "Draws the README banner, docs/src/assets/tempest-banner-{dark,light}.svg",
-  "scripts": { "build": "node build.mjs" },
+  "description": "Draws the README banner, docs/src/assets/tempest-banner-{dark,light}.avif",
+  "scripts": {
+    "build": "node build.mjs"
+  },
   "dependencies": {
     "d3-contour": "4.0.2",
-    "harfbuzzjs": "1.6.3"
+    "harfbuzzjs": "1.6.3",
+    "playwright": "1.64.1"
   }
 }

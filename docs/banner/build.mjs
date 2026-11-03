@@ -1,35 +1,49 @@
-// Draws the README banner: two rows of cat's-eye vortices with the name between them, one file per GitHub theme.
+// Draws the README banner: two rows of cat's-eye vortices with the name between them, one animated AVIF per
+// GitHub theme.
 //
-//   cd docs/banner && npm install && node build.mjs
+//   cd docs/banner && npm install && npx playwright install chromium-headless-shell
+//   python3 -m pip install -r requirements.txt
+//   node build.mjs
 //
 // The flow is Stuart's solution for a shear layer rolled up into a row of vortices, doubled into two layers
 // of opposite sign: the middle band moves right, the outer bands move left, and the eyes turn between them.
 // Its streamlines are drawn as contours of the stream function, each eye's loops shaded toward a brighter green
-// at its centre, and short streaks move along every line at the flow's own speed there.
+// at its centre, and short streaks move along every line at the flow's own speed there. A gaussian vignette
+// keeps the eyes around the name in focus and lets the rest fade out before the frame's edges.
 //
-// GitHub shows a README image through <img>, so the files hold no script and load no font: the motion is CSS
-// keyframes, the colours are fixed per theme, and the name is drawn as outlines.
+// The motion is drawn once as an SVG with CSS keyframes, then rendered frame by frame in headless Chromium and
+// encoded as AVIF (encode.py). The SVG itself is not the banner: a browser redraws an animated SVG in <img>
+// whole on every frame, a few CPU cores' worth for this many lines, while showing decoded frames is cheap.
+// The frames make one loop, so every line's streak cycle is fitted to divide it.
 
 import { contours } from 'd3-contour';
 import { Blob, Face, Font, Buffer, Variation, shape } from 'harfbuzzjs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chromium } from 'playwright';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { Buffer as Bytes } from 'node:buffer';
+import { spawnSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { crc32, deflateSync } from 'node:zlib';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const OUT = join(HERE, '..', 'src', 'assets');
+const OUT = join(HERE, '..', 'src', 'assets'), CACHE = join(HERE, '.cache');
 
-const W = 1280, H = 360, MID = H / 2, LANE = 40;
+// Four eyes wide: four in the lower row, three in the upper with halves at the edges. At about the width of a
+// README column, so lines show at the width they are drawn.
+const W = 852, H = 360, MID = H / 2, LANE = 40, LAMBDA = W / 4;
 const CELL = 4;                   // drawing unit in px; paths are written in these units, scaled up by the frame
-const SPACING = 9, V0 = 22;       // streak spacing in drawing units; streak speed in px/s in the free bands
+const SPACING = 9;                // streak spacing along a line, in drawing units
+// Streak speed in px/s in the free bands. This speed fits the lines' streak cycles to the loop within 10%.
+const V0 = 32.56, LOOP = 6, FPS = 12;
 const THEMES = {
   dark:  { line: '#52B33A', hot: '#A1F266', ink: '#E8F4D2' },
-  light: { line: '#5BAF3D', hot: '#2E8F1A', ink: '#389826' },
+  light: { line: '#5BAF3D', hot: '#2E8F1A', ink: '#0C3502' },
 };
 const FONT = {
   url: 'https://raw.githubusercontent.com/google/fonts/95f4904fc8bcf26d3420fe315560c96417c6dec7/ofl/anybody/Anybody%5Bwdth,wght%5D.ttf',
-  file: join(HERE, '.cache', 'Anybody.ttf'),
+  file: join(CACHE, 'Anybody.ttf'),
   variations: { wght: 800, wdth: 135 },
 };
 
@@ -185,6 +199,47 @@ async function wordmark(text = 'Tempest', fit = 640, maxSize = 74) {
   return d;
 }
 
+// The lines' opacity, as an image mask: a gaussian around the name, tapered to zero over the last TAPER_SIDES px
+// at the sides and TAPER_ENDS px at the top and bottom, and cut out along the name's lane. A gaussian never
+// reaches zero, and whatever is left at an edge shows the frame's rectangle.
+const SIGMA_X = 170, SIGMA_Y = 150, TAPER_SIDES = 120, TAPER_ENDS = 60;
+// A cosine rise from 0 at t = 0 to 1 at t = 1, and 1 beyond.
+const taper = t => t >= 1 ? 1 : 0.5 - 0.5 * Math.cos(Math.PI * t);
+function lane(y) {
+  const a = MID - LANE - 22, b = MID - LANE + 6, c = MID + LANE - 6, d = MID + LANE + 22;
+  if (y <= a || y >= d) return 1;
+  if (y < b) return (b - y) / (b - a);
+  if (y > c) return (y - c) / (d - c);
+  return 0;
+}
+function vignette(x, y) {
+  const g = Math.exp(-(((x - W / 2) / SIGMA_X) ** 2 + ((y - MID) / SIGMA_Y) ** 2) / 2);
+  return g * taper(Math.min(x, W - x) / TAPER_SIDES) * taper(Math.min(y, H - y) / TAPER_ENDS) * lane(y);
+}
+// The mask as a PNG: white, with the vignette in the alpha channel.
+function vignettePNG() {
+  const row = W * 4 + 1, raw = Bytes.alloc(row * H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const o = y * row + 1 + x * 4;
+    raw[o] = raw[o + 1] = raw[o + 2] = 255;
+    raw[o + 3] = Math.round(255 * vignette(x + 0.5, y + 0.5));
+  }
+  const chunk = (type, data) => {
+    const b = Bytes.alloc(12 + data.length);
+    b.writeUInt32BE(data.length, 0);
+    b.write(type, 4, 'latin1');
+    data.copy(b, 8);
+    b.writeUInt32BE(crc32(b.subarray(4, 8 + data.length)), 8 + data.length);
+    return b;
+  };
+  const ihdr = Bytes.alloc(13);
+  ihdr.writeUInt32BE(W, 0);
+  ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8;   // bits per channel
+  ihdr[9] = 6;   // RGBA
+  return Bytes.concat([Bytes.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw, { level: 9 })), chunk('IEND', Bytes.alloc(0))]);
+}
+
 // Every path is stored once in <defs> and drawn through <use>: the faint line, then three streak layers
 // (a tail, a stronger half tail, a dot at the head), all moving together at the line's flow speed.
 function banner(ST, C, name) {
@@ -196,32 +251,47 @@ function banner(ST, C, name) {
     ST.eye.map(r => `<use href="#${ref.get(r)}" stroke="${tone(r)}" stroke-opacity="${(0.4 + 0.45 * r.depth).toFixed(2)}"/>`).join('');
   const streaks = all.map(r => {
     const p = r.len / Math.max(1, Math.round(r.len / SPACING)), Ls = Math.min(3, p * 0.5), sg = r.fwd ? -1 : 1;
-    const dur = (p * CELL / (Math.max(r.speed, 0.1) * V0)).toFixed(2);
+    // The cycle at the flow's speed, rounded so a whole number of cycles fills the loop.
+    const cycle = p * CELL / (Math.max(r.speed, 0.1) * V0);
+    const dur = (LOOP / Math.max(1, Math.round(LOOP / cycle))).toFixed(4);
     const seg = (len, off, op, w) => `<use href="#${ref.get(r)}" stroke="${tone(r)}" stroke-dasharray="${len ? len.toFixed(3) : 0} ${(p - len).toFixed(4)}" ` +
       `stroke-dashoffset="${off.toFixed(3)}" stroke-opacity="${op}" stroke-width="${w}" style="animation:${anim(off + sg * p)} ${dur}s linear infinite"/>`;
-    return seg(Ls, 0, .22, .5) + seg(Ls / 2, r.fwd ? -Ls / 2 : 0, .45, .55) + seg(0, r.fwd ? -Ls : 0, 1, .6);
+    return seg(Ls, 0, .22, .7) + seg(Ls / 2, r.fwd ? -Ls / 2 : 0, .45, .77) + seg(0, r.fwd ? -Ls : 0, 1, .84);
   }).join('');
-  const css = [...keyframes].map(([to, k]) => `@keyframes ${k}{to{stroke-dashoffset:${to}}}`).join('') +
-    '@media (prefers-reduced-motion:reduce){*{animation:none!important}}';
-  // Fades: out toward the left and right edges, and out toward the name's lane and the top and bottom edges.
-  const hfade = `<linearGradient id="hG" gradientUnits="userSpaceOnUse" x1="90" y1="0" x2="1190" y2="0"><stop offset="0" stop-color="#000"/><stop offset=".2" stop-color="#fff"/><stop offset=".8" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>` +
-    `<mask id="h" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="url(#hG)"/></mask>`;
-  const vfade = `<linearGradient id="vG" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2="${H}"><stop offset="0" stop-color="#000"/><stop offset=".12" stop-color="#fff"/>` +
-    `<stop offset="${(MID - LANE - 22) / H}" stop-color="#fff"/><stop offset="${(MID - LANE + 6) / H}" stop-color="#000"/><stop offset="${(MID + LANE - 6) / H}" stop-color="#000"/><stop offset="${(MID + LANE + 22) / H}" stop-color="#fff"/>` +
-    `<stop offset=".88" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient>` +
-    `<mask id="v" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}"><rect width="${W}" height="${H}" fill="url(#vG)"/></mask>`;
-  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tempest">` +
-    `<title>Tempest</title><style>${css}</style><defs>${hfade}${vfade}${all.map(r => `<path id="${ref.get(r)}" d="${r.d}"/>`).join('')}</defs>` +
-    `<g mask="url(#h)"><g mask="url(#v)">` +
-    `<g transform="${ST.tr}" fill="none" stroke="${C.line}"><g stroke-width=".3">${lines}</g><g stroke-linecap="round">${streaks}</g></g></g></g>` +
+  const css = [...keyframes].map(([to, k]) => `@keyframes ${k}{to{stroke-dashoffset:${to}}}`).join('');
+  const mask = `<mask id="vignette" maskUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}">` +
+    `<image href="data:image/png;base64,${vignettePNG().toString('base64')}" width="${W}" height="${H}"/></mask>`;
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">` +
+    `<style>${css}</style><defs>${mask}${all.map(r => `<path id="${ref.get(r)}" d="${r.d}"/>`).join('')}</defs>` +
+    `<g mask="url(#vignette)"><g transform="${ST.tr}" fill="none" stroke="${C.line}"><g stroke-width=".42">${lines}</g><g stroke-linecap="round">${streaks}</g></g></g>` +
     `<path fill="${C.ink}" d="${name}"/></svg>\n`;
 }
 
-const ST = stuart({ lam: W / 6, Cc: 1.12, rings: 5 });
+// One loop of frames, on a transparent background: every animation paused and set to the frame's time.
+async function render(svg, dir) {
+  await rm(dir, { recursive: true, force: true });
+  await mkdir(dir, { recursive: true });
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: W, height: H }, deviceScaleFactor: 1 });
+  await page.goto(pathToFileURL(svg).href);
+  const frames = LOOP * FPS;
+  for (let i = 0; i < frames; i++) {
+    await page.evaluate(t => { for (const a of document.getAnimations()) { a.pause(); a.currentTime = t; } }, i * 1000 / FPS);
+    await page.screenshot({ path: join(dir, `f${String(i).padStart(4, '0')}.png`), omitBackground: true });
+  }
+  await browser.close();
+  return frames;
+}
+
+const ST = stuart({ lam: LAMBDA, Cc: 1.12, rings: 5 });
 const name = await wordmark();
 await mkdir(OUT, { recursive: true });
 for (const [theme, C] of Object.entries(THEMES)) {
-  const file = join(OUT, `tempest-banner-${theme}.svg`), svg = banner(ST, C, name);
-  await writeFile(file, svg);
-  console.log(`${file}: ${(svg.length / 1024).toFixed(0)} KB, ${ST.eye.length} loops, ${ST.open.length} open lines`);
+  const svg = join(CACHE, `tempest-banner-${theme}.svg`), frames = join(CACHE, `frames-${theme}`);
+  const avif = join(OUT, `tempest-banner-${theme}.avif`);
+  await writeFile(svg, banner(ST, C, name));
+  const n = await render(svg, frames);
+  const enc = spawnSync('python3', [join(HERE, 'encode.py'), frames, avif, String(FPS)], { stdio: 'inherit' });
+  if (enc.status !== 0) throw new Error(`encode.py failed for ${theme}`);
+  console.log(`${avif}: ${n} frames, ${ST.eye.length} loops, ${ST.open.length} open lines`);
 }
