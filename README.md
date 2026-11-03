@@ -1,4 +1,7 @@
-# Tempest.jl
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/src/assets/tempest-banner-dark.svg">
+  <img alt="Tempest.jl" src="docs/src/assets/tempest-banner-light.svg" width="100%">
+</picture>
 
 > [!NOTE]  
 > This package is in active development.
