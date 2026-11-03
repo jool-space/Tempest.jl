@@ -86,7 +86,10 @@ function broadcast_dims(@nospecialize(dims...))
 end
 
 constant!(tape::Tape, x::Number) = record!(tape, Constant(x), (), (), typeof(x); scalar = true)
-constant!(tape::Tape, x::AbstractArray{<:Number}) = record!(tape, Constant(collect(x)), (), size(x), eltype(x))
+function constant!(tape::Tape, x::AbstractArray{<:Number})
+    push!(tape.met, x)
+    record!(tape, Constant(collect(x)), (), size(x), eltype(x))
+end
 
 # A range is the index itself: it stays a range, and lowers to a formula
 # rather than an array in memory, as does a range reshaped or transposed. So
@@ -992,7 +995,10 @@ Program with 3 nodes: Float64(3,) → Float64
   %3 = reduce sum over (1,) %2 :: Float64  [result]
 ```
 """
-function trace(f, args...)
+trace(f, args...) = first(trace_meeting(f, args...))
+
+# `trace`, and the arrays it met as constants, as they were.
+function trace_meeting(f, args...)
     tape = Tape()
     arguments = Int[]
     inputs = TracedArray[]
@@ -1031,5 +1037,5 @@ function trace(f, args...)
         push!(results, x.id)
         push!(writes, length(results) => k)
     end
-    prune(Program(tape.nodes, arguments, results, input_structure, output_structure, tape.backward, writes))
+    prune(Program(tape.nodes, arguments, results, input_structure, output_structure, tape.backward, writes)), tape.met
 end

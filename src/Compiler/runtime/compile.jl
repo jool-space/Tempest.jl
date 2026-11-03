@@ -22,11 +22,15 @@ like the others, the call `f(args...)` traced: the arrays of a callable
 struct's fields and those a closure captures are inputs too, read at each
 call, so a closure over a model sees its weights as they are when called.
 
-A global that `f`'s own code reads by name is no part of `f`, and tracing reads
-it once. One holding arrays is refused, since the program would keep them as
-they were when traced: pass it as an argument. Any other is a constant, and
-one not declared `const` is checked at each call. A global read deeper, by a
-function `f` calls, is not seen, and kept as it was when traced.
+A global that `f` reads is no part of `f`, and tracing reads it once. One
+holding arrays is refused, since the program would keep them as they were when
+traced: pass it as an argument. In `f`'s own code a global is seen by its name;
+in a function `f` calls, by its arrays: an array tracing meets that lives in a
+global, of any module, is refused alike, as is a global a function assigned
+while traced. Any other global `f`'s own code reads is a constant, and one not
+declared `const` is checked at each call. A number a function `f` calls reads,
+or a copy it makes of a global's array before using it with an input, is kept
+as it was when traced.
 
 A call whose arguments, `f`'s own leaves or the globals `f` reads differ in
 anything but the values of inputs throws, naming the difference.
@@ -49,7 +53,9 @@ use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
 """
 function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = :close, capture::Bool = true)
     globals = read_globals(f, args)
-    ex = prepare(trace(call, f, args...), f, args...; target, measure)
+    program, met = trace_meeting(call, f, args...)
+    refuse_held(met)
+    ex = prepare(program, f, args...; target, measure)
     capture && capture!(ex)
     Compiled(f, ex, signature((f, args...)), globals)
 end
@@ -66,9 +72,7 @@ function read_globals(f, args)
     values = Pair{GlobalRef, Any}[]
     for g in named_globals(f, args)
         value = getglobal(g.mod, g.name)
-        any(is_input, leaves(value)) && throw(ArgumentError(string("the function reads the global ", g.name,
-            ", which holds arrays: compiled, it would keep them as they were when traced. Pass ", g.name,
-            " as an argument, or bind it to a local the function captures")))
+        any(is_input, leaves(value)) && throw(ArgumentError(holds_arrays(g.name)))
         isconst(g.mod, g.name) || push!(values, g => value)
     end
     values
@@ -90,6 +94,111 @@ named!(refs, x::Expr) = foreach(a -> named!(refs, a), x.args)
 named!(refs, x::Core.ReturnNode) = isdefined(x, :val) && named!(refs, x.val)
 named!(refs, x::Core.GotoIfNot) = named!(refs, x.cond)
 named!(refs, x) = nothing
+
+holds_arrays(name) = string("the function reads the global ", name, ", which holds arrays: compiled, it would keep ",
+    "them as they were when traced. Pass ", name, " as an argument, or bind it to a local the function captures")
+
+# The arrays tracing met as constants that live in a global, refused as those
+# `f`'s own code names are: what a function `f` calls reads, seen by its arrays
+# rather than its name. The globals of every module loaded are looked through,
+# only when tracing met an array. A global a function assigned while traced
+# holds stand-ins of the program, and is refused first.
+function refuse_held(met)
+    isempty(met) && return
+    held = held_arrays()
+    if !isempty(held.traced)
+        name = global_name(first(held.traced))
+        throw(ArgumentError(string("the function assigned the global ", name, " while traced, which now holds ",
+            "stand-ins of the program: assign ", name, " again, then pass it as an argument and assign what the ",
+            "compiled function returns")))
+    end
+    for x in met
+        at = holder(held.arrays, x)
+        at === nothing || throw(ArgumentError(holds_arrays(global_name(at))))
+    end
+end
+
+"The arrays that live in globals, each with the global's module and name, and the globals that hold stand-ins."
+struct Held
+    arrays::IdDict{Any, Tuple{Module, Symbol}}
+    traced::Vector{Tuple{Module, Symbol}}
+end
+
+# The globals of every module loaded, of Main and of each package, and their
+# modules within.
+function held_arrays()
+    held = Held(IdDict{Any, Tuple{Module, Symbol}}(), Tuple{Module, Symbol}[])
+    seen, stack = Base.IdSet{Any}(), Any[]
+    modules, done = Module[Main; Base.loaded_modules_array()], Base.IdSet{Module}()
+    while !isempty(modules)
+        m = pop!(modules)
+        m in done && continue
+        push!(done, m)
+        for n in names(m; all = true)
+            isdefined(m, n) && !Base.isdeprecated(m, n) || continue
+            value = getglobal(m, n)
+            if value isa Module
+                parentmodule(value) === m && push!(modules, value)
+            else
+                push!(stack, value)
+                hold!(held, seen, stack, (m, n))
+            end
+        end
+    end
+    held
+end
+
+# What a global's value holds, reached by fields as a dict's are, and by
+# elements in an array of anything but bits; each mutable value once, which
+# ends every cycle. Only a mutable array is found by identity: an immutable
+# one, a range, is equal to any like it, and holds what it wraps. A value
+# without fields, a function's, or of bits holds none, nor do Julia's own
+# records of code, its method tables and docstrings.
+function hold!(held, seen, stack, at)
+    while !isempty(stack)
+        x = pop!(stack)
+        T = typeof(x)
+        (!ismutabletype(T) && fieldcount(T) == 0 || isbitstype(T) || x isa CODE) && continue
+        if x isa Union{Traced, TracedArray} || x isa AbstractArray && eltype(x) <: Traced
+            at in held.traced || push!(held.traced, at)
+            continue
+        end
+        if ismutable(x)
+            x in seen && continue
+            push!(seen, x)
+        end
+        if x isa AbstractArray && eltype(x) <: Number && ismutable(x)
+            held.arrays[x] = at
+        elseif x isa Union{Array, Core.Memory}
+            isbitstype(eltype(x)) && continue
+            for i in 1:min(length(x), 100_000)
+                isassigned(x, i) && push!(stack, x[i])
+            end
+        else
+            for i in 1:nfields(x)
+                isdefined(x, i) && push!(stack, getfield(x, i))
+            end
+        end
+    end
+end
+
+const CODE = Union{Module, Type, Symbol, AbstractString, Number, Ptr, Expr, Task, GlobalRef, Method, Core.MethodInstance,
+    Core.CodeInstance, Core.CodeInfo, Core.MethodTable, Core.TypeMapEntry, Core.TypeMapLevel, Core.TypeName,
+    Core.SimpleVector, Base.Docs.DocStr, Base.Docs.MultiDoc}
+
+# A global of the user's code named as `f`'s own are, a package's with its module.
+global_name((m, n)) = Base.moduleroot(m) === Main ? string(n) : string(m, ".", n)
+
+# The global an array lives in, or one it wraps, a view or an adjoint, or `nothing`.
+function holder(arrays, x)
+    while true
+        at = get(arrays, x, nothing)
+        at === nothing || return at
+        p = parent(x)
+        p === x && return nothing
+        x = p
+    end
+end
 
 "A function traced and prepared by `compile`."
 struct Compiled{F}

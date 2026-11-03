@@ -36,6 +36,8 @@ held_layer = Dense(data(3, 4), data(3), tanh)
 const held_table = data(4)
 held_rate = 0.5
 held_step(x) = Tempest.gradient(m -> loss(m, x), held_layer)
+held_total = data(4)
+held_add!(x) = (global held_total = held_total .+ x; held_total)
 
 function finite_difference_weights(m, x)
     g = similar(m.w)
@@ -197,14 +199,13 @@ end
     global held_rate = 0.5
     # Base's globals are its code's.
     @test compile(x -> π .* x, x)(x) ≈ π .* x
-    # What a function the compiled one calls reads is not seen: the layer is
-    # kept as it was when traced. A gradient by constants cannot be refused
-    # instead, as a transposed convolution is one at zeros. Closed by a tracer
-    # that reads the code it runs, not only the values it is given.
-    step = compile(x -> held_step(x), x)
-    held_layer.w .*= 2
-    @test_broken step(x)[2].w ≈ held_step(x)[2].w
-    held_layer.w ./= 2
+    # What a function the compiled one calls reads is seen by its arrays.
+    @test occursin("reads the global held_layer", message(() -> compile(x -> held_step(x), x)))
+    # A global it assigns while traced holds stand-ins: refused, to be assigned again.
+    total = held_total
+    @test occursin("assigned the global held_total while traced", message(() -> compile(x -> held_add!(x), x)))
+    @test held_total isa Tempest.Compiler.TracedArray
+    global held_total = total
 end
 
 @testset "mutable structs among the arguments" begin

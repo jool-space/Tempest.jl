@@ -116,11 +116,14 @@ mutable struct Tape
     steps::Vector{Int}
     # How many gradients' functions are being traced (see `differentiating`).
     gradients::Int
+    # The arrays met as constants, as they were: `compile` asks whether one
+    # lives in a global.
+    met::Vector{Any}
 end
 
-Tape() = Tape(Node[], BitSet(), Int[], 0)
-Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0)
-Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0)
+Tape() = Tape(Node[], BitSet(), Int[], 0, Any[])
+Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[])
+Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[])
 
 function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))
