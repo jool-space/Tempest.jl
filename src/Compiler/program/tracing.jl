@@ -354,10 +354,21 @@ function Base.similar(@nospecialize(bc::Broadcast.Broadcasted{TracedStyle}), ::T
 end
 
 # Node `id` as an array of shape `dims`: a result smaller than a broadcast, or
-# a scalar, is filled out to it.
+# a scalar, is filled out to it. A scalar read from an array of that shape is
+# the array, so that `map` and Base's arithmetic over arrays of no dimensions,
+# which make their broadcast a number and write it back into one, record
+# just the broadcast.
 function filled(tape, id, dims)
     n = tape.nodes[id]
+    read_from(tape, n, dims) && return only(n.inputs)
     n.dims != dims || n.scalar ? record!(tape, Map(identity), (id,), dims, n.eltype) : id
+end
+
+# Whether scalar node `n` is a reshape of an array of shape `dims`.
+function read_from(tape, n, dims)
+    n.scalar && n.op isa Reshape || return false
+    array = tape.nodes[only(n.inputs)]
+    array.dims == dims && !array.scalar
 end
 
 "A function with some arguments fixed; each `Slot` takes the next input."

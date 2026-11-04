@@ -82,6 +82,11 @@ twice(s::Number) = 2s
     @test T.gradient((x, a) -> sum(x .* a), x, 3.0) == (fill(3.0), nothing)
     loss, (g,) = interpret(trace(x -> T.withgradient(x -> exp.(x .* y), x), x), x)
     @test loss ≈ exp(1.0) && g isa Array{Float64, 0} && g[] ≈ 0.5 * exp(1.0)
+    # Keeping such a result an array records the broadcast alone, not a
+    # number and a copy of it back into an array.
+    @test length(trace(x -> map(sin, x), x).nodes) == 2
+    @test length(trace(x -> sum(sin, x), x).nodes) == 3
+    @test length(trace((x, y) -> x + y, x, y).nodes) == 3
 end
 
 # A gradient in traced code is the differentiated program inlined where it is
