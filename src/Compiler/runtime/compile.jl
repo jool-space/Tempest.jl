@@ -248,12 +248,22 @@ function (c::Compiled)(@nospecialize(args...))
         xs = argument_leaves(ex.program, (c.f, args...))
         foreach(((_, a),) -> copyto!(vec(xs[a]), ex.arguments[a]), ex.program.writes)
     end
-    rebuild(k -> k isa Int ? fresh(ex.results[k], ex.plan.graph.result_scalar[k]) : constant_leaf(k), ex.program.output_structure)
+    # The results apart from the buffers the next call overwrites: a number
+    # where the program computed a number, else an array, though it have no
+    # dimensions. The arrays are copied first: each copy waits for the
+    # kernels on the device while the host goes on to allocate the next,
+    # where reading a number waits for them on the host, and the allocations
+    # after it, which grow the device's memory pool while the last call's
+    # results live, would wait in turn.
+    scalar = ex.plan.graph.result_scalar
+    out = ex.program.output_structure
+    arrays = Any[k isa Int && !scalar[k] ? copy(ex.results[k]) : nothing for k in leaves(out)]
+    i = 0
+    rebuild(out) do k
+        i += 1
+        k isa Int ? (scalar[k] ? Array(ex.results[k])[] : arrays[i]) : constant_leaf(k)
+    end
 end
-
-# A result apart from the buffers the next call overwrites: a number where the
-# program computed a number, else an array, though it have no dimensions.
-fresh(x, scalar) = scalar ? Array(x)[] : copy(x)
 
 "An input as a call must match it: its element type and its size."
 struct InputType
