@@ -122,11 +122,15 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     # recomputed in the kernel that writes the result, it would read the
     # argument where the result is written, and the result would be copied
     # there instead (see `writes_over`). It reads it directly, or through
-    # maps, which may be recomputed with it.
+    # maps, which may be recomputed with it. Each value's answer is kept:
+    # maps share operands, and walked afresh from every reader, a chain of
+    # them is walked once per path through it.
     replaced = Set(input[a] for (_, a) in pairs)
+    answers = Dict{Int, Bool}()
     function reads_replaced(v)
+        haskey(answers, v) && return answers[v]
         d = graph.values[v].definition
-        any(operands(d)) do o
+        answers[v] = any(operands(d)) do o
             any(read_values(o)) do r
                 r in replaced || graph.values[r].definition isa Pointwise && reads_replaced(r)
             end
