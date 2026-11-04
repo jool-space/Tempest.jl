@@ -785,7 +785,7 @@ function claims(generator::cuTileGenerator, target::CUDATarget, g::GroupView)
     # A pointwise kernel writes its outputs and scatters its folds by key; a
     # group with another fold, one over no axes say, is not one.
     s.sketch === :pointwise && any(r -> !g.values[r].keyed, g.reductions) && return Claim[]
-    moved(claim) = sum(w -> w.bytes + w.reread, estimate(generator, claim, target, g); init = 0.0)
+    moved(claim) = sum(w -> w.bytes + w.reread + w.passed, estimate(generator, claim, target, g); init = 0.0)
     sort!([Claim(chunked(Context(g, x))) for x in schedules]; by = moved)
 end
 
@@ -914,8 +914,10 @@ function reading_blocks(t, ax, domain)
 end
 
 # A schedule's launches: each of its kernels, moving the bytes of its
-# arguments over the blocks of its grid. The first after the folds by key's
-# initial states computes the group's products and the folds it recomputes.
+# arguments over the blocks of its grid, and passing what its workspaces hold
+# (a split sum's parts, a fold's value a later phase reads) to a later one.
+# The first after the folds by key's initial states computes the group's
+# products and the folds it recomputes.
 # A fold by key that starts from contents in storage is priced in place, as
 # the plan's bytes are: no launch copies the contents, and a kernel moves the
 # elements it combines, a sum reading them too.
@@ -980,10 +982,12 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) : reachable(a)
     map(enumerate(kernels)) do (i, kernel)
         moved(a) = elements(kernel, a) * sizeof(element(a)) * (i == main && a.buffer isa Int ? share(a.buffer) : 1.0)
-        bytes = sum(moved, kernel.args; init = 0.0)
+        bytes = sum(a -> a.buffer isa Int ? moved(a) : 0.0, kernel.args; init = 0.0)
+        passed = sum(a -> a.buffer isa Int ? 0.0 : moved(a), kernel.args; init = 0.0)
         reread = i == main ? sum(a -> a.buffer isa Int ? moved(a) * (times_read(a.buffer) - 1) : 0.0, kernel.args; init = 0.0) : 0.0
         blocks = prod(kernel.grid; init = 1)
-        i == main ? Work(bytes; reread, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) : Work(bytes; blocks)
+        i == main ? Work(bytes; reread, passed, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) :
+            Work(bytes; passed, blocks)
     end
 end
 

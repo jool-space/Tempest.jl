@@ -26,11 +26,14 @@ abstract type Implementation end
 
 """
 One launch's work: bytes moved, bytes it reads again (what its blocks read of
-an argument beyond the first time), flops of products whose factors are of type
-`factor`, flops of folds it recomputes inside them, its blocks, whether they
-split the sums among them, and the scalar functions it applies elementwise,
-each with the number of positions it is applied at. Tempest prices the
-bytes on its package's memory, those read again from the cache, the flops on
+an argument beyond the first time), bytes it passes to or takes from another
+of its claim's launches (partial results in a workspace, as a split sum's
+parts), flops of products whose factors are of type `factor`, flops of folds
+it recomputes inside them, its blocks, whether they split the sums among
+them, and the scalar functions it applies elementwise, each with the number
+of positions it is applied at. Tempest prices the bytes on its package's
+memory, those read again from the cache, those passed within the cache where
+they fit it, as the launch that takes them finds them there, the flops on
 the line its package reaches for products of that class, and each function on
 the time it measured for it on the device (see `seconds`). Functions applied
 inside a product's sweep, to its factors, are `swept`: each step's small tile
@@ -41,6 +44,7 @@ those applied inside a fold the sweep recomputes, to that fold's tiles, are
 struct Work
     bytes::Float64
     reread::Float64
+    passed::Float64
     flops::Float64
     recomputed::Float64
     factor::DataType
@@ -51,9 +55,9 @@ struct Work
     inner::Vector{Pair{Any, Float64}}
 end
 
-Work(bytes; reread = 0.0, flops = 0.0, recomputed = 0.0, factor = Float32, blocks = Inf, split = false,
+Work(bytes; reread = 0.0, passed = 0.0, flops = 0.0, recomputed = 0.0, factor = Float32, blocks = Inf, split = false,
     applied = Pair{Any, Float64}[], swept = Pair{Any, Float64}[], inner = Pair{Any, Float64}[]) =
-    Work(bytes, reread, flops, recomputed, factor, blocks, split, applied, swept, inner)
+    Work(bytes, reread, passed, flops, recomputed, factor, blocks, split, applied, swept, inner)
 
 """
     package_of(implementation) -> Symbol
