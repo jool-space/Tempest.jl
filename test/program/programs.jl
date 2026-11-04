@@ -78,9 +78,9 @@ twice(s::Number) = 2s
         traced = interpret(trace(f, x, y, v), copy(x), y, v)
         @test isequal(traced, expected) && typeof(traced) == typeof(expected)
     end
-    @test T.gradient(x -> x .* 3.0, x) == (6.0, fill(3.0))
-    @test T.gradient((x, a) -> sum(x .* a), x, 3.0) == (6.0, fill(3.0), nothing)
-    loss, g = interpret(trace(x -> T.gradient(x -> exp.(x .* y), x), x), x)
+    @test T.withgradient(x -> x .* 3.0, x) == (val = 6.0, grad = (fill(3.0),))
+    @test T.gradient((x, a) -> sum(x .* a), x, 3.0) == (fill(3.0), nothing)
+    loss, (g,) = interpret(trace(x -> T.withgradient(x -> exp.(x .* y), x), x), x)
     @test loss ≈ exp(1.0) && g isa Array{Float64, 0} && g[] ≈ 0.5 * exp(1.0)
 end
 
@@ -91,24 +91,24 @@ end
     same(a, b) = a === nothing ? b === nothing : isapprox(a, b; rtol = 1.0e-12)
     @testset "$name" for (name, f, args) in [PROGRAMS; REPEATED_WRITES]
         expected = C.leaves(interpret(differentiate(trace(f, args...)), args...))
-        @test all(map(same, expected, C.leaves(interpret(trace((xs...) -> T.gradient(f, xs...), args...), args...))))
-        @test all(map(same, expected, C.leaves(T.gradient(f, args...))))
+        @test all(map(same, expected, C.leaves(interpret(trace((xs...) -> T.withgradient(f, xs...), args...), args...))))
+        @test all(map(same, expected, C.leaves(T.withgradient(f, args...))))
     end
     x, y = data(8, 6), data(8, 6; scale = 0.3)
-    loss, dx = interpret(trace((x, y) -> T.gradient(a -> sum(a .* y .* x), x), x, y), x, y)
+    loss, (dx,) = interpret(trace((x, y) -> T.withgradient(a -> sum(a .* y .* x), x), x, y), x, y)
     @test loss ≈ sum(x .* y .* x) && dx ≈ y .* x
-    loss, da, db = interpret(trace(x -> T.gradient((a, b) -> sum(a .* b .* b), x, x), x), x)
+    loss, (da, db) = interpret(trace(x -> T.withgradient((a, b) -> sum(a .* b .* b), x, x), x), x)
     @test da ≈ x .* x && db ≈ 2 .* x .* x
     # Structured arguments, and Julia arrays among them.
     w, b = data(8, 8; scale = 0.2), data(8)
-    loss, g = interpret(trace((w, x) -> T.gradient(q -> sum(abs2, q.w * x .+ q.b), (; w, b)), w, x), w, x)
+    loss, (g,) = interpret(trace((w, x) -> T.withgradient(q -> sum(abs2, q.w * x .+ q.b), (; w, b)), w, x), w, x)
     @test g.w ≈ 2 .* (w * x .+ b) * x' && g.b ≈ vec(sum(2 .* (w * x .+ b); dims = 2))
     # Arguments none of which is traced, as a layer without weights has, and a
     # function closing over traced values: the gradient is the program's.
-    loss, g = interpret(trace(x -> T.gradient(p -> p.k * sum(abs2, x), (; k = 2)), x), x)
+    loss, (g,) = interpret(trace(x -> T.withgradient(p -> p.k * sum(abs2, x), (; k = 2)), x), x)
     @test loss ≈ 2 * sum(abs2, x) && g == (; k = nothing)
     # A loss no argument reaches, run eagerly, is a constant with no gradient.
-    @test T.gradient(a -> 1.5, x) == (1.5, zero(x))
+    @test T.withgradient(a -> 1.5, x) == (val = 1.5, grad = (zero(x),))
 end
 
 # A stopped gradient is its input in value and a constant to every derivative:
@@ -128,7 +128,7 @@ end
     graph = C.lower(d)
     @test !any(v -> v.definition isa C.Pointwise && v.definition.f === T.stopgrad, graph.values)
     @test agree(C.interpret(graph, x), (loss, g))
-    loss, g = interpret(trace(x -> T.gradient(a -> sum(a .* T.stopgrad((; s = a)).s), x), x), x)
+    g = only(interpret(trace(x -> T.gradient(a -> sum(a .* T.stopgrad((; s = a)).s), x), x), x))
     @test g ≈ x
     inner(a) = sum(a .^ 3 .* T.stopgrad(a))
     @test last(T.gradient(x -> sum(last(T.gradient(inner, x))), x)) ≈ 6 .* x .^ 2
@@ -147,7 +147,7 @@ end
     @test !compares(d)
     @test last(interpret(d, x)) ≈ last(T.gradient(x -> sum(T.logsumexp(x; dims = 1) .* w), x))
     @test compares(differentiate(trace(x -> (m = maximum(x; dims = 1); sum(m .+ log.(sum(exp.(x .- m); dims = 1))) + sum(m)), x)))
-    @test T.gradient((x, b) -> sum(softmax_columns(x .+ b) .* t), x, b)[3] == zero(b)
+    @test T.gradient((x, b) -> sum(softmax_columns(x .+ b) .* t), x, b)[2] == zero(b)
 end
 
 # A Julia array a function closes over is a constant factor of the products it
@@ -161,9 +161,9 @@ end
     masked = dx .* (axes(x, 1) .!= 1)
     @test last(interpret(differentiate(trace(written, x)), x)) ≈ masked
     # Tempest.gradient, eagerly and where it is called in traced code.
-    loss, g = T.gradient(p -> sum(W * p), x)
+    loss, (g,) = T.withgradient(p -> sum(W * p), x)
     @test loss ≈ sum(W * x) && g ≈ dx
-    loss, g = interpret(trace(x -> T.gradient(p -> sum(W * p), x), x), x)
+    loss, (g,) = interpret(trace(x -> T.withgradient(p -> sum(W * p), x), x), x)
     @test loss ≈ sum(W * x) && g ≈ dx
     @test last(interpret(trace(x -> T.gradient(written, x), x), x)) ≈ masked
 end
@@ -177,12 +177,12 @@ T.scalar_partials(::typeof(xlogy), z, x, y) = (log(y), x / y)
     # A function whose code traces takes a statement of its derivative where
     # it is broadcast, as a primitive takes it for its rule.
     x, y = [0.0, 0.5, 2.0], [0.3, 1.5, 2.0]
-    _, gx, gy = T.gradient((x, y) -> sum(xlogy.(x, y)), x, y)
+    gx, gy = T.gradient((x, y) -> sum(xlogy.(x, y)), x, y)
     @test gx ≈ log.(y) && gy ≈ x ./ y
     @test interpret(trace((x, y) -> xlogy.(x, y), x, y), x, y) == xlogy.(x, y)
-    @test T.gradient(x -> sum(leaky.(x)), [-1.0, 2.0])[2] ≈ [0.01, 1.0]
+    @test only(T.gradient(x -> sum(leaky.(x)), [-1.0, 2.0])) ≈ [0.01, 1.0]
     # A constant partial is in the cotangent's type: `1 / 3` of a quotient by
     # an integer is a Float64, but a Float32 gradient stays one.
-    @test T.gradient(x -> sum(x ./ 3), Float32[1, 2])[2] isa Vector{Float32}
+    @test only(T.gradient(x -> sum(x ./ 3), Float32[1, 2])) isa Vector{Float32}
     @test all(n -> n.eltype !== Float64, differentiate(trace(x -> sum(x ./ 3), Float32[1, 2])).nodes)
 end

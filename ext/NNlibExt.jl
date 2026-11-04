@@ -115,7 +115,7 @@ end
 # Tempest's derivative of `convolved` gives, at any input, for `dy`.
 function convolved_data(dy, w, cdims)
     x = zeros(eltype(dy), NNlib.input_size(cdims)..., NNlib.channels_in(cdims), size(dy, ndims(dy)))
-    Tempest.gradient(x -> sum(convolved(x, w, cdims) .* dy), x)[2]
+    only(Tempest.gradient(x -> sum(convolved(x, w, cdims) .* dy), x))
 end
 
 # Each with a traced array, the other traced or not.

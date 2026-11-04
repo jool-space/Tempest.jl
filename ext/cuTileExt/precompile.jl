@@ -73,7 +73,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
         ]
         @compile_workload begin
             for (f, args) in losses, target in (CUDATarget(cuTileGenerator()), CUDATarget(cuTileGenerator(); precision = :tf32))
-                program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
+                program = Tempest.Compiler.trace((xs...) -> Tempest.withgradient(f, xs...), args...)
                 ex = Tempest.Compiler.prepare(program, args...; target, build = false)
                 explain(devnull, ex)
                 for g in Tempest.Compiler.group_views(ex), claim in claims(cuTileGenerator(), target, g)

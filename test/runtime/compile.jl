@@ -90,8 +90,8 @@ end
     @test v([1.0, 1, 1, 1], fill(3.0)) == [3.0, 3.0, 3.0, 3.0]
     # A gradient has nothing for a number, as for an integer, and one for an
     # array of no dimensions.
-    @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], 2.0)[3] === nothing
-    @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], fill(2.0))[3] == fill(3.0)
+    @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], 2.0)[2] === nothing
+    @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], fill(2.0))[2] == fill(3.0)
 end
 
 @testset "structs among the arguments" begin
@@ -105,8 +105,8 @@ end
     @test c(other, x) ≈ other(x)
     @test occursin("argument 1.act is the constant sin, not the constant tanh", message(() -> c(Dense(m.w, m.b, sin), x)))
     # A struct's gradient is a named tuple of its fields'.
-    g = compile((m, x) -> Tempest.gradient(loss, m, x), m, x)
-    value, gm, gx = g(other, x)
+    g = compile((m, x) -> Tempest.withgradient(loss, m, x), m, x)
+    value, (gm, gx) = g(other, x)
     reference = interpret(differentiate(trace(loss, other, x)), other, x)
     @test value ≈ loss(other, x)
     @test gm isa NamedTuple{(:w, :b, :act)} && gm.act === nothing
@@ -163,10 +163,10 @@ end
     @test fieldtype(typeof(scaled), :v) === Core.Box && boxed(x) ≈ v .* x
     # A layer compiles as itself, and a closure over a model as over arrays.
     m = Dense(data(3, 4; scale = 0.3), data(3), tanh)
-    layer, step = compile(m, x), compile(x -> Tempest.gradient(loss, m, x), x)
+    layer, step = compile(m, x), compile(x -> Tempest.withgradient(loss, m, x), x)
     m.w .= 0.5 .* m.w
     @test layer(x) ≈ m(x)
-    value, gm, gx = step(x)
+    value, (gm, gx) = step(x)
     @test value ≈ loss(m, x) && isapprox(gm.w, finite_difference_weights(m, x); rtol = 1.0e-5)
     # What the program writes into an array of `f`'s lands in it, as running
     # statistics land in a layer's.
@@ -223,7 +223,7 @@ end
     other = Running(data(3; scale = 2.0), data(3; scale = 0.5))
     @test c(other, x) ≈ other.scale .* (x .- other.mean)
     @test c(deepcopy(m), x) ≈ m.scale .* (x .- m.mean)
-    _, gm, _ = compile((m, x) -> Tempest.gradient((m, x) -> sum(m.scale .* x), m, x), m, x)(m, x)
+    gm, _ = compile((m, x) -> Tempest.gradient((m, x) -> sum(m.scale .* x), m, x), m, x)(m, x)
     @test gm isa NamedTuple{(:scale, :mean)} && gm.scale ≈ x
     # The traced code may write the struct it was given, as a layer updates
     # its running statistics: the result is a struct of its own, and the
@@ -256,10 +256,10 @@ end
     end
     # Also through a gradient, whose value and gradient are at the arrays as
     # they were given.
-    step(m, x) = Tempest.gradient((m, x) -> sum(abs2, normalized(m, x)), m, x)
+    step(m, x) = Tempest.withgradient((m, x) -> sum(abs2, normalized(m, x)), m, x)
     g = compile(step, m, x)
     mine, theirs = deepcopy(m), deepcopy(m)
-    value, gm, gx = g(mine, x)
+    value, (gm, gx) = g(mine, x)
     @test value ≈ sum(abs2, normalized(deepcopy(m), x)) && gm.mean === nothing || all(iszero, gm.mean)
     normalized(theirs, x)
     @test mine.mean ≈ theirs.mean

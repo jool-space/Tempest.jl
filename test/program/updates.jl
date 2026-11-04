@@ -63,11 +63,11 @@ end
     writes(p) = (p[1] = 0; sum(p))
     @test same(x -> T.gradient(writes, x), x)
     y = copy(x)
-    @test T.gradient(writes, y)[2] == (g = ones(8, 6); g[1] = 0; g) && y == (z = copy(x); z[1] = 0; z)
+    @test only(T.gradient(writes, y)) == (g = ones(8, 6); g[1] = 0; g) && y == (z = copy(x); z[1] = 0; z)
     statistics(m, x) = (m .= 0.9 .* m .+ 0.1 .* vec(sum(x; dims = 2)); sum(abs2, x))
     m = data(8; scale = 0.3)
     mine = copy(m)
-    value, g = interpret(trace((m, x) -> T.gradient(x -> statistics(m, x), x), m, x), mine, x)
+    value, (g,) = interpret(trace((m, x) -> T.withgradient(x -> statistics(m, x), x), m, x), mine, x)
     @test value ≈ sum(abs2, x) && g ≈ 2 .* x && mine ≈ 0.9 .* m .+ 0.1 .* vec(sum(x; dims = 2))
     # A constant of the program cannot change.
     @test occursin("a constant of the program", message(() -> trace(x -> T.gradient(w -> (w .= 0; sum(x)), data(3)), x)))

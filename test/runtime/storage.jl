@@ -98,7 +98,7 @@ function adam(params, state, grads; rate = 1.0f-2, β1 = 0.9f0, β2 = 0.999f0, �
 end
 mlp_loss(p, batch) = sum(abs2, p.w2 * tanh.(p.w1 * batch.x .+ p.b1) .+ p.b2 .- batch.y) / size(batch.y, 2)
 function training_step(params, state, batch)
-    loss, grads, _ = T.gradient(mlp_loss, params, batch)
+    loss, (grads, _) = T.withgradient(mlp_loss, params, batch)
     new_params, new_state = adam(params, state, grads)
     (loss, new_params, new_state)
 end

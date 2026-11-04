@@ -23,7 +23,7 @@ end
 loss(q, k, v, x) = sum(abs2, attention(q, k, v) .+ x)
 
 # The loss and its gradient with respect to each argument.
-step(q, k, v, x) = Tempest.gradient(loss, q, k, v, x)
+step(q, k, v, x) = Tempest.withgradient(loss, q, k, v, x)
 
 # 64 features, 256 positions, 12 heads × a batch of 16.
 d, n, hb = 64, 256, 12 * 16
@@ -37,10 +37,10 @@ reference = step(q, k, v, x)
 
 relative(a::Number, b) = abs(a - b) / abs(b)
 relative(a, b) = maximum(abs, Array(a) .- b) / maximum(abs, b)
-for (name, g, r) in zip(("loss", "dq", "dk", "dv", "dx"), got, reference)
+for (name, g, r) in zip(("loss", "dq", "dk", "dv", "dx"), (got.val, got.grad...), (reference.val, reference.grad...))
     @printf("%-4s relative difference from Float64 %.1e\n", name, relative(g, r))
 end
-@printf("the interpreter's loss against eager Julia's: %.1e\n", relative(reference[1], loss(q, k, v, x)))
+@printf("the interpreter's loss against eager Julia's: %.1e\n", relative(reference.val, loss(q, k, v, x)))
 
 # What runs: each kernel, what it computes, stores and recomputes.
 println()

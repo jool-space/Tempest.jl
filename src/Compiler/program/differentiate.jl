@@ -5,7 +5,7 @@
 # each a handle or `nothing`, as a tuple element is the tuple of its
 # components (see `components`).
 
-public gradient, scalar_partials, stated_derivatives, stopgrad, differentiating
+public gradient, withgradient, scalar_partials, stated_derivatives, stopgrad, differentiating
 
 const Handle = Union{Traced, TracedArray}
 
@@ -815,31 +815,48 @@ function differentiate(p::Program)
 end
 
 """
-    Tempest.gradient(f, args...) -> (value, gradients...)
+    Tempest.gradient(f, args...) -> gradients
+
+The gradient of `f(args...)`, a number, with respect to each argument, a tuple
+with one per argument, in that argument's structure: an array for each
+floating-point array, and `nothing` for anything else. Numbers are constants,
+among a gradient's arguments as among a program's, so a number to
+differentiate by is an array, `[x]` say. A struct's gradient is a named tuple
+of its fields'. It is Zygote's `gradient`, and `withgradient` returns the value
+too.
+
+In traced code it differentiates `f` where it is called, so a training step
+is a function like any other, traced and prepared as one program (see
+`withgradient`). What `f` closes over is a constant to the gradient.
+"""
+gradient(f, args...) = withgradient(f, args...).grad
+
+"""
+    Tempest.withgradient(f, args...) -> (val = value, grad = gradients)
 
 The value of `f(args...)`, a number, and its gradient with respect to each
-argument, in that argument's structure: an array for each floating-point
-array, and `nothing` for anything else. Numbers are constants, among a
-gradient's arguments as among a program's, so a number to differentiate by is
-an array, `[x]` say. A struct's gradient is a named tuple of its fields'. On Julia arrays this is
-`interpret(differentiate(trace(f, args...)), args...)`.
+argument, as `gradient` returns it, as Zygote's `withgradient` does. On Julia
+arrays this is `interpret(differentiate(trace(f, args...)), args...)`.
 
 In traced code it differentiates `f` where it is called, so a training step
 is a function like any other, traced and prepared as one program:
 
     function step(params, state, batch)
-        loss, grads = Tempest.gradient(p -> loss_of(p, batch), params)
+        loss, (grads,) = Tempest.withgradient(p -> loss_of(p, batch), params)
         new_params, new_state = adam(params, state, grads)
         (loss, new_params, new_state)
     end
 
 What `f` closes over is a constant to the gradient.
 """
-function gradient(f, args...)
+function withgradient(f, args...)
     # The program being traced: an argument's, or, when no argument is traced,
     # as for a layer without weights, the one of the values `f` closes over.
     traced = filter(x -> x isa Union{Traced, TracedArray}, leaves((args, fields(f))))
-    isempty(traced) && return interpret(differentiate(trace(f, args...)), args...)
+    if isempty(traced)
+        value, gradients... = interpret(differentiate(trace(f, args...)), args...)
+        return (val = value, grad = gradients)
+    end
     tape = first(traced).tape
     # Each floating-point array enters as a node of its own, whose cotangent
     # the pass collects: the node the stand-in starts at, before `f` writes it.
@@ -875,7 +892,7 @@ function gradient(f, args...)
         x isa TracedArray || throw(ArgumentError("a gradient's function writes into an array that is a constant of the program; make it an input"))
         write!(x, s.id)
     end
-    (value, gradients...)
+    (val = value, grad = gradients)
 end
 
 """

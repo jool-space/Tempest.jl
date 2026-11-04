@@ -23,7 +23,7 @@
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(f, args...), args...)); rtol)
     end
     # Its gradient prepared: the reversed loop is a recurrence too.
-    grad(f) = (xs...) -> T.gradient((ys...) -> sum(x -> sum(abs2, x), f(ys...)), xs...)
+    grad(f) = (xs...) -> T.withgradient((ys...) -> sum(x -> sum(abs2, x), f(ys...)), xs...)
     for (f, args) in cases, (device, rtol) in devices
         p = trace(grad(f), map(x -> device(x) isa CuArray{Float32} ? single(x) : x, args)...)
         ex = prepare(p, map(device, args)...)

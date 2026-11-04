@@ -10,6 +10,7 @@ Tempest
 compile
 Tempest.Compiled
 Tempest.gradient
+Tempest.withgradient
 explain
 Tempest.CPUTarget
 Tempest.CUDATarget

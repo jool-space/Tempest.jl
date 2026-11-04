@@ -19,8 +19,8 @@ loss(m, x) = sum(abs2, m(x))
 m = Dense(CuArray(randn(Float32, 64, 32)), CuArray(randn(Float32, 64)))
 x = CuArray(randn(Float32, 32, 16))
 
-grad = compile((m, x) -> Tempest.gradient(loss, m, x), m, x)
-l, dm, dx = grad(m, x)   # dm is a named tuple (w = ..., b = ...)
+grad = compile((m, x) -> Tempest.withgradient(loss, m, x), m, x)
+l, (dm, dx) = grad(m, x)   # dm is a named tuple (w = ..., b = ...)
 explain(grad)            # each kernel: what it computes and stores, and what runs it
 ```
 

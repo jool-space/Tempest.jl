@@ -212,7 +212,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
         push!(losses, ((q, k) -> sum(abs2, Tempest.Compiler.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
         @compile_workload begin
             for (f, args) in losses, target in (CUDATarget(cuBLASProducts()), CUDATarget(cuBLASProducts(); precision = :tf32))
-                program = Tempest.Compiler.trace((xs...) -> Tempest.gradient(f, xs...), args...)
+                program = Tempest.Compiler.trace((xs...) -> Tempest.withgradient(f, xs...), args...)
                 ex = Tempest.Compiler.prepare(program, args...; target, build = false)
                 Tempest.explain(devnull, ex)
             end

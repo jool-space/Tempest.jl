@@ -148,7 +148,7 @@ state_of(params) = (first = map_leaves(zero, params), second = map_leaves(zero, 
 
 # A training step as a function: the loss and its gradient, then Adam.
 function train_step(p, state, batch, c, cfg)
-    l, g = Tempest.gradient(q -> loss(q, batch, c, cfg), p)
+    l, (g,) = Tempest.withgradient(q -> loss(q, batch, c, cfg), p)
     p, state = adam(p, state, g)
     (l, p, state)
 end

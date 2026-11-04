@@ -20,7 +20,7 @@
     # through read it, none back to front, so the step it runs again is the
     # forward's own values, computed once.
     squares(xs...) = sum(x -> sum(abs2, x), chunks(xs...))
-    p = trace((xs...) -> T.gradient(squares, xs...), W, U, Kd, G, S0)
+    p = trace((xs...) -> T.withgradient(squares, xs...), W, U, Kd, G, S0)
     g = C.lower(p)
     @test [v.definition.reverse for v in g.values if v.definition isa C.Carried] == [false, true]
     reads(d) = [o for o in [collect(C.operands(d)); d isa C.Carried ? [d.from] : []] if o isa C.Read]

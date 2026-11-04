@@ -30,7 +30,7 @@ loss(layers, x, y) = sum(abs2, forward(layers, x) .- y) / size(y, 2)
 # The loss before the step, and the layers after it. The gradient comes back
 # in the layers' structure: a named tuple (w = ..., b = ...) for each.
 function step(layers, x, y; rate = 0.05f0)
-    l, g = Tempest.gradient(m -> loss(m, x, y), layers)
+    l, (g,) = Tempest.withgradient(m -> loss(m, x, y), layers)
     l, map((d, dd) -> Dense(d.w .- rate .* dd.w, d.b .- rate .* dd.b), layers, g)
 end
 
