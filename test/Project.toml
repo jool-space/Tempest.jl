@@ -22,6 +22,7 @@ cuTile = {rev = "main", url = "https://github.com/JuliaGPU/cuTile.jl"}
 BFloat16s = "0.6"
 CUDACore = "6.4"
 ChainRulesCore = "1"
+Einops = "0.3.1"
 LinearAlgebra = "1"
 NNlib = "0.9"
 ParallelTestRunner = "2.9"
