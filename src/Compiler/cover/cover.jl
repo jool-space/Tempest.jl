@@ -143,20 +143,15 @@ group_sets(q) = [fixes(q)]
 A proposal's place in a plan, by the values it fixes: the groups its values
 reach (`reached`), in the order the planner forms them, and its values among
 them, numbered as `canonical` numbers one group's. Proposals with one key in
-the generator's plan are the same edit in identical layers.
+the generator's plan are the same edit in identical layers. Each group's text
+is written once into `texts`, which the keys of one plan's proposals share.
 """
-function proposal_key(p::Plan, a::Around, q)
+function proposal_key(p::Plan, a::Around, q, texts = Dict{Int, String}())
     around = Set{Int}()
     foreach(v -> union!(around, reached(p, a, v)), fixes(q))
     io = IOBuffer()
     for j in sort!(collect(around); by = j -> a.places[j])
-        g = p.groups[j]
-        print(io, "| ", g.kind, " ", g.domain)
-        for m in members(g)
-            v = p.graph.values[m]
-            what = m in g.reductions ? fold_key(v.definition) : "value"
-            print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", g.terms[m])
-        end
+        print(io, get!(() -> group_text(p, p.groups[j]), texts, j))
     end
     q isa Join && print(io, " || join %", q.value)
     q isa Vector{Vector{Int}} && print(io, " || apart ", join((join(map(v -> "%$v", set), " ") for set in q), " | "))
@@ -176,6 +171,15 @@ function proposal_key(p::Plan, a::Around, q)
         string("%", k, " ", p.graph.values[v].eltype, p.graph.values[v].dims, p.stored[v] ? " stored" : "")
     end
     string(text, "; ", join(shapes, ", "))
+end
+
+group_text(p::Plan, g::Group) = sprint() do io
+    print(io, "| ", g.kind, " ", g.domain)
+    for m in members(g)
+        v = p.graph.values[m]
+        what = m in g.reductions ? fold_key(v.definition) : "value"
+        print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", g.terms[m])
+    end
 end
 
 # Every stored value of a kernel that another kernel reads, joined into the
@@ -286,7 +290,8 @@ function cover(d::Decider)
     # Every proposal's trial against the starting plan, planned side by side
     # on the threads there are: a trial is pure, and planning is most of the
     # cover's time. Priced in order, once per key, as before.
-    keyed = [(q, i, proposal_key(base, a, q)) for (q, i) in proposals]
+    texts = Dict{Int, String}()
+    keyed = [(q, i, proposal_key(base, a, q, texts)) for (q, i) in proposals]
     firsts = Dict{String, Any}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
     planned = Dict(k => Threads.@spawn(trial(base, Any[], Any[q])) for (k, q) in firsts)
