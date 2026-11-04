@@ -257,26 +257,33 @@ function fit!(d::Decider, T, among = implementations(d.target))
 end
 
 # Folds over the columns of 1024-row matrices with these many columns fit a
-# package's memory: the bytes the claim moves, against its time.
-const MEMORY_COLUMNS = (256, 1024)
+# package's memory: the bytes the claim moves, against its time. The smallest
+# moves 64 KB, its time nearly all latency, which a line through larger folds
+# alone extrapolates to: through the 1 and 4 MB ones, a jitter of a tenth in
+# the smaller's time moved the latency between 0.4 and 2.1 μs, and with it
+# whether the cover measured a split it would otherwise not.
+const MEMORY_COLUMNS = (16, 256, 1024, 4096)
 
 """
 Fit the memory of every package of the implementations `among`, by default
-the decider's target's, that has none: the
-line through the times of its fastest claims on a fold over each column at
-the two reference sizes, against the bytes the claims move. A package that
-claims no such fold moves bytes at the device's rates.
+the decider's target's, that has none, from the times of its fastest claims
+on a fold over each column at the reference sizes and the bytes the claims
+move: its bandwidth is the slope of their least-squares line, which the
+largest folds set, and its latency the smallest fold's time less its bytes
+at that bandwidth. A package that claims no such fold moves bytes at the
+device's rates.
 """
 function fit_memory!(d::Decider, among = implementations(d.target))
     key(p, what) = string(p, " memory ", what)
     unfitted = [i for i in among if !haskey(d.calibration, key(package_name(i), "bandwidth"))]
-    small, large = map(n -> reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n)), MEMORY_COLUMNS)
+    folds = map(n -> reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n)), MEMORY_COLUMNS)
     for package in unique(map(package_name, unfitted))
-        latency, bandwidth = if haskey(small, package)
-            (t, a), (u, b) = small[package], large[package]
-            bytes(work) = sum(w -> w.bytes, work)
-            rate = (bytes(b) - bytes(a)) / (u - t)
-            t - bytes(a) / rate, rate
+        latency, bandwidth = if all(fold -> haskey(fold, package), folds)
+            bytes = [sum(w -> w.bytes, last(fold[package])) for fold in folds]
+            seconds = [first(fold[package]) for fold in folds]
+            b, s = sum(bytes) / length(bytes), sum(seconds) / length(seconds)
+            per_byte = sum((bytes .- b) .* (seconds .- s)) / sum((bytes .- b) .^ 2)
+            first(seconds) - first(bytes) * per_byte, 1 / per_byte
         else
             d.rates.launch, d.rates.cached
         end
