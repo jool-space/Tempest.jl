@@ -14,7 +14,9 @@ The formulas over `v`'s axes that mask it, each at most zero where the mask
 holds, and the number `v` is where the mask fails; nothing when `v` is no
 such value.
 """
-function masked(graph::IndexGraph, v)
+masked(graph::IndexGraph, v) = @lock graph.masks get!(() -> masked_of(graph, v), graph.masks[], v)
+
+function masked_of(graph::IndexGraph, v)
     d = Domain(graph.values[v].dims)
     index = Tuple(var(k) for k in 1:length(graph.values[v].dims))
     found = Vector{Affine}[]
@@ -52,9 +54,12 @@ compared(graph, o::Read, through, d) = held_formula(o.value, map(through, o.inde
 compared(graph, o, through, d) = nothing
 
 # The masks of the `ifelse` definitions `v`, read at `index`, is computed
-# from, through the pointwise values it reads.
-function value_masks!(found, graph::IndexGraph, v, index, d::Domain, depth)
+# from, through the pointwise values it reads, each value at each index once:
+# values read by several, as a derivative's are, are a graph, not a tree.
+function value_masks!(found, graph::IndexGraph, v, index, d::Domain, depth, seen = Set{Any}())
     depth < 32 || return
+    (v, index) in seen && return
+    push!(seen, (v, index))
     def = graph.values[v].definition
     def isa Pointwise || return
     through(e) = substitute(e, index, d)
@@ -64,21 +69,27 @@ function value_masks!(found, graph::IndexGraph, v, index, d::Domain, depth)
         m === nothing || push!(found, m)
     end
     for o in def.operands
-        o isa Read && value_masks!(found, graph, o.value, map(through, o.index), d, depth + 1)
+        o isa Read && value_masks!(found, graph, o.value, map(through, o.index), d, depth + 1, seen)
     end
 end
 
 # What `v`, read at `index`, is where `mask` fails, when the mask's literal
 # decides it: a number; `:finite` for an input, a fold, an index, and for
 # what sums, scales, exponentiates or converts those; nothing when unknown.
-function masked_value(graph::IndexGraph, v, index, mask, d::Domain, depth)
+# Each value at each index is asked once (`known`).
+function masked_value(graph::IndexGraph, v, index, mask, d::Domain, depth, known = Dict{Any, Any}())
     depth < 32 || return nothing
+    haskey(known, (v, index)) && return known[(v, index)]
+    known[(v, index)] = masked_value_of(graph, v, index, mask, d, depth, known)
+end
+
+function masked_value_of(graph::IndexGraph, v, index, mask, d::Domain, depth, known)
     val = graph.values[v]
     def = val.definition
     def isa Pointwise || return :finite
     through(e) = substitute(e, index, d)
     operand(o) = o isa Literal ? o.value : o isa IndexOperand ? :finite :
-        o isa Read ? masked_value(graph, o.value, map(through, o.index), mask, d, depth + 1) : nothing
+        o isa Read ? masked_value(graph, o.value, map(through, o.index), mask, d, depth + 1, known) : nothing
     if def.f === ifelse && length(def.operands) == 3 && def.operands[1] isa Read
         o = def.operands[1]
         mask_of(graph, o.value, map(through, o.index), d) == mask && return operand(def.operands[3])

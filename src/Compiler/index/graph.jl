@@ -159,7 +159,9 @@ A program at the index level: values in topological order, the values that are
 arguments, and each result as a read over the result's own shape (results may be
 layouts of values, or constants). `rewrites` notes the values that rewrites of
 the graph made, and what each rewrote. `backward` marks the values of the
-program's backward, where a reverse pass recorded it.
+program's backward, where a reverse pass recorded it. `masks` holds each
+value's mask as `masked` finds it, once per graph: every view of a group
+asks it of the values the group reads.
 """
 struct IndexGraph
     values::Vector{Value}
@@ -170,10 +172,11 @@ struct IndexGraph
     result_eltype::Vector{DataType}
     rewrites::Vector{Pair{Int, String}}
     backward::BitVector
+    masks::Base.Lockable{Dict{Int, Any}, ReentrantLock}
 end
 
-IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int, String}[]) =
-    IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites, falses(length(values)))
+IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int, String}[], backward = falses(length(values))) =
+    IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites, backward, Base.Lockable(Dict{Int, Any}()))
 
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
