@@ -49,6 +49,41 @@ end
     @test dE[:, 2] == fill(BFloat16s.BFloat16(41), 4)
 end
 
+# A broadcast of numbers and arrays of no dimensions is a number, as in Julia,
+# and with an array of one element it is that array. An array of no
+# dimensions written in place stays one, as do Base's arithmetic on it, `map`
+# of it and Statistics' variance along a dimension; an input of no dimensions
+# is an array, and so is its gradient.
+twice(s::Number) = 2s
+
+@testset "broadcasts of no dimensions" begin
+    x, y, v = fill(2.0), fill(0.5), [3.0]
+    @testset "$name" for (name, f) in [
+        ("with a number", (x, y, v) -> x .* 3.0),
+        ("of two arrays", (x, y, v) -> x .+ y),
+        ("fused", (x, y, v) -> exp.(x .* y) .+ 1.0),
+        ("of the identity", (x, y, v) -> identity.(x)),
+        ("with an array of one element", (x, y, v) -> x .+ v),
+        ("read as a number", (x, y, v) -> (x .* y) isa Number),
+        ("taken by a method for numbers", (x, y, v) -> twice(x .* y)),
+        ("broadcast with a vector", (x, y, v) -> (s = x .* y; s .* v)),
+        ("summed", (x, y, v) -> sum(x .* y)),
+        ("written in place", (x, y, v) -> (z = similar(x); z .= x .* y; z)),
+        ("mapped", (x, y, v) -> map(abs, x)),
+        ("summed along a dimension", (x, y, v) -> sum(abs2, x; dims = 1)),
+        ("in Base's arithmetic", (x, y, v) -> (x + y, 2x, -x)),
+        ("in a variance", (x, y, v) -> (Statistics.var(x), Statistics.var(x; dims = 1), Statistics.std(x; dims = 1))),
+    ]
+        expected = f(copy(x), y, v)
+        traced = interpret(trace(f, x, y, v), copy(x), y, v)
+        @test isequal(traced, expected) && typeof(traced) == typeof(expected)
+    end
+    @test T.gradient(x -> x .* 3.0, x) == (6.0, fill(3.0))
+    @test T.gradient((x, a) -> sum(x .* a), x, 3.0) == (6.0, fill(3.0), nothing)
+    loss, g = interpret(trace(x -> T.gradient(x -> exp.(x .* y), x), x), x)
+    @test loss ≈ exp(1.0) && g isa Array{Float64, 0} && g[] ≈ 0.5 * exp(1.0)
+end
+
 # A gradient in traced code is the differentiated program inlined where it is
 # called; what the function closes over is a constant to it, and an argument
 # passed twice gets a gradient for each place.

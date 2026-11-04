@@ -62,6 +62,7 @@ end
     # A number comes back as a number, an array of no dimensions as one.
     @test compile(sum, data(1))([3.0]) === 3.0
     @test compile(x -> reshape(x, ()), data(1))([3.0]) == fill(3.0)
+    @test compile(x -> 2 .* x, fill(1.0))(fill(3.0)) === 6.0
     @test occursin("1 kernel", sprint(show, compile(sum, data(4))))
     @test occursin("kernel 1", sprint(explain, compile(sum, data(4))))
 end

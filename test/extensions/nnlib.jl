@@ -47,6 +47,8 @@ const NNLIB = [
     @test interpret(trace(x -> T.gradient(x -> sum(x), x)[1] + sum(NNlib.within_gradient(x) ? 2 .* x : x), x), x) ≈ 2 * sum(x)
     # A traced softplus's derivative at zero is one half, as NNlib's is.
     @test interpret(differentiate(trace(x -> sum(NNlib.softplus.(x)), [0.0])), [0.0])[2] == [0.5]
+    # Of an array of no dimensions, a softmax is one, as NNlib's is.
+    @test interpret(trace(x -> (NNlib.softmax(x), NNlib.logsoftmax(x)), fill(2.0)), fill(2.0)) == (fill(1.0), fill(0.0))
     # The methods on traced arrays add no ambiguity.
     for f in (NNlib.softmax, NNlib.logsoftmax, NNlib.batched_mul, NNlib.softplus)
         ms = collect(methods(f))

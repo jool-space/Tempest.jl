@@ -13,9 +13,9 @@ import Tempest: logsumexp
 import Tempest.Compiler: TracedArray, Traced, contract
 
 # Written with the log-sum-exp, a softmax streams: a sum weighted by it
-# accumulates online.
-NNlib.softmax(x::TracedArray; dims = 1) = exp.(x .- logsumexp(x; dims))
-NNlib.logsoftmax(x::TracedArray; dims = 1) = x .- logsumexp(x; dims)
+# accumulates online. Of an array of no dimensions it is one, as NNlib's is.
+NNlib.softmax(x::TracedArray; dims = 1) = Broadcast.broadcast_preserving_zero_d((x, l) -> exp(x - l), x, logsumexp(x; dims))
+NNlib.logsoftmax(x::TracedArray; dims = 1) = Broadcast.broadcast_preserving_zero_d(-, x, logsumexp(x; dims))
 
 # NNlib writes `softplus` without branches for Float32 and Float64 only, and a
 # traced number takes the same form: both terms switch below zero, so the

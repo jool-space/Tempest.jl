@@ -333,9 +333,24 @@ function tape_in(@nospecialize(bc::Broadcast.Broadcasted))
     nothing
 end
 
+# A broadcast of numbers and arrays of no dimensions is a number, as in Julia:
+# the program's number, a scalar node.
 function Base.copy(@nospecialize(bc::Broadcast.Broadcasted{TracedStyle}))
     tape = tape_in(bc)
-    TracedArray(tape, filled(tape, broadcast_handle(bc, tape).id, broadcast_dims_of(bc)))
+    dims = broadcast_dims_of(bc)
+    y = broadcast_handle(bc, tape)
+    isempty(dims) && return number(y)
+    TracedArray(tape, filled(tape, y.id, dims))
+end
+
+number(y::Traced) = node(y).scalar ? y : Traced(y.tape, record!(y.tape, Reshape(), (y.id,), (), node(y).eltype; scalar = true))
+
+# An array for a broadcast's result, zero as `similar` of a traced array is:
+# Base's arithmetic on arrays, `x + y` and `2x`, keeps a result of no
+# dimensions an array by writing it into one (`broadcast_preserving_zero_d`).
+function Base.similar(@nospecialize(bc::Broadcast.Broadcasted{TracedStyle}), ::Type{T}, dims) where {T}
+    tape = tape_in(bc)
+    TracedArray(tape, record!(tape, Constant(zero(element_type(T))), (), map(length, dims), element_type(T)))
 end
 
 # Node `id` as an array of shape `dims`: a result smaller than a broadcast, or
@@ -391,10 +406,10 @@ Base.sum(x::TracedArray; dims = :) = fold(SumFold(), x; dims)
 Base.maximum(x::TracedArray; dims = :) = fold(MaxFold(), x; dims)
 Base.minimum(x::TracedArray; dims = :) = fold(MinFold(), x; dims)
 Base.prod(x::TracedArray; dims = :) = fold(ProdFold(), x; dims)
-Base.sum(f, x::TracedArray; dims = :) = sum(f.(x); dims)
-Base.maximum(f, x::TracedArray; dims = :) = maximum(f.(x); dims)
-Base.minimum(f, x::TracedArray; dims = :) = minimum(f.(x); dims)
-Base.prod(f, x::TracedArray; dims = :) = prod(f.(x); dims)
+Base.sum(f, x::TracedArray; dims = :) = sum(map(f, x); dims)
+Base.maximum(f, x::TracedArray; dims = :) = maximum(map(f, x); dims)
+Base.minimum(f, x::TracedArray; dims = :) = minimum(map(f, x); dims)
+Base.prod(f, x::TracedArray; dims = :) = prod(map(f, x); dims)
 
 """
     Tempest.logsumexp(x; dims = :)
@@ -938,10 +953,11 @@ constant_handle(tape, x::Number) = Traced(tape, constant!(tape, x))
 constant_handle(tape, x::AbstractArray) = TracedArray(tape, constant!(tape, x))
 
 # `map` over arrays of one shape is a broadcast, and `dot` a sum of products,
-# rather than loops over their elements.
+# rather than loops over their elements. A map of arrays of no dimensions is
+# one, where their broadcast is a number.
 function Base.map(f, x::TracedArray, xs::AbstractArray...)
     all(y -> size(y) == size(x), xs) || throw(DimensionMismatch("map over arrays of sizes $(map(size, (x, xs...)))"))
-    f.(x, xs...)
+    Broadcast.broadcast_preserving_zero_d(f, x, xs...)
 end
 
 function LinearAlgebra.dot(x::TracedArray{<:Real}, y::TracedArray{<:Real})
