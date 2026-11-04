@@ -34,6 +34,9 @@
     # An array the function allocates itself holds numbers, not the
     # program's values; one allocated from a traced array does.
     @test_throws ArgumentError trace(x -> (y = zeros(size(x)); y .= 2 .* x; y), x)
+    @test_throws ArgumentError trace(x -> (y = zeros(Float32, size(x)); y[1] = x[1]; y), x)
+    @test_throws ArgumentError trace(x -> (y = zeros(Float32, size(x)); y[1, 2] = sum(x); y), x)
+    @test_throws ArgumentError trace(x -> (y = zeros(Float32, size(x)); view(y, :, 1)[CartesianIndex(2)] = x[1]; y), x)
     @test same(x -> (y = fill!(similar(x, size(x, 2)), 0); y .= x[1, :]; y), x)
 end
 

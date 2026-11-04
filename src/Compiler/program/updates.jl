@@ -127,8 +127,22 @@ Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted{TracedStyle}) = assign!(x
 # An array the function allocates itself, as `zeros(Float32, n)` does, is a
 # constant of the program and holds numbers: what a traced broadcast computes
 # is the program's, and is written into arrays allocated from traced ones.
-Base.copyto!(::AbstractArray, ::Broadcast.Broadcasted{TracedStyle}) =
-    throw(ArgumentError("a traced value cannot be written into an array the function allocates itself, such as `zeros(Float32, n)`; allocate it from a traced array: `similar(x, …)`, `zero(x)` or `fill!(similar(x, …), v)`"))
+const PLAIN_WRITE = "a traced value cannot be written into an array the function allocates itself, such as `zeros(Float32, n)`; allocate it from a traced array: `similar(x, …)`, `zero(x)` or `fill!(similar(x, …), v)`"
+
+Base.copyto!(::AbstractArray, ::Broadcast.Broadcasted{TracedStyle}) = throw(ArgumentError(PLAIN_WRITE))
+
+# So is one traced number written into an element of such an array, one of
+# numbers rather than of traced values; a view and a Cartesian index come here
+# through the array's own integer indices.
+function Base.setindex!(y::Array{T}, v::Traced, i::Int) where {T <: Number}
+    v isa T || throw(ArgumentError(PLAIN_WRITE))
+    invoke(setindex!, Tuple{Array{T}, Any, Int}, y, v, i)
+end
+
+function Base.setindex!(y::Array{T}, v::Traced, i::Int, j::Int, I::Int...) where {T <: Number}
+    v isa T || throw(ArgumentError(PLAIN_WRITE))
+    invoke(setindex!, Tuple{Array{T}, Any, Int, Int, Vararg{Int}}, y, v, i, j, I...)
+end
 
 function Base.copyto!(dest::TracedArray, src::AbstractArray)
     length(src) <= length(dest) || throw(ArgumentError("destination has fewer elements than required"))
