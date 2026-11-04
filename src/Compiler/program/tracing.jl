@@ -236,6 +236,15 @@ struct TracedStyle <: Broadcast.BroadcastStyle end
 Base.BroadcastStyle(::Type{<:TracedArray}) = TracedStyle()
 Base.BroadcastStyle(s::TracedStyle, ::Broadcast.AbstractArrayStyle) = s
 
+# A traced number broadcast with numbers and arrays of no dimensions is
+# computed as Julia computes a number's broadcast. With an array of dimensions
+# it is the program's broadcast, as a traced array's is: one operation reading
+# the array as a constant, not a traced number per element. Base makes the
+# style of a number met with an array of `N` dimensions `TracedNumberStyle(Val(N))`.
+struct TracedNumberStyle <: Broadcast.AbstractArrayStyle{0} end
+TracedNumberStyle(::Val) = TracedStyle()
+Base.BroadcastStyle(::Type{<:Traced}) = TracedNumberStyle()
+
 handle(x::TracedArray) = Traced(x.tape, x.id)
 handle(x::TracedArray, tape) = handle(x)
 handle(x::AbstractArray{<:Number}, tape) = Traced(tape, constant!(tape, x))
@@ -333,9 +342,19 @@ function tape_in(@nospecialize(bc::Broadcast.Broadcasted))
     nothing
 end
 
+# Whether a broadcast reads a traced number that stands for an element of an
+# array: one a broadcast's function runs on.
+reads_element(@nospecialize(bc::Broadcast.Broadcasted)) = any(reads_element, bc.args)
+reads_element(x::Traced) = !node(x).scalar
+reads_element(x) = false
+
 # A broadcast of numbers and arrays of no dimensions is a number, as in Julia:
-# the program's number, a scalar node.
+# the program's number, a scalar node. In a broadcast's function a traced
+# number stands for an element, a number to the code around it: broadcast
+# with an array, it makes an array for each element, which a program does not
+# hold, so it is broadcast element by element, as a number is.
 function Base.copy(@nospecialize(bc::Broadcast.Broadcasted{TracedStyle}))
+    reads_element(bc) && return copy(convert(Broadcast.Broadcasted{Broadcast.DefaultArrayStyle{ndims(bc)}}, bc))
     tape = tape_in(bc)
     dims = broadcast_dims_of(bc)
     y = broadcast_handle(bc, tape)
@@ -346,9 +365,10 @@ end
 number(y::Traced) = node(y).scalar ? y : Traced(y.tape, record!(y.tape, Reshape(), (y.id,), (), node(y).eltype; scalar = true))
 
 # An array for a broadcast's result, zero as `similar` of a traced array is:
-# Base's arithmetic on arrays, `x + y` and `2x`, keeps a result of no
-# dimensions an array by writing it into one (`broadcast_preserving_zero_d`).
-function Base.similar(@nospecialize(bc::Broadcast.Broadcasted{TracedStyle}), ::Type{T}, dims) where {T}
+# Base's arithmetic on arrays, `x + y` and `2x`, and on a traced number and a
+# Julia array, keeps a result of no dimensions an array by writing it into one
+# (`broadcast_preserving_zero_d`).
+function Base.similar(@nospecialize(bc::Broadcast.Broadcasted{<:Union{TracedStyle, TracedNumberStyle}}), ::Type{T}, dims) where {T}
     tape = tape_in(bc)
     TracedArray(tape, record!(tape, Constant(zero(element_type(T))), (), map(length, dims), element_type(T)))
 end

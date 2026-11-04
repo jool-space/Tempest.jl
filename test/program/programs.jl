@@ -89,6 +89,45 @@ twice(s::Number) = 2s
     @test length(trace((x, y) -> x + y, x, y).nodes) == 3
 end
 
+# A Julia array broadcast with a traced number is one operation of the
+# program reading the array as a constant, as with a traced array, not a
+# traced number per element. Inside a broadcast's function a traced number
+# stands for an element, a number to the code around it, and its broadcast
+# with a Julia array is element by element, as a number's is.
+shifted(a, s) = a * s + 1
+power_series(a) = sum(a .^ (0:3))
+
+@testset "a Julia array broadcast with a traced number" begin
+    x, w = data(4), data(4; scale = 0.3)
+    @testset "$name" for (name, f) in [
+        ("added", x -> w .+ sum(x)),
+        ("multiplied", x -> w .* sum(x)),
+        ("by a function of its own", x -> shifted.(w, sum(x))),
+        ("fused with a number", x -> sum(x) .* w .+ 1),
+        ("fused with a traced array", x -> x .* w .+ sum(x)),
+        ("of a range", x -> sum(x) .* (1:4)),
+        ("of a range added", x -> (1:4) .+ maximum(x)),
+        ("in Base's arithmetic", x -> w * sum(x)),
+    ]
+        p = trace(f, x)
+        @test interpret(p, x) ≈ f(x)
+        @test !any(n -> n.op isa C.Map && n.scalar, p.nodes)
+        loss, g = interpret(differentiate(trace(x -> sum(abs2, f(x)), x)), x)
+        @test g ≈ finite_difference(x -> sum(abs2, f(x)), (x,), 1) rtol = 1.0e-5
+    end
+    @test any(n -> n.op isa C.Constant && n.op.value == w, trace(x -> w .+ sum(x), x).nodes)
+    # Base's arithmetic keeps a result of no dimensions an array, the program's.
+    y = interpret(trace(x -> fill(2.0) * sum(x), x), x)
+    @test y isa Array{Float64, 0} && y[] ≈ 2 * sum(x)
+    @test interpret(trace(x -> power_series.(x), x), x) ≈ power_series.(x)
+    @test only(T.gradient(x -> sum(power_series.(x)), x)) ≈ 1 .+ 2 .* x .+ 3 .* x .^ 2
+    # A function closing over a traced number and mapped over a Julia array
+    # gives `map` no traced value to dispatch on: it runs element by element.
+    @testset "gap: a map over a Julia array that sees the traced numbers its function closes over" begin
+        @test_broken !any(n -> n.op isa C.Map && n.scalar, trace(x -> (s = sum(x); sum(map(a -> a + s, w))), x).nodes)
+    end
+end
+
 # A gradient in traced code is the differentiated program inlined where it is
 # called; what the function closes over is a constant to it, and an argument
 # passed twice gets a gradient for each place.
