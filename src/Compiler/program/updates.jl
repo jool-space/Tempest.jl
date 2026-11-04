@@ -122,6 +122,13 @@ end
 Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted) = assign!(x, bc)
 Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted{Nothing}) = assign!(x, bc)
 Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted{<:Broadcast.AbstractArrayStyle{0}}) = assign!(x, bc)
+Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted{TracedStyle}) = assign!(x, bc)
+
+# An array the function allocates itself, as `zeros(Float32, n)` does, is a
+# constant of the program and holds numbers: what a traced broadcast computes
+# is the program's, and is written into arrays allocated from traced ones.
+Base.copyto!(::AbstractArray, ::Broadcast.Broadcasted{TracedStyle}) =
+    throw(ArgumentError("a traced value cannot be written into an array the function allocates itself, such as `zeros(Float32, n)`; allocate it from a traced array: `similar(x, …)`, `zero(x)` or `fill!(similar(x, …), v)`"))
 
 function Base.copyto!(dest::TracedArray, src::AbstractArray)
     length(src) <= length(dest) || throw(ArgumentError("destination has fewer elements than required"))

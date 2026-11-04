@@ -31,6 +31,10 @@
     @test same((x, i) -> (y = copy(x); y[i, 2:3] .= 7; y[i[2], 1] = -1; view(y, :, 4)[i] .= x[i, 5]; y), x, Int32[5, 2, 5])
     # A traced mask selects a number of elements known only when the program runs.
     @test_throws ArgumentError trace((x, m) -> (y = copy(x); y[m] .= 0; y), x, x .> 0)
+    # An array the function allocates itself holds numbers, not the
+    # program's values; one allocated from a traced array does.
+    @test_throws ArgumentError trace(x -> (y = zeros(size(x)); y .= 2 .* x; y), x)
+    @test same(x -> (y = fill!(similar(x, size(x, 2)), 0); y .= x[1, :]; y), x)
 end
 
 # A write into an input, or into anything that shares its memory, is a write
