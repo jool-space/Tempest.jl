@@ -238,6 +238,24 @@ end
     @test m.mean == before
 end
 
+# Results that are inputs as they were before the program wrote them, against
+# the functions run untraced: the results, and the caller's arrays after.
+host(a) = a isa Number ? a : Array(a)
+function check_before_write(device; options...)
+    stepped = x -> (old = copy(x); x .= x .- 0.1f0 .* x; old)
+    overwritten = x -> (y = copy(x); x .= 1; (y, sum(x)))
+    reshaped = x -> (y = reshape(copy(x), 1, :); x[2] = 0; (y, copy(y)))
+    for f in (stepped, overwritten, reshaped)
+        c = compile(f, device(single(data(3))); options...)
+        # Each call on new contents: the copy is made on every call.
+        for scale in (1, 2)
+            mine, theirs = device(single(data(3; scale))), single(data(3; scale))
+            @test all(map((a, b) -> host(a) ≈ b, C.leaves(c(mine)), C.leaves(f(theirs)))) && Array(mine) ≈ theirs
+        end
+    end
+    @test occursin("input 1 copied apart before the kernels", sprint(explain, compile(stepped, device(single(data(3)))).executable))
+end
+
 @testset "writes into the arguments" begin
     # What the traced code writes into an argument's arrays, a layer's running
     # statistics say, the caller's arrays hold after each call, as they would
@@ -263,9 +281,10 @@ end
     @test value ≈ sum(abs2, normalized(deepcopy(m), x)) && gm.mean === nothing || all(iszero, gm.mean)
     normalized(theirs, x)
     @test mine.mean ≈ theirs.mean
-    # A result that is what an input held before the program wrote it is not
-    # yet one a prepared program returns.
-    @test occursin("as it was before the program wrote it", message(() -> compile(x -> (y = copy(x); x .= 1; (y, sum(x))), data(3))))
+    # A result may be what an input held before the program wrote it, as an
+    # optimizer's step returns a parameter's old value: the input is copied
+    # apart before the kernels, on each call.
+    check_before_write(single)
 end
 
 if CUDA_FUNCTIONAL
@@ -284,5 +303,9 @@ if CUDA_FUNCTIONAL
         launched = compile((m, x) -> (loss(m, x), m(x)), Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x); capture = false)
         @test launched.executable.captured === nothing
         @test launched(Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x))[1] == value
+        # Inputs as they were before the program wrote them, copied apart
+        # within the capture and launched kernel by kernel.
+        check_before_write(CuArray)
+        check_before_write(CuArray; capture = false)
     end
 end

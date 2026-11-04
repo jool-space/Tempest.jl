@@ -5,8 +5,10 @@
 
 A program prepared for a target: its plan, its storage, and a launch per
 kernel. Each stored value has a buffer: inputs, constants and results their
-own, other values a view of their slot, and a result that replaces an argument
-the argument's. `bind!` copies inputs into the buffers the executable owns,
+own, other values a view of their slot, a result that replaces an argument
+the argument's, and a result that is an input as it was before the program
+wrote it a buffer of its own, which the input is copied into before the
+kernels run. `bind!` copies inputs into the buffers the executable owns,
 `execute!` and `replay!` run the program over them, and `outputs` is where
 the results are, overwritten by each run.
 """
@@ -29,6 +31,10 @@ mutable struct Executable{T <: Target}
     kernels::Vector{Any}
     decisions::Vector{Any}
     considered::Vector{Any}
+    # The inputs the program writes that results are as they were before: per
+    # input, its argument, its buffer and the buffer those results are over,
+    # which it is copied into ahead of the kernels.
+    saves::Vector{Any}
     # Copies of staged results into the arguments they replace, after the kernels.
     copies::Vector{Any}
     # The graph `execute!` replays, once captured (see `capture!`).
@@ -61,7 +67,8 @@ program's results and its arguments, alike in structure, shapes and types:
 `(2 => 1, 3 => 2)` for a step `(params, state, batch) -> (loss, params, state)`.
 After each execution the argument holds the result, as if bound again, so the
 next execution reads it where it is. An input the program writes is replaced
-so by what it writes. A result is written into the argument's
+so by what it writes; a result that is the input as it was before the write
+is copied apart before the kernels run. A result is written into the argument's
 storage when the kernel that writes it reads the argument only at the address
 it writes, and the kernels that read the argument otherwise can run first;
 else it is written apart and copied there after the last kernel. `explain`
@@ -164,12 +171,15 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     ds = decisions(d, p)
     values = p.graph.values
     result_value(k) = p.graph.results[k].value
-    # A result that is an argument's storage would change as another result replaces it.
+    # A result that is an argument's storage would change as another result
+    # replaces it. One that is an input as it was before the program wrote it,
+    # as `old` in `x -> (old = copy(x); x .= 0.9f0 .* x; old)`, is saved: the
+    # input is copied into a buffer of its own before the kernels run.
+    saved = Dict{Int, Int}()
     for k in eachindex(p.graph.results), (r, a) in pairs
         k != r && result_value(k) == input[a] || continue
-        (r => a) in program.writes &&
-            throw(ArgumentError("result $k is input $a as it was before the program wrote it, which a prepared program cannot return"))
-        throw(ArgumentError("result $k is argument $a, which result $r replaces"))
+        (r => a) in program.writes || throw(ArgumentError("result $k is argument $a, which result $r replaces"))
+        saved[k] = input[a]
     end
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
@@ -178,7 +188,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
         none(n) = Vector{Any}(nothing, n)
         return Executable(program, p, target, s, Any[], none(length(values)),
             none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
-            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], nothing, false)
+            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Any[], nothing, false)
     end
     slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
     referenced = Vector{Any}(nothing, length(program.arguments))
@@ -210,14 +220,17 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     end
     foreach(((r, a),) -> buffers[r] = buffers[a], taken)
     arguments = Any[get(buffers, get(input, k, 0), nothing) for k in eachindex(program.arguments)]
+    # One buffer per input saved, however many results are it.
+    befores = Dict(v => allocate(target, values[v].eltype, storage_length(values[v])) for v in unique(Base.values(saved)))
+    saves = Any[(argument = values[v].definition.argument, input = buffers[v], before = b) for (v, b) in befores]
     replaced = Dict(pairs)
-    results = Any[reshape(haskey(replaced, k) ? arguments[replaced[k]] : buffers[result_value(k)],
-        p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
+    stored(k) = haskey(replaced, k) ? arguments[replaced[k]] : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
+    results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
     outs = rebuild(k -> k isa Int ? results[k] : constant_leaf(k), program.output_structure)
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
-        Any[b[1] for b in built], Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], copies, nothing, true)
+        Any[b[1] for b in built], Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, true)
 end
 
 runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
@@ -260,6 +273,7 @@ function footprint(ex::Executable)
     graph, s = ex.plan.graph, ex.storage
     own = sum(v -> s.slots[v] == 0 && ex.buffers[v] !== nothing ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
     own -= sum(v -> s.slots[v] == 0 ? value_bytes(graph.values[v]) : 0, unique(first.([s.donated; s.overwrites])); init = 0)
+    own += sum(save -> sizeof(save.before), ex.saves; init = 0)
     apart = sum(v -> s.slots[v] > 0 ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
     (bytes = own + sum(s.sizes; init = 0), apart = own + apart)
 end
@@ -337,7 +351,8 @@ end
 """
     execute!(ex) -> ex
 
-Run the program on the inputs bound last, launching every kernel in order,
+Run the program on the inputs bound last: copy the inputs it writes into
+the results that are them as they were before, launch every kernel in order,
 then copy staged results into the arguments they replace. The results are in
 `outputs(ex)`. Whether or not the program is captured, this launches kernel by
 kernel; `replay!` runs the capture.
@@ -350,6 +365,7 @@ end
 
 # What an execution launches, and what a capture records.
 function run_once(ex::Executable)
+    foreach(save -> copyto!(save.before, save.input), ex.saves)
     foreach(launch -> launch(), ex.launches)
     foreach(copy -> copy(), ex.copies)
 end
@@ -375,7 +391,7 @@ function capture!(ex::Executable; repetitions::Integer = 1)
     runnable(ex)
     ex.captured === nothing || release(ex.target, ex.captured)
     ex.captured = nothing
-    ex.captured = capture(ex.target, () -> foreach(_ -> run_once(ex), 1:repetitions), (ex.launches, ex.copies))
+    ex.captured = capture(ex.target, () -> foreach(_ -> run_once(ex), 1:repetitions), (ex.saves, ex.launches, ex.copies))
     ex
 end
 
@@ -400,6 +416,7 @@ function explain(io::IO, ex::Executable)
         ex.target.online ? "; softmax online where a sum is weighted by it" : "; no online softmax")
     foreach(c -> explain(io, ex.plan, c), ex.considered)
     explain(io, ex.plan, ex.storage)
+    foreach(save -> println(io, "  input ", save.argument, " copied apart before the kernels, as results return it before the program writes it"), ex.saves)
     is = implementations(ex.target)
     println(io, isempty(is) ? "the floor alone:" : string("implementations ", join(map(repr, is), ", "), " and the floor:"))
     for (k, d) in enumerate(ex.kernels)
