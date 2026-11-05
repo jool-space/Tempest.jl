@@ -281,10 +281,19 @@ term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads
 # joined such a member would make kernels depend on each other in a cycle.
 # A value among the ancestors of one already looked at is passed over: its
 # ancestors are among them, and their kernels were looked at.
+# The latest value pending is looked at first: values are numbered after
+# their operands, so its ancestors cover most of the others.
 function depends(graph, deps::Dependencies, reads, group)
-    pending, covered, kernels = collect(reads), falses(length(deps.owner)), Set{Int}()
-    while !isempty(pending)
-        r = pop!(pending)
+    n = length(deps.owner)
+    pending, covered, kernels = falses(n), falses(n), Set{Int}()
+    top = 0
+    for r in reads
+        pending[r] = true
+        top = max(top, r)
+    end
+    while top > 0 && (r = findprev(pending, top)) !== nothing
+        pending[r] = false
+        top = r
         covered[r] && continue
         any(m -> m == r || deps.up[r][m], group) && return true
         fresh = deps.up[r] .& .!covered
@@ -294,7 +303,9 @@ function depends(graph, deps::Dependencies, reads, group)
             k = deps.owner[u]
             (k == 0 || k in kernels) && continue
             push!(kernels, k)
-            append!(pending, get!(() -> group_reads(graph, deps.groups[k]), deps.reads, k))
+            for x in get!(() -> group_reads(graph, deps.groups[k]), deps.reads, k)
+                covered[x] || (pending[x] = true; top = max(top, x))
+            end
         end
     end
     false
