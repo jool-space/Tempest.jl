@@ -513,6 +513,12 @@ fails to build, the next option that builds, the floor last, a decision made
 the cover plans the program again without it (see `prepare`).
 """
 function build_group(d::Decider, p::Plan, g::Group, x, buffers)
+    # A recurrence no claim takes runs a step at a time where its step is a
+    # program of its own, rather than on the floor (see `build_stepped`).
+    if g.kind === :recurrence && (x === nothing || x.choice.implementation === nothing)
+        built = build_stepped(d, p, g, buffers)
+        built === nothing || return (built..., x)
+    end
     (x === nothing || x.choice.implementation === nothing) && return (build_floor(d.target, p, g, buffers)..., x)
     for o in [x.choice; filter(!=(x.choice), x.options)]
         o.implementation === nothing && break

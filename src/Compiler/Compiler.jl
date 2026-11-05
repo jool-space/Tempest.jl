@@ -83,6 +83,7 @@ include("cover/choose.jl")
 include("cover/cover.jl")
 include("cover/calibrate.jl")
 include("cover/record.jl")
+include("runtime/stepped.jl")
 
 # The kernel cache, and the front door.
 include("runtime/cache.jl")
