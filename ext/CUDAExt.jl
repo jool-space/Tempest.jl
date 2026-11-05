@@ -140,7 +140,7 @@ function steps_recorded(steps)
     graph = CUDACore.CuGraph()
     after = CUDACore.CuGraphNode[]
     marks = map(steps) do step
-        after = CUDACore.capture!(() -> step(), graph; after)
+        after = captured!(() -> step(), graph; after)
         CUDACore.CUgraphNode[n.handle for n in after]
     end
     seen = Set{CUDACore.CUgraphNode}()
@@ -156,6 +156,21 @@ function steps_recorded(steps)
         Any[node_record(n) for n in reverse!(mine)]
     end
     graph, nodes
+end
+
+# `f` captured into `graph`, after `after`. A capture that starts while CUDA.jl
+# waits for the GPU to release memory, as it does when an allocation of another
+# task (a group built at the same time, a kernel's measurement) reclaims, fails
+# before it captures anything, and is tried again once the release is done.
+function captured!(f, graph; after)
+    while true
+        try
+            return CUDACore.capture!(f, graph; after)
+        catch err
+            err isa ErrorException && startswith(err.msg, "Cannot start a graph capture while CUDA.jl is waiting") || rethrow()
+            sleep(0.001)
+        end
+    end
 end
 
 function Tempest.Compiler.capture(::CUDATarget, steps, keep)

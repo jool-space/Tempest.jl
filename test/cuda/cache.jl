@@ -46,4 +46,16 @@
         CUDACore.synchronize()
         """
     @test success(pipeline(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`; stderr = devnull))
+
+    # A graph captured while another task waits for the GPU to release memory,
+    # as one reclaiming does, is captured once the release is done.
+    x = CuArray(Float32.(reshape(1:4096, 64, 64)))
+    p = trace(x -> sum(abs2, x * x; dims = 1), x)
+    ex = prepare(p, x; target = Tempest.CUDATarget(precision = :tf32))
+    reclaiming = @async CUDACore.releasing(() -> sleep(0.2); blocking = true)
+    yield()
+    @test !istaskdone(reclaiming)
+    replay!(capture!(ex))
+    @test istaskdone(reclaiming) && fetch(reclaiming)
+    @test Array(only(C.leaves(outputs(ex)))) ≈ sum(abs2, Array(x) * Array(x); dims = 1)
 end
