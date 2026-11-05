@@ -120,11 +120,14 @@ function node_record(node)
     Node(kind[], nothing)
 end
 
+# A node's dependencies, read with their edges' data: the driver refuses to
+# leave it out where an edge has any, as a library's programmatic launch's.
 function dependencies(node)
     n = Ref{Csize_t}(0)
     CUDACore.cuGraphNodeGetDependencies_v2(node, C_NULL, C_NULL, n)
     out = Vector{CUDACore.CUgraphNode}(undef, n[])
-    n[] > 0 && CUDACore.cuGraphNodeGetDependencies_v2(node, out, C_NULL, n)
+    edges = Vector{CUDACore.CUgraphEdgeData}(undef, n[])
+    n[] > 0 && CUDACore.cuGraphNodeGetDependencies_v2(node, out, edges, n)
     out
 end
 
