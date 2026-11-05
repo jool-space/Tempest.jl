@@ -294,25 +294,29 @@ end
 pointed(c) = (ex = c.executable; count(k -> ex.pointable[k] !== nothing && ex.pointed[k] !== ex.arguments[k], eachindex(ex.pointable)))
 
 @testset "arguments read where the caller has them" begin
-    # An argument the program only reads is copied into the program's storage
-    # on its first call, and read where the caller has it once the caller
-    # brings the same array twice in a row: what the caller writes into it
-    # after, the next call reads.
+    # An argument the program only reads is read where the caller has it:
+    # what the caller writes into it after, the next call reads.
     m, x = Dense(data(3, 4), data(3), tanh), data(4, 2)
     c = compile((m, x) -> m(x), m, x)
-    @test c(m, x) ≈ m(x) && pointed(c) == 0
+    ex = c.executable
     @test c(m, x) ≈ m(x) && pointed(c) == 3
     x .*= 2
     m.w[1] = 7
     @test c(m, x) ≈ m(x) && pointed(c) == 3
-    # A new array is copied, as an array that moves every call is.
+    # Another array is read where it is too.
     y = data(4, 2; scale = 0.3)
-    @test c(m, y) ≈ m(y) && pointed(c) == 2
-    @test c(m, y) ≈ m(y) && pointed(c) == 3
+    @test c(m, y) ≈ m(y) && pointed(c) == 3 && any(p -> p === y, ex.pointed)
     # `bind!` copies, and the kernels read the program's storage again.
-    ex = c.executable
     bind!(ex, c.f, m, x)
     @test execute!(ex) === ex && outputs(ex) ≈ m(x) && pointed(c) == 0
+    # An argument whose graph had to be recorded again to read elsewhere
+    # waits to be brought twice in a row: the layer's arrays, brought on the
+    # call before, are read where they are, a new array is copied, and read
+    # where it is on the next call.
+    ex.settles .= true
+    w = copy(y)
+    @test c(m, w) ≈ m(w) && pointed(c) == 2
+    @test c(m, w) ≈ m(w) && pointed(c) == 3
     # An argument the program writes is copied into its storage and back on
     # every call, the same array or not; the others are read where they are.
     function normalized(m, x)
@@ -358,19 +362,21 @@ if CUDA_FUNCTIONAL
     end
 
     @testset "arguments read where the caller has them, on CUDA" begin
-        # The captured graph is recorded again when its kernels are pointed
-        # at the caller's arrays, and when they are pointed back.
+        # The captured graph's kernels are changed in place where they read
+        # an argument pointed elsewhere, not recorded again.
         m, x = Dense(CuArray(single(data(64, 32; scale = 0.3))), CuArray(single(data(64))), tanh), CuArray(single(data(32, 16; scale = 0.5)))
         reference(m, x) = Array(m.act.(m.w * x .+ m.b))
         for capture in (true, false)
             c = compile((m, x) -> m(x), m, x; capture)
-            @test isapprox(Array(c(m, x)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 0
+            ex = c.executable
             @test isapprox(Array(c(m, x)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 3
             x .*= 2
             @test isapprox(Array(c(m, x)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 3
-            z = copy(x) .+ 1
-            @test isapprox(Array(c(m, z)), reference(m, z); rtol = 1.0e-5) && pointed(c) == 2
-            @test isapprox(Array(c(m, z)), reference(m, z); rtol = 1.0e-5) && pointed(c) == 3
+            for _ in 1:3
+                z = copy(x) .+ 1
+                @test isapprox(Array(c(m, z)), reference(m, z); rtol = 1.0e-5) && pointed(c) == 3
+            end
+            @test !any(ex.settles)
             # An array the kernels cannot read where it is, one element into
             # another, so not at the alignment they assume, is copied.
             y = CuArray{Float32}(undef, length(x) + 1)
@@ -378,6 +384,15 @@ if CUDA_FUNCTIONAL
             copyto!(unaligned, x)
             for _ in 1:2
                 @test isapprox(Array(c(m, unaligned)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 2
+            end
+            # Every execution a replay runs reads where the arguments are.
+            if capture
+                capture!(ex; repetitions = 3)
+                for _ in 1:2
+                    z = copy(x) .- 1
+                    @test isapprox(Array(c(m, z)), reference(m, z); rtol = 1.0e-5) && pointed(c) == 3
+                end
+                @test !any(ex.settles)
             end
         end
     end

@@ -152,11 +152,15 @@ end
 function TileLaunch(fun::CuFunction, @nospecialize(f), @nospecialize(args), grid)
     any(>(ct.MAX_GRID_DIM), grid) && error("grid $grid exceeds Tile IR's 24-bit limit")
     # The kernel function's captured values come first, the seed of cuTile's
-    # kernel state last.
+    # kernel state last. The seed is drawn once, not at each launch as
+    # cuTile's own launches draw it: Tempest's kernels draw none of cuTile's
+    # random numbers, their randomness being the program's, from its seeds,
+    # and a launch whose seed differed each time would differ in each graph
+    # recorded of it, which `retarget!` reads as a change it cannot make.
     values = flatten!(Any[], f)
     foreach(a -> flatten!(values, a), args)
     boxes = Any[Base.RefValue{typeof(v)}(v) for v in values]
-    seed = Base.RefValue{UInt32}(0)
+    seed = Base.RefValue{UInt32}(rand(CUDACore.launch_rng(), UInt32))
     push!(boxes, seed)
     pointers = Ptr{Cvoid}[pointer_from_objref(b) for b in boxes]
     TileLaunch(fun, boxes, pointers, seed, ntuple(i -> get(grid, i, 1), 3))
@@ -164,7 +168,6 @@ end
 
 # One thread per block lets the driver take the thread count from the CUBIN.
 function (l::TileLaunch)()
-    l.seed[] = rand(CUDACore.launch_rng(), UInt32)
     GC.@preserve l begin
         CUDACore.cuLaunchKernel(l.fun, l.grid..., 1, 1, 1, 0, CUDACore.stream(), l.pointers, C_NULL)
     end

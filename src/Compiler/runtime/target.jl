@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, pointable, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, pointable, retarget!, task_state, device_name,
     measurable, time_launch, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -239,26 +239,42 @@ floor_split(::Target, items, positions, adjacent) = nothing
 ## Graphs.
 
 """
-    capture(target, run, keep) -> graph
+    capture(target, steps, keep) -> graph
 
-`run`, which launches work on `target`, captured as a graph for `replay(target,
-graph)` to launch again. The graph keeps `keep`, what it launches, alive until
-`release(target, graph)` or the collector destroys it. A target without graphs
-replays `run` itself.
+`steps`, callables that launch work on `target`, captured in order as one
+graph for `replay(target, graph)` to launch again; `retarget!` changes the
+addresses one step's work reads. The graph keeps `keep`, what it launches,
+alive until `release(target, graph)` or the collector destroys it. A target
+without graphs replays the steps themselves.
 """
-capture(::Target, run, keep) = run
+capture(::Target, steps, keep) = steps
 
 """
-    recapture(target, graph, run, keep) -> graph
+    recapture(target, graph, steps, keep) -> graph
 
-`graph`, which `capture` recorded from `run`, recorded again after its
+`graph`, which `capture` recorded from `steps`, recorded again after their
 launches were pointed at other storage (see `repoint!`). A target with graphs
 may update the graph it has rather than make another.
 """
-recapture(target::Target, graph, run, keep) = (release(target, graph); capture(target, run, keep))
+recapture(target::Target, graph, steps, keep) = (release(target, graph); capture(target, steps, keep))
+
+"""
+    retarget!(target, graph, steps, moves, repoint) -> Bool
+
+Make what `graph` recorded of a launch, `steps` among the steps `capture`
+took, read where `moves` say its values moved, each a named tuple of the
+value, its old and new addresses and its bytes, `(value, from, to, bytes)`.
+`repoint()` points the launch at the new storage (see `repoint!`), and is
+called once, by the target or after it: a target may record the launch
+alone before and after, to learn where its recording holds an address.
+False when the graph cannot be changed so, and must be recorded again
+(`recapture`). The steps themselves, a target's graph without graphs, read
+where their launches read: true.
+"""
+retarget!(::Target, graph, steps, moves, repoint) = true
 
 "Launch `graph`, what `capture` recorded on `target`."
-replay(::Target, run) = run()
+replay(::Target, steps) = foreach(step -> step(), steps)
 
 "Destroy `graph`, what `capture` recorded on `target`, once nothing replays it."
 release(::Target, graph) = nothing

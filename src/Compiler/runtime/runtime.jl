@@ -13,6 +13,12 @@ kernels run. `bind!` copies inputs into the buffers the executable owns, and
 caller has it, when they can; `execute!` and `replay!` run the program over
 them, and `outputs` is where the results are, overwritten by each run.
 """
+# An argument's value, and the kernels that read it.
+const Readers = @NamedTuple{value::Int, kernels::Vector{Int}}
+
+# A value moved, as `retarget!` takes it: its old and new addresses and its bytes.
+const Move = @NamedTuple{value::Int, from::UInt, to::UInt, bytes::UInt}
+
 mutable struct Executable{T <: Target}
     program::Program
     plan::Plan
@@ -43,12 +49,19 @@ mutable struct Executable{T <: Target}
     # Per argument whose launches can read the caller's array where it is
     # (see `point!`): its value, and the kernels that read it; nothing for one
     # copied. And per such argument, the array they read: its buffer, or the
-    # caller's array they were pointed at last. And per argument, the address
-    # of the array it was bound to last, as a number: holding the array would
-    # keep a caller's last arrays alive, as a training step's last weights.
-    pointable::Vector{Any}
+    # caller's array they were pointed at last, and its address. And per
+    # argument, the address of the array it was bound to last, as a number:
+    # holding the array would keep a caller's last arrays alive, as a
+    # training step's last weights. And per argument, whether it is pointed
+    # only once the caller brings the same array twice in a row: once its
+    # graph had to be recorded again.
+    pointable::Vector{Union{Nothing, Readers}}
     pointed::Vector{Any}
+    at::Vector{UInt}
     seen::Vector{UInt}
+    settles::Vector{Bool}
+    # The executions of the program a replay runs (see `capture!`).
+    repetitions::Int
     # Whether its kernels were built; a plan alone can be explained, not run.
     built::Bool
 end
@@ -203,7 +216,8 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
         return Executable(program, p, target, s, Any[], none(length(values)),
             none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
             Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Any[], nothing,
-            none(length(program.arguments)), none(length(program.arguments)), zeros(UInt, length(program.arguments)), false)
+            Vector{Union{Nothing, Readers}}(nothing, length(program.arguments)), none(length(program.arguments)),
+            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)), 1, false)
     end
     slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
     referenced = Vector{Any}(nothing, length(program.arguments))
@@ -248,7 +262,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     # An argument the program only reads, from its own buffer, which no
     # result is and no other value shares, can be read where the caller has
     # it, when every launch can be pointed elsewhere.
-    pointable = Vector{Any}(nothing, length(program.arguments))
+    pointable = Vector{Union{Nothing, Readers}}(nothing, length(program.arguments))
     if all(repoints, launches)
         written = Set(input[a] for (_, a) in pairs)
         shared = Set(last.(taken))
@@ -260,8 +274,10 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
         end
     end
     pointed = Any[x === nothing ? nothing : arguments[a] for (a, x) in enumerate(pointable)]
+    at = UInt[x === nothing ? 0 : reinterpret(UInt, pointer(x)) for x in pointed]
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
-        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, pointable, pointed, zeros(UInt, length(program.arguments)), true)
+        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, pointable, pointed, at, zeros(UInt, length(program.arguments)),
+        fill(false, length(program.arguments)), 1, true)
 end
 
 runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
@@ -373,69 +389,125 @@ end
 
 function bind_leaves!(ex, positions, xs)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
-    moved = false
+    moves = nothing
     for (k, x) in zip(positions, xs)
         k === nothing && continue
         x === ex.referenced[k] && continue
-        moved |= point_at!(ex, k, ex.arguments[k])
+        moves = point_at!(ex, k, ex.arguments[k], moves)
         copyto!(ex.arguments[k], vec(x))
     end
-    moved && recapture!(ex)
-    ex
+    retarget!(ex, moves)
 end
 
 """
     point!(ex, inputs...) -> ex
 
 Bind inputs as `compile`'s call does: an argument the program only reads is
-read where the caller has it once the caller brings the same array twice in
-a row, when every launch can be pointed elsewhere (`repoints`) and the
-target can read the array where it is (`pointable`); it is copied into its
-buffer otherwise, as `bind!` copies. Pointing the launches elsewhere records
-a captured graph again, which costs more than copying an array that moves
-every call, as a training step's weights do; one that stays costs nothing
-from its second call on. The executable holds the arrays it reads until it
-is bound again.
+read where the caller has it, when every launch can be pointed elsewhere
+(`repoints`) and the target can read the array where it is (`pointable`);
+it is copied into its buffer otherwise, as `bind!` copies. An array where
+the launches read already costs nothing. The launches of one elsewhere are
+pointed at it, and a captured graph is changed where it records their
+addresses (`retarget!`), or recorded again where the target cannot change
+it; recording again costs more than copying an array that moves every call,
+as a training step's weights do, so an argument whose graph was recorded
+again is read where it is only once the caller brings the same array twice
+in a row. The executable holds the arrays it reads until it is bound again.
 """
 function point!(ex::Executable, @nospecialize(inputs...))
     runnable(ex)
     positions, xs = leaves(ex.program.input_structure), leaves(inputs)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
-    moved = false
+    moves = nothing
     for (k, x) in zip(positions, xs)
-        k === nothing && continue
-        if ex.pointable[k] !== nothing && pointable(ex.target, x)
-            here = reinterpret(UInt, pointer(x))
-            again = here == ex.seen[k]
-            ex.seen[k] = here
-            again && (moved |= point_at!(ex, k, x); continue)
-        end
-        moved |= point_at!(ex, k, ex.arguments[k])
-        x === ex.referenced[k] || copyto!(ex.arguments[k], vec(x))
+        k === nothing || (moves = point_leaf!(ex, k, x, moves))
     end
-    moved && recapture!(ex)
-    ex
+    retarget!(ex, moves)
 end
 
-# Point the launches that read argument `k` at array `x`, its buffer or the
-# caller's array; whether they read another array before.
-function point_at!(ex::Executable, k, x)
-    ex.pointable[k] === nothing && return false
-    now = ex.pointed[k]
-    (x === now || pointer(x) == pointer(now)) && return false
-    v, kernels = ex.pointable[k]
+# Bind input `x` to argument `k`, as `point!` binds each: one call a leaf,
+# specialized on the leaf's type, a model's hundreds of arrays each checked
+# in a few hundred nanoseconds.
+function point_leaf!(ex::Executable, k::Int, x, moves)
+    if ex.pointable[k] !== nothing && pointable(ex.target, x)
+        here = reinterpret(UInt, pointer(x))
+        again = here == ex.seen[k]
+        ex.seen[k] = here
+        here == ex.at[k] && return moves
+        (again || !ex.settles[k]) && return point_at!(ex, k, x, moves)
+    end
+    moves = point_at!(ex, k, ex.arguments[k], moves)
+    x === ex.referenced[k] || copyto!(ex.arguments[k], vec(x))
+    moves
+end
+
+# Point argument `k` at array `x`, its buffer or the caller's array, adding
+# to `moves` (made on the first) what moved for each launch that reads it:
+# the launch, the argument, the move as `retarget!` takes it, and the
+# storage the launch reads from now on, which `retarget!` points it at.
+function point_at!(ex::Executable, k, x, moves)
+    readers = ex.pointable[k]
+    readers === nothing && return moves
+    to = reinterpret(UInt, pointer(x))
+    to == ex.at[k] && return moves
     buffer = vec(x)
-    foreach(i -> repoint!(ex.launches[i], v, buffer), kernels)
+    move = (value = readers.value, from = ex.at[k], to, bytes = UInt(sizeof(x)))
+    moves = something(moves, Tuple{Int, Int, Move, Any}[])
+    foreach(i -> push!(moves, (i, k, move, buffer)), readers.kernels)
     ex.pointed[k] = x
-    true
+    ex.at[k] = to
+    moves
+end
+
+# Point the launches at their new storage, and change the captured graph
+# where it records their addresses, launch by launch, or record it again
+# where the target cannot; an argument whose graph was recorded again waits
+# from then on to be brought twice in a row.
+function retarget!(ex::Executable, moves)
+    moves === nothing && return ex
+    sort!(moves; by = first)
+    changed = true
+    start = 1
+    while start <= length(moves)
+        launch = moves[start][1]
+        stop = start
+        while stop < length(moves) && moves[stop + 1][1] == launch
+            stop += 1
+        end
+        mine = view(moves, start:stop)
+        # The launch is pointed at the new storage once, by the target or after it.
+        pointed = Ref(false)
+        repoint() = pointed[] || (foreach(m -> repoint!(ex.launches[launch], m[3].value, m[4]), mine); pointed[] = true)
+        if ex.captured === nothing
+            repoint()
+        elseif !retarget!(ex.target, ex.captured, collect(launch_steps(ex, launch)), [m[3] for m in mine], repoint)
+            foreach(m -> ex.settles[m[2]] = true, mine)
+            changed = false
+        end
+        repoint()
+        start = stop + 1
+    end
+    changed || recapture!(ex)
+    ex
 end
 
 # Record the captured graph again, after its launches were pointed elsewhere.
 function recapture!(ex::Executable)
     ex.captured === nothing && return ex
-    ex.captured = recapture(ex.target, ex.captured, () -> run_once(ex), (ex.saves, ex.launches, ex.copies))
+    ex.captured = recapture(ex.target, ex.captured, steps(ex), (ex.saves, ex.launches, ex.copies))
     ex
 end
+
+# What a graph records, step by step: in each of the executions a replay
+# runs, the inputs saved, each launch, and the staged copies.
+function steps(ex::Executable)
+    once = Any[(() -> copyto!(save.before, save.input) for save in ex.saves)..., ex.launches..., ex.copies...]
+    reduce(vcat, fill(once, ex.repetitions))
+end
+
+# The steps of launch `i`, one in each execution.
+launch_steps(ex::Executable, i) =
+    (length(ex.saves) + i) .+ (length(ex.saves) + length(ex.launches) + length(ex.copies)) .* (0:(ex.repetitions - 1))
 
 """
     execute!(ex) -> ex
@@ -480,7 +552,8 @@ function capture!(ex::Executable; repetitions::Integer = 1)
     runnable(ex)
     ex.captured === nothing || release(ex.target, ex.captured)
     ex.captured = nothing
-    ex.captured = capture(ex.target, () -> foreach(_ -> run_once(ex), 1:repetitions), (ex.saves, ex.launches, ex.copies))
+    ex.repetitions = repetitions
+    ex.captured = capture(ex.target, steps(ex), (ex.saves, ex.launches, ex.copies))
     ex
 end
 

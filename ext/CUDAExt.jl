@@ -37,31 +37,271 @@ Tempest.Compiler.measurable(::CUDATarget) = true
 # finalized in no order we choose: so what a graph launches stays alive in
 # `GRAPHS` until the graph's own finalizer has destroyed it, and graphs alive
 # at exit are destroyed before finalizers run.
+#
+# A graph keeps, per step it recorded, its nodes as the executable graph has
+# them now (`Node`), so that a step whose launches were pointed elsewhere is
+# changed in place (`retarget!`): the words of its kernels' arguments that
+# hold a moved value's address are rewritten, and the executable graph takes
+# the kernels' new arguments, 0.3 μs a kernel on GB10 where recording the
+# graph again took 3.7. Which words hold an address is learned, not assumed,
+# as a library's kernels say nothing of their arguments: the step is
+# recorded alone with its launches pointed elsewhere, and the words that
+# changed, each by exactly what its value moved, are the ones to rewrite.
+# A library may choose its kernels by an address's alignment, so a move to
+# an address aligned otherwise than those seen is learned again. A step whose
+# kernels' arguments changed otherwise, as cuBLAS's hold bytes of the host
+# stack it built them on, or an address packed with other fields (a tensor
+# map's), is recorded alone at each move, and the executable graph takes its
+# kernels' arguments from that record; a step whose kernels or other nodes
+# changed, as a library choosing another kernel, is recorded again with the
+# rest.
 mutable struct Graph
     exec::CUDACore.CuGraphExec
+    # The graph the executable was made from, whose nodes name its own.
+    graph::CUDACore.CuGraph
+    steps::Vector{Any}
+    nodes::Vector{Vector{Any}}
+    # Per step and value, where its address is in the step's kernels, and
+    # the alignments it was learned at.
+    slots::Dict{Tuple{Int, Int}, Vector{Tuple{Int, Int, Int, Int}}}
+    aligned::Dict{Tuple{Int, Int}, Set{Int}}
+    # The steps recorded alone at each move.
+    recorded::Set{Int}
 end
 
 const GRAPHS = WeakKeyDict{Graph, Any}()
 
-function Tempest.Compiler.capture(::CUDATarget, run, keep)
-    graph = CUDACore.capture(run)
+# A kernel node as the executable graph launches it: its launch, and its
+# arguments' bytes, each argument's own (`cuFuncGetParamInfo`).
+struct Kernel
+    node::CUDACore.CUgraphNode
+    params::CUDACore.CUDA_KERNEL_NODE_PARAMS
+    arguments::Vector{Vector{UInt8}}
+    pointers::Vector{Ptr{Cvoid}}
+end
+
+# Another node: its kind and parameters, which a step must keep to be
+# changed in place; a kind whose parameters are not read keeps `nothing`,
+# and a step with one is recorded again.
+struct Node
+    kind::CUDACore.CUgraphNodeType
+    params::Any
+end
+
+function node_record(node)
+    kind = Ref{CUDACore.CUgraphNodeType}()
+    CUDACore.cuGraphNodeGetType(node, kind)
+    if kind[] == CUDACore.CU_GRAPH_NODE_TYPE_KERNEL
+        p = Ref{CUDACore.CUDA_KERNEL_NODE_PARAMS}()
+        CUDACore.cuGraphKernelNodeGetParams_v2(node, p)
+        p[].kernelParams == C_NULL && return Node(kind[], nothing)
+        func = p[].func
+        if func == C_NULL
+            f = Ref{CUDACore.CUfunction}()
+            CUDACore.cuKernelGetFunction(f, p[].kern)
+            func = f[]
+        end
+        arguments = Vector{UInt8}[]
+        offset, size = Ref{Csize_t}(), Ref{Csize_t}()
+        while CUDACore.unchecked_cuFuncGetParamInfo(func, length(arguments), offset, size) == CUDACore.CUDA_SUCCESS
+            argument = unsafe_load(p[].kernelParams, length(arguments) + 1)
+            push!(arguments, copy(unsafe_wrap(Array, Ptr{UInt8}(argument), Int(size[]))))
+        end
+        return Kernel(node, p[], arguments, Ptr{Cvoid}[pointer(a) for a in arguments])
+    elseif kind[] == CUDACore.CU_GRAPH_NODE_TYPE_MEMSET
+        p = Ref{CUDACore.CUDA_MEMSET_NODE_PARAMS}()
+        CUDACore.cuGraphMemsetNodeGetParams(node, p)
+        return Node(kind[], p[])
+    elseif kind[] == CUDACore.CU_GRAPH_NODE_TYPE_MEMCPY
+        p = Ref{CUDACore.CUDA_MEMCPY3D}()
+        CUDACore.cuGraphMemcpyNodeGetParams(node, p)
+        return Node(kind[], p[])
+    end
+    Node(kind[], nothing)
+end
+
+function dependencies(node)
+    n = Ref{Csize_t}(0)
+    CUDACore.cuGraphNodeGetDependencies_v2(node, C_NULL, C_NULL, n)
+    out = Vector{CUDACore.CUgraphNode}(undef, n[])
+    n[] > 0 && CUDACore.cuGraphNodeGetDependencies_v2(node, out, C_NULL, n)
+    out
+end
+
+# The steps captured as one graph, and per step its nodes: those the frontier
+# after the step depends on, back to the step before's. Each step is captured
+# by itself, after the step before: a library records a call within a longer
+# capture otherwise than alone (cuBLAS, a word of its kernels' arguments), and
+# `retarget!` learns from a step captured alone.
+function steps_recorded(steps)
+    graph = CUDACore.CuGraph()
+    after = CUDACore.CuGraphNode[]
+    marks = map(steps) do step
+        after = CUDACore.capture!(() -> step(), graph; after)
+        CUDACore.CUgraphNode[n.handle for n in after]
+    end
+    seen = Set{CUDACore.CUgraphNode}()
+    nodes = map(marks) do mark
+        mine, todo = CUDACore.CUgraphNode[], copy(mark)
+        while !isempty(todo)
+            n = pop!(todo)
+            n in seen && continue
+            push!(seen, n)
+            push!(mine, n)
+            append!(todo, dependencies(n))
+        end
+        Any[node_record(n) for n in reverse!(mine)]
+    end
+    graph, nodes
+end
+
+function Tempest.Compiler.capture(::CUDATarget, steps, keep)
+    graph, nodes = steps_recorded(steps)
     exec = CUDACore.instantiate(graph)
-    # The executable graph does not need the graph it was made from.
-    finalize(graph)
-    g = finalizer(g -> finalize(g.exec), Graph(exec))
+    g = finalizer(g -> (finalize(g.exec); finalize(g.graph)), Graph(exec, graph, steps, nodes, Dict(), Dict(), Set{Int}()))
     GRAPHS[g] = keep
     g
 end
 
-# Updated in place where the graph recorded again has the same nodes, as it
-# does when only addresses moved.
-function Tempest.Compiler.recapture(target::CUDATarget, g::Graph, run, keep)
-    graph = CUDACore.capture(run)
-    updated = CUDACore.update(g.exec, graph; throw_error = false)
+# Updated in place where the graph recorded again launches the same kernels,
+# as it does when only addresses moved; the records take its launches.
+function Tempest.Compiler.recapture(target::CUDATarget, g::Graph, steps, keep)
+    graph, nodes = steps_recorded(steps)
+    if alike(g.nodes, nodes) && CUDACore.update(g.exec, graph; throw_error = false)
+        foreach((old, new) -> foreach(adopt!, old, new), g.nodes, nodes)
+        finalize(graph)
+        g.steps = steps
+        return g
+    end
     finalize(graph)
-    updated && return g
     Tempest.Compiler.release(target, g)
-    Tempest.Compiler.capture(target, run, keep)
+    Tempest.Compiler.capture(target, steps, keep)
+end
+
+alike(a::Vector{Vector{Any}}, b::Vector{Vector{Any}}) = length(a) == length(b) && all(((x, y),) -> length(x) == length(y) && all(splat(alike), zip(x, y)), zip(a, b))
+alike(a::Kernel, b::Kernel) = a.params.func == b.params.func && a.params.kern == b.params.kern &&
+    (a.params.gridDimX, a.params.gridDimY, a.params.gridDimZ) == (b.params.gridDimX, b.params.gridDimY, b.params.gridDimZ) &&
+    (a.params.blockDimX, a.params.blockDimY, a.params.blockDimZ, a.params.sharedMemBytes) ==
+        (b.params.blockDimX, b.params.blockDimY, b.params.blockDimZ, b.params.sharedMemBytes) &&
+    length.(a.arguments) == length.(b.arguments)
+alike(a::Node, b::Node) = a.kind == b.kind
+alike(a, b) = false
+
+# The record of a node takes the arguments of its counterpart in a graph
+# recorded again, whose launch it now is.
+adopt!(a::Kernel, b::Kernel) = foreach(copyto!, a.arguments, b.arguments)
+adopt!(a::Node, b::Node) = nothing
+
+# Launch the kernel node as its record has it now.
+function relaunch!(g::Graph, k::Kernel)
+    p = k.params
+    params = Ref(CUDACore.CUDA_KERNEL_NODE_PARAMS(p.func, p.gridDimX, p.gridDimY, p.gridDimZ, p.blockDimX, p.blockDimY, p.blockDimZ,
+        p.sharedMemBytes, pointer(k.pointers), C_NULL, p.kern, p.ctx))
+    GC.@preserve k CUDACore.cuGraphExecKernelNodeSetParams_v2(g.exec, k.node, params)
+end
+
+# The alignment of an address, in powers of two up to 4096 bytes.
+alignment(address) = min(trailing_zeros(address), 12)
+
+function Tempest.Compiler.retarget!(::CUDATarget, g::Graph, steps, moves, repoint)
+    key = first(steps)
+    key in g.recorded && (repoint(); return record_alone!(g, steps))
+    known = all(m -> haskey(g.slots, (key, m.value)) && alignment(m.to) in g.aligned[(key, m.value)], moves)
+    known || return learn!(g, steps, moves, repoint)
+    repoint()
+    foreach(step -> patch!(g, step, key, moves), steps)
+    true
+end
+
+# Write where each value moved into the words of the step's kernels that
+# hold its address, and launch the kernels so.
+function patch!(g::Graph, step, key, moves)
+    touched = Int[]
+    for m in moves, (n, a, byte, offset) in g.slots[(key, m.value)]
+        bytes = g.nodes[step][n].arguments[a]
+        GC.@preserve bytes unsafe_store!(Ptr{UInt64}(pointer(bytes, byte)), UInt64(Int(m.to) + offset))
+        n in touched || push!(touched, n)
+    end
+    foreach(n -> relaunch!(g, g.nodes[step][n]), touched)
+end
+
+# Record the launch alone before and after it is pointed where `moves` say,
+# and find where each value's address is: every 8-byte word of its kernels'
+# arguments that changed must have changed by what one value moved, from near
+# where the value was (an address into it, its end, or rounded down from its
+# start), and hold in the graph what it held alone. Recorded one after the
+# other, the launch's arguments differ in nothing else: what a library leaves
+# unset in them, as the bytes of the host stack cuBLAS builds them on, which
+# differ between the graph and a recording alone, stays as the graph has it.
+# A launch with other words changed is recorded alone at each move from then
+# on. Its kernels and other nodes must be as they were.
+function learn!(g::Graph, steps, moves, repoint)
+    key = first(steps)
+    old, (before,) = steps_recorded(Any[g.steps[key]])
+    repoint()
+    new, (after,) = steps_recorded(Any[g.steps[key]])
+    try
+        same(before, after) && all(step -> same(g.nodes[step], after), steps) || return false
+        found = Dict(m.value => Tuple{Int, Int, Int, Int}[] for m in moves)
+        exact = true
+        for (n, (a, b)) in enumerate(zip(before, after))
+            a isa Kernel || continue
+            for (j, (x, y)) in enumerate(zip(a.arguments, b.arguments))
+                x == y && continue
+                for byte in 1:8:length(x)
+                    last = min(byte + 7, length(x))
+                    x[byte:last] == y[byte:last] && continue
+                    word = last - byte == 7 ? reinterpret(UInt64, x[byte:last])[1] : nothing
+                    i = word === nothing ? nothing : moved_by(moves, word, reinterpret(UInt64, y[byte:last])[1])
+                    held = i !== nothing && all(step -> g.nodes[step][n].arguments[j][byte:last] == x[byte:last], steps)
+                    held ? push!(found[moves[i].value], (n, j, byte, Int(word - moves[i].from))) : (exact = false)
+                end
+            end
+        end
+        if !exact
+            push!(g.recorded, key)
+            foreach(step -> take_record!(g, g.nodes[step], after), steps)
+            return true
+        end
+        for m in moves
+            g.slots[(key, m.value)] = found[m.value]
+            push!(get!(() -> Set([alignment(m.from)]), g.aligned, (key, m.value)), alignment(m.to))
+        end
+        foreach(step -> patch!(g, step, key, moves), steps)
+        true
+    finally
+        finalize(old)
+        finalize(new)
+    end
+end
+
+# The launch recorded alone, its kernels' arguments in each of its steps
+# taken from the record.
+function record_alone!(g::Graph, steps)
+    graph, (fresh,) = steps_recorded(Any[g.steps[first(steps)]])
+    try
+        all(step -> same(g.nodes[step], fresh), steps) || return false
+        foreach(step -> take_record!(g, g.nodes[step], fresh), steps)
+        true
+    finally
+        finalize(graph)
+    end
+end
+
+# Whether a step recorded again launches the same kernels, and has the same
+# other nodes, as the executable graph's.
+same(old, fresh) = alike(Vector{Any}[old], Vector{Any}[fresh]) &&
+    all(((a, b),) -> a isa Kernel || (a.params !== nothing && a.params == b.params), zip(old, fresh))
+
+# The executable graph's kernels of a step take their arguments from a record of it.
+take_record!(g, old, fresh) = foreach(((a, b),) -> a isa Kernel && a.arguments != b.arguments && (adopt!(a, b); relaunch!(g, a)), zip(old, fresh))
+
+# The move a word changed by, from near where its value was: within a page
+# of it, so that an address rounded down from its start or its end counts.
+function moved_by(moves, before, after)
+    near(m) = m.from - min(m.from, 4096) <= before <= m.from + m.bytes + 4096
+    by(m) = after - before == m.to - m.from
+    something(findfirst(m -> by(m) && m.from <= before < m.from + m.bytes, moves), findfirst(m -> by(m) && near(m), moves), Some(nothing))
 end
 
 Tempest.Compiler.replay(::CUDATarget, g::Graph) = CUDACore.launch(g.exec)
@@ -84,7 +324,7 @@ function Tempest.Compiler.time_launch(target::CUDATarget, launch)
     launch()
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
-    g = Tempest.Compiler.capture(target, () -> launch(), launch)
+    g = Tempest.Compiler.capture(target, Any[launch], launch)
     t = cleared(target, g; samples = clamp(round(Int, 1.0e-2 / max(once, 1.0e-6)), 3, 20))
     Tempest.Compiler.release(target, g)
     t - replay_overhead(target)
@@ -146,7 +386,7 @@ const OVERHEAD = Ref(NaN)
 function replay_overhead(target)
     isnan(OVERHEAD[]) || return OVERHEAD[]
     empty = blank_launch()
-    g = Tempest.Compiler.capture(target, () -> empty(), empty)
+    g = Tempest.Compiler.capture(target, Any[empty], empty)
     alone = cleared(target, g)
     Tempest.Compiler.release(target, g)
     OVERHEAD[] = alone - batched(target, empty)
@@ -159,7 +399,7 @@ function batched(target, launch; samples = 5)
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
     repetitions = clamp(round(Int, 1.0e-3 / max(once, 1.0e-6)), 1, 100)
-    g = Tempest.Compiler.capture(target, () -> foreach(_ -> launch(), 1:repetitions), launch)
+    g = Tempest.Compiler.capture(target, Any[launch for _ in 1:repetitions], launch)
     Tempest.Compiler.replay(target, g)
     t = minimum(_ -> CUDACore.@elapsed(Tempest.Compiler.replay(target, g)), 1:samples) / repetitions
     Tempest.Compiler.release(target, g)

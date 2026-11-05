@@ -32,12 +32,11 @@ declared `const` is checked at each call. A number a function `f` calls reads,
 or a copy it makes of a global's array before using it with an input, is kept
 as it was when traced.
 
-An array the program only reads is copied into the program's storage until
-a call brings the same array as the call before; from then on the kernels
-read it where the caller has it, and calls on it copy nothing, until another
-array comes (see `Tempest.Compiler.point!`). Arrays that move every call, as
-a training step's weights do, are copied, which costs less than recording the
-graph again.
+An array the program only reads is read where the caller has it, not
+copied: a call on the arrays of the call before costs nothing for them, and
+one on others changes the addresses the captured graph's kernels read, in
+place (see `Tempest.Compiler.point!`), so a training step whose weights
+are new arrays at every call copies none of them.
 
 A call whose arguments, `f`'s own leaves or the globals `f` reads differ in
 anything but the values of inputs throws, naming the difference.
