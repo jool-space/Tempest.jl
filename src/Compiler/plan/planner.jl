@@ -203,6 +203,29 @@ function fold_term(graph, stored, g, v, index, domain)
     Recomputed(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended))
 end
 
+# The values `value_term` and `operand_term` would load for `v` or `o`, the
+# term's `stored_reads`, added to `reads`: found by the same rules from the
+# graph alone, each value visited once where the term repeats it at every
+# reader. Its formulas' gathers are the same at any index.
+function value_reads!(reads, seen, graph, stored, g::Group, v)
+    v in seen && return reads
+    push!(seen, v)
+    d = graph.values[v].definition
+    g.kind === :recurrence && v in g.outputs && return push!(reads, v)
+    v in g.reductions && return reads
+    v in g.outputs && return foreach(o -> operand_reads!(reads, seen, graph, stored, g, o), operands(d))
+    stored[v] && return push!(reads, v)
+    d isa Reduction && return operand_reads!(reads, seen, graph, stored, g, d.operand)
+    d isa Pointwise || return push!(reads, v)
+    foreach(o -> operand_reads!(reads, seen, graph, stored, g, o), operands(d))
+end
+
+function operand_reads!(reads, seen, graph, stored, g, o)
+    union!(reads, gathered_values(o))
+    o isa Read && value_reads!(reads, seen, graph, stored, g, o.value)
+    reads
+end
+
 operand_term(graph, stored, g, o::Read, index, domain) =
     value_term(graph, stored, g, o.value, map(e -> substitute(e, index, domain), o.index), domain)
 operand_term(graph, stored, g, o::Literal, index, domain) = Lit(o.value)
@@ -285,6 +308,14 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomput
     any(m -> v in stored_reads(g.terms[m]) || v in keyed_reads(graph, m), members(g)) && return false
     any(in(members(g)), keyed_reads(graph, v)) && return false
     candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase)
+    # What the term would load, from the graph before the term is built: most
+    # candidates fail here, and a term inlines every value recomputed in it.
+    loads = Set{Int}()
+    fold ? operand_reads!(loads, Set{Int}(), graph, stored, candidate, val.definition.operand) :
+        value_reads!(loads, Set{Int}(), graph, stored, candidate, v)
+    reads = [collect(loads); keyed_reads(graph, v)]
+    group = Set(members(g))
+    depends(graph, deps, reads, group) && return false
     t = try
         fold ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
         value_term(graph, stored, candidate, v, index)
@@ -292,13 +323,10 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomput
         e isa OutsideGroup || rethrow()
         return false
     end
-    reads = [stored_reads(t); keyed_reads(graph, v)]
     # A member reads the group's folds, or something the group reads.
     shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
     isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads) || return false
     fold && !mixes(graph, g, v, t; recomputing) && return false
-    group = Set(members(g))
-    depends(graph, deps, reads, group) && return false
     # Nor may what the group reads from other kernels depend on `v`.
     depends(graph, deps, filter(!in(group), shared), Set((v,))) && return false
     push!(fold ? g.reductions : g.outputs, v)
