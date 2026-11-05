@@ -259,16 +259,21 @@ end
 
 """
 The kernels formed so far, the kernel that owns each value (zero for none
-yet), each value's ancestors, and what each kernel reads, once asked.
+yet), each value's ancestors, what each kernel reads, once asked, and what
+each member's term loads, once asked: a group tries many candidates against
+the same members.
 """
 struct Dependencies
     owner::Vector{Int}
     groups::Vector{Group}
     up::Vector{BitVector}
     reads::Dict{Int, Set{Int}}
+    loads::IdDict{Term, Vector{Int}}
 end
 
-Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}())
+Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), IdDict{Term, Vector{Int}}())
+
+term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads, t)
 
 # Whether any of the values `reads` depends on a member of `group`: through
 # its ancestors, and through the kernels that own any of them, each of which
@@ -305,7 +310,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomput
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    any(m -> v in stored_reads(g.terms[m]) || v in keyed_reads(graph, m), members(g)) && return false
+    any(m -> v in term_loads(deps, g.terms[m]) || v in keyed_reads(graph, m), members(g)) && return false
     any(in(members(g)), keyed_reads(graph, v)) && return false
     candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase)
     # What the term would load, from the graph before the term is built: most
@@ -324,7 +329,7 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomput
         return false
     end
     # A member reads the group's folds, or something the group reads.
-    shared = Set(r for m in members(g) for r in stored_reads(g.terms[m]))
+    shared = Set(r for m in members(g) for r in term_loads(deps, g.terms[m]))
     isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads) || return false
     fold && !mixes(graph, g, v, t; recomputing) && return false
     # Nor may what the group reads from other kernels depend on `v`.

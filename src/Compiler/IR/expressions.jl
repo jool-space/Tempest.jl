@@ -288,7 +288,7 @@ mentions(e::Affine, n) = any(t -> mentions(t.first, n), e.terms)
 is_affine(e::Affine) = all(t -> t.first isa Var, e.terms)
 
 "The values an expression gathers from."
-indirect_values(e::Affine) = reduce(vcat, (indirect_values(a) for (a, _) in e.terms); init = Int[])
+indirect_values(e::Affine) = is_affine(e) ? Int[] : reduce(vcat, (indirect_values(a) for (a, _) in e.terms); init = Int[])
 indirect_values(::Var) = Int[]
 indirect_values(a::Union{Div, Mod}) = indirect_values(a.e)
 indirect_values(a::Indirect) = [a.value; reduce(vcat, map(indirect_values, a.index); init = Int[])]
