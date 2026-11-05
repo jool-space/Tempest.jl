@@ -247,24 +247,50 @@ whose dependencies walk every kernel fixed, 0.22 s each at the first and
 0.68 s at the last, and by their pricing. The challengers are not yet run on
 the GB10.
 
-**Loops are unrolled.** A `for` loop traces as its iterations, a program as
-long as its trip count, planned and compiled whole: at 100 RK4 steps, 3602
-kernels and 148 s of planning (above). The rolled loop exists, entered only
-by `accumulate(f, eachslice(x); init)`: a `Loop` of the program
+**Loops are unrolled: rolled from the tape and stepped, adopted.** A `for`
+loop traced as its iterations, a program as long as its trip count, planned
+and compiled whole: at 100 RK4 steps, 3602 kernels and 148 s of planning
+(above). The rolled loop existed, entered only by
+`accumulate(f, eachslice(x); init)`: a `Loop` of the program
 (`src/Compiler/program/program.jl`), lowered by batching its body over an
 axis of steps with one carried definition, planned as a recurrence group,
-differentiated as the loop reversed, storing each step's start and replaying
-it, and on cuTile one kernel sweeping the steps with the state on chip, else
-the floor. A plain loop never reaches it. Challenger: StructuredReactant
-(AntonOresten/Reactant.jl, branch `structured`), which rolls structured
-`for` and `while` loops from Julia's IR through IRStructurizer, without a
-macro. Nearest in Tempest: a tape rolled where it repeats into the loop that
-exists, the RK4 loop's tape at 1000 steps periodic up to renaming, 39 nodes
-a step; and a recurrence too large for one kernel launched once per step
-from one plan of the step. Judged on `test/bench/node.jl` unchanged, at 10,
-100 and 1000 RK4 steps: the groups the same in count at each, the planning
-time independent of the steps, the losses agreeing with the interpreter's,
-and the step's time within a quarter of the unrolled program's.
+differentiated as the loop reversed, and on cuTile one kernel sweeping the
+steps with the state on chip, else the floor. A plain loop never reached
+it. Challenger: StructuredReactant (AntonOresten/Reactant.jl, branch
+`structured`), which rolls structured `for` and `while` loops from Julia's
+IR through IRStructurizer, without a macro. Taken instead, two pieces and
+no new IR. The tape is rolled where it repeats (`src/Compiler/program/roll.jl`):
+the last window whose nodes each read what the node a period back read, or
+the node a period after that, a period holding a fold, at least three
+periods, is rewritten in place as the loop `accumulate` traces, its first
+step read from where the loop starts; inside `withgradient` before the
+reverse pass, so its derivative is the loop's, and as the trace ends. The
+RK4 loop's tape is periodic up to renaming, 39 nodes a step, the weights
+its captures and the state its one carry. And a recurrence no one kernel
+holds runs a step at a time (`src/Compiler/runtime/stepped.jl`): its
+cycle restricted to one step, the step axis left out of each value and
+read of it, is a graph planned and built as any program, its kernels
+launched once per step and pointed at the step's slices of the
+recurrence's storage, a step's position an argument where the step reads
+it; captured, a graph of the steps' launches. Before, the accumulate form
+of the bench ran its two recurrences on the floor, 102 ms a step at 10 RK4
+steps.
+
+On the GB10, `test/bench/node.jl` unchanged, TF32: at 10 RK4 steps, 24
+kernels, 19.6 s to the first result, 0.644 ms a step, against 1.06 ms
+unrolled; at 100, 25 kernels, 18.9 s and 6.80 ms, against 194 s and 10.9
+ms unrolled, Reactant's 99 s and 10.8 ms and torch.compile's 6.4 s and
+16.1 ms on the A6000; at 1000, 19.7 s and 68.8 ms, which unrolled did not
+prepare. Losses agree with the interpreter's to 4e-6 and the first
+moments to 3e-4 at each. A step forward is 12 kernels and one back 12,
+against about 36 unrolled: the weights' gradients are products batched
+over the steps. A window of maps alone is not rolled: unrolled it fuses
+into one kernel (a calibration's chain of eight maps, a polynomial's
+products). Open: the stepped run is taken wherever no one kernel claims a
+recurrence, not priced against the floor; a step's own launches are not
+fewer than an unrolled step's; a step reading a value along the steps
+other than by its last axis, or the step's position other than as itself,
+runs on the floor; the challengers are not yet run on the GB10.
 
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
