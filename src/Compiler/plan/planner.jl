@@ -504,8 +504,9 @@ end
 
 # Insert into the sorted `frontier` the stored values after `seed` that read
 # any of `from`, directly or through values a term computes in place: the
-# only values whose terms can reach a group grown from `from`.
-function reach!(frontier, followers, stored, from, seed)
+# only values whose terms can reach a group grown from `from`. Those `skip`
+# names are passed over.
+function reach!(frontier, followers, stored, from, seed; skip = w -> false)
     pending, seen = collect(from), Set{Int}()
     while !isempty(pending)
         for w in followers[pop!(pending)]
@@ -513,7 +514,7 @@ function reach!(frontier, followers, stored, from, seed)
             push!(seen, w)
             if !stored[w]
                 push!(pending, w)
-            elseif w > seed
+            elseif w > seed && !skip(w)
                 k = searchsortedfirst(frontier, w)
                 get(frontier, k, 0) == w || insert!(frontier, k, w)
             end
@@ -558,7 +559,16 @@ function group_values(graph, stored, live, results, fixed)
         g = d isa Scan ? Group(:scan, values[id].dims) : Group(:reduction, d.iteration)
         after = d isa Scan ? 0 : id
         try_add!(graph, stored, deps, g, id; fold = true)
-        frontier = reach!(Int[], followers, stored, [members(g); (r for m in members(g) for r in stored_reads(g.terms[m]))...], after)
+        # A group reaches what reads its members, and what reads what they
+        # read. Of the latter, a value that depends on a member is passed
+        # over: the last value stored on a path to it from the group would be
+        # among its loads and depend on the group, so it joins only where
+        # every such path runs through what the group computes, and then it
+        # is reached from a member. The weights every step of a long program
+        # reads would otherwise bring every later step to every group.
+        apart(w) = any(m -> deps.up[w][m], members(g))
+        frontier = reach!(Int[], followers, stored, members(g), after)
+        reach!(frontier, followers, stored, [r for m in members(g) for r in term_loads(deps, g.terms[m])], after; skip = apart)
         # A pass visits the frontier in order; what a new member reaches above
         # the cursor is visited in this pass, the rest in the next.
         changed = true
@@ -581,7 +591,8 @@ function group_values(graph, stored, live, results, fixed)
                 end
                 added || continue
                 changed = true
-                reach!(frontier, followers, stored, [other; stored_reads(g.terms[other])], after)
+                reach!(frontier, followers, stored, [other], after)
+                reach!(frontier, followers, stored, term_loads(deps, g.terms[other]), after; skip = apart)
                 k = searchsortedfirst(frontier, other) + 1
             end
         end
