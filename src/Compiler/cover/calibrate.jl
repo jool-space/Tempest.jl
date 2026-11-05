@@ -158,9 +158,10 @@ apply_chain(::typeof(^), y) = y .^ 3
 apply_chain(c::Cast{T}, y) where {T} = Float32.(c.(y)) .+ 1.5f0
 
 """
-The memory of `package` on the decider's target, fitted on first need, with
-the target's packages, and kept in the rates file; the device's rates for a
-package that claims no reference fold.
+The memory of `package` on the decider's target, or of the floor's kernels
+for `:floor`, fitted on first need, with the target's packages, and kept in
+the rates file; the device's rates for a package that claims no reference
+fold.
 """
 function memory!(d::Decider, package)
     get!(d.memories, package) do
@@ -176,15 +177,16 @@ end
 """
 A reference program, `f` over arrays like `args`, built: planned as one group,
 with each implementation's first claim on it built on buffers of its own, for
-`time_reference` to time as claims are. The first claim is what a package
-stands by unmeasured, which a reference is measured under, not the fastest
-of its alternatives.
+`time_reference` to time as claims are, and the floor's kernels too when
+`floor`, as package `:floor`. The first claim is what a package stands by
+unmeasured, which a reference is measured under, not the fastest of its
+alternatives.
 """
 struct Reference
     launches::Vector{Tuple{Symbol, Any, Vector{Work}}} # package, launch, estimate
 end
 
-function build_reference(d::Decider, among, f, args...; recomputing = false)
+function build_reference(d::Decider, among, f, args...; recomputing = false, floor = false)
     graph = lower(trace(f, args...))
     timing = Decider(d.target, graph; measure = :none)
     p = plan(graph; recompute = recomputing ? recomputable_folds(graph) : ())
@@ -194,6 +196,7 @@ function build_reference(d::Decider, among, f, args...; recomputing = false)
     for i in among, c in Iterators.take(Base.invokelatest(claims, i, d.target, view), 1)
         push!(launches, (package_name(i), first(Base.invokelatest(build_claim, i, c, d.target, view, buffers!(timing, p, g))), Base.invokelatest(estimate, i, c, d.target, view)))
     end
+    floor && push!(launches, (:floor, first(build_floor(d.target, p, g, buffers!(timing, p, g))), floor_estimate(p, g, floor_splits(timing))))
     Reference(launches)
 end
 
@@ -212,8 +215,8 @@ Each package's fastest claim of the implementations `among` on the group the
 planner forms for `f` over arrays like `args`: its seconds, timed as claims
 are, and its launches as the package estimates them.
 """
-reference(d::Decider, among, f, args...; recomputing = false) =
-    time_reference(d, build_reference(d, among, f, args...; recomputing))
+reference(d::Decider, among, f, args...; recomputing = false, floor = false) =
+    time_reference(d, build_reference(d, among, f, args...; recomputing, floor))
 
 # Products of factors of these shapes fit a package's line: the small one, too
 # small to split, its latency; the large one its rate; and the middle one,
@@ -266,24 +269,26 @@ const MEMORY_COLUMNS = (16, 256, 1024, 4096)
 
 """
 Fit the memory of every package of the implementations `among`, by default
-the decider's target's, that has none, from the times of its fastest claims
-on a fold over each column at the reference sizes and the bytes the claims
-move: its bandwidth is the slope of their least-squares line, which the
-largest folds set, and its latency the smallest fold's time less its bytes
-at that bandwidth. A package that claims no such fold moves bytes at the
-device's rates.
+the decider's target's, and of the floor, `:floor`, that has none, from the
+times of its fastest claims on a fold over each column at the reference
+sizes and the bytes the claims move: its bandwidth is the slope of their
+least-squares line, which the largest folds set, and its latency, a launch's,
+the smallest fold's time less its bytes at that bandwidth, over its
+launches. A package that claims no such fold moves bytes at the device's
+rates.
 """
 function fit_memory!(d::Decider, among = implementations(d.target))
     key(p, what) = string(p, " memory ", what)
     unfitted = [i for i in among if !haskey(d.calibration, key(package_name(i), "bandwidth"))]
-    folds = map(n -> reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n)), MEMORY_COLUMNS)
-    for package in unique(map(package_name, unfitted))
+    floor = !haskey(d.calibration, key(:floor, "bandwidth"))
+    folds = map(n -> reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n); floor), MEMORY_COLUMNS)
+    for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
         latency, bandwidth = if all(fold -> haskey(fold, package), folds)
             bytes = [sum(w -> w.bytes, last(fold[package])) for fold in folds]
             seconds = [first(fold[package]) for fold in folds]
             b, s = sum(bytes) / length(bytes), sum(seconds) / length(seconds)
             per_byte = sum((bytes .- b) .* (seconds .- s)) / sum((bytes .- b) .^ 2)
-            first(seconds) - first(bytes) * per_byte, 1 / per_byte
+            (first(seconds) - first(bytes) * per_byte) / length(last(first(folds)[package])), 1 / per_byte
         else
             d.rates.launch, d.rates.cached
         end
