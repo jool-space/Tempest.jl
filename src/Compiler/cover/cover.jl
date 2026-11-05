@@ -173,6 +173,22 @@ function proposal_key(p::Plan, a::Around, q, texts = Dict{Int, String}())
     string(text, "; ", join(shapes, ", "))
 end
 
+"""
+A proposal's edit: the groups its trial `t` forms that the plan `p` it
+changes does not, and those of `p` it no longer forms, each in its
+canonical form. The comparison of `t` with `p` is of these groups alone (see
+`compare`), so proposals with one edit are priced alike; and a proposal in
+each of a stack of identical layers has one, where the groups around it, a
+sum over every layer among them, tell the layers apart. `identities` are
+those of the groups of `p`.
+"""
+function edit_key(p::Plan, identities, t::Plan)
+    formed = Set(group_identity(t, g) for g in t.groups)
+    added = sort!([canonical(t, g) for g in t.groups if !(group_identity(t, g) in identities)])
+    removed = sort!([canonical(p, g) for g in p.groups if !(group_identity(p, g) in formed)])
+    string(join(added, " | "), " || ", join(removed, " | "))
+end
+
 group_text(p::Plan, g::Group) = sprint() do io
     print(io, "| ", g.kind, " ", g.domain)
     for m in members(g)
@@ -210,7 +226,9 @@ Proposals are accepted greedily by estimated gain over the plan, then by
 their values, each when its proposer claims the group it forms (any claim,
 or the floor, for a join; a claim of an implementation that recomputes folds,
 for a fold recomputed). Proposals alike in the starting plan (`proposal_key`)
-are one edit in identical layers: priced once, and taken together. A proposal
+are planned once. Proposals whose trials there change groups alike
+(`edit_key`) are one edit in identical layers: priced once, and taken
+together. A proposal
 is priced again in the current plan when an edit taken already changed a
 group around it. Each trial plans the whole graph, and is compared with the
 plan it changes on the groups that differ. Every proposal compared is
@@ -322,6 +340,10 @@ function cover(d::Decider)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
     end
     sort!(ranked; by = r -> (-r[1], fixes(r[2])))
+    # Each ranked proposal's edit, by which proposals alike are one class.
+    identities = Set(group_identity(base, g) for g in base.groups)
+    edits = Dict{String, String}()
+    edit = [get!(() -> edit_key(base, identities, trials[r[4]]), edits, r[4]) for r in ranked]
     near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
     current, considered, taken, done = base, Considered[], Any[], Set{Int}()
     kept = Set(group_identity(base, g) for g in base.groups)
@@ -337,7 +359,7 @@ function cover(d::Decider)
     # and are not used.
     classes, first_of = Dict{Int, Vector{Int}}(), Dict{String, Int}()
     for (m, r) in enumerate(ranked)
-        push!(get!(() -> Int[], classes, get!(first_of, r[4], m)), m)
+        push!(get!(() -> Int[], classes, get!(first_of, edit[m], m)), m)
     end
     order = sort!(collect(keys(classes)))
     ahead, spawned = Dict{String, Task}(), Task[]
@@ -360,9 +382,9 @@ function cover(d::Decider)
         t = pop!(ahead, key, nothing)
         priced_plan(t === nothing ? trial(current, taken, Any[q]) : fetch_result(t), current, q, i)
     end
-    for (n, (_, _, _, k)) in enumerate(ranked)
+    for n in eachindex(ranked)
         n in done && continue
-        class = [m for m in n:length(ranked) if !(m in done) && ranked[m][4] == k]
+        class = [m for m in n:length(ranked) if !(m in done) && edit[m] == edit[n]]
         union!(done, class)
         plan_ahead!(n)
         was = current
