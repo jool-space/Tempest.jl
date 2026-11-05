@@ -290,7 +290,20 @@ products). Open: the stepped run is taken wherever no one kernel claims a
 recurrence, not priced against the floor; a step's own launches are not
 fewer than an unrolled step's; a step reading a value along the steps
 other than by its last axis, or the step's position other than as itself,
-runs on the floor; the challengers are not yet run on the GB10.
+runs on the floor.
+
+The challengers on the GB10, 5 November, TF32, 100 RK4 steps, each alone on
+the device: torch 2.14.0+cu130 by its own script (`bench_node.py` at
+7684532), eager 50.4 ms a step and 0.43 s to the first, `default` 27.2 ms
+and 56 s, `reduce-overhead` 12.1 ms and 48 s, `max-autotune` 10.9 ms and
+254 s, without its product autotuning ("not enough SMs" on 48). Reactant
+0.2.290 by its own script too (`bench_node.jl` at 7684532), through
+ReactantNitro 0.1.6, the first release with the `compile_options` the script
+passes (its manifest, naming 0.1.5, re-resolved; no version it pinned
+moved): its loop unrolled at trace, as the script has it, 8.53 ms a step and
+48.7 s to the first, 10.3 ms at the highest precision; rolled with
+`@trace for`, as the Reactant end-to-end post writes it, 9.81 ms and 42.9 s.
+Tempest, 6.80 ms and 18.9 s, is the fastest of them at both.
 
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
