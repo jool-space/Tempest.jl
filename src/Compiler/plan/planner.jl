@@ -366,6 +366,18 @@ end
 # What `plan` decides before it forms kernels: the graph with its results
 # stored, what is stored, what runs, and the folds recomputed where read.
 # The values in `store` are stored as those a gather reads are.
+# Whether group `g` may take value `v`: anything but a step of an
+# accumulation, which joins the group of a fold it adds. Through the step
+# before it, every step would join the first one's group, which would load
+# every term.
+adds_to(values, g::Group, v) = !accumulates(values, v) || any(o -> o isa Read && o.value in g.reductions, values[v].definition.operands)
+
+# Whether value `v` sums two operands, a fold among them: a step of an accumulation.
+function accumulates(values, v)
+    d = values[v].definition
+    d isa Pointwise && d.f === (+) && length(d.operands) == 2 && any(o -> o isa Read && values[o.value].definition isa Reduction, d.operands)
+end
+
 function storing(graph::IndexGraph; recompute = (), store = ())
     recomputed = Set{Int}(recompute)
     graph = with_stored_results(graph)
@@ -419,6 +431,15 @@ function storing(graph::IndexGraph; recompute = (), store = ())
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
         d isa Union{Pointwise, Reduction, Scan, Keyed} && !live[id] && return false
         d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id] || fold_slice(values, d)) : true
+    end
+    # A sum another sum reads, adding a fold, is stored: the sums of a value
+    # used many times, as its gradient accumulates over each use. Recomputed,
+    # the last one's reader would load every term, a kernel growing with the
+    # uses; stored, each is written beside the fold it adds.
+    users = readers(graph)
+    for id in 1:n
+        live[id] && !stored[id] && !(id in recomputed || after[id]) && accumulates(values, id) || continue
+        any(r -> live[r] && accumulates(values, r), users[id]) && (stored[id] = true)
     end
     # A recurrence's state is stored, and the values of its cycle something
     # outside it reads, the value the state is carried from among them: its
@@ -587,7 +608,7 @@ function group_values(graph, stored, live, results, fixed)
                     h !== nothing && try_add!(graph, stored, deps, h, other; fold = true) && (g = h; true)
                 else
                     od isa Union{Reduction, Scan, Keyed} ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
-                        od isa Pointwise && other > id && !awaits_sweep(graph, deps, g, other) && try_add!(graph, stored, deps, g, other; fold = false)
+                        od isa Pointwise && other > id && !awaits_sweep(graph, deps, g, other) && adds_to(values, g, other) && try_add!(graph, stored, deps, g, other; fold = false)
                 end
                 added || continue
                 changed = true
@@ -614,7 +635,7 @@ function group_values(graph, stored, live, results, fixed)
             other = frontier[k]
             k += 1
             live[other] && owner[other] == 0 && values[other].definition isa Pointwise && values[other].dims == g.domain || continue
-            any(m -> up[other][m], members(g)) && try_add!(graph, stored, deps, g, other; fold = false) || continue
+            any(m -> up[other][m], members(g)) && adds_to(values, g, other) && try_add!(graph, stored, deps, g, other; fold = false) || continue
             reach!(frontier, followers, stored, [other], id)
         end
         push!(groups, g)
