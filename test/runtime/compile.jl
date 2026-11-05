@@ -290,6 +290,24 @@ end
     check_before_write(single)
 end
 
+@testset "arrays sharing memory with one the function writes" begin
+    # The program reads each array apart, where the function itself would
+    # read what it wrote: a call with arrays that may share memory with one
+    # it writes throws, naming both.
+    f!(a, b) = (a .= 2 .* a; sum(b))
+    c = compile(f!, data(2), data(2; scale = 0.5))
+    u = data(2)
+    @test occursin("argument 2 shares memory with argument 1, which f! writes", message(() -> c(u, u)))
+    @test occursin("argument 1 shares memory with argument 2", message(() -> compile((b, a) -> f!(a, b), data(2), data(2))(u, u)))
+    m = Running(data(3), data(3))
+    @test occursin("argument 2 shares memory with argument 1.mean", message(() -> compile((m, x) -> (m.mean .+= x; sum(m.scale)), m, data(3))(m, m.mean)))
+    # Arrays apart run as the function does, and arrays it only reads may
+    # share memory.
+    v, w = data(2), data(2; scale = 0.5)
+    @test c(v, w) == f!(data(2), data(2; scale = 0.5)) && v == 2 .* data(2)
+    @test compile((a, b) -> sum(a) + sum(b), data(2), data(2))(u, u) == 2 * sum(u)
+end
+
 # How many arguments the kernels read where the caller has them.
 pointed(c) = (ex = c.executable; count(k -> ex.pointable[k] !== nothing && ex.pointed[k] !== ex.arguments[k], eachindex(ex.pointable)))
 

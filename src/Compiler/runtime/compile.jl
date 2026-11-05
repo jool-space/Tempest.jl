@@ -39,7 +39,9 @@ place (see `Tempest.Compiler.point!`), so a training step whose weights
 are new arrays at every call copies none of them.
 
 A call whose arguments, `f`'s own leaves or the globals `f` reads differ in
-anything but the values of inputs throws, naming the difference.
+anything but the values of inputs throws, naming the difference. So does a
+call whose arrays share memory with one `f` writes: the program reads each
+array apart, where `f` run on them would read what it wrote.
 
 ```jldoctest
 julia> c = compile(x -> sum(abs2, x), [0.0, 0.0, 0.0, 0.0]);
@@ -247,6 +249,7 @@ function (c::Compiled)(@nospecialize(args...))
     d = difference(c, args)
     d === nothing || throw(ArgumentError("$(c.f) was compiled for other arguments: $d"))
     ex = c.executable
+    isempty(ex.program.writes) || refuse_shared(ex, (c.f, args...))
     point!(ex, c.f, args...)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
     # What the program wrote into an input, the caller's array takes.
@@ -293,6 +296,31 @@ function difference(c::Compiled, args)
 end
 
 shown(x) = sprint(show, x; context = :limit => true)
+
+# A call whose arrays share memory with one the program writes throws: the
+# program reads each array as one of its own, which the function itself,
+# run on the same arrays, would not, as `f!(x, x)` writing its first
+# argument and reading its second reads what it wrote. Which arrays may
+# share memory is Base's `mightalias`, as broadcasting's.
+function refuse_shared(ex::Executable, call)
+    positions, xs = leaves(ex.program.input_structure), leaves(call)
+    for (_, a) in ex.program.writes
+        i = findfirst(==(a), positions)
+        for (j, y) in enumerate(xs)
+            (j == i || positions[j] === nothing || !Base.mightalias(xs[i], y)) && continue
+            paths = leaf_paths(call)
+            throw(ArgumentError(string(paths[j], " shares memory with ", paths[i], ", which ", call[1],
+                " writes: a compiled call reads its arrays apart, so pass arrays that share none")))
+        end
+    end
+end
+
+# The path of each leaf of the call `(f, args...)`, as `difference` names it,
+# in the order `leaves` gives them.
+leaf_paths(call) = foldl((out, (k, x)) -> leaf_paths!(out, x, k == 1 ? "f" : "argument $(k - 1)"), enumerate(call); init = String[])
+leaf_paths!(out, x::Tuple, path) = foldl((out, (k, y)) -> leaf_paths!(out, y, "$path[$k]"), enumerate(x); init = out)
+leaf_paths!(out, x::NamedTuple, path) = foldl((out, k) -> leaf_paths!(out, x[k], "$path.$k"), keys(x); init = out)
+leaf_paths!(out, x, path) = nested(x) ? leaf_paths!(out, fields(x), path) : push!(out, path)
 
 # Where the call `got`, `f` and its arguments, differs from `expected`, in
 # words, or `nothing`. The function is `f`, and the arguments are counted after it.
