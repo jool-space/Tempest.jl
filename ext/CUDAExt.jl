@@ -15,6 +15,12 @@ Tempest.Compiler.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
 Tempest.Compiler.upload(::CUDATarget, x) = copyto!(CuArray{eltype(x)}(undef, size(x)), x)
 Tempest.Compiler.bindable(::CUDATarget, x) = x isa CuArray
 
+# cuTile compiles a kernel for the alignment of each address it was built on,
+# up to 128 bytes, which every allocation has.
+const ALIGNMENT = 128
+
+Tempest.Compiler.pointable(::CUDATarget, x) = x isa CuArray{<:Any, <:Any, CUDACore.DeviceMemory} && reinterpret(UInt, pointer(x)) % ALIGNMENT == 0
+
 function Tempest.Compiler.task_state(::CUDATarget)
     context, stream = CUDACore.context(), CUDACore.stream()
     () -> (CUDACore.context!(context); CUDACore.stream!(stream))
@@ -45,6 +51,17 @@ function Tempest.Compiler.capture(::CUDATarget, run, keep)
     g = finalizer(g -> finalize(g.exec), Graph(exec))
     GRAPHS[g] = keep
     g
+end
+
+# Updated in place where the graph recorded again has the same nodes, as it
+# does when only addresses moved.
+function Tempest.Compiler.recapture(target::CUDATarget, g::Graph, run, keep)
+    graph = CUDACore.capture(run)
+    updated = CUDACore.update(g.exec, graph; throw_error = false)
+    finalize(graph)
+    updated && return g
+    Tempest.Compiler.release(target, g)
+    Tempest.Compiler.capture(target, run, keep)
 end
 
 Tempest.Compiler.replay(::CUDATarget, g::Graph) = CUDACore.launch(g.exec)
@@ -115,7 +132,7 @@ function clear_cache!()
         bytes = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
         a, sink = CUDACore.zeros(UInt32, 2bytes ÷ 4), CUDACore.zeros(UInt32, 1)
         args = CUDACore.cudaconvert((a, sink))
-        CLEARING[] = (FloorLaunch(floor_function(read_through, (args, length(a)))..., (args, length(a)), 1024, 256), a, sink)
+        CLEARING[] = (FloorLaunch(floor_function(read_through, (args, length(a)))..., (args, length(a)), 1024, 256, Int[]), a, sink)
     end
     first(CLEARING[])()
 end
@@ -153,7 +170,7 @@ end
 # `read_through` is.
 blank(_, _) = nothing
 
-blank_launch() = FloorLaunch(floor_function(blank, ((), 1))..., ((), 1), 1, 1)
+blank_launch() = FloorLaunch(floor_function(blank, ((), 1))..., ((), 1), 1, 1, Int[])
 
 # Half a microsecond between launches in a captured graph: GB10's 0.47. Ten
 # times as long or a tenth changes one plan of the corpus's.
@@ -187,7 +204,7 @@ function Tempest.Compiler.floor_launch(::CUDATarget, k::Tempest.Compiler.ScalarK
     end))
     args = CUDACore.cudaconvert(args)
     threads = min(THREADS, k.items)
-    FloorLaunch(floor_function(f, (args, k.items))..., (args, k.items), cld(k.items, threads), threads)
+    FloorLaunch(floor_function(f, (args, k.items))..., (args, k.items), cld(k.items, threads), threads, k.slots)
 end
 
 # A split kernel's launch: a block per part of `side` neighbouring items, a
@@ -205,7 +222,7 @@ function split_launch(k, args)
     end))
     args = CUDACore.cudaconvert(args)
     arguments = (args, k.items, k.split.parts)
-    FloorLaunch(floor_function(f, arguments)..., arguments, (k.items ÷ k.split.side) * k.split.parts, (k.split.side, k.split.lanes))
+    FloorLaunch(floor_function(f, arguments)..., arguments, (k.items ÷ k.split.side) * k.split.parts, (k.split.side, k.split.lanes), k.slots)
 end
 
 # Lanes that keep a multiprocessor busy, by GB10's measure: a fold split over
@@ -292,7 +309,9 @@ end
 
 """
 A launch of a floor kernel on fixed arguments. Its parameters are those CUDA.jl
-gives a kernel: the kernel state, then each argument by value.
+gives a kernel: the kernel state, then each argument by value, the first the
+kernel's buffers, the first of them those of the values it reads and stores,
+in `values`.
 """
 struct FloorLaunch
     fun::CuFunction
@@ -302,12 +321,24 @@ struct FloorLaunch
     pointers::Vector{Ptr{Cvoid}}
     blocks::Int
     threads::Tuple{Int, Int}
+    values::Vector{Int}
 end
 
-function FloorLaunch(fun, exceptions, @nospecialize(args::Tuple), blocks, threads)
+function FloorLaunch(fun, exceptions, @nospecialize(args::Tuple), blocks, threads, values)
     state = Base.RefValue(CUDACore.KernelState(exceptions, UInt32(0)))
     boxes = Any[state; [Base.RefValue{typeof(a)}(a) for a in args]]
-    FloorLaunch(fun, exceptions, state, boxes, Ptr{Cvoid}[pointer_from_objref(b) for b in boxes], blocks, threads isa Integer ? (threads, 1) : threads)
+    FloorLaunch(fun, exceptions, state, boxes, Ptr{Cvoid}[pointer_from_objref(b) for b in boxes], blocks,
+        threads isa Integer ? (threads, 1) : threads, values)
+end
+
+Tempest.Compiler.Implement.repoints(::FloorLaunch) = true
+
+# The buffers' box holds a tuple of device arrays; one of the same type
+# replaces it.
+function Tempest.Compiler.Implement.repoint!(l::FloorLaunch, value, buffer)
+    box = l.boxes[2]
+    box[] = foldl((b, j) -> Base.setindex(b, CUDACore.cudaconvert(buffer), j), findall(==(value), l.values); init = box[])
+    l
 end
 
 function (l::FloorLaunch)()

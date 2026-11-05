@@ -290,6 +290,51 @@ end
     check_before_write(single)
 end
 
+# How many arguments the kernels read where the caller has them.
+pointed(c) = (ex = c.executable; count(k -> ex.pointable[k] !== nothing && ex.pointed[k] !== ex.arguments[k], eachindex(ex.pointable)))
+
+@testset "arguments read where the caller has them" begin
+    # An argument the program only reads is copied into the program's storage
+    # on its first call, and read where the caller has it once the caller
+    # brings the same array twice in a row: what the caller writes into it
+    # after, the next call reads.
+    m, x = Dense(data(3, 4), data(3), tanh), data(4, 2)
+    c = compile((m, x) -> m(x), m, x)
+    @test c(m, x) ≈ m(x) && pointed(c) == 0
+    @test c(m, x) ≈ m(x) && pointed(c) == 3
+    x .*= 2
+    m.w[1] = 7
+    @test c(m, x) ≈ m(x) && pointed(c) == 3
+    # A new array is copied, as an array that moves every call is.
+    y = data(4, 2; scale = 0.3)
+    @test c(m, y) ≈ m(y) && pointed(c) == 2
+    @test c(m, y) ≈ m(y) && pointed(c) == 3
+    # `bind!` copies, and the kernels read the program's storage again.
+    ex = c.executable
+    bind!(ex, c.f, m, x)
+    @test execute!(ex) === ex && outputs(ex) ≈ m(x) && pointed(c) == 0
+    # An argument the program writes is copied into its storage and back on
+    # every call, the same array or not; the others are read where they are.
+    function normalized(m, x)
+        μ = vec(sum(x; dims = 2)) ./ size(x, 2)
+        m.mean .= 0.9 .* m.mean .+ 0.1 .* μ
+        m.scale .* (x .- μ)
+    end
+    mine, theirs, x = Running(data(3), data(3; scale = 0.5)), Running(data(3), data(3; scale = 0.5)), data(3, 4)
+    n = compile(normalized, mine, x)
+    for _ in 1:3
+        @test n(mine, x) ≈ normalized(theirs, x) && mine.mean ≈ theirs.mean
+    end
+    @test pointed(n) == 2
+    # A result that is an input is the caller's array copied, never pointed at.
+    same = compile(x -> (x, 2 .* x), x)
+    before = copy(x)
+    a, = same(x)
+    b, = same(x)
+    x .= 0
+    @test a == b == before && pointed(same) == 0
+end
+
 if CUDA_FUNCTIONAL
     @testset "compiled on CUDA" begin
         m, x = Dense(single(data(64, 32; scale = 0.3)), single(data(64)), tanh), single(data(32, 16; scale = 0.5))
@@ -310,5 +355,30 @@ if CUDA_FUNCTIONAL
         # within the capture and launched kernel by kernel.
         check_before_write(CuArray)
         check_before_write(CuArray; capture = false)
+    end
+
+    @testset "arguments read where the caller has them, on CUDA" begin
+        # The captured graph is recorded again when its kernels are pointed
+        # at the caller's arrays, and when they are pointed back.
+        m, x = Dense(CuArray(single(data(64, 32; scale = 0.3))), CuArray(single(data(64))), tanh), CuArray(single(data(32, 16; scale = 0.5)))
+        reference(m, x) = Array(m.act.(m.w * x .+ m.b))
+        for capture in (true, false)
+            c = compile((m, x) -> m(x), m, x; capture)
+            @test isapprox(Array(c(m, x)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 0
+            @test isapprox(Array(c(m, x)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 3
+            x .*= 2
+            @test isapprox(Array(c(m, x)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 3
+            z = copy(x) .+ 1
+            @test isapprox(Array(c(m, z)), reference(m, z); rtol = 1.0e-5) && pointed(c) == 2
+            @test isapprox(Array(c(m, z)), reference(m, z); rtol = 1.0e-5) && pointed(c) == 3
+            # An array the kernels cannot read where it is, one element into
+            # another, so not at the alignment they assume, is copied.
+            y = CuArray{Float32}(undef, length(x) + 1)
+            unaligned = unsafe_wrap(CuArray, pointer(y) + sizeof(Float32), size(x))
+            copyto!(unaligned, x)
+            for _ in 1:2
+                @test isapprox(Array(c(m, unaligned)), reference(m, x); rtol = 1.0e-5) && pointed(c) == 2
+            end
+        end
     end
 end

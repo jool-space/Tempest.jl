@@ -32,6 +32,13 @@ declared `const` is checked at each call. A number a function `f` calls reads,
 or a copy it makes of a global's array before using it with an input, is kept
 as it was when traced.
 
+An array the program only reads is copied into the program's storage until
+a call brings the same array as the call before; from then on the kernels
+read it where the caller has it, and calls on it copy nothing, until another
+array comes (see `Tempest.Compiler.point!`). Arrays that move every call, as
+a training step's weights do, are copied, which costs less than recording the
+graph again.
+
 A call whose arguments, `f`'s own leaves or the globals `f` reads differ in
 anything but the values of inputs throws, naming the difference.
 
@@ -241,7 +248,7 @@ function (c::Compiled)(@nospecialize(args...))
     d = difference(c, args)
     d === nothing || throw(ArgumentError("$(c.f) was compiled for other arguments: $d"))
     ex = c.executable
-    bind!(ex, c.f, args...)
+    point!(ex, c.f, args...)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
     # What the program wrote into an input, the caller's array takes.
     if !isempty(ex.program.writes)

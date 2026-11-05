@@ -7,8 +7,8 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, task_state, device_name,
-    measurable, time_launch, device_rates, capture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
+public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, pointable, task_state, device_name,
+    measurable, time_launch, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
@@ -151,6 +151,16 @@ bindable(::Target, x) = false
 bindable(::CPUTarget, x) = x isa Array
 
 """
+    pointable(target, x) -> Bool
+
+Whether launches built on storage `target` allocated can read array `x`
+where it is instead (see `repoint!`): `x` is storage the target could have
+allocated, as aligned as its kernels assume of what it allocates.
+"""
+pointable(::Target, x) = false
+pointable(::CPUTarget, x) = x isa Array
+
+"""
     task_state(target) -> function
 
 A function that, called first in a new task, gives the task the state on
@@ -179,7 +189,7 @@ function floor_launch(::CPUTarget, k::ScalarKernel, args)
             end
             nothing
         end))
-        return HostLaunch(f, (args, k.items))
+        return HostLaunch(f, (args, k.items), k.slots)
     end
     k.split.lanes == 1 || throw(ArgumentError("the CPU runs each part of a split item as one lane, not $(k.split.lanes)"))
     f = generated(:(function (buffers, n, parts)
@@ -189,20 +199,31 @@ function floor_launch(::CPUTarget, k::ScalarKernel, args)
         end
         nothing
     end))
-    HostLaunch(f, (args, k.items, k.split.parts))
+    HostLaunch(f, (args, k.items, k.split.parts), k.slots)
 end
 
 """
 A floor kernel's launch on the CPU. Each kernel is a new function, so its
 launch holds the function and arguments untyped: a closure over them would be
 a new type too, and every method it passes through would compile again for it.
+Its first argument is the kernel's buffers, the first of them those of the
+values it reads and stores, in `values`.
 """
-struct HostLaunch
-    f::Any
+mutable struct HostLaunch
+    const f::Any
     arguments::Tuple
+    const values::Vector{Int}
 end
 
 (l::HostLaunch)() = Base.invokelatest(l.f, l.arguments...)
+
+repoints(::HostLaunch) = true
+
+function repoint!(l::HostLaunch, value, buffer)
+    buffers = foldl((b, j) -> Base.setindex(b, buffer, j), findall(==(value), l.values); init = first(l.arguments))
+    l.arguments = (buffers, Base.tail(l.arguments)...)
+    l
+end
 
 """
     floor_split(target, items, positions, adjacent) -> Split or nothing
@@ -226,6 +247,15 @@ graph)` to launch again. The graph keeps `keep`, what it launches, alive until
 replays `run` itself.
 """
 capture(::Target, run, keep) = run
+
+"""
+    recapture(target, graph, run, keep) -> graph
+
+`graph`, which `capture` recorded from `run`, recorded again after its
+launches were pointed at other storage (see `repoint!`). A target with graphs
+may update the graph it has rather than make another.
+"""
+recapture(target::Target, graph, run, keep) = (release(target, graph); capture(target, run, keep))
 
 "Launch `graph`, what `capture` recorded on `target`."
 replay(::Target, run) = run()

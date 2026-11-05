@@ -21,7 +21,7 @@ import Tempest
 using Tempest: CUDATarget
 using Tempest.Compiler: contract
 using Tempest.Compiler.Implement: Library, Template, Binding, Strided, Work, cuDNNAttention
-import Tempest.Compiler.Implement: templates, supports, build, estimate, loaded
+import Tempest.Compiler.Implement: templates, supports, build, estimate, loaded, repoints, repoint!
 
 # The library, `Tempest.cuDNNAttention`, can be made once this extension loads.
 loaded(::Type{cuDNNAttention}) = true
@@ -164,32 +164,63 @@ function Base.show(io::IO, a::BuiltAttention)
         c.stats === nothing ? "" : ", with its log-sum-exp")
 end
 
-# Every pointer the plan reads is fixed when it is built, in a variant pack:
-# the buffers of a prepared program do not move. A launch sets the stream and
+# Every pointer the plan reads is in a variant pack, made again when an
+# operand's value moves (see `repoint!`). A launch sets the stream and
 # executes, which a graph captures.
 function build(::cuDNNAttention, target::CUDATarget, b::Binding)
     c = sdpa(b)
     g = graph(c)
-    h = handle()
     workspace = CuArray{UInt8}(undef, g.workspace_size)
-    scale, mask = Ref(Float32(inv(sqrt(c.q.dims[1])))), Ref(-Inf32)
     arrays = Dict("Q" => b.arrays.q, "K" => b.arrays.k, "V" => b.arrays.v, "O" => b.arrays.o)
     c.stats === nothing || (arrays["Stats"] = b.arrays.lse)
+    scale, mask = Ref(Float32(inv(sqrt(c.q.dims[1])))), Ref(-Inf32)
     pointers = map(g.variant_tensors) do t
         t.name == "Scale" && return Base.unsafe_convert(Ptr{Float32}, scale)
         t.name == "MaskValue" && return Base.unsafe_convert(Ptr{Float32}, mask)
         pointer(arrays[t.name])
     end
-    pack = cuDNN.variant_pack(; uids = [t.uid for t in g.variant_tensors], pointers,
-        workspace = g.workspace_size == 0 ? C_NULL : pointer(workspace))
-    keep = (g, pack, scale, mask, workspace, b)
-    function launch()
-        cuDNN.cudnnSetStream(h, CUDACore.stream())
-        cuDNN.cudnnBackendExecute(h, g.plan.ptr, pack.ptr)
-        keep
-        nothing
+    l = Attention(handle(), g, arrays, Any[pointers...], workspace, scale, mask, Ref{Any}())
+    pack!(l)
+    (l, BuiltAttention(c, g.workspace_size))
+end
+
+"""
+Attention as one cuDNN plan, on the pointers of its variant pack: its
+operands' addresses, which `repoint!` moves, and its scale's and mask
+value's, which it holds.
+"""
+struct Attention
+    h::cuDNN.cudnnHandle_t
+    g::Any
+    arrays::Dict{String, Strided}
+    pointers::Vector{Any}
+    workspace::CuArray{UInt8, 1}
+    scale::Base.RefValue{Float32}
+    mask::Base.RefValue{Float32}
+    pack::Base.RefValue{Any}
+end
+
+pack!(l::Attention) = l.pack[] = cuDNN.variant_pack(; uids = [t.uid for t in l.g.variant_tensors], pointers = l.pointers,
+    workspace = l.g.workspace_size == 0 ? C_NULL : pointer(l.workspace))
+
+function (l::Attention)()
+    cuDNN.cudnnSetStream(l.h, CUDACore.stream())
+    cuDNN.cudnnBackendExecute(l.h, l.g.plan.ptr, l.pack[].ptr)
+    nothing
+end
+
+repoints(::Attention) = true
+
+function repoint!(l::Attention, value, buffer)
+    moved = false
+    for (i, t) in enumerate(l.g.variant_tensors)
+        s = get(l.arrays, t.name, nothing)
+        (s === nothing || s.value != value) && continue
+        l.pointers[i] = pointer(buffer) + s.offset * sizeof(s.eltype)
+        moved = true
     end
-    (launch, BuiltAttention(c, g.workspace_size))
+    moved && pack!(l)
+    l
 end
 
 # Work the library does while it precompiles, without a GPU: preparing

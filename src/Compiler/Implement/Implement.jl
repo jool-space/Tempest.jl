@@ -11,8 +11,8 @@ module Implement
 using Republic: @republic
 @republic republic=false inherit=:public using ..IR
 
-public Implementation, Work, package_of, loaded, claims, variants, estimate, build_claim, candidates, record_name,
-    recomputes_folds, in_place, lowers, compiling, recurrence_axes
+public Implementation, Work, package_of, loaded, claims, variants, estimate, build_claim, repoints, repoint!, candidates,
+    record_name, recomputes_folds, in_place, lowers, compiling, recurrence_axes
 
 include("groups.jl")
 
@@ -112,6 +112,30 @@ are. `buffers[v]` is the storage of value `v`, for each value the group reads
 or stores.
 """
 function build_claim end
+
+"""
+    repoints(launch) -> Bool
+
+Whether `launch`, as `build_claim` returned it, can read a value from other
+storage than it was built on (see `repoint!`): false by default. `compile`
+points the launches of an argument the program only reads at the caller's
+array, rather than copying it into the program's storage, when all of the
+program's launches can.
+"""
+repoints(launch) = false
+
+"""
+    repoint!(launch, value, buffer)
+
+Make `launch` read value `value`, a number among the plan's values as in
+`build_claim`'s `buffers`, from `buffer` from now on, where it read the
+storage it was given before; a launch that does not read it is unchanged.
+`buffer` is the target's storage of that value's element type and length,
+aligned as the target's own storage is to the bytes its kernels assume of
+an address. A graph captured from the launch is captured again before it
+runs on `buffer`.
+"""
+function repoint! end
 
 """
     candidates(implementation, target, plan) -> Vector

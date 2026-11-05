@@ -784,12 +784,46 @@ end
 
 function launch_kernels(kernels, workspaces, buffers, schedule, target)
     scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in workspaces)
-    launches = Tempest.Compiler.concurrently(kernels, target) do k
+    built = Tempest.Compiler.concurrently(kernels, target) do k
         f = Tempest.Compiler.generated(source(k))
         arrays = map(spec -> tile_array(spec.buffer isa Int ? buffers[spec.buffer] : scratch[spec.buffer], spec), k.args)
-        tile_launch(f, arrays, k.grid; k.occupancy)
+        launch = tile_launch(f, arrays, k.grid; k.occupancy)
+        # Where each value's array starts among the parameters: after the
+        # kernel function's captured values and the arrays before it.
+        at = length(flatten!(Any[], f))
+        places = Place[]
+        for (spec, a) in zip(k.args, arrays)
+            spec.buffer isa Int && push!(places, Place(at + 1, spec.buffer, UInt(a.ptr) - reinterpret(UInt, pointer(buffers[spec.buffer]))))
+            at += length(flatten!(Any[], a))
+        end
+        (launch, places)
     end
-    keep = (scratch, buffers)
-    launch = () -> (foreach(l -> l(), launches); keep; nothing)
-    (launch, BuiltTiles(schedule, kernels))
+    (TileRun(first.(built), last.(built), (scratch, buffers)), BuiltTiles(schedule, kernels))
+end
+
+"An array's address among a launch's parameters: its box, its value and its offset in bytes."
+struct Place
+    box::Int
+    value::Int
+    offset::UInt
+end
+
+"The launches of a claim's kernels, in order, the places of the values' arrays among each one's parameters, and what they read kept alive."
+struct TileRun
+    launches::Vector{TileLaunch}
+    places::Vector{Vector{Place}}
+    keep::Any
+end
+
+(r::TileRun)() = (foreach(l -> l(), r.launches); nothing)
+
+Tempest.Compiler.Implement.repoints(::TileRun) = true
+
+function Tempest.Compiler.Implement.repoint!(r::TileRun, value, buffer)
+    for (l, places) in zip(r.launches, r.places), p in places
+        p.value == value || continue
+        box = l.boxes[p.box]
+        box[] = reinterpret(typeof(box[]), reinterpret(UInt, pointer(buffer)) + p.offset)
+    end
+    r
 end

@@ -60,6 +60,7 @@ Tempest.Compiler
 Tempest.Compiler.trace
 Tempest.Compiler.prepare
 Tempest.Compiler.bind!
+Tempest.Compiler.point!
 Tempest.Compiler.execute!
 Tempest.Compiler.capture!
 Tempest.Compiler.replay!
@@ -82,6 +83,7 @@ Tempest.Compiler.product_class
 Tempest.Compiler.allocate
 Tempest.Compiler.upload
 Tempest.Compiler.bindable
+Tempest.Compiler.pointable
 Tempest.Compiler.task_state
 Tempest.Compiler.floor_launch
 Tempest.Compiler.ScalarKernel
@@ -92,6 +94,7 @@ Tempest.Compiler.merge_lanes
 Tempest.Compiler.capture
 Tempest.Compiler.replay
 Tempest.Compiler.release
+Tempest.Compiler.recapture
 Tempest.Compiler.device_name
 Tempest.Compiler.measurable
 Tempest.Compiler.time_launch
@@ -195,6 +198,8 @@ Tempest.Compiler.Implement.variants
 Tempest.Compiler.Implement.estimate
 Tempest.Compiler.Implement.Work
 Tempest.Compiler.Implement.build_claim
+Tempest.Compiler.Implement.repoints
+Tempest.Compiler.Implement.repoint!
 Tempest.Compiler.Implement.candidates
 Tempest.Compiler.Implement.record_name
 Tempest.Compiler.Implement.recomputes_folds

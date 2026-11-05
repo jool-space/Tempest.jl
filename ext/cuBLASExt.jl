@@ -12,8 +12,8 @@ using BFloat16s: BFloat16
 import Tempest
 using Tempest: CUDATarget
 using Tempest.Compiler: contract
-using Tempest.Compiler.Implement: Library, Template, Binding, cuBLASProducts
-import Tempest.Compiler.Implement: templates, supports, build, loaded
+using Tempest.Compiler.Implement: Library, Template, Binding, Strided, cuBLASProducts
+import Tempest.Compiler.Implement: templates, supports, build, loaded, repoints, repoint!
 
 # The library, `Tempest.cuBLASProducts`, can be made once this extension loads.
 loaded(::Type{cuBLASProducts}) = true
@@ -150,45 +150,102 @@ end
 
 function build(::cuBLASProducts, target::CUDATarget, b::Binding)
     c = gemm(b)
-    lib = handle()
-    a, x, y = pointer(b.arrays[c.a.name]), pointer(b.arrays[c.b.name]), pointer(b.arrays[c.c.name])
+    operands = [b.arrays[c.a.name], b.arrays[c.b.name], b.arrays[c.c.name]]
     compute = compute_type(target, c.factor)
-    (ta, tb), (m, n, k, batch) = c.transposes, (c.m, c.n, c.k, c.batch)
-    keep = (lib, b)
-    function launch()
-        cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
-        # Setting the stream resets the workspace: install it after.
-        cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
-        cuBLAS.cublasGemmStridedBatchedEx(lib.handle, ta, tb, m, n, k, lib.one, a, c.factor, c.a.leading, c.a.batch_stride,
-            x, c.factor, c.b.leading, c.b.batch_stride, lib.zero, y, c.result, c.c.leading, c.c.batch_stride, batch,
-            compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
-        keep
-        nothing
-    end
-    (launch, BuiltProduct(c, compute))
+    (Product(handle(), c, compute, operands, [CuPtr{Cvoid}(address(s.buffer, s)) for s in operands]), BuiltProduct(c, compute))
 end
 
-# The matrices of products alike, by arrays of their addresses on the device,
-# fixed when it is built: the buffers of a prepared program do not move.
+"""
+A product's call on the addresses of its factors and result, which
+`repoint!` moves: the operands it was built on keep their buffers alive.
+"""
+struct Product
+    lib::Handle
+    gemm::Gemm
+    compute::cuBLAS.cublasComputeType_t
+    operands::Vector{Strided}
+    addresses::Vector{CuPtr{Cvoid}}
+end
+
+function (l::Product)()
+    c, lib = l.gemm, l.lib
+    a, x, y = l.addresses
+    cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
+    # Setting the stream resets the workspace: install it after.
+    cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
+    cuBLAS.cublasGemmStridedBatchedEx(lib.handle, c.transposes..., c.m, c.n, c.k, lib.one, a, c.factor, c.a.leading, c.a.batch_stride,
+        x, c.factor, c.b.leading, c.b.batch_stride, lib.zero, y, c.result, c.c.leading, c.c.batch_stride, c.batch,
+        l.compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
+    nothing
+end
+
+repoints(::Product) = true
+
+function repoint!(l::Product, value, buffer)
+    for (i, s) in enumerate(l.operands)
+        s.value == value && (l.addresses[i] = CuPtr{Cvoid}(address(buffer, s)))
+    end
+    l
+end
+
+# Where operand `s` starts when its value is in `buffer`.
+address(buffer, s::Strided) = reinterpret(UInt, pointer(buffer)) + s.offset * sizeof(s.eltype)
+
+# The matrices of products alike, by arrays of their addresses on the device:
+# each operand's, a matrix per product of the batch of each binding.
 function build(::cuBLASProducts, target::CUDATarget, bs::Vector{Binding})
     cs = map(gemm, bs)
     c = first(cs)
-    lib = handle()
-    at(b, o, T, i) = Ptr{Cvoid}(reinterpret(UInt, pointer(b.arrays[o.name])) + i * o.batch_stride * sizeof(T))
-    addresses(o, T) = CuArray(Ptr{Cvoid}[at(b, o, T, i) for b in bs for i in 0:(c.batch - 1)])
-    a, x, y = addresses(c.a, c.factor), addresses(c.b, c.factor), addresses(c.c, c.result)
+    operands = [[b.arrays[o.name] for b in bs] for o in (c.a, c.b, c.c)]
+    strides = [c.a.batch_stride * sizeof(c.factor), c.b.batch_stride * sizeof(c.factor), c.c.batch_stride * sizeof(c.result)]
+    hosts = [[Ptr{Cvoid}(address(s.buffer, s) + i * stride) for s in ss for i in 0:(c.batch - 1)] for (ss, stride) in zip(operands, strides)]
     compute = compute_type(target, c.factor)
-    (ta, tb), (m, n, k), count = c.transposes, (c.m, c.n, c.k), length(bs) * c.batch
-    keep = (lib, bs, a, x, y)
-    function launch()
-        cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
-        cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
-        cuBLAS.cublasGemmBatchedEx(lib.handle, ta, tb, m, n, k, lib.one, a, c.factor, c.a.leading, x, c.factor, c.b.leading,
-            lib.zero, y, c.result, c.c.leading, count, compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
-        keep
-        nothing
+    (Products(handle(), c, compute, length(bs) * c.batch, operands, strides, hosts, map(CuArray, hosts)), BuiltProducts(cs, compute))
+end
+
+"""
+Products alike as one call, on arrays of their operands' addresses on the
+device, which `repoint!` writes again.
+"""
+struct Products
+    lib::Handle
+    gemm::Gemm
+    compute::cuBLAS.cublasComputeType_t
+    count::Int
+    operands::Vector{Vector{Strided}}
+    strides::Vector{Int}
+    hosts::Vector{Vector{Ptr{Cvoid}}}
+    devices::Vector{CuArray{Ptr{Cvoid}, 1}}
+end
+
+function (l::Products)()
+    c, lib = l.gemm, l.lib
+    a, x, y = l.devices
+    cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
+    cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
+    cuBLAS.cublasGemmBatchedEx(lib.handle, c.transposes..., c.m, c.n, c.k, lib.one, a, c.factor, c.a.leading, x, c.factor, c.b.leading,
+        lib.zero, y, c.result, c.c.leading, l.count, l.compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
+    nothing
+end
+
+repoints(::Products) = true
+
+# The arrays of addresses are written on the stream, after the launches
+# before that read them.
+function repoint!(l::Products, value, buffer)
+    batch = l.gemm.batch
+    for (r, ss) in enumerate(l.operands)
+        moved = false
+        for (j, s) in enumerate(ss)
+            s.value == value || continue
+            for i in 0:(batch - 1)
+                l.hosts[r][(j - 1) * batch + i + 1] = Ptr{Cvoid}(address(buffer, s) + i * l.strides[r])
+            end
+            moved = true
+        end
+        moved && copyto!(l.devices[r], l.hosts[r])
     end
-    (launch, BuiltProducts(cs, compute))
+    l
 end
 
 # Work the cuBLAS products do while they precompile, without a GPU: preparing
