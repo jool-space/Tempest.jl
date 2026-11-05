@@ -185,6 +185,87 @@ trace, since `conv` writes into a typed buffer, and none written as array
 code has been judged. The eager slice (`test/bench/eager_slice.jl`): 113 of
 its 136 cases trace and agree, Base's 59 of 67.
 
+**A neural ODE's training step: a hundred RK4 steps of a small MLP, the
+loop unrolled at trace.** The vector field du/dt = dec(tanh(enc(u))), 32
+dimensions through 256 hidden, batch 128, integrated over [0, 1] by 100
+fixed RK4 steps written as a plain `for` loop; a mean squared error on the
+final state; RAdam at 1e-3. The forward is 400 evaluations of the field,
+each two products of 32 by 256 at batch 128, in a chain where every stage
+reads the last: kernels too small to fill the device, so the step is
+launches and latency, and the trace is 400 times one field's. What stands
+trial: the trace and planning of a long unrolled program
+(`src/Compiler/program/`, `src/Compiler/plan/planner.jl`), the store or
+recompute partition across 400 stage states (`partition.jl`), and the
+cover's kernels for products this small (`src/Compiler/cover/`). The
+chain group for small batched products, probed and not built, is the
+nearest answer Tempest has. Challengers, from PathMNISTReactant.jl at
+7684532 (`benchmarks/julia/bench_node.jl`, `benchmarks/pytorch/bench_node.py`,
+`benchmarks/results/*_node.jsonl`), on an RTX A6000 in TF32: Reactant
+0.2.290 through ReactantNitro, the same plain loop unrolled at trace into one
+XLA program, 10.8 ms a step and 99 s to the first; torch.compile
+`reduce-overhead` 16.1 ms and 6.4 s, `max-autotune` 21.2 ms and 505 s; eager
+PyTorch 127 ms and 0.4 s. Judged on the GB10, with both challengers run
+there by their own scripts, by the step's time and the seconds to the first
+step, cold and warm, with the losses agreeing with the same code run
+eagerly.
+
+The baseline (`test/bench/node.jl`, TF32, 4 November), by RK4 steps: at 1,
+36 kernels, prepared in 17.4 s, 0.103 ms a step; at 10, 361 kernels, 69.0
+s, 0.995 ms; at 30, the preparation had not finished after ten minutes, at
+4.6 GB resident. Losses agree with the interpreter's to 4e-6 and the first
+moments to 3e-4 relative at both. A step is about 36 kernels and 0.1 ms
+per RK4 step, launches of a few microseconds each; the preparation grows
+faster than the program, and the 100 steps of the challengers' program do
+not prepare. Planning alone, its kernels cached: 18.4 s at 10 steps (1301
+values), 99.2 s at 20 (2511), near the 2.5th power of the program; its
+time is the planner's grouping (`group_values`, `try_add!`) and the
+trials it prices (`trial`, `src/Compiler/cover/cover.jl`). At 20 the
+preparation also compiled kernels for 180 s that the 10 steps' cache did
+not hold: the step 1/K is a constant of every kernel, so each K is a
+program of its own, while within one the steps share theirs (253 kernels
+from 33 keys at 7). Counted, planning
+alone at 1, 5, 10 and 20 steps (210, 696, 1301, 2511 values): the cover
+plans the whole graph once per trial, 40, 104, 159 and 269 times, linear in
+the program; each plan calls `try_add!` 202, 2466, 8625 and 31974 times,
+quadratic in it, 3.4% of them adding at 20; and each call costs more as
+the program grows, 0.22 ms at 10 and 0.42 ms at 20. The plans' summed
+time, across threads, is 297 s at 10 and 3645 s at 20, near the fourth
+power; the threads hide part of it in the wall time.
+
+Taken since, 5 November: planning alone 2.1 s at 10 steps, 4.6 s at 20 and
+11.6 s at 40, against 18.4 and 99.2 s. A group's loads are found once per
+plan and its dependencies from the latest value pending (`planner.jl`); the
+cover's trials are classed by the groups they change and planned side by
+side (`cover.jl`); and a gradient summed over a value's uses accumulates
+beside each product that adds to it, cuBLAS adding the product to the sum in
+one call, the sum taking its slot in place (`storage.jl`,
+`ext/cuBLASExt.jl`). At 100 steps, the challengers' program: 3602 kernels,
+prepared in 193 s cold and 184 s warm, of which planning is 148 s; 10.9 ms a
+step, against Reactant's 10.8 on the A6000. Open: planning still grows
+faster than the program, by the greedy loop's taken trials, 15 at 100 steps,
+whose dependencies walk every kernel fixed, 0.22 s each at the first and
+0.68 s at the last, and by their pricing. The challengers are not yet run on
+the GB10.
+
+**Loops are unrolled.** A `for` loop traces as its iterations, a program as
+long as its trip count, planned and compiled whole: at 100 RK4 steps, 3602
+kernels and 148 s of planning (above). The rolled loop exists, entered only
+by `accumulate(f, eachslice(x); init)`: a `Loop` of the program
+(`src/Compiler/program/program.jl`), lowered by batching its body over an
+axis of steps with one carried definition, planned as a recurrence group,
+differentiated as the loop reversed, storing each step's start and replaying
+it, and on cuTile one kernel sweeping the steps with the state on chip, else
+the floor. A plain loop never reaches it. Challenger: StructuredReactant
+(AntonOresten/Reactant.jl, branch `structured`), which rolls structured
+`for` and `while` loops from Julia's IR through IRStructurizer, without a
+macro. Nearest in Tempest: a tape rolled where it repeats into the loop that
+exists, the RK4 loop's tape at 1000 steps periodic up to renaming, 39 nodes
+a step; and a recurrence too large for one kernel launched once per step
+from one plan of the step. Judged on `test/bench/node.jl` unchanged, at 10,
+100 and 1000 RK4 steps: the groups the same in count at each, the planning
+time independent of the steps, the losses agreeing with the interpreter's,
+and the step's time within a quarter of the unrolled program's.
+
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
 it, and a program for a new size is a new preparation. Decode escapes it, its
