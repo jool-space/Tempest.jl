@@ -307,9 +307,12 @@ end
 
 @generated built(::Type{S}, fields::Tuple) where {S} = Expr(:splatnew, S, :fields)
 
-leaves(x::Union{Tuple, NamedTuple}) = reduce(vcat, map(leaves, values(x)); init = Any[])
-leaves(x::Fields) = leaves(x.fields)
-leaves(x) = nested(x) ? leaves(fields(x)) : Any[x]
+# The leaves of `x` in order, gathered into one vector: a model's hundreds of
+# arrays walked at each call in time linear in them.
+leaves(x) = leaves!(Any[], x)
+leaves!(out, x::Union{Tuple, NamedTuple}) = (foreach(y -> leaves!(out, y), values(x)); out)
+leaves!(out, x::Fields) = leaves!(out, x.fields)
+leaves!(out, x) = nested(x) ? leaves!(out, fields(x)) : push!(out, x)
 
 # `g` on each element of a tuple or named tuple, its names kept.
 each(g, x::Tuple) = map(g, x)
