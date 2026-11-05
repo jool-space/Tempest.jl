@@ -1,9 +1,10 @@
 # cuBLAS: a product as one library call. A library to Tempest: its templates
-# are a batch of products, and the same of half-precision factors summed in
-# Float32, and it supports those whose factors and result are matrices cuBLAS
-# reads, each with a unit stride and a leading dimension; and instances of
-# them alike but for where their operands start, as one call over arrays of
-# their matrices.
+# are a batch of products, the same of half-precision factors summed in
+# Float32, and a product added to a matrix, as a gradient accumulates over a
+# value's uses; and it supports those whose factors and result are matrices
+# cuBLAS reads, each with a unit stride and a leading dimension; and
+# instances of products alike but for where their operands start, as one
+# call over arrays of their matrices.
 module cuBLASExt
 
 using CUDACore
@@ -13,16 +14,21 @@ import Tempest
 using Tempest: CUDATarget
 using Tempest.Compiler: contract
 using Tempest.Compiler.Implement: Library, Template, Binding, Strided, cuBLASProducts
-import Tempest.Compiler.Implement: templates, supports, build, loaded, repoints, repoint!
+import Tempest.Compiler.Implement: templates, supports, build, loaded, repoints, repoint!, in_place
 
 # The library, `Tempest.cuBLASProducts`, can be made once this extension loads.
 loaded(::Type{cuBLASProducts}) = true
 
 product(A, B) = contract(A, B, (1, 3, 4), (3, 2, 4), (1, 2, 4))
 widened(A, B) = product(Float32.(A), Float32.(B))
+accumulated(A, B, D) = D .+ product(A, B)
 
 const PRODUCTS = (Template(product; inputs = (A = (:m, :k, :b), B = (:k, :n, :b)), outputs = (:C,)),
-    Template(widened; inputs = (A = (:m, :k, :b), B = (:k, :n, :b)), outputs = (:C,)))
+    Template(widened; inputs = (A = (:m, :k, :b), B = (:k, :n, :b)), outputs = (:C,)),
+    Template(accumulated; inputs = (A = (:m, :k, :b), B = (:k, :n, :b), D = (:m, :n, :b)), outputs = (:C,)))
+
+# The templates by number.
+const WIDENED, ACCUMULATED = 2, 3
 
 templates(::cuBLASProducts, ::CUDATarget) = PRODUCTS
 
@@ -44,6 +50,9 @@ struct Gemm
     a::Operand
     b::Operand
     c::Operand
+    # What the product is added to, laid out as the result: copied into it,
+    # which cuBLAS then adds the product to.
+    d::Union{Nothing, Operand}
     factor::DataType
     result::DataType
 end
@@ -71,14 +80,20 @@ end
 
 # The call that computes a binding, or nothing when cuBLAS does not take it:
 # products of matrices of more than one row and column, the widened
-# template's of half-precision factors only.
+# template's of half-precision factors only, and the accumulated template's
+# where the matrix added is laid out as the result and fills its storage, so
+# that one copy moves it there.
 function gemm(b::Binding)
     A, B, C = b.arrays.A, b.arrays.B, b.arrays.C
     T, R = A.eltype, C.eltype
-    T in FACTOR_TYPES && B.eltype === T && (R === T || R === Float32) && (b.template == 1 || T !== Float32) || return nothing
+    T in FACTOR_TYPES && B.eltype === T && (R === T || R === Float32) && (b.template != WIDENED || T !== Float32) || return nothing
     m, n, k, batch = b.extents.m, b.extents.n, b.extents.k, b.extents.b
     m > 1 && n > 1 && max(m, n, k, batch) < typemax(Int32) || return nothing
     left, right, out = (:A, A.strides[1:2], A.strides[3]), (:B, B.strides[1:2], B.strides[3]), (:C, C.strides[1:2], C.strides[3])
+    if b.template == ACCUMULATED
+        D = b.arrays.D
+        D.eltype === R && D.strides == C.strides && R === T || return nothing
+    end
     # cuBLAS writes a column-major result: when the result's columns are unit
     # stride instead, compute its transpose, the factors swapped and transposed.
     if C.strides[1] != 1
@@ -92,17 +107,28 @@ function gemm(b::Binding)
     (oc === nothing || oa === nothing || ob === nothing) && return nothing
     maximum((oa[2], ob[2], oc[2])) < typemax(Int32) || return nothing
     operand((name, _, bs), o) = Operand(name, o[2], bs)
-    Gemm((oa[1], ob[1]), m, n, k, batch, operand(left, oa), operand(right, ob), operand(out, oc), T, R)
+    c = operand(out, oc)
+    # The matrix added fills the result's storage, without gaps between columns
+    # or matrices, so that it is one copy.
+    b.template == ACCUMULATED && !(c.leading == m && (batch == 1 || c.batch_stride == m * n)) && return nothing
+    Gemm((oa[1], ob[1]), m, n, k, batch, operand(left, oa), operand(right, ob), c,
+        b.template == ACCUMULATED ? Operand(:D, c.leading, c.batch_stride) : nothing, T, R)
 end
 
 supports(::cuBLASProducts, ::CUDATarget, b::Binding) = gemm(b) !== nothing
 
-# What products must share to be one call: all but where their operands start.
-alike(c::Gemm) = (c.transposes, c.m, c.n, c.k, c.batch, c.a, c.b, c.c, c.factor, c.result)
+# A product added to a matrix reads each element of the matrix before it
+# writes the result's there: the result may take the matrix's storage, and
+# the call is then the product added in place.
+in_place(::cuBLASProducts, b::Binding) = b.template == ACCUMULATED
 
+# What products must share to be one call: all but where their operands start.
+alike(c::Gemm) = (c.transposes, c.m, c.n, c.k, c.batch, c.a, c.b, c.c, c.d, c.factor, c.result)
+
+# Products added to matrices are one call each.
 function supports(::cuBLASProducts, ::CUDATarget, bs::Vector{Binding})
     cs = map(gemm, bs)
-    !any(isnothing, cs) && allequal(map(alike, cs))
+    !any(isnothing, cs) && all(c -> c.d === nothing, cs) && allequal(map(alike, cs))
 end
 
 # One handle per context, its workspace and the device constants one and
@@ -143,6 +169,7 @@ Base.show(io::IO, b::BuiltProducts) = print(io, length(b.products), " ", BuiltPr
 function Base.show(io::IO, b::BuiltProduct)
     c = b.gemm
     print(io, "cuBLAS product ", c.m, "×", c.n, " summing ", c.k)
+    c.d === nothing || print(io, ", added to a matrix")
     c.batch > 1 && print(io, ", batch ", c.batch)
     print(io, ", ", c.transposes[1], c.transposes[2], ", ",
         b.compute == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : c.factor === Float32 ? "full precision" : "$(c.factor) accumulating in Float32")
@@ -150,14 +177,15 @@ end
 
 function build(::cuBLASProducts, target::CUDATarget, b::Binding)
     c = gemm(b)
-    operands = [b.arrays[c.a.name], b.arrays[c.b.name], b.arrays[c.c.name]]
+    operands = Strided[b.arrays[o.name] for o in (c.a, c.b, c.c, c.d) if o !== nothing]
     compute = compute_type(target, c.factor)
     (Product(handle(), c, compute, operands, [CuPtr{Cvoid}(address(s.buffer, s)) for s in operands]), BuiltProduct(c, compute))
 end
 
 """
-A product's call on the addresses of its factors and result, which
-`repoint!` moves: the operands it was built on keep their buffers alive.
+A product's call on the addresses of its factors and result, and of the
+matrix it is added to if any, which `repoint!` moves: the operands it was
+built on keep their buffers alive.
 """
 struct Product
     lib::Handle
@@ -170,11 +198,16 @@ end
 function (l::Product)()
     c, lib = l.gemm, l.lib
     a, x, y = l.addresses
+    # A product added to a matrix: the matrix copied into the result unless it
+    # is there already, and the product added to it.
+    if c.d !== nothing && l.addresses[4] != y
+        unsafe_copyto!(reinterpret(CuPtr{UInt8}, y), reinterpret(CuPtr{UInt8}, l.addresses[4]), c.m * c.n * c.batch * sizeof(c.result); async = true)
+    end
     cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
     # Setting the stream resets the workspace: install it after.
     cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
     cuBLAS.cublasGemmStridedBatchedEx(lib.handle, c.transposes..., c.m, c.n, c.k, lib.one, a, c.factor, c.a.leading, c.a.batch_stride,
-        x, c.factor, c.b.leading, c.b.batch_stride, lib.zero, y, c.result, c.c.leading, c.c.batch_stride, c.batch,
+        x, c.factor, c.b.leading, c.b.batch_stride, c.d === nothing ? lib.zero : lib.one, y, c.result, c.c.leading, c.c.batch_stride, c.batch,
         l.compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
     nothing
 end
