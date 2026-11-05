@@ -9,6 +9,9 @@
 # takes their storage, so that its kernel writes only the elements it
 # combines, as an append to a cache writes one position: a result written
 # from an argument it replaces, through such folds, is the argument's storage.
+# A value its kernel writes where it reads, for the last time, a value of its
+# size takes that value's slot, as each sum of a gradient accumulating over a
+# value's uses takes the last one's.
 
 """
     Storage
@@ -19,7 +22,9 @@ zero for a value with storage of its own); the bytes of each slot (`sizes`).
 `donated` holds the results written into the storage of the arguments they
 replace and `staged` those copied there after the last kernel, each as
 `result value => argument value`; `overwrites` the folds by key written over
-the storage of the contents they start from, as `fold value => value`.
+the storage of the contents they start from, as `fold value => value`; and
+`reused` the values written over the slot of a value their kernel reads last,
+as `value => value`.
 """
 struct Storage
     lifetimes::Vector{UnitRange{Int}}
@@ -28,6 +33,7 @@ struct Storage
     donated::Vector{Pair{Int, Int}}
     staged::Vector{Pair{Int, Int}}
     overwrites::Vector{Pair{Int, Int}}
+    reused::Vector{Pair{Int, Int}}
 end
 
 """
@@ -105,12 +111,37 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
     slots = zeros(Int, n)
     sizes, busy = Int[], Int[] # per slot: its bytes, and the last kernel of the value in it
     over = Dict(overwrites)
+    reused, taken = Pair{Int, Int}[], Set{Tuple{Int, Int}}()
+    # A value its kernel reads for the last time, at the address the kernel
+    # writes `v`, a value of `v`'s size in a slot no other value of the kernel
+    # took so: its storage, which `v` may take; nothing otherwise.
+    function dying(v)
+        k = p.owner[v]
+        g = p.groups[k]
+        # A scan's or a recurrence's kernel writes a step before it reads the next.
+        g.kind in (:reduction, :pointwise) && in_place(order[k]) || return nothing
+        for b in sort!(collect(group_reads(graph, g)))
+            slots[b] > 0 && busy[slots[b]] == k && !((slots[b], k) in taken) && last[b] == k && p.owner[b] != k && !(b in results) || continue
+            value_bytes(graph.values[b]) == value_bytes(graph.values[v]) && graph.values[b].eltype == graph.values[v].eltype || continue
+            writes_over(graph, g, v, b) && return b
+        end
+        nothing
+    end
     for v in sort!([v for v in 1:n if p.stored[v] && p.owner[v] > 0 && !(v in results)]; by = v -> (p.owner[v], v))
         if haskey(over, v)
             # The slot of the contents it writes over; none over an argument's storage.
             s = slots[over[v]]
             s > 0 && (busy[s] = max(busy[s], last[v]))
             slots[v] = s
+            continue
+        end
+        b = dying(v)
+        if b !== nothing
+            s = slots[b]
+            push!(taken, (s, p.owner[v]))
+            busy[s] = max(busy[s], last[v])
+            slots[v] = s
+            push!(reused, v => b)
             continue
         end
         bytes = value_bytes(graph.values[v])
@@ -122,7 +153,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         busy[s] = last[v]
         slots[v] = s
     end
-    p, order, Storage(lifetimes, slots, sizes, donated, staged, overwrites)
+    p, order, Storage(lifetimes, slots, sizes, donated, staged, overwrites, reused)
 end
 
 # Kernels in an order where each runs after those it needs, otherwise in their
@@ -187,5 +218,8 @@ function explain(io::IO, p::Plan, s::Storage)
     end
     for (v, b) in s.overwrites
         println(io, "  fold by key ", describe_value(p.graph, v), " written over ", describe_value(p.graph, b))
+    end
+    for (v, b) in s.reused
+        println(io, "  ", describe_value(p.graph, v), " written over ", describe_value(p.graph, b), ", which its kernel reads last")
     end
 end

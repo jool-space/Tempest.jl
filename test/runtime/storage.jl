@@ -6,11 +6,12 @@
 include("../fixtures/programs.jl")
 
 # Values other than inputs and results share slots where their lifetimes do
-# not overlap, or where a fold by key writes over the value it starts from, so
-# training steps that keep values for their backward pass store less.
+# not overlap, or where a fold by key writes over the value it starts from, or
+# a value over one its kernel reads last, so training steps that keep values
+# for their backward pass store less.
 function slots_disjoint(s::C.Storage)
     slotted = [v for v in eachindex(s.slots) if s.slots[v] > 0]
-    over(v, w) = (v => w) in s.overwrites || (w => v) in s.overwrites
+    over(v, w) = any(pairs -> (v => w) in pairs || (w => v) in pairs, (s.overwrites, s.reused))
     all(isempty(intersect(s.lifetimes[v], s.lifetimes[w])) || over(v, w) for v in slotted for w in slotted if v < w && s.slots[v] == s.slots[w])
 end
 
