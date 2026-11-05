@@ -76,7 +76,7 @@ end
 # cuTile's compilation of `f` for `tt`, which its code runs in cuTile's own world.
 function tile_job(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy), @nospecialize(groups), arch)
     argtypes, constants = ct.unwrap_argtypes(f, tt)
-    ct.invoke_frozen(ct.launch_job, f, argtypes, constants; sm_arch = arch, occupancy, name = ENTRY, alias_groups = groups)
+    ct.invoke_frozen(ct.launch_job, f, argtypes, constants, (; sm_arch = arch, occupancy, name = ENTRY, alias_groups = groups))
 end
 
 # What a job's compilation used of Tempest's code: the dependencies of the
