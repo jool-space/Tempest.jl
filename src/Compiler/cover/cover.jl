@@ -285,7 +285,6 @@ function cover(d::Decider)
         priceable(p, q, i) || return nothing
         (compare(d, p, current), i === nothing ? nothing : claimant(d, p, q, i))
     end
-    price(current, taken, q, i, key) = get!(() -> priced_plan(trial(current, taken, Any[q]), current, q, i), priced, key)
     a = around(base, Any[])
     # Every proposal's trial against the starting plan, planned side by side
     # on the threads there are: a trial is pure, and planning is most of the
@@ -326,19 +325,52 @@ function cover(d::Decider)
     near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
     current, considered, taken, done = base, Considered[], Any[], Set{Int}()
     kept = Set(group_identity(base, g) for g in base.groups)
+    # Those around which an edit taken already changed a group are priced
+    # again in the current plan, by the first of them; the rest keep their
+    # price.
+    moved(m) = any(j -> !(group_identity(base, base.groups[j]) in kept), near(ranked[m][2]))
+    # The classes in order, each where its first proposal is ranked. The
+    # current plan changes only when a class is taken, and few are: the
+    # trials of the moved classes ahead are planned side by side against it,
+    # as the starting plan's are, and priced in order as they come. Those
+    # ahead of a class taken were planned against a plan no longer current,
+    # and are not used.
+    classes, first_of = Dict{Int, Vector{Int}}(), Dict{String, Int}()
+    for (m, r) in enumerate(ranked)
+        push!(get!(() -> Int[], classes, get!(first_of, r[4], m)), m)
+    end
+    order = sort!(collect(keys(classes)))
+    ahead, spawned = Dict{String, Task}(), Task[]
+    function plan_ahead!(n)
+        c = searchsortedfirst(order, n)
+        for later in order[c:min(end, c + Threads.nthreads() - 1)]
+            part = filter(moved, classes[later])
+            isempty(part) && continue
+            q = ranked[first(part)][2]
+            key = proposal_key(current, around(current, taken), q)
+            (haskey(priced, key) || haskey(ahead, key)) && continue
+            t = let p = current, before = copy(taken)
+                Threads.@spawn trial(p, before, Any[q])
+            end
+            ahead[key] = t
+            push!(spawned, t)
+        end
+    end
+    price_ahead(q, i, key) = get!(priced, key) do
+        t = pop!(ahead, key, nothing)
+        priced_plan(t === nothing ? trial(current, taken, Any[q]) : fetch_result(t), current, q, i)
+    end
     for (n, (_, _, _, k)) in enumerate(ranked)
         n in done && continue
         class = [m for m in n:length(ranked) if !(m in done) && ranked[m][4] == k]
         union!(done, class)
-        # Those around which an edit taken already changed a group are priced
-        # again in the current plan, by the first of them; the rest keep
-        # their price.
-        moved(m) = any(j -> !(group_identity(base, base.groups[j]) in kept), near(ranked[m][2]))
+        plan_ahead!(n)
+        was = current
         taking = Considered[]
         for part in (filter(!moved, class), filter(moved, class))
             isempty(part) && continue
             _, q, i, key = ranked[first(part)]
-            x = moved(first(part)) ? price(current, taken, q, i, proposal_key(current, around(current, taken), q)) : priced[key]
+            x = moved(first(part)) ? price_ahead(q, i, proposal_key(current, around(current, taken), q)) : priced[key]
             x === nothing && continue
             c, j = x
             cs = [Considered(ranked[m][2], j, c, cheaper(c)) for m in part]
@@ -363,7 +395,11 @@ function cover(d::Decider)
             append!(taken, [c.proposal for c in taking])
         end
         kept = Set(group_identity(current, g) for g in current.groups)
+        current === was || empty!(ahead)
     end
+    # A trial planned ahead and not used is waited for, so none outlives the
+    # cover; one that failed was of a plan the cover did not price.
+    foreach(t -> try wait(t) catch end, spawned)
     current, considered
 end
 
