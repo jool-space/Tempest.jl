@@ -179,13 +179,14 @@ changes does not, and those of `p` it no longer forms, each in its
 canonical form. The comparison of `t` with `p` is of these groups alone (see
 `compare`), so proposals with one edit are priced alike; and a proposal in
 each of a stack of identical layers has one, where the groups around it, a
-sum over every layer among them, tell the layers apart. `identities` are
-those of the groups of `p`.
+sum over every layer among them, tell the layers apart. The plans' identities
+are kept in `known` (see `identities!`).
 """
-function edit_key(p::Plan, identities, t::Plan)
-    formed = Set(group_identity(t, g) for g in t.groups)
-    added = sort!([canonical(t, g) for g in t.groups if !(group_identity(t, g) in identities)])
-    removed = sort!([canonical(p, g) for g in p.groups if !(group_identity(p, g) in formed)])
+function edit_key(known, p::Plan, t::Plan)
+    ids_p, in_p = identities!(known, p)
+    ids_t, in_t = identities!(known, t)
+    added = sort!([canonical(t, g) for (g, id) in zip(t.groups, ids_t) if !(id in in_p)])
+    removed = sort!([canonical(p, g) for (g, id) in zip(p.groups, ids_p) if !(id in in_t)])
     string(join(added, " | "), " || ", join(removed, " | "))
 end
 
@@ -294,6 +295,7 @@ function cover(d::Decider)
     # is priced when every kernel that recomputes it is claimed by an
     # implementation that recomputes folds.
     priced = Dict{String, Any}()
+    known = IdDict{Plan, Any}()
     function priceable(p, q, i)
         p === nothing && return false
         i === nothing || claimant(d, p, q, i) !== nothing || return false
@@ -301,7 +303,7 @@ function cover(d::Decider)
     end
     function priced_plan(p, current, q, i)
         priceable(p, q, i) || return nothing
-        (compare(d, p, current), i === nothing ? nothing : claimant(d, p, q, i))
+        (compare(d, p, current, known), i === nothing ? nothing : claimant(d, p, q, i))
     end
     a = around(base, Any[])
     # Every proposal's trial against the starting plan, planned side by side
@@ -341,9 +343,8 @@ function cover(d::Decider)
     end
     sort!(ranked; by = r -> (-r[1], fixes(r[2])))
     # Each ranked proposal's edit, by which proposals alike are one class.
-    identities = Set(group_identity(base, g) for g in base.groups)
     edits = Dict{String, String}()
-    edit = [get!(() -> edit_key(base, identities, trials[r[4]]), edits, r[4]) for r in ranked]
+    edit = [get!(() -> edit_key(known, base, trials[r[4]]), edits, r[4]) for r in ranked]
     near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
     current, considered, taken, done = base, Considered[], Any[], Set{Int}()
     kept = Set(group_identity(base, g) for g in base.groups)
@@ -407,7 +408,7 @@ function cover(d::Decider)
             for t in taking
                 p = trial(current, taken, Any[t.proposal])
                 p === nothing && continue
-                c = compare(d, p, current)
+                c = compare(d, p, current, known)
                 push!(considered, Considered(t.proposal, t.implementation, c, cheaper(c)))
                 cheaper(c) && (current = p; push!(taken, t.proposal))
             end

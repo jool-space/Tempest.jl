@@ -386,12 +386,19 @@ end
 
 cheaper(c::Comparison) = c.new < c.old
 
+# Each plan's group identities, and their set, kept in `known` across
+# comparisons: the cover compares one plan with each of its trials.
+identities!(known, p::Plan) = get!(known, p) do
+    ids = [group_identity(p, g) for g in p.groups]
+    (ids, Set(ids))
+end
+
 # Compare plan `b` with plan `a`. Close calls are measured.
-function compare(d::Decider, b::Plan, a::Plan)
-    ia = Set(group_identity(a, g) for g in a.groups)
-    ib = Set(group_identity(b, g) for g in b.groups)
-    only_a = [(a, g) for g in a.groups if !(group_identity(a, g) in ib)]
-    only_b = [(b, g) for g in b.groups if !(group_identity(b, g) in ia)]
+function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
+    ids_a, ia = identities!(known, a)
+    ids_b, ib = identities!(known, b)
+    only_a = [(a, g) for (g, id) in zip(a.groups, ids_a) if !(id in ib)]
+    only_b = [(b, g) for (g, id) in zip(b.groups, ids_b) if !(id in ia)]
     decided(side) = [(p, g, decide(d, p, g)) for (p, g) in side]
     da, db = decided(only_a), decided(only_b)
     ea = sum(x -> x[3].choice.estimate, da; init = 0.0)
