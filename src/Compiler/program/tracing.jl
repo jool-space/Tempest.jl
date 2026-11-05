@@ -1084,5 +1084,7 @@ function trace_meeting(f, args...)
         push!(results, x.id)
         push!(writes, length(results) => k)
     end
+    # A loop `f` ran outside any gradient is rolled (see `roll!`).
+    roll_all!(tape, eachindex(tape.nodes), results)
     prune(Program(tape.nodes, arguments, results, input_structure, output_structure, tape.backward, writes)), tape.met
 end

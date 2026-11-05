@@ -54,6 +54,7 @@ include("program/program.jl")
 include("program/tracing.jl")
 include("program/updates.jl")
 include("program/interpret.jl")
+include("program/roll.jl")
 include("program/differentiate.jl")
 
 # The index level.

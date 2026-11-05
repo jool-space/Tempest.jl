@@ -878,6 +878,8 @@ function withgradient(f, args...)
     value isa Number && !(value isa Traced) && (value = Traced(tape, constant!(tape, value)))
     value isa Traced && value.tape === tape && node(value).scalar ||
         throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
+    # A loop the function ran is rolled first, its derivative a loop too.
+    isempty(tape.steps) && roll_all!(tape, start:length(tape.nodes), [value.id; [s.id for (s, _, _) in entered]])
     cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))
     gradients = tangent(stand_ins) do x
         k = findfirst(e -> e[1] === x, entered)
