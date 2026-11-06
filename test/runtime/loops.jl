@@ -108,3 +108,43 @@
         @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), C.leaves(eager); rtol = 1.0e-3)
     end
 end
+
+# A loop that selects each step's slice of an array, `xs[:, :, t]`, rolls as
+# `accumulate` over the slices does: the loop scans the array, or the range
+# of it the steps select, reversed where the index falls; an array the loop
+# captures, copied at each use, is computed once; two states may start from
+# one value. A selection stepping by more than one stays unrolled.
+@testset "loops over slices rolled" begin
+    W, U = data(4, 4; scale = 0.3), data(4, 3; scale = 0.2)
+    cell(h, x) = tanh.(W * h .+ U * x)
+    run(order) = (xs, h) -> (for t in order(size(xs, 3)); h = cell(h, xs[:, :, t]); end; sum(abs2, h))
+    σ(x) = 1 / (1 + exp(-x))
+    function lstm(xs, h)
+        c = h
+        for t in axes(xs, 2)
+            z = W * h .+ U * xs[:, t]
+            c = σ.(z) .* c .+ tanh.(z)
+            h = σ.(z) .* tanh.(c)
+        end
+        sum(abs2, h)
+    end
+    forcing(ts, u) = (for t in eachindex(ts); u = tanh.(W * u) .* ts[t] .+ u; end; sum(abs2, u))
+    xs, h = data(3, 2, 6; scale = 0.4), data(4, 2; scale = 0.2)
+    cases = [(run(n -> 1:n), (xs, h), 1), (run(n -> 2:(n - 1)), (xs, h), 1), (run(n -> n:-1:1), (xs, h), 1),
+        (lstm, (data(3, 6; scale = 0.4), data(4; scale = 0.1)), 1), (forcing, (data(6; scale = 0.2), h), 1),
+        (run(n -> 1:2:n), (xs, h), 0)]
+    for (f, args, loops) in cases
+        p = trace(f, args...)
+        @test count(n -> n.op isa C.Loop, p.nodes) == loops
+        @test interpret(p, args...) ≈ f(args...)
+        @test only(C.leaves(outputs(execute!(prepare(p, args...)))))[] ≈ f(args...)
+        grad = (ys...) -> T.withgradient(f, ys...)
+        @test agree(C.leaves(outputs(execute!(prepare(trace(grad, args...), args...)))), C.leaves(grad(args...)))
+    end
+    if CUDA_FUNCTIONAL
+        args = (single(data(3, 6; scale = 0.4)), single(data(4; scale = 0.1)))
+        grad = (ys...) -> T.withgradient(lstm, ys...)
+        ex = prepare(trace(grad, args...), map(CuArray, args)...)
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(grad(args...)); rtol = 1.0e-3)
+    end
+end

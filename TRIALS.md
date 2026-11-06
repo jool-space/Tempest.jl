@@ -344,6 +344,22 @@ it too, two kernels owning it; taken where measurements of a microsecond
 fell its way, the neural ODE's decoder weights had a gradient 39% off in one
 preparation in three. No join takes such a value now.
 
+A loop selecting each step's slice, `xs[:, :, t]`, as most write a
+recurrent network, was unrolled: each step's selection differs from the
+next at one index, and each use of an array the loop captures records a
+copy of it, so no window repeated; at 100 steps the LSTM written so did not
+prepare in 30 minutes. Taken, 6 November (`src/Compiler/program/roll.jl`):
+selections one index apart from step to step are the loop's scanned arrays,
+as `accumulate` over slices has them, the range of the array the steps
+select taken once where they do not select it all, the loop reversed where
+the index falls; constants of one value are alike, computed once before the
+loop; and two states starting from one value, `h, c = h0, h0`, are told
+apart by what the next step reads, where they had been one argument of the
+step and its result wrong. The LSTM as a plain loop, 17.8 s to the first
+result and 5.53 ms a step at batch 64, 19.9 s and 33.2 ms at 1024, as the
+`accumulate` form. A selection stepping by more than one stays unrolled, as
+does a loop of maps alone.
+
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
 it, and a program for a new size is a new preparation. Decode escapes it, its
