@@ -1,5 +1,5 @@
-# A recurrence prepared: one group computes its state, the values of its
-# cycle read outside it and what the state is carried from, a step at a
+# A recurrence prepared: one group computes its states, the values of its
+# cycle read outside it and what each state is carried from, a step at a
 # time, an item per position its step does not read them across; what each
 # step computes besides is planned as any value over the steps, reading what
 # the group stored, a batch over them; its gradient a recurrence over the
@@ -28,6 +28,42 @@
         p = trace(grad(f), map(x -> device(x) isa CuArray{Float32} ? single(x) : x, args)...)
         ex = prepare(p, map(device, args)...)
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(grad(f), args...), args...)); rtol)
+    end
+    # An LSTM carries two states, its hidden state and its cell, each step
+    # reading both: one recurrence, whose step computes the cell before the
+    # hidden state that reads it. Both start from one array, so their terms
+    # where they start are one. Its gradient's loop is another, of the two
+    # states' adjoints.
+    σ(x) = 1 / (1 + exp(-x))
+    function lstm_cell(p, (h, c), x)
+        i, f = σ.(p.Wi * x .+ p.Ui * h .+ p.bi), σ.(p.Wf * x .+ p.Uf * h .+ p.bf)
+        g, o = tanh.(p.Wg * x .+ p.Ug * h .+ p.bg), σ.(p.Wo * x .+ p.Uo * h .+ p.bo)
+        c = f .* c .+ i .* g
+        (o .* tanh.(c), c)
+    end
+    lstm(p, xs, h0) = Tuple(map(first, accumulate((s, x) -> lstm_cell(p, s, x), eachslice(xs; dims = 2); init = (h0, h0))))
+    weights = (; (Symbol(:W, k) => data(3, 2; scale = 0.3) for k in "ifgo")..., (Symbol(:U, k) => data(3, 3; scale = 0.3) for k in "ifgo")...,
+        (Symbol(:b, k) => data(3; scale = 0.1) for k in "ifgo")...)
+    lstm_args = (weights, data(2, 5; scale = 0.5), data(3; scale = 0.1))
+    lstm_grad = (p, xs, h0) -> T.withgradient((q, x) -> sum(h -> sum(abs2, h), lstm(q, x, h0)), p, xs)
+    states(p) = [length(C.recurrence_states(p.graph, g.outputs)) for g in p.groups if g.kind === :recurrence]
+    for (f, loops) in ((lstm, [2]), (lstm_grad, [2, 2]))
+        p = trace(f, lstm_args...)
+        eager = C.leaves(f(lstm_args...))
+        planned = C.plan(C.lower(p))
+        @test states(planned) == loops
+        @test agree(C.execute(planned, lstm_args...), eager; rtol = 1.0e-10)
+        @test agree(C.leaves(outputs(execute!(prepare(p, lstm_args...)))), eager; rtol = 1.0e-10)
+        if CUDA_FUNCTIONAL
+            device(x) = x isa AbstractArray ? CuArray(single(x)) : x isa NamedTuple ? map(device, x) : x
+            host(x) = x isa AbstractArray ? single(x) : x isa NamedTuple ? map(host, x) : x
+            q = trace(f, map(host, lstm_args)...)
+            for target in (T.CUDATarget(; precision = :full), T.CUDATarget(T.cuBLASProducts(); precision = :full))
+                ex = prepare(q, map(device, lstm_args)...; target)
+                @test count(k -> k isa C.SteppedKernels || occursin("cuTile recurrence", string(k)), ex.kernels) == length(loops)
+                @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), eager; rtol = 1.0e-4)
+            end
+        end
     end
     # The weights' gradient sums each step's part: pinned to ride the
     # backward's steps, a fold of its group, and the plan agrees.

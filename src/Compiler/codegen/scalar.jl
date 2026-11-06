@@ -386,24 +386,23 @@ function scan_kernel(graph, stored, g::Group, slots)
 end
 
 # A recurrence's group: an item per position of its parallel axes, stepping
-# along the state's axis. At the first step it stores the state where it
-# starts; at each it computes and stores each other member over its axes,
-# reading what this step stored, the value the state is carried from last,
-# into the state one step on.
+# along the states' axis. At the first step it stores the states where they
+# start; at each it computes and stores each other member over its axes,
+# reading what this step stored, the values the states are carried from
+# last, each into its state one step on.
 function recurrence_kernel(graph, stored, g::Group, slots)
     D = g.domain
     vars = index_vars(length(D))
     domain = Domain(D)
     c = EmitContext(graph, slots, vars, domain)
     (; axis, parallel) = recurrence_axes(graph, g)
-    state = first(g.outputs)
-    carried = graph.values[state].definition
-    from = carried.from.value
+    states = recurrence_states(graph, g.outputs)
+    state_of = Dict(carried_from(graph, c) => c for c in states)
+    carried = graph.values[first(states)].definition
     places = recurrence_places(graph, g.outputs).places
     # A state carried in reverse steps from the axis's last position.
     step = carried.reverse ? -1 : 1
     first_step, last_step = carried.reverse ? (D[axis] - 1, 0) : (0, D[axis] - 1)
-    next = Base.setindex(places[from], add(var(axis), step, domain), axis)
     body = Expr(:block)
     delinearize_expr(body.args, :lin, parallel, D, vars)
     steps = Expr(:block)
@@ -414,13 +413,14 @@ function recurrence_kernel(graph, stored, g::Group, slots)
         names = emit_terms!(compute.args, [g.terms[m]], c)
         x = names[g.terms[m]]
         stored[m] && push!(compute.args, store_expr(c, m, places[m], x))
-        if m == from
-            push!(compute.args, :($(vars[axis]) != $last_step && $(store_expr(c, state, next, x))))
+        if haskey(state_of, m)
+            next = Base.setindex(places[m], add(var(axis), step, domain), axis)
+            push!(compute.args, :($(vars[axis]) != $last_step && $(store_expr(c, state_of[m], next, x))))
         end
         loop = :(for position in 0:$(prod(k -> D[k], inner; init = 1) - 1)
             $compute
         end)
-        push!(steps.args, m == state ? :($(vars[axis]) == $first_step && $loop) : loop)
+        push!(steps.args, m in states ? :($(vars[axis]) == $first_step && $loop) : loop)
     end
     push!(body.args, :(for $(vars[axis]) in $first_step:$step:$last_step
         $steps

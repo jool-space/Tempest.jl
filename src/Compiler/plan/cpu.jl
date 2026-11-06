@@ -40,28 +40,28 @@ function run_group!(g::Group, buffers, graph)
     run_pointwise!(g, buffers, graph)
 end
 
-# A step at a time, the last first for a state carried in reverse: the
-# state, where it starts at the first step; then each other member over its
-# axes, the value the state is carried from last, which is the state at the
-# next step. Each sum riding the steps after them, over its own iteration.
+# A step at a time, the last first for states carried in reverse: the
+# states, where they start at the first step; then each other member over
+# its axes, the values the states are carried from last, each its state at
+# the next step. Each sum riding the steps after them, over its own iteration.
 function run_recurrence!(g::Group, buffers, graph)
     D = g.domain
     axis = recurrence_axes(graph, g).axis
-    state = first(g.outputs)
-    carried = graph.values[state].definition
-    from = carried.from.value
+    states = recurrence_states(graph, g.outputs)
+    state_of = Dict(carried_from(graph, c) => c for c in states)
+    carried = graph.values[first(states)].definition
     places = recurrence_places(graph, g.outputs).places
     foreach(m -> buffers[m] = Array{graph.values[m].eltype}(undef, graph.values[m].dims), g.outputs)
     order, next = carried.reverse ? ((D[axis] - 1):-1:0, -1) : (0:(D[axis] - 1), 1)
     for n in order, m in g.outputs
-        m == state && n != first(order) && continue
+        m in states && n != first(order) && continue
         spans = map(k -> k != axis && any(e -> mentions(e, k), places[m]) ? D[k] : 1, Base.OneTo(length(D)))
         for I in CartesianIndices(Tuple(spans))
             x = Base.setindex(Tuple(I) .- 1, n, axis)
             y = evaluate_term(g.terms[m], x, nothing, buffers, nothing, graph)
             at = map(e -> evaluate_index(e, x), places[m])
             buffers[m][(at .+ 1)...] = y
-            m == from && n != last(order) && (buffers[state][(Base.setindex(at, n + next, axis) .+ 1)...] = y)
+            haskey(state_of, m) && n != last(order) && (buffers[state_of[m]][(Base.setindex(at, n + next, axis) .+ 1)...] = y)
         end
     end
     for r in g.reductions

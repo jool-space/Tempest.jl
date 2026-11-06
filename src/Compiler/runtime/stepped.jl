@@ -8,11 +8,12 @@
 # the sum's storage.
 
 """
-One step of a recurrence as a graph of its own: its arguments are the state
-(argument 1), the values outside the cycle it reads, each whole or one
+One step of a recurrence as a graph of its own: its arguments are the states
+(the first arguments, in the group's order), the values outside the cycle it reads, each whole or one
 step's slice of it, and each sum riding the steps as the steps before left
-it; its results are the value the state is carried from, the cycle's values
-stored at each step, and each sum with this step's part added.
+it; its results are the values the states are carried from, in the states'
+order, the cycle's values stored at each step, and each sum with this step's
+part added.
 """
 struct StepGraph
     graph::IndexGraph
@@ -22,6 +23,7 @@ struct StepGraph
     leaves::Vector{Any}
     # Each result's value outside, stored a step at a time; the sums' results follow.
     stored::Vector{Int}
+    states::Int
     sums::Vector{Int}
 end
 
@@ -48,14 +50,17 @@ axis, or by an index array, or a sum riding the steps reads none along them.
 """
 function step_graph(graph::IndexGraph, stored, g::Group)
     values = graph.values
-    c, f = first(g.outputs), last(g.outputs)
+    cs = recurrence_states(graph, g.outputs)
+    fs = [carried_from(graph, c) for c in cs]
+    c = first(cs)
     cd = values[c].definition::Carried
-    cd.from isa Read && cd.from.value == f && cd.from.index == identity_index(values[c].dims) || return nothing
-    cycle = Set(recurrence_cycle(graph, c, f))
+    all(c -> values[c].definition.from.index == identity_index(values[c].dims), cs) || return nothing
+    cycle = Set(recurrence_cycle(graph, cs, fs))
     places = recurrence_places(graph, g.outputs).places
     # The axis along the steps of each member, from its place.
     along(m) = findfirst(==(var(cd.axis)), places[m])
-    members = [m for m in g.outputs if m != c]
+    # The values the states are carried from first, in the states' order.
+    members = [fs; [m for m in g.outputs if !(m in cs) && !(m in fs)]]
     any(m -> along(m) === nothing, members) && return nothing
     # The values a step needs, each with its axis along the steps or 0, and
     # how: :state, :leaf, or :step, computed in the step.
@@ -65,7 +70,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     ok = Ref(true)
     function visit(u, s)
         haskey(kinds, (u, s)) && return
-        kind = if u == c
+        kind = if u in cs
             s == cd.axis || (ok[] = false)
             :state
         elseif u in cycle
@@ -130,9 +135,9 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         0
     end
     any(==(0), axes) && return nothing
-    # The arguments first, the state the first of them, the sums last; then
+    # The arguments first, the states the first of them, the sums last; then
     # the step's values in the graph's order.
-    leaves = Any[(c, cd.axis); [key for key in order if kinds[key] === :leaf]; [(:position, T) for T in positions]; [(:sum, r) for r in sums]]
+    leaves = Any[[(c, cd.axis) for c in cs]; [key for key in order if kinds[key] === :leaf]; [(:position, T) for T in positions]; [(:sum, r) for r in sums]]
     steps = [key for key in sort(order) if kinds[key] === :step]
     id = Dict{Any, Int}()
     new = Value[]
@@ -173,9 +178,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         b = id[(m, along(m))]
         push!(results, Read(b, identity_index(new[b].dims)))
     end
-    # The value the state is carried from first.
-    results = [results[end]; results[1:(end - 1)]]
-    stored_order = [f; members[1:(end - 1)]]
+    stored_order = members
     # Each sum, the steps before's, plus this step's part: its operand here,
     # summed over its other axes. A part that is a sum of others, each added
     # in turn, lets each product add into the sum as it writes.
@@ -200,7 +203,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     end
     dims = [new[r.value].dims for r in results]
     body = IndexGraph(new, collect(1:length(leaves)), results, dims, [isempty(d) for d in dims], [new[r.value].eltype for r in results])
-    StepGraph(body, leaves, stored_order, sums)
+    StepGraph(body, leaves, stored_order, length(cs), sums)
 end
 
 # The operands sum `o` adds, a value of the step past `computed` read whole:
@@ -350,32 +353,35 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     s, bd, bp, ds, st, steps = sp.step, sp.decider, sp.plan, sp.decisions, sp.storage, sp.steps
     values = p.graph.values
     target = d.target
-    c = first(g.outputs)
-    cd = values[c].definition::Carried
-    # The value the state is carried from, where the plan does not store it,
-    # is stored by the steps, each step's where the next reads it.
-    f = last(g.outputs)
-    own = buffers[f] === nothing ? allocate(target, values[f].eltype, storage_length(values[f])) : nothing
-    stacked(u) = u == f && own !== nothing ? own : buffers[u]
+    cs = [first(leaf) for leaf in s.leaves[1:s.states]]
+    fs = [carried_from(p.graph, c) for c in cs]
+    cd = values[first(cs)].definition::Carried
+    # A value a state is carried from, where the plan does not store it, is
+    # stored by the steps, each step's where the next reads it.
+    own = Dict(f => allocate(target, values[f].eltype, storage_length(values[f])) for f in fs if buffers[f] === nothing)
+    stacked(u) = haskey(own, u) ? own[u] : buffers[u]
     # The step's slice of value `u` along its last axis, at step `t`.
     function slice(u, t)
         n = storage_length(values[u]) ÷ values[u].dims[end]
         view(stacked(u), ((t - 1) * n + 1):(t * n))
     end
-    # The start: the state's first step where the recurrence starts, and
+    # The start: each state's first step where the recurrence starts, and
     # each sum riding the steps at zero.
     first_step = cd.reverse ? steps : 1
-    init = cd.init
-    set_state = if init isa Literal
-        () -> fill!(slice(c, first_step), init.value)
-    elseif init isa Read && !any(e -> mentions(e, cd.axis), init.index) && buffers[init.value] !== nothing &&
-            reads_storage(values[init.value], init.index[1:end], drop_axis(values[c].dims, cd.axis))
-        () -> copyto!(slice(c, first_step), view(buffers[init.value], 1:(storage_length(values[c]) ÷ steps)))
-    else
-        return nothing
+    starts = map(cs) do c
+        init = values[c].definition.init
+        if init isa Literal
+            () -> fill!(slice(c, first_step), init.value)
+        elseif init isa Read && !any(e -> mentions(e, cd.axis), init.index) && buffers[init.value] !== nothing &&
+                reads_storage(values[init.value], init.index[1:end], drop_axis(values[c].dims, cd.axis))
+            () -> copyto!(slice(c, first_step), view(buffers[init.value], 1:(storage_length(values[c]) ÷ steps)))
+        else
+            nothing
+        end
     end
+    any(isnothing, starts) && return nothing
     sums = s.sums
-    start = () -> (set_state(); foreach(r -> fill!(buffers[r], zero(values[r].eltype)), sums))
+    start = () -> (foreach(x -> x(), starts); foreach(r -> fill!(buffers[r], zero(values[r].eltype)), sums))
     bvalues = bp.graph.values
     slots = Any[allocate(target, UInt8, bytes) for bytes in st.sizes]
     bbuffers = Vector{Any}(nothing, length(bvalues))
@@ -385,7 +391,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     # The steps' positions, as each type read, uploaded once.
     positions = Dict{Int, Any}()
     for (k, leaf) in enumerate(s.leaves)
-        k == 1 && continue
+        k <= s.states && continue
         if first(leaf) === :position
             positions[k] = upload(target, [last(leaf)(t - 1) for t in 1:steps])
             bbuffers[k] = view(positions[k], first_step:first_step)
@@ -405,8 +411,8 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         def = v.definition
         if haskey(moving, id)
             bbuffers[id] = slice(moving[id], first_step)
-        elseif id == 1
-            bbuffers[id] = slice(c, first_step)
+        elseif id <= s.states
+            bbuffers[id] = slice(cs[id], first_step)
         elseif def isa ConstantArray
             bbuffers[id] = upload(target, vec(collect(def.data)))
         elseif st.slots[id] > 0
@@ -422,16 +428,18 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     built = [build_group(bd, bp, bg, x, bbuffers) for (bg, x) in zip(bp.groups, ds)]
     launches = Any[b[1] for b in built]
     all(repoints, launches) || return nothing
-    # Per step, where each launch reads the state and the values along the
-    # steps: the state where the recurrence starts at the first, else the
+    # Per step, where each launch reads the states and the values along the
+    # steps: each state where the recurrence starts at the first, else the
     # value it is carried from one step back.
     readers(v) = [k for (k, bg) in enumerate(bp.groups) if v in kernel_slots(bp, bg)]
-    users = Dict(v => readers(v) for v in [1; collect(keys(moving)); collect(keys(positions))])
+    users = Dict(v => readers(v) for v in [1:s.states; collect(keys(moving)); collect(keys(positions))])
     sequence = cd.reverse ? (steps:-1:1) : (1:steps)
     moves = map(sequence) do t
         ms = Tuple{Int, Int, Any}[]
-        state = t == first_step ? slice(c, t) : slice(f, cd.reverse ? t + 1 : t - 1)
-        foreach(l -> push!(ms, (l, 1, state)), users[1])
+        for (k, (c, f)) in enumerate(zip(cs, fs))
+            state = t == first_step ? slice(c, t) : slice(f, cd.reverse ? t + 1 : t - 1)
+            foreach(l -> push!(ms, (l, k, state)), users[k])
+        end
         for (v, u) in moving
             buffer = slice(u, t)
             foreach(l -> push!(ms, (l, v, buffer)), users[v])
@@ -442,16 +450,16 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         end
         ms
     end
-    # The state at every step but the first is the value it is carried from
-    # one step back: one copy of all of them.
-    n = storage_length(values[c]) ÷ steps
-    total = storage_length(values[c])
+    # Each state at every step but the first is the value it is carried
+    # from one step back: one copy of all of them.
+    n = storage_length(values[first(cs)]) ÷ steps
+    total = storage_length(values[first(cs)])
     finish = if steps == 1
         () -> nothing
     elseif cd.reverse
-        () -> copyto!(view(buffers[c], 1:(total - n)), view(stacked(f), (n + 1):total))
+        () -> foreach(((c, f),) -> copyto!(view(buffers[c], 1:(total - n)), view(stacked(f), (n + 1):total)), zip(cs, fs))
     else
-        () -> copyto!(view(buffers[c], (n + 1):total), view(stacked(f), 1:(total - n)))
+        () -> foreach(((c, f),) -> copyto!(view(buffers[c], (n + 1):total), view(stacked(f), 1:(total - n))), zip(cs, fs))
     end
     run = SteppedRun(launches, moves, copies, start, finish, (slots, bbuffers, built, positions, own))
     (run, SteppedKernels(steps, Any[b[2] for b in built], sums))

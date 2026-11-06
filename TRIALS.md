@@ -325,6 +325,25 @@ loops, 6.80 ms; at 1024, 16.0 ms; at 8192 the weights' two and the
 encoder's bias ride, 79.0 ms, prepared in 25.5 s to the first result. The
 losses and first moments agree with the interpreter's as before.
 
+Checked against main on other loops, 6 November, TF32, 100 steps, 32
+inputs through 256 hidden: a GRU at batch 64, 4.62 ms against 4.58, its
+nine sums measured or estimated and left after the steps; at 1024, 23.3 ms
+against 24.2, one riding; chunked linear attention's gradient, cuTile's
+one-kernel recurrences both ways, 0.234 ms against 0.230 at 32 chunks, 1.080
+against 1.078 at 128. An LSTM did not plan on main: its hidden state and
+cell, each step reading both, were recurrences of their own, kernels
+depending on each other in a cycle. Taken: states whose cycles read each
+other's are one recurrence's (`recurrences`, `src/Compiler/plan/planner.jl`),
+their group's step computing its values in the graph's order, a value a
+state is carried from that the step reads stored, and the stepped run, the
+floor and cuTile's one-kernel recurrence each carrying every state. The LSTM
+at batch 64, 5.53 ms a step; at 1024, 32.6 ms; its gradients agree with the
+interpreter's to 1e-3. Found on the way: the cover had offered to join a
+value of a recurrence's step into a kernel that read it, which then wrote
+it too, two kernels owning it; taken where measurements of a microsecond
+fell its way, the neural ODE's decoder weights had a gradient 39% off in one
+preparation in three. No join takes such a value now.
+
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
 it, and a program for a new size is a new preparation. Decode escapes it, its

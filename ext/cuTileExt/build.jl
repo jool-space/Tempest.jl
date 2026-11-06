@@ -681,20 +681,20 @@ function scan_kernel(c::Context)
     k
 end
 
-# A recurrence's group: a block per tile of its parallel axes, stepping along
-# the state's axis with the state's tile, from its last position for a state
-# carried in reverse. Each step computes each member but
-# the state as a tile, reading the state and the members before it from the
-# tiles it holds; then stores them where they are stored, and the state, and
-# carries the value the state is carried from, the last. A step that stores
-# the state before reading it ran 3.4 times as long (2.1 ms against 0.63 for
+# A recurrence's group: a block per tile of its parallel axes, stepping
+# along the states' axis with each state's tile, from its last position for
+# states carried in reverse. Each step computes each member but the states
+# as a tile, reading the states and the members before it from the tiles it
+# holds; then stores them where they are stored, and the states, and carries
+# the values the states are carried from, the last. A step that stores the
+# state before reading it ran 3.4 times as long (2.1 ms against 0.63 for
 # chunked gated DeltaNet's at T 1024, H 32), its stores waited on.
 function recurrence_kernel(c::Context)
     k = TileKernel("recurrence", (), c.s.occupancy)
     st = k.body
     indices, k.grid, _, _ = block_indices!(st, c)
-    state = first(c.g.outputs)
-    from = c.g.values[state].carried.from.value
+    states = [m for m in c.g.outputs if c.g.values[m].carried !== nothing]
+    from = Dict(m => c.g.values[m].carried.from.value for m in states)
     p = only(swept(c.s))
     n = length(c.g.domain)
     # A member's tile lies along the axes its placement mentions, one step.
@@ -702,28 +702,36 @@ function recurrence_kernel(c::Context)
     shape(m) = ntuple(q -> q != p && q in along(m) ? tile(c)[q] : 1, n)
     as_tile(m, x) = :(convert($(ct.Tile){$(c.g.values[m].eltype)}, $(ct.broadcast_to)($(tile_of(x)), $(shape(m)))))
     steps = c.s.tiling[p].extent
-    reverse = c.g.values[state].carried.reverse
+    reverse = c.g.values[first(states)].carried.reverse
     first_step = copy(indices)
     first_step[p] = :(Int32($(reverse ? steps : 1)))
-    names = emit_tiles!(k, st, c, [c.g.terms[state]], Dict{Term, Any}(), first_step...)
-    s = gensym(:state)
-    push!(st, :($s = $(as_tile(state, names[c.g.terms[state]]))))
+    names = emit_tiles!(k, st, c, [c.g.terms[m] for m in states], Dict{Term, Any}(), first_step...)
+    # Each value's tile, by the value: states that start alike, as an
+    # LSTM's hidden state and cell from one array, have one term.
+    held_states = Dict{Int, Tuple{Symbol, Vector{Int}, Tuple}}()
+    tiles = Dict{Int, Symbol}()
+    for m in states
+        s = gensym(:state)
+        push!(st, :($s = $(as_tile(m, names[c.g.terms[m]]))))
+        held_states[m] = (s, along(m), shape(m))
+        tiles[m] = s
+    end
     t = gensym(:step)
     at = copy(indices)
     at[p] = t
     loop = Any[]
-    held = Context(c.g, c.s, Dict{Int, Tuple{Symbol, Vector{Int}, Tuple}}(state => (s, along(state), shape(state))))
-    tiles = Dict{Term, Any}(c.g.terms[state] => s)
-    for m in c.g.outputs[2:end]
+    held = Context(c.g, c.s, held_states)
+    members = [m for m in c.g.outputs if !(m in states)]
+    for m in members
         names = emit_tiles!(k, loop, held, [c.g.terms[m]], Dict{Term, Any}(), at...)
         x = gensym(:member)
         push!(loop, :($x = $(as_tile(m, names[c.g.terms[m]]))))
-        tiles[c.g.terms[m]] = x
-        m == from || (held.held[m] = (x, along(m), shape(m)))
+        tiles[m] = x
+        held.held[m] = (x, along(m), shape(m))
     end
-    stored = [m for m in c.g.outputs[2:end] if c.g.values[m].stored]
-    store_values!(k, loop, c, [stored; state], tiles, at...)
-    push!(loop, :($s = $(tiles[c.g.terms[from]])))
+    stored = [m for m in members if c.g.values[m].stored]
+    foreach(m -> store_values!(k, loop, c, [m], Dict{Term, Any}(c.g.terms[m] => tiles[m]), at...), [stored; states])
+    foreach(m -> push!(loop, :($(tiles[m]) = $(tiles[from[m]]))), states)
     if reverse
         u = gensym(:count)
         push!(st, :(for $u in Int32(1):Int32($steps)
