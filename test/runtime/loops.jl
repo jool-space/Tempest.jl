@@ -53,6 +53,21 @@
     p = trace(u -> trajectory(u, 8), u0)
     @test interpret(p, u0) ≈ trajectory(u0, 8)
     @test only(C.leaves(outputs(execute!(prepare(p, u0)))))[] ≈ trajectory(u0, 8)
+    # Two states starting from one value, as an LSTM's hidden state and
+    # cell may, are two arguments of the step.
+    function two(W, x, h)
+        c = h
+        for _ in 1:6
+            z = W * h .+ x
+            c = tanh.(z) .* c .+ 0.1
+            h = tanh.(z) .* tanh.(c)
+        end
+        sum(abs2, h)
+    end
+    args = (data(4, 4; scale = 0.3), data(4), data(4; scale = 0.5))
+    p = trace(two, args...)
+    @test loops(p) == 1
+    @test interpret(p, args...) ≈ two(args...)
     # Two repeats are cheaper unrolled.
     twice = trace(u -> sum(tanh.(tanh.(u))), u0)
     @test loops(twice) == 0

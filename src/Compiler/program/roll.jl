@@ -162,11 +162,12 @@ function roll!(tape::Tape, range, required)
     arguments = Int[]
     body = Node[]
     # The step's nodes by their places before the window, or in the step;
-    # those computed once, by their new places.
-    renumbered, once = Dict{Int, Int}(), Dict{Int, Int}()
-    for (x, _) in states
+    # those computed once, by their new places; each state by where it
+    # starts and what the next step reads, as two may start from one value.
+    renumbered, once, held = Dict{Int, Int}(), Dict{Int, Int}(), Dict{Tuple{Int, Int}, Int}()
+    for (x, y) in states
         push!(body, Node(Argument(), (), nodes[x].dims, nodes[x].eltype, nodes[x].scalar))
-        renumbered[x] = length(body)
+        held[(x, y)] = length(body)
     end
     for x in captured
         n = x >= w0 ? hoist[x - w0 + 1] : nodes[x]
@@ -177,8 +178,8 @@ function roll!(tape::Tape, range, required)
     for (o, id) in enumerate(step)
         reads_state[o] || continue
         n = nodes[id]
-        inputs = map(n.inputs) do x
-            x >= w0 && !reads_state[x - w0 + 1] ? once[place[x]] : renumbered[x]
+        inputs = map(n.inputs, nodes[id + p].inputs) do x, y
+            x >= w0 ? (reads_state[x - w0 + 1] ? renumbered[x] : once[place[x]]) : get(() -> renumbered[x], held, (x, y))
         end
         push!(body, Node(n.op, inputs, n.dims, n.eltype, n.scalar))
         renumbered[id] = length(body)
