@@ -221,7 +221,10 @@ group_text(p::Plan, g::Group) = sprint() do io
 end
 
 # Every stored value of a kernel that another kernel reads, joined into the
-# reader's group: a choice the planner's rules make, offered to the cover.
+# reader's group: a choice the planner's rules make, offered to the cover. A
+# value of a recurrence's step stays its group's: joined, a second kernel
+# wrote it, and a neural ODE's weights' gradient read it wrong in one
+# preparation in three.
 function joins(p::Plan)
     a = Around(p, Vector{Int}[])
     found = Join[]
@@ -229,7 +232,7 @@ function joins(p::Plan)
         g.kind in (:reduction, :pointwise) || continue
         for v in sort!(collect(group_reads(p.graph, g)))
             j = p.owner[v]
-            j == 0 || j == k || push!(found, Join(v, sort!([a.owned[k]; v])))
+            j == 0 || j == k || p.groups[j].kind === :recurrence || push!(found, Join(v, sort!([a.owned[k]; v])))
         end
     end
     found

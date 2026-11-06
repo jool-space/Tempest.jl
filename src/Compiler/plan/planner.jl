@@ -588,8 +588,12 @@ function group_values(graph, stored, live, results, fixed, riders = Dict{Int, Ve
     end
     for (c, f, cycle) in recurrences(graph)
         live[c] || continue
-        push!(groups, recurrence_group(graph, stored, c, f, cycle, get(riders, c, Int[])))
-        foreach(m -> owner[m] = length(groups), members(groups[end]))
+        g = recurrence_group(graph, stored, c, f, cycle, get(riders, c, Int[]))
+        # What a recurrence computes at each step is its group's alone: a set
+        # fixed apart holding any of it would be a second kernel writing it.
+        any(m -> owner[m] != 0, members(g)) && throw(NotAGroup(filter(m -> owner[m] != 0, members(g))))
+        push!(groups, g)
+        foreach(m -> owner[m] = length(groups), members(g))
     end
     # Who reads each value, directly or through a gather: a group grows toward
     # them, so it never scans the values that cannot reach it.

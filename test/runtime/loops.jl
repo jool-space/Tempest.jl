@@ -75,6 +75,14 @@
     backward(q) = only(g for g in q.groups if g.kind === :recurrence && !isempty(g.reductions))
     ridden = C.plan(planned.graph; ride = sums)
     @test sort(backward(ridden).reductions) == sort(sums)
+    # What the backward's steps compute stays its group's: no join takes a
+    # value of it into a kernel that reads it, which would write it again,
+    # and a set fixed apart that holds one forms no plan.
+    recurrent(v) = planned.owner[v] > 0 && planned.groups[planned.owner[v]].kind === :recurrence
+    @test !any(q -> recurrent(q.value), C.joins(planned))
+    reader = findfirst(g -> g.kind === :reduction && any(recurrent, C.group_reads(planned.graph, g)), planned.groups)
+    member = first(filter(recurrent, collect(C.group_reads(planned.graph, planned.groups[reader]))))
+    @test_throws C.NotAGroup C.plan(planned.graph; fixed = [[C.members(planned.groups[reader]); member]])
     @test count(m -> ridden.stored[m], backward(ridden).outputs) < maximum(g -> g.kind === :recurrence ? length(g.outputs) : 0, planned.groups)
     ex = prepare(p, params, u0, y; ride = sums)
     @test sort(only(k.sums for k in ex.kernels if k isa C.SteppedKernels && !isempty(k.sums))) == sort(sums)
