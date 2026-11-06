@@ -103,3 +103,23 @@
         end
     end
 end
+
+# A state no cycle of states runs through is no recurrence: a state whose
+# next value reads no state, or reads only states that do not read it, is
+# its next value one step back, or where it starts, an array over the steps
+# like any other. A state lagging another, `s1, s2 = W * x, s1`, and one
+# lagging a recurrence, at any step order.
+@testset "states no cycle runs through" begin
+    W = data(3, 3; scale = 0.3)
+    lagged(xs, a, b) = (r = last(accumulate(((s, l), x) -> (W * x, 2 .* s), eachslice(xs; dims = 2); init = (a, b))); sum(r[1]) + sum(abs2, r[2]))
+    looped(order) = (xs, a, b) -> (s = a; l = b; for t in order(size(xs, 2)); s, l = W * xs[:, t], 2 .* s; end; sum(s) + sum(abs2, l))
+    trailing(xs, a, b) = (s = a; l = b; for t in axes(xs, 2); s, l = tanh.(W * s .+ xs[:, t]), sum(s) .* s; end; sum(s) + sum(abs2, l))
+    args = (data(3, 5; scale = 0.4), data(3; scale = 0.2), data(3; scale = 0.3))
+    for f in (lagged, looped(n -> 1:n), looped(n -> n:-1:1), trailing)
+        p = trace(f, args...)
+        @test count(n -> n.op isa C.Loop, p.nodes) > 0
+        @test only(C.leaves(outputs(execute!(prepare(p, args...)))))[] ≈ f(args...)
+        grad = (ys...) -> T.withgradient(f, ys...)
+        @test agree(C.leaves(outputs(execute!(prepare(trace(grad, args...), args...)))), C.leaves(grad(args...)))
+    end
+end

@@ -515,15 +515,17 @@ function splice_step!(nodes, body::LoopBody, inputs)
         emit!(Reshape(), (id,), (n.dims[1:(end - 1)]..., ntuple(_ -> 1, rank - r)..., steps), n.eltype)
     end
     rank(n::Node) = n.scalar ? 0 : length(n.dims)
+    shifted = steps > 1 ? shifted_states(body) : falses(nstate)
     at = zeros(Int, length(step.nodes))
-    carries = Int[]
+    carries = Dict{Int, Int}()
     for (k, a) in enumerate(step.arguments)
         n = step.nodes[a]
         outer = nodes[inputs[k]]
+        k <= nstate && shifted[k] && continue
         at[a] = if k <= nstate
             # One step: the state is where it starts.
             steps == 1 ? emit!(Reshape(), (inputs[k],), over(n), n.eltype) :
-                (push!(carries, emit!(Carry(0, body.reverse), (inputs[k],), over(n), n.eltype)); last(carries))
+                (carries[k] = emit!(Carry(0, body.reverse), (inputs[k],), over(n), n.eltype))
         elseif k <= nstate + nscanned
             axis = body.sliced[k - nstate]
             m = length(outer.dims)
@@ -534,8 +536,50 @@ function splice_step!(nodes, body::LoopBody, inputs)
             emit!(Map(identity), (shaped,), over(n), n.eltype)
         end
     end
-    for (id, n) in enumerate(step.nodes)
-        n.op isa Argument && continue
+    # A state no cycle of states runs through, its next value read of no
+    # state that reads it, is that value one step back, or where it starts:
+    # its next value written one step on over the start at every step,
+    # emitted once its next value is, before what reads it.
+    function shift!(k)
+        a = step.arguments[k]
+        n = step.nodes[a]
+        next = at[step.results[body.carried[k]]]
+        dims = n.scalar ? () : n.dims
+        whole = map(d -> 1:d, dims)
+        start = emit!(Reshape(), (inputs[k],), (dims..., 1), n.eltype)
+        held = emit!(Map(identity), (start,), (dims..., steps), n.eltype)
+        moved = emit!(Select((whole..., body.reverse ? (2:steps) : (1:(steps - 1)))), (next,), (dims..., steps - 1), n.eltype)
+        at[a] = emit!(Update((whole..., body.reverse ? (1:(steps - 1)) : (2:steps))), (held, moved), (dims..., steps), n.eltype)
+    end
+    # Each node once what it reads is: a shifted state's next value before it.
+    order = Int[]
+    placed = falses(length(step.nodes))
+    for root in eachindex(step.nodes)
+        pending = [(root, false)]
+        while !isempty(pending)
+            id, ready = pop!(pending)
+            placed[id] && continue
+            k = findfirst(==(id), step.arguments)
+            if ready
+                placed[id] = true
+                push!(order, id)
+                continue
+            end
+            push!(pending, (id, true))
+            if k !== nothing && k <= nstate && shifted[k]
+                push!(pending, (step.results[body.carried[k]], false))
+            elseif k === nothing
+                foreach(i -> placed[i] || push!(pending, (i, false)), reverse(step.nodes[id].inputs))
+            end
+        end
+    end
+    for id in order
+        n = step.nodes[id]
+        if n.op isa Argument
+            k = findfirst(==(id), step.arguments)
+            k <= nstate && shifted[k] && shift!(k)
+            continue
+        end
         op = n.op
         ins = map(i -> at[i], n.inputs)
         any(i -> i isa IndexInput, op isa Union{Select, Scatter, Update} ? op.indices : ()) &&
@@ -562,11 +606,36 @@ function splice_step!(nodes, body::LoopBody, inputs)
             throw(ArgumentError("a $(op_name(op)) in a recurrence's step is not supported yet"))
         end
     end
-    for (k, c) in enumerate(carries)
+    for (k, c) in carries
         n = nodes[c]
         nodes[c] = Node(Carry(at[step.results[body.carried[k]]], body.reverse), n.inputs, n.dims, n.eltype, n.scalar)
     end
     [at[r] for r in step.results]
+end
+
+# Of a loop's states, those no cycle of states runs through: a state reads
+# another where its next value reads it, and a state is a recurrence only
+# where it reads itself so.
+function shifted_states(body::LoopBody)
+    step, nstate = body.program, length(body.carried)
+    reads = [BitSet() for _ in step.nodes]
+    for (id, n) in enumerate(step.nodes)
+        k = findfirst(==(id), step.arguments)
+        k !== nothing && k <= nstate && push!(reads[id], k)
+        foreach(i -> union!(reads[id], reads[i]), n.inputs)
+    end
+    next(k) = reads[step.results[body.carried[k]]]
+    map(1:nstate) do k
+        seen, pending = BitSet(), collect(next(k))
+        while !isempty(pending)
+            j = pop!(pending)
+            j == k && return false
+            j in seen && continue
+            push!(seen, j)
+            append!(pending, next(j))
+        end
+        true
+    end
 end
 
 function lower(p::Program)
