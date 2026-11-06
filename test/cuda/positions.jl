@@ -58,14 +58,11 @@ const CHUNKED = [
 end
 
 # The dropout fixture's hash, wrapping Int32 multiplies and logical shifts on
-# tiles, is claimed by the generator and then fails to build: the assembler
-# rejects the bytecode cuTile emits for it. The floor runs it, correct, and
-# the failed build warns once.
-const INTEGER_HASH = "an integer hash (wrapping multiplies, logical shifts) on Int32 tiles (cuTile's bytecode)"
-@testset "gap: $INTEGER_HASH" begin
+# tiles, is one tile kernel: cuTile emits bytecode the assembler takes.
+@testset "an integer hash (wrapping multiplies, logical shifts) on Int32 tiles" begin
     x, s = single(data(64, 48)), Int32[7]
     p = trace((x, s) -> Ops.dropout(x, s; rate = 0.25), x, s)
     ex = prepare(p, CuArray(x), CuArray(s); target = T.CUDATarget(T.cuTileGenerator()))
-    @test_broken !(only(ex.kernels) isa C.FloorKernels)
+    @test !(only(ex.kernels) isa C.FloorKernels)
     @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, x, s)])
 end
