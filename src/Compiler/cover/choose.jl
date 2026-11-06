@@ -77,6 +77,8 @@ mutable struct Decider
     # folds the cover keeps stored.
     pinned::Set{Int}
     kept::Set{Int}
+    # Sums pinned to ride the steps of a recurrence, in every plan.
+    rides::Set{Int}
     buffers::Vector{Any}
     built::Dict{String, Any}
     # The choice for each group alike (by `canonical`): its rank among the
@@ -87,16 +89,18 @@ mutable struct Decider
     options::Dict{Any, Vector{Choice}}
     # The claims that failed to build, by key.
     failed::Dict{String, Failure}
+    # Each recurrence's step planned (by `group_identity`; see `stepped_plan`).
+    stepped::Dict{Any, Any}
 end
 
-function Decider(target, graph; measure = :close, recompute = (), keep = ())
+function Decider(target, graph; measure = :close, recompute = (), keep = (), ride = ())
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     calibration = load_record(calibration_path)
     r = dry ? rates(target) : target_rates(target)
     Decider(target, measurable(target), graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
-        Set{Int}(recompute), Set{Int}(keep), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
-        Dict{Any, Vector{Choice}}(), Dict{String, Failure}())
+        Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
+        Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}())
 end
 
 # Forget every decision and option, so that the cover plans again from what
@@ -181,7 +185,9 @@ end
 # A choice's name in the tuning record: the target's numerics, the claim's
 # record name and the group's canonical form.
 function choice_key(d::Decider, p::Plan, g::Group, implementation, claim)
-    name = implementation === nothing ? "floor" : Base.invokelatest(record_name, implementation, claim)
+    # A recurrence on the floor runs a step at a time where it can.
+    floor = g.kind === :recurrence && stepped_plan(d, p, g) !== nothing ? "stepped" : "floor"
+    name = implementation === nothing ? floor : Base.invokelatest(record_name, implementation, claim)
     replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
 end
 
@@ -196,7 +202,11 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     memory = memory!(d, implementation === nothing ? :floor : package_name(implementation))
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_name(implementation), w.factor) for w in work]
     price(w) = (regime, f) -> price!(d, regime, product_class(d.target, w.factor), f)
-    Choice(implementation, claim, sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0), key,
+    # A recurrence on the floor runs a step at a time where it can (see
+    # `build_group`), at its step's price.
+    stepped = implementation === nothing && g.kind === :recurrence ? stepped_seconds(d, p, g) : nothing
+    seconds_of = stepped === nothing ? sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0) : stepped
+    Choice(implementation, claim, seconds_of, key,
         any(l -> l !== nothing && l.borrowed, lines), order,
         implementation === nothing ? Any[] : Any[Base.invokelatest(variants, implementation, d.target, view, claim)...])
 end
@@ -209,7 +219,9 @@ function options(d::Decider, p::Plan, g::Group)
     # as they load, and were a call to bind the one method a package saw
     # while it precompiled, the cover's code that package cached would be
     # void in every session where another package loaded too.
-    os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
+    # A recurrence with sums riding its steps runs them only a step at a time.
+    riders = g.kind === :recurrence && !isempty(g.reductions)
+    os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) if !riders for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
     filter!(o -> !haskey(d.failed, o.key), os)
     isempty(os) && push!(os, choice(d, p, g, view, nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
@@ -502,9 +514,13 @@ build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
     Base.invokelatest(build_claim, o.implementation, o.claim, target, group_view(p, g), buffers)
 
 # Build a choice on the decider's buffers, once, to measure it: its key names
-# the group alike, so the first of them builds for all.
-build_choice!(d::Decider, p::Plan, g::Group, o::Choice) =
-    get!(() -> build_choice(d.target, p, g, o, buffers!(d, p, g)), d.built, o.key)
+# the group alike, so the first of them builds for all. A recurrence on the
+# floor is measured as it runs, a step at a time where it can.
+build_choice!(d::Decider, p::Plan, g::Group, o::Choice) = get!(d.built, o.key) do
+    buffers = buffers!(d, p, g)
+    stepped = o.implementation === nothing && g.kind === :recurrence ? build_stepped(d, p, g, buffers) : nothing
+    stepped === nothing ? build_choice(d.target, p, g, o, buffers) : stepped
+end
 
 """
 A group's kernels and the decision that runs them: its choice, or, when that
@@ -518,6 +534,7 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers)
     if g.kind === :recurrence && (x === nothing || x.choice.implementation === nothing)
         built = build_stepped(d, p, g, buffers)
         built === nothing || return (built..., x)
+        isempty(g.reductions) || error("a recurrence with sums riding its steps runs only a step at a time")
     end
     (x === nothing || x.choice.implementation === nothing) && return (build_floor(d.target, p, g, buffers)..., x)
     for o in [x.choice; filter(!=(x.choice), x.options)]

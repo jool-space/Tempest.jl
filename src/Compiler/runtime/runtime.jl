@@ -68,7 +68,7 @@ end
 
 
 """
-    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = (), build = true) -> Executable
+    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = (), ride = (), build = true) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
@@ -105,7 +105,10 @@ between executions, and a result that replaces one writes into it.
 `recompute` pins folds to be recomputed where they are read rather than
 stored, by their numbers among the values of the program's index graph, as
 `explain` prints them: what the cover would otherwise decide by cost (see
-`Tempest.Compiler.recomputable_folds`). `partition` decides which of the
+`Tempest.Compiler.recomputable_folds`). `ride` pins sums over a
+recurrence's steps to be added as the steps run, so numbered: what the cover
+would otherwise decide by cost (see `Tempest.Compiler.riding_sums`).
+`partition` decides which of the
 forward's maps the backward recomputes rather than reads, by a minimum cut
 of what saving them costs (see `Tempest.Compiler.partition`); `false` saves
 every map the backward reads, as a trial's comparison.
@@ -132,7 +135,7 @@ For a function called on new arguments each time, `compile` does the binding
 and copying.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = :close,
-        replaces = (), by_reference = (), recompute = (), partition::Bool = true, build::Bool = true)
+        replaces = (), by_reference = (), recompute = (), ride = (), partition::Bool = true, build::Bool = true)
     # The terms an earlier preparation interned are of its program.
     IR.forget_terms!()
     forget_matches!()
@@ -168,7 +171,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
         union!(pinned, recomputed)
     end
-    d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept)
+    d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride)
     # Planned again while the last plan's builds failed, a few times at most;
     # then what fails runs on the next option, the floor last (see
     # `build_group`). The last plan's buffers are let go first. Without

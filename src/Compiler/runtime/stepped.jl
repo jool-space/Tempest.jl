@@ -3,21 +3,26 @@
 # that step's place in the recurrence's storage. A one-kernel claim keeps
 # the state on chip; this runs a step too large for one kernel, a neural
 # ODE's field evaluated four times an RK4 step, as the kernels of an
-# unrolled step, from one plan of it.
+# unrolled step, from one plan of it. A sum riding the steps (see `riding`)
+# adds each step's part where it is: the step's plan adds it to the sum, in
+# the sum's storage.
 
 """
 One step of a recurrence as a graph of its own: its arguments are the state
-(argument 1) and the values outside the cycle it reads, each whole or one
-step's slice of it; its results are the value the state is carried from and
-the cycle's values stored at each step.
+(argument 1), the values outside the cycle it reads, each whole or one
+step's slice of it, and each sum riding the steps as the steps before left
+it; its results are the value the state is carried from, the cycle's values
+stored at each step, and each sum with this step's part added.
 """
 struct StepGraph
     graph::IndexGraph
     # Each argument's value outside and the axis it is sliced along, 0 for
-    # whole; or `(:position, T)`, the step's position as a `T`.
+    # whole; `(:position, T)`, the step's position as a `T`; or `(:sum, r)`,
+    # sum `r` riding the steps.
     leaves::Vector{Any}
-    # Each result's value outside, stored a step at a time.
+    # Each result's value outside, stored a step at a time; the sums' results follow.
     stored::Vector{Int}
+    sums::Vector{Int}
 end
 
 eltype_of(::IndexOperand{T}) where {T} = T
@@ -36,9 +41,10 @@ end
     step_graph(graph, stored, g) -> StepGraph or nothing
 
 The cycle of recurrence group `g` at one step, the values it recomputes
-outside the cycle with it, or nothing where a step is not a program of its
-own: where it reads a value of the cycle at another step, or a value along
-the steps other than by its last axis, or by an index array.
+outside the cycle with it, and each part of the sums riding its steps; or
+nothing where a step is not a program of its own: where it reads a value of
+the cycle at another step, or a value along the steps other than by its last
+axis, or by an index array, or a sum riding the steps reads none along them.
 """
 function step_graph(graph::IndexGraph, stored, g::Group)
     values = graph.values
@@ -63,7 +69,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
             s == cd.axis || (ok[] = false)
             :state
         elseif u in cycle
-            s == 0 && (ok[] = false)
+            (s == 0 || u in members && s != along(u)) && (ok[] = false)
             :step
         elseif stored[u]
             # Sliced along its last axis, a step's slice is contiguous.
@@ -106,15 +112,36 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         ok[] || return nothing
     end
     ok[] || return nothing
-    # The arguments first, the state the first of them; then the step's
-    # values in the graph's order.
-    leaves = Any[(c, cd.axis); [key for key in order if kinds[key] === :leaf]; [(:position, T) for T in positions]]
+    # Each sum riding the steps, by the axis of its iteration along them: the
+    # first it sums whose operand is a step's there.
+    sums = g.reductions
+    axes = map(sums) do r
+        d = values[r].definition
+        for k in d.reduced
+            d.operand isa Read && any(e -> mentions(e, k), d.operand.index) || continue
+            saved = (copy(kinds), copy(order), copy(positions))
+            visit_operand(d.operand, k)
+            ok[] && return k
+            ok[] = true
+            merge!(empty!(kinds), saved[1])
+            append!(empty!(order), saved[2])
+            union!(empty!(positions), saved[3])
+        end
+        0
+    end
+    any(==(0), axes) && return nothing
+    # The arguments first, the state the first of them, the sums last; then
+    # the step's values in the graph's order.
+    leaves = Any[(c, cd.axis); [key for key in order if kinds[key] === :leaf]; [(:position, T) for T in positions]; [(:sum, r) for r in sums]]
     steps = [key for key in sort(order) if kinds[key] === :step]
     id = Dict{Any, Int}()
     new = Value[]
     for (k, leaf) in enumerate(leaves)
         if first(leaf) === :position
             push!(new, Value(Input(k), (), last(leaf), true))
+        elseif first(leaf) === :sum
+            v = values[last(leaf)]
+            push!(new, Value(Input(k), v.dims, v.eltype, v.scalar))
         else
             u, s = leaf
             v = values[u]
@@ -149,9 +176,40 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     # The value the state is carried from first.
     results = [results[end]; results[1:(end - 1)]]
     stored_order = [f; members[1:(end - 1)]]
+    # Each sum, the steps before's, plus this step's part: its operand here,
+    # summed over its other axes. A part that is a sum of others, each added
+    # in turn, lets each product add into the sum as it writes.
+    computed = length(leaves)
+    for (j, (r, k)) in enumerate(zip(sums, axes))
+        d = values[r].definition
+        v = values[r]
+        kept = drop_axis(d.iteration, k)
+        o = restricted(d.operand, k, Domain(kept), id)
+        o === nothing && return nothing
+        reduced = Tuple(a > k ? a - 1 : a for a in d.reduced if a != k)
+        if !isempty(reduced)
+            push!(new, Value(Reduction(d.fold, o, kept, reduced), v.dims, v.eltype, v.scalar))
+            o = Read(length(new), identity_index(v.dims))
+        end
+        total = Read(length(leaves) - length(sums) + j, identity_index(v.dims))
+        for part in summands(new, o, computed)
+            push!(new, Value(Pointwise(+, (total, part)), v.dims, v.eltype, v.scalar))
+            total = Read(length(new), identity_index(v.dims))
+        end
+        push!(results, total)
+    end
     dims = [new[r.value].dims for r in results]
     body = IndexGraph(new, collect(1:length(leaves)), results, dims, [isempty(d) for d in dims], [new[r.value].eltype for r in results])
-    StepGraph(body, leaves, stored_order)
+    StepGraph(body, leaves, stored_order, sums)
+end
+
+# The operands sum `o` adds, a value of the step past `computed` read whole:
+# those of each sum of two it is.
+function summands(new, o, computed)
+    o isa Read && o.value > computed && o.index == identity_index(new[o.value].dims) || return Operand[o]
+    d = new[o.value].definition
+    d isa Pointwise && d.f === (+) && length(d.operands) == 2 || return Operand[o]
+    Operand[summands(new, d.operands[1], computed); summands(new, d.operands[2], computed)]
 end
 
 # Operand `o` of a value computed in the step, over the step's domain `d`:
@@ -188,6 +246,9 @@ struct SteppedRun
     launches::Vector{Any}
     # Per step, the moves: (launch, value of the step's graph, buffer).
     moves::Vector{Vector{Tuple{Int, Int, Any}}}
+    # After each step's kernels, the copies of the sums its plan could not
+    # write in place.
+    copies::Vector{Any}
     start::Any
     finish::Any
     # What the step's kernels read and write, kept alive.
@@ -201,22 +262,79 @@ function (r::SteppedRun)()
             repoint!(r.launches[l], v, buffer)
         end
         foreach(l -> l(), r.launches)
+        foreach(c -> c(), r.copies)
     end
     r.finish()
     nothing
 end
 
-"What a recurrence's steps run: its step's kernels."
+"What a recurrence's steps run: its step's kernels, and the sums riding them."
 struct SteppedKernels
     steps::Int
     kernels::Vector{Any}
+    sums::Vector{Int}
 end
 
 function Base.show(io::IO, k::SteppedKernels)
     print(io, k.steps, " steps of ", length(k.kernels), " kernels")
+    isempty(k.sums) || print(io, ", adding to ", join(map(r -> "%$r", k.sums), " "))
     for x in k.kernels
         print(io, "; ", x)
     end
+end
+
+"""
+A recurrence's step planned: its graph, the decider that planned it, the
+plan with its kernels in order, their decisions and its storage, and the
+number of steps.
+"""
+struct SteppedPlan
+    step::StepGraph
+    decider::Decider
+    plan::Plan
+    decisions::Vector{Any}
+    storage::Storage
+    steps::Int
+end
+
+"""
+    stepped_plan(d, p, g) -> SteppedPlan or nothing
+
+Recurrence group `g`'s step planned as a program of its own, once per group
+alike in the decider; nothing where a step is not a program of its own. Each
+sum riding the steps is written over the storage of the sum the steps before
+left, where the step's kernels allow it.
+"""
+stepped_plan(d::Decider, p::Plan, g::Group) = get!(() -> plan_step(d, p, g), d.stepped, group_identity(p, g))
+
+function plan_step(d::Decider, p::Plan, g::Group)
+    s = step_graph(p.graph, p.stored, g)
+    s === nothing && return nothing
+    values = p.graph.values
+    c = first(g.outputs)
+    cd = values[c].definition::Carried
+    cd.axis == length(values[c].dims) || return nothing
+    bd = Decider(d.target, s.graph; measure = d.measure === :dry ? :dry : d.measure)
+    bp, _ = cover(bd)
+    search!(bd, bp)
+    ds = decisions(bd, bp)
+    writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
+    first_sum = length(s.leaves) - length(s.sums)
+    replaces = [bp.graph.results[length(s.stored) + j].value => first_sum + j for j in eachindex(s.sums)]
+    bp, order, st = storage(bp, replaces; in_place = k -> writes_in_place(ds[k]))
+    SteppedPlan(s, bd, bp, ds[order], st, values[c].dims[cd.axis])
+end
+
+"""
+    stepped_seconds(d, p, g) -> seconds or nothing
+
+The time of recurrence group `g` run a step at a time: each step's kernels
+at their measured times, else their estimates; nothing where it does not run so.
+"""
+function stepped_seconds(d::Decider, p::Plan, g::Group)
+    sp = stepped_plan(d, p, g)
+    sp === nothing && return nothing
+    sp.steps * sum(x -> something(x.measured, x.choice.estimate), sp.decisions; init = 0.0)
 end
 
 """
@@ -227,14 +345,13 @@ Recurrence group `g` as a plan of one step, launched once per step on
 program of its own or its kernels cannot be pointed elsewhere.
 """
 function build_stepped(d::Decider, p::Plan, g::Group, buffers)
-    s = step_graph(p.graph, p.stored, g)
-    s === nothing && return nothing
+    sp = stepped_plan(d, p, g)
+    sp === nothing && return nothing
+    s, bd, bp, ds, st, steps = sp.step, sp.decider, sp.plan, sp.decisions, sp.storage, sp.steps
     values = p.graph.values
     target = d.target
     c = first(g.outputs)
     cd = values[c].definition::Carried
-    steps = values[c].dims[cd.axis]
-    cd.axis == length(values[c].dims) || return nothing
     # The value the state is carried from, where the plan does not store it,
     # is stored by the steps, each step's where the next reads it.
     f = last(g.outputs)
@@ -245,10 +362,11 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         n = storage_length(values[u]) ÷ values[u].dims[end]
         view(stacked(u), ((t - 1) * n + 1):(t * n))
     end
-    # The start: the state's first step where the recurrence starts.
+    # The start: the state's first step where the recurrence starts, and
+    # each sum riding the steps at zero.
     first_step = cd.reverse ? steps : 1
     init = cd.init
-    start = if init isa Literal
+    set_state = if init isa Literal
         () -> fill!(slice(c, first_step), init.value)
     elseif init isa Read && !any(e -> mentions(e, cd.axis), init.index) && buffers[init.value] !== nothing &&
             reads_storage(values[init.value], init.index[1:end], drop_axis(values[c].dims, cd.axis))
@@ -256,13 +374,8 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     else
         return nothing
     end
-    bd = Decider(target, s.graph; measure = d.measure === :dry ? :dry : d.measure)
-    bp, _ = cover(bd)
-    search!(bd, bp)
-    ds = decisions(bd, bp)
-    writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
-    bp, order, st = storage(bp, Pair{Int, Int}[]; in_place = k -> writes_in_place(ds[k]))
-    ds = ds[order]
+    sums = s.sums
+    start = () -> (set_state(); foreach(r -> fill!(buffers[r], zero(values[r].eltype)), sums))
     bvalues = bp.graph.values
     slots = Any[allocate(target, UInt8, bytes) for bytes in st.sizes]
     bbuffers = Vector{Any}(nothing, length(bvalues))
@@ -278,11 +391,12 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
             bbuffers[k] = view(positions[k], first_step:first_step)
             continue
         end
+        first(leaf) === :sum && (bbuffers[k] = buffers[last(leaf)]; continue)
         u, a = leaf
         a == 0 ? (bbuffers[k] = buffers[u]) : (moving[k] = u)
     end
-    for (k, r) in enumerate(bp.graph.results)
-        moving[r.value] = s.stored[k]
+    for (k, u) in enumerate(s.stored)
+        moving[bp.graph.results[k].value] = u
     end
     any(t -> haskey(moving, first(t)), taken) && return nothing
     for (id, v) in enumerate(bvalues)
@@ -302,6 +416,9 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         end
     end
     foreach(((r, a),) -> bbuffers[r] = bbuffers[a], taken)
+    # A sum its step's kernels could not write over the steps before's is
+    # copied there after them.
+    copies = Any[(let to = bbuffers[a], from = bbuffers[r]; () -> copyto!(to, from) end) for (r, a) in st.staged]
     built = [build_group(bd, bp, bg, x, bbuffers) for (bg, x) in zip(bp.groups, ds)]
     launches = Any[b[1] for b in built]
     all(repoints, launches) || return nothing
@@ -336,6 +453,6 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     else
         () -> copyto!(view(buffers[c], (n + 1):total), view(stacked(f), 1:(total - n)))
     end
-    run = SteppedRun(launches, moves, start, finish, (slots, bbuffers, built, positions, own))
-    (run, SteppedKernels(steps, Any[b[2] for b in built]))
+    run = SteppedRun(launches, moves, copies, start, finish, (slots, bbuffers, built, positions, own))
+    (run, SteppedKernels(steps, Any[b[2] for b in built], sums))
 end

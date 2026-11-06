@@ -1,7 +1,8 @@
 # Loops rolled from the tape: a `for` loop traces as its iterations, and the
 # window of them that repeats is the loop `accumulate` traces, so a program
 # does not grow with its steps; a recurrence no one kernel holds runs a step
-# at a time, its step's kernels planned once and launched once per step.
+# at a time, its step's kernels planned once and launched once per step, and
+# a sum over its steps may be added as they run.
 @testset "loops rolled and stepped" begin
     dense(l, u) = l.weight * u .+ l.bias
     field(p, u) = dense(p.dec, tanh.(dense(p.enc, u)))
@@ -60,5 +61,27 @@
         p = programs[12]
         ex = prepare(p, device(params), device(u0), device(y))
         @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), C.leaves(train(12)(params, u0, y)); rtol = 1.0e-3)
+    end
+    # Each parameter's gradient sums every evaluation's part over the steps:
+    # added after them, from the parts the backward's steps store, or as they
+    # run, where the parts' operands are fresh. The cover prices both; pinned
+    # to ride, each sum is a fold of the backward's group, which stores
+    # nothing only the sums read, and its steps add each part.
+    p = programs[12]
+    eager = train(12)(params, u0, y)
+    planned = prepare(p, params, u0, y; build = false).plan
+    sums = C.riding_sums(planned)
+    @test length(sums) == 4
+    backward(q) = only(g for g in q.groups if g.kind === :recurrence && !isempty(g.reductions))
+    ridden = C.plan(planned.graph; ride = sums)
+    @test sort(backward(ridden).reductions) == sort(sums)
+    @test count(m -> ridden.stored[m], backward(ridden).outputs) < maximum(g -> g.kind === :recurrence ? length(g.outputs) : 0, planned.groups)
+    ex = prepare(p, params, u0, y; ride = sums)
+    @test sort(only(k.sums for k in ex.kernels if k isa C.SteppedKernels && !isempty(k.sums))) == sort(sums)
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(eager); rtol = 1.0e-5)
+    if CUDA_FUNCTIONAL
+        ex = prepare(p, device(params), device(u0), device(y); ride = sums)
+        @test count(k -> k isa C.SteppedKernels && !isempty(k.sums), ex.kernels) == 1
+        @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), C.leaves(eager); rtol = 1.0e-3)
     end
 end

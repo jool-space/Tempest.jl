@@ -286,8 +286,7 @@ moments to 3e-4 at each. A step forward is 12 kernels and one back 12,
 against about 36 unrolled: the weights' gradients are products batched
 over the steps. A window of maps alone is not rolled: unrolled it fuses
 into one kernel (a calibration's chain of eight maps, a polynomial's
-products). Open: the stepped run is taken wherever no one kernel claims a
-recurrence, not priced against the floor; a step's own launches are not
+products). Open: a step's own launches are not
 fewer than an unrolled step's; a step reading a value along the steps
 other than by its last axis, or the step's position other than as itself,
 runs on the floor.
@@ -304,6 +303,27 @@ moved): its loop unrolled at trace, as the script has it, 8.53 ms a step and
 48.7 s to the first, 10.3 ms at the highest precision; rolled with
 `@trace for`, as the Reactant end-to-end post writes it, 9.81 ms and 42.9 s.
 Tempest, 6.80 ms and 18.9 s, is the fastest of them at both.
+
+By batch, each stack by its own script with only the batch changed: at
+1024, Tempest 16.2 ms a step, torch `reduce-overhead` 17.1, Reactant 18.6;
+at 8192, Tempest 113, torch 91.9, Reactant 115. Profiled at 8192, neither
+device idles: Tempest's 47 ms after the loops were the parameters'
+gradients, each a sum over the steps of every evaluation's part, read back
+from the 11 GB a step the backward stored, at the device's bandwidth, where
+torch adds each evaluation's part as its backward runs, its operands in the
+cache. Taken, 6 November: a sum over a recurrence's steps of what they
+compute may ride them (`riding`, `src/Compiler/plan/planner.jl`), a fold
+of the recurrence's group, as a fold along a scan's axes rides its sweep;
+each step's plan adds its part to the sum in the sum's storage, each
+product into it as it writes (`step_graph`, `src/Compiler/runtime/stepped.jl`),
+and the backward stores nothing only the sums read. Whether a sum rides is
+the cover's choice (`Ride`, `src/Compiler/cover/cover.jl`): a stepped run is
+priced by its step's plan, and measured whole, under a record name of its
+own, where the floor's time of a recurrence as one serial kernel had been
+read back as its. At 128 the four sums are measured and stay after the
+loops, 6.80 ms; at 1024, 16.0 ms; at 8192 the weights' two and the
+encoder's bias ride, 79.0 ms, prepared in 25.5 s to the first result. The
+losses and first moments agree with the interpreter's as before.
 
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for

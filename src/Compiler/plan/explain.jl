@@ -66,6 +66,7 @@ function explain(io::IO, p::Plan)
         print(io, "kernel ", k, ": ", g.kind, " over ", g.domain)
         println(io, isempty(reads) ? "" : string(", reads ", join(map(r -> "%$r", reads), " ")))
         for r in sort(g.reductions; by = r -> (g.phase[r], r))
+            g.kind === :recurrence && (println(io, "  adds to ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r], " at each step"); continue)
             println(io, "  phase ", g.phase[r], ": ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r])
         end
         for m in g.outputs

@@ -125,17 +125,30 @@ struct Store
 end
 
 """
+A sum over a recurrence's steps of what they compute, added as they run
+rather than after them from what they store (see `riding`): a proposal of
+the planner's own. The steps compute each part where its operands are fresh,
+and store only what else reads them; the sum after the steps reads every
+step's, as a neural ODE's weight gradients read every evaluation's
+activations. Small steps run fastest summed after, in a few kernels; large
+ones, read once.
+"""
+struct Ride
+    value::Int
+end
+
+"""
 The values a proposal is about: those it fixes as one group, or as groups
 apart (a candidate that is several sets), or the fold it recomputes, or the
-map it stores.
+map it stores, or the sum riding steps.
 """
 fixes(q::Vector{Int}) = q
 fixes(q::Vector{Vector{Int}}) = reduce(vcat, q)
 fixes(q::Join) = q.group
-fixes(q::Union{Recompute, Store}) = [q.value]
+fixes(q::Union{Recompute, Store, Ride}) = [q.value]
 
 # Whether a proposal fixes sets of values as groups, and the sets.
-forms_group(q) = !(q isa Union{Recompute, Store})
+forms_group(q) = !(q isa Union{Recompute, Store, Ride})
 group_sets(q::Vector{Vector{Int}}) = q
 group_sets(q) = [fixes(q)]
 
@@ -163,6 +176,7 @@ function proposal_key(p::Plan, a::Around, q, texts = Dict{Int, String}())
     q isa Join && print(io, " || join %", q.value)
     q isa Vector{Vector{Int}} && print(io, " || apart ", join((join(map(v -> "%$v", set), " ") for set in q), " | "))
     q isa Recompute && print(io, " || recompute")
+    q isa Ride && print(io, " || ride")
     # A stored map is inlined in the terms of the groups it reaches: its
     # definition tells it from the group's other maps.
     if q isa Store
@@ -264,10 +278,11 @@ function cover(d::Decider)
             any(x -> x[1] == Store(v), proposals) || push!(proposals, (Store(v), nothing))
         end
     end
+    measures(d) && foreach(v -> push!(proposals, (Ride(v), nothing)), riding_sums(base))
     # What the starting plan stores: a set that does not form one group
     # there, where a trial would first form it, is not tried. A set holding a
     # pinned fold changes what is stored.
-    start = storing(d.graph; recompute = d.pinned)
+    start = storing(d.graph; recompute = d.pinned, ride = d.rides)
     deps = Dependencies(start.graph)
     function forms(set)
         isdisjoint(set, d.pinned) || return true
@@ -287,11 +302,12 @@ function cover(d::Decider)
         recompute = Set{Int}(d.pinned)
         foreach(x -> x isa Recompute && push!(recompute, x.value), all)
         store = Set{Int}(x.value for x in all if x isa Store)
+        ride = [collect(d.rides); [x.value for x in all if x isa Ride]]
         # A value belongs to one proposal.
         allunique(Iterators.flatten(fixes(x) for x in all)) || return nothing
         isempty(taken) && length(sets) == 1 && !forms(only(sets)) && return nothing
         try
-            plan(d.graph; fixed = sets, recompute, store)
+            plan(d.graph; fixed = sets, recompute, store, ride)
         catch e
             e isa NotAGroup || rethrow()
             nothing
@@ -306,6 +322,7 @@ function cover(d::Decider)
     function priceable(p, q, i)
         p === nothing && return false
         i === nothing || claimant(d, p, q, i) !== nothing || return false
+        q isa Ride && return stepped_plan(d, p, p.groups[p.owner[q.value]]) !== nothing
         !(q isa Recompute) || recomputed_claimed(d, p, q.value)
     end
     function priced_plan(p, current, q, i)
@@ -447,6 +464,10 @@ function explain(io::IO, p::Plan, c::Considered)
     elseif q isa Store
         c.accepted && println(io, "%", q.value, " is stored apart, in a kernel of its own", why)
         return
+    elseif q isa Ride
+        println(io, "%", q.value, c.accepted ? " is summed as the steps of the recurrence it reads run" :
+            " is summed after the steps of the recurrence it reads", why)
+        return
     end
     sets = join((join(map(v -> "%$v", set), " ") for set in group_sets(q)), ", ")
     what = q isa Vector{Vector{Int}} ? "candidates " * sets * ", one kernel each," : "candidate " * sets
@@ -485,7 +506,7 @@ recomputed_in(g; nested = true) =
 
 # The starting plan: the program as written, every fold stored but those
 # the decider pins to be recomputed.
-generator_plan(d::Decider) = plan(d.graph; recompute = d.pinned)
+generator_plan(d::Decider) = plan(d.graph; recompute = d.pinned, ride = d.rides)
 
 # Whether every kernel of `p` that recomputes fold `v` is claimed by an
 # implementation that recomputes folds on the decider's target.

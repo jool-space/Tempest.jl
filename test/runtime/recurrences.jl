@@ -29,6 +29,15 @@
         ex = prepare(p, map(device, args)...)
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(grad(f), args...), args...)); rtol)
     end
+    # The weights' gradient sums each step's part: pinned to ride the
+    # backward's steps, a fold of its group, and the plan agrees.
+    args = (data(3, 3; scale = 0.5), data(3, 6; scale = 0.2), data(3; scale = 0.1))
+    planned = prepare(trace(grad(cell), args...), args...; build = false).plan
+    sums = C.riding_sums(planned)
+    @test !isempty(sums)
+    ridden = C.plan(planned.graph; ride = sums)
+    @test any(g -> g.kind === :recurrence && sort(g.reductions) == sort(sums), ridden.groups)
+    @test agree(C.execute(ridden, args...), C.leaves(interpret(trace(grad(cell), args...), args...)); rtol = 1.0e-12)
     # The product each step returns is of its cycle: the group stores it at
     # each step, along the state's columns and steps, its rows an axis of
     # their own. The state one step on it stores where it is returned.

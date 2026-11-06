@@ -43,7 +43,7 @@ end
 # A step at a time, the last first for a state carried in reverse: the
 # state, where it starts at the first step; then each other member over its
 # axes, the value the state is carried from last, which is the state at the
-# next step.
+# next step. Each sum riding the steps after them, over its own iteration.
 function run_recurrence!(g::Group, buffers, graph)
     D = g.domain
     axis = recurrence_axes(graph, g).axis
@@ -63,6 +63,23 @@ function run_recurrence!(g::Group, buffers, graph)
             buffers[m][(at .+ 1)...] = y
             m == from && n != last(order) && (buffers[state][(Base.setindex(at, n + next, axis) .+ 1)...] = y)
         end
+    end
+    for r in g.reductions
+        val = graph.values[r]
+        d = val.definition
+        A = fold_types(d.fold, term_eltype(g.terms[r], graph)).accumulator
+        kept = kept_dims(d.iteration, d.reduced)
+        swept = ntuple(k -> k in d.reduced ? d.iteration[k] : 1, length(d.iteration))
+        out = Array{val.eltype}(undef, kept)
+        for K in CartesianIndices(kept)
+            state = fold_init(d.fold, A)
+            for S in CartesianIndices(swept)
+                x = ntuple(k -> k in d.reduced ? S[k] - 1 : K[k] - 1, length(kept))
+                state = fold_combine(d.fold, state, fold_lift(d.fold, A(evaluate_term(g.terms[r], x, nothing, buffers, nothing, graph))))
+            end
+            out[K] = val.eltype(fold_observe(d.fold, state))
+        end
+        buffers[r] = val.scalar ? only(out) : reshape(out, val.dims)
     end
 end
 

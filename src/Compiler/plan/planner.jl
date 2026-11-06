@@ -352,26 +352,28 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomput
 end
 
 """
-    plan(graph::IndexGraph; fixed = [], recompute = (), store = ()) -> Plan
+    plan(graph::IndexGraph; fixed = [], recompute = (), store = (), ride = ()) -> Plan
 
 Decide what is stored and form the kernels. Each set of values in `fixed`, a
 candidate an implementation proposed, forms a group of its own, its folds
 stored; the planner groups the rest around them. Each value in `recompute` is
 recomputed where it is read instead of stored, and each map in `store` is
-stored rather than recomputed where it is read.
+stored rather than recomputed where it is read. Each sum in `ride` rides the
+steps of the recurrence whose cycle it reads (see `riding`): a fold of its
+group, the values between computed at each step and not stored.
 """
-function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = ())
-    s = storing(graph; recompute, store)
+function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = (), ride = ())
+    s = storing(graph; recompute, store, ride)
     graph, stored, live, results = s.graph, s.stored, s.live, s.results
     # A pointwise value read only by one group over its domain, at the same
     # index, is recomputed by that group: grouped again without it.
-    p = group_values(graph, copy(stored), live, results, fixed)
+    p = group_values(graph, copy(stored), live, results, fixed, s.riders)
     users = readers(graph)
     n = length(graph.values)
     shared = filter(id -> !any(s -> id in s, fixed) && recomputable(p, users, id, live, results, s.materialized), 1:n)
     isempty(shared) && return p
     stored[shared] .= false
-    group_values(graph, stored, live, results, fixed)
+    group_values(graph, stored, live, results, fixed, s.riders)
 end
 
 # What `plan` decides before it forms kernels: the graph with its results
@@ -389,7 +391,7 @@ function accumulates(values, v)
     d isa Pointwise && d.f === (+) && length(d.operands) == 2 && any(o -> o isa Read && values[o.value].definition isa Reduction, d.operands)
 end
 
-function storing(graph::IndexGraph; recompute = (), store = ())
+function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     recomputed = Set{Int}(recompute)
     graph = with_stored_results(graph)
     values = graph.values
@@ -405,6 +407,19 @@ function storing(graph::IndexGraph; recompute = (), store = ())
             live[r] = true
         end
     end
+    # Each sum riding a recurrence's steps, by the recurrence's state, and
+    # the values between it and the cycle, which its steps compute.
+    cycles = recurrences(graph)
+    riders = Dict{Int, Vector{Int}}()
+    between = Dict{Int, Set{Int}}()
+    for r in ride
+        k = findfirst(((c, f, cycle),) -> live[c] && riding(graph, live, cycle, r) !== nothing, cycles)
+        k === nothing && throw(NotAGroup([r]))
+        c, _, cycle = cycles[k]
+        push!(get!(() -> Int[], riders, c), r)
+        union!(get!(() -> Set{Int}(), between, c), riding(graph, live, cycle, r))
+    end
+    foreach(b -> union!(recomputed, b), Base.values(between))
     # Reads of a value, one per running reader and formula: a reader that
     # reads it several times at one index computes it once.
     counts = zeros(Int, n)
@@ -458,15 +473,17 @@ function storing(graph::IndexGraph; recompute = (), store = ())
     # the value it is carried from becoming the state one step on (see
     # `recurrence_group`); so does a map of what is stored, which a reader
     # outside recomputes too.
-    cycles = recurrences(graph)
     if !isempty(cycles)
         users = readers(graph)
         for (c, f, cycle) in cycles
             stored[c] = true
+            # A sum riding the steps, and what it computes there, are read
+            # within them.
+            within = union(Set(cycle), get(riders, c, Int[]), get(between, c, Set{Int}()))
             for w in cycle
                 w == c && continue
                 d = values[w].definition
-                stored[w] = w in results || materialized[w] || any(u -> live[u] && !(u in cycle), users[w])
+                stored[w] = w in results || materialized[w] || any(u -> live[u] && !(u in within), users[w])
                 stored[w] && w != f && d isa Pointwise && all(o -> !(o isa Read) || stored[o.value], d.operands) && (stored[w] = false)
             end
         end
@@ -491,7 +508,8 @@ function storing(graph::IndexGraph; recompute = (), store = ())
         o = only(d.operands)
         o isa Read && stored[o.value] && (stored[id] = false)
     end
-    (; graph, stored, live, results, materialized)
+    foreach(b -> foreach(u -> stored[u] = false, b), Base.values(between))
+    (; graph, stored, live, results, materialized, riders)
 end
 
 # Whether `d` widens a half-precision value to Float32, as `Float32.(k)` does
@@ -559,7 +577,7 @@ end
 Dependencies(graph::IndexGraph) = Dependencies(zeros(Int, length(graph.values)), Group[], ancestors(graph))
 
 # The kernels, given what is stored.
-function group_values(graph, stored, live, results, fixed)
+function group_values(graph, stored, live, results, fixed, riders = Dict{Int, Vector{Int}}())
     values = graph.values
     n = length(values)
     deps = Dependencies(graph)
@@ -570,7 +588,7 @@ function group_values(graph, stored, live, results, fixed)
     end
     for (c, f, cycle) in recurrences(graph)
         live[c] || continue
-        push!(groups, recurrence_group(graph, stored, c, f, cycle))
+        push!(groups, recurrence_group(graph, stored, c, f, cycle, get(riders, c, Int[])))
         foreach(m -> owner[m] = length(groups), members(groups[end]))
     end
     # Who reads each value, directly or through a gather: a group grows toward
@@ -777,6 +795,74 @@ function recurrences(graph)
     found
 end
 
+"""
+    riding(graph, live, cycle, r) -> values or nothing
+
+The values a sum `r` reads between it and a recurrence's `cycle`, which ride
+the recurrence's steps with it: computed at each step from the cycle's
+values there, the sum adding each step's part as the steps run, as a weight's
+gradient adds each step's while its operands are fresh. Each is a map or a
+fold that only `r` and the others read; nothing where `r` reads no value of
+the cycle, or another reads one of them.
+"""
+function riding(graph, live, cycle, r)
+    values = graph.values
+    d = values[r].definition
+    d isa Reduction && d.fold isa SumFold && !(r in cycle) || return nothing
+    inside = Set(cycle)
+    # Each value up to `r` that reads the cycle, through others; and those
+    # `r` reads, through others.
+    reaches, read = falses(r), falses(r)
+    read[r] = true
+    for u in minimum(cycle):r
+        u in inside && (reaches[u] = true; continue)
+        reaches[u] = any(o -> any(x -> x <= r && reaches[x], read_values(o)), operands(values[u].definition))
+    end
+    reaches[r] || return nothing
+    for u in r:-1:1
+        read[u] || continue
+        foreach(o -> foreach(x -> read[x] = true, read_values(o)), operands(values[u].definition))
+    end
+    between = [u for u in 1:(r - 1) if read[u] && reaches[u] && !(u in inside)]
+    all(u -> values[u].definition isa Union{Pointwise, Reduction}, between) || return nothing
+    set = Set([between; r])
+    users = readers(graph)
+    all(u -> all(w -> !live[w] || w in set, users[u]), between) || return nothing
+    between
+end
+
+"""
+    riding_sums(plan) -> values
+
+The sums of `plan` that could ride the steps of one of its recurrences:
+computed apart from them, over an axis as long as the steps, reading the
+recurrence's cycle through values only they read (see `riding`).
+"""
+function riding_sums(p::Plan)
+    graph = p.graph
+    values = graph.values
+    live = falses(length(values))
+    foreach(g -> foreach(m -> live[m] = true, members(g)), p.groups)
+    for id in length(values):-1:1
+        live[id] || continue
+        foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(values[id].definition))
+    end
+    found = Int[]
+    for (c, f, cycle) in recurrences(graph)
+        live[c] || continue
+        k = p.owner[c]
+        cd = values[c].definition
+        steps = values[c].dims[cd.axis]
+        for (r, v) in enumerate(values)
+            d = v.definition
+            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > f || continue
+            any(a -> d.iteration[a] == steps, d.reduced) || continue
+            riding(graph, live, cycle, r) === nothing || push!(found, r)
+        end
+    end
+    found
+end
+
 function recurrence_cycle(graph, c, f)
     values = graph.values
     reaches, feeds = falses(f), falses(f)
@@ -851,8 +937,11 @@ end
 # at each step, where it starts or else the value it is carried from one step
 # back; the values of the cycle stored, in order; and that value, stored or
 # not, the state one step on. Their terms recompute the rest of the cycle
-# and read what the group computes wherever this step stored it.
-function recurrence_group(graph, stored, c, f, cycle)
+# and read what the group computes wherever this step stored it. The sums
+# riding its steps are its folds, each over its own iteration: as a fold
+# along a scan's axes rides its sweep, each is complete only after the
+# steps, and nothing in the group reads it.
+function recurrence_group(graph, stored, c, f, cycle, riders = Int[])
     values = graph.values
     values[f].dims == values[c].dims || throw(ArgumentError("a recurrence's state carried from a value of another shape is not supported yet"))
     members = [c; [w for w in cycle if w != c && w != f && stored[w]]; f]
@@ -868,6 +957,12 @@ function recurrence_group(graph, stored, c, f, cycle)
             definition_term(graph, inside, g, values[m].definition, values[m], places[m], whole)
     end
     foreach(m -> g.phase[m] = 0, members)
+    for r in riders
+        d = values[r].definition::Reduction
+        push!(g.reductions, r)
+        g.terms[r] = operand_term(graph, inside, g, d.operand, identity_index(d.iteration), Domain(d.iteration))
+        g.phase[r] = 0
+    end
     g
 end
 
