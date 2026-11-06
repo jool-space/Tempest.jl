@@ -39,6 +39,19 @@ end
     end
 end
 
+# A chain of maps each reading the last twice is one kernel, its term
+# sharing each map: built, shown and looked up once per map, its preparation
+# does not double with each one. At 40 maps it had taken hours.
+@testset "a chain of maps each reading the last twice" begin
+    f(x) = (for _ in 1:40; x = x ./ (1 .+ abs.(x)); end; sum(x))
+    x = data(4)
+    p = trace(f, x)
+    seconds = @elapsed ex = prepare(p, x)
+    @test seconds < 30
+    @test only(C.leaves(outputs(execute!(ex))))[] ≈ f(x)
+    @test maximum(g -> maximum(t -> length(string(t)), values(g.terms)), ex.plan.groups) < 10_000
+end
+
 # Writes into an allocation are functional updates that plan with their
 # readers: padding read by a reduction, a concatenation read by a map and a
 # slice written then read are one kernel each, which stores only its result.

@@ -162,8 +162,18 @@ struct OutsideGroup <: Exception end
 """
 The term computing value `v` at `index`, an index over `domain`: the group's
 domain, or inside a recomputed fold that domain extended by the fold's axes.
+Each value's term at an index is built once, in `memo`: terms are interned,
+so a value read twice is one subterm, and built again at every path to it,
+a chain of maps each reading the last twice would take time doubling with
+each map.
 """
-function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain))
+function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain), memo = Dict{Any, Term}())
+    key = (v, index, domain)
+    haskey(memo, key) && return memo[key]
+    memo[key] = built_term(graph, stored, g, v, index, domain, memo)
+end
+
+function built_term(graph, stored, g::Group, v, index, domain, memo)
     val = graph.values[v]
     d = val.definition
     # A recurrence's group reads what it computes wherever this step stored it.
@@ -177,30 +187,30 @@ function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain)
     end
     if v in g.outputs
         index == placement(graph, g, v) || throw(OutsideGroup())
-        return definition_term(graph, stored, g, d, val, index, domain)
+        return definition_term(graph, stored, g, d, val, index, domain, memo)
     end
     stored[v] && return Load(v, index)
-    d isa Reduction && return fold_term(graph, stored, g, v, index, domain)
+    d isa Reduction && return fold_term(graph, stored, g, v, index, domain, memo)
     d isa Pointwise || return Load(v, index)
-    definition_term(graph, stored, g, d, val, index, domain)
+    definition_term(graph, stored, g, d, val, index, domain, memo)
 end
 
-function definition_term(graph, stored, g, d::Pointwise, val, index, domain)
+function definition_term(graph, stored, g, d::Pointwise, val, index, domain, memo = Dict{Any, Term}())
     args = map(d.operands) do o
-        operand_term(graph, stored, g, o, index, domain)
+        operand_term(graph, stored, g, o, index, domain, memo)
     end
     Apply(d.f, args, val.eltype)
 end
 
 # A fold recomputed where it is read: its operand over the domain extended by
 # its reduced axes.
-function fold_term(graph, stored, g, v, index, domain)
+function fold_term(graph, stored, g, v, index, domain, memo = Dict{Any, Term}())
     d = graph.values[v].definition::Reduction
     base = length(domain)
     extents = Tuple(d.iteration[k] for k in d.reduced)
     iteration = iteration_index(d, index, ntuple(j -> var(base + j), length(d.reduced)))
     extended = Domain((domain.extents..., extents...))
-    Recomputed(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended))
+    Recomputed(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended, memo))
 end
 
 # The values `value_term` and `operand_term` would load for `v` or `o`, the
@@ -226,10 +236,10 @@ function operand_reads!(reads, seen, graph, stored, g, o)
     reads
 end
 
-operand_term(graph, stored, g, o::Read, index, domain) =
-    value_term(graph, stored, g, o.value, map(e -> substitute(e, index, domain), o.index), domain)
-operand_term(graph, stored, g, o::Literal, index, domain) = Lit(o.value)
-operand_term(graph, stored, g, o::IndexOperand{T}, index, domain) where {T} =
+operand_term(graph, stored, g, o::Read, index, domain, memo = Dict{Any, Term}()) =
+    value_term(graph, stored, g, o.value, map(e -> substitute(e, index, domain), o.index), domain, memo)
+operand_term(graph, stored, g, o::Literal, index, domain, memo = nothing) = Lit(o.value)
+operand_term(graph, stored, g, o::IndexOperand{T}, index, domain, memo = nothing) where {T} =
     Ix{T}(substitute(o.expr, index, domain))
 
 # An operand read from storage, as a term over its reader's domain: the
@@ -268,10 +278,12 @@ struct Dependencies
     groups::Vector{Group}
     up::Vector{BitVector}
     reads::Dict{Int, Set{Int}}
-    loads::IdDict{Term, Vector{Int}}
+    # By the term's own hash: an identity dictionary hashes an immutable term
+    # by its contents, all of it, at every lookup.
+    loads::Dict{Term, Vector{Int}}
 end
 
-Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), IdDict{Term, Vector{Int}}())
+Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}())
 
 term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads, t)
 
@@ -1000,16 +1012,17 @@ function recurrence_group(graph, stored, cs, fs, cycle, riders = Int[])
     foreach(w -> w in members || (inside[w] = false), cycle)
     append!(g.outputs, members)
     whole = Domain(domain)
-    foreach(c -> g.terms[c] = operand_term(graph, inside, g, values[c].definition.init, places[c], whole), cs)
+    memo = Dict{Any, Term}()
+    foreach(c -> g.terms[c] = operand_term(graph, inside, g, values[c].definition.init, places[c], whole, memo), cs)
     for m in members[(length(cs) + 1):end]
-        g.terms[m] = values[m].definition isa Reduction ? fold_term(graph, inside, g, m, places[m], whole) :
-            definition_term(graph, inside, g, values[m].definition, values[m], places[m], whole)
+        g.terms[m] = values[m].definition isa Reduction ? fold_term(graph, inside, g, m, places[m], whole, memo) :
+            definition_term(graph, inside, g, values[m].definition, values[m], places[m], whole, memo)
     end
     foreach(m -> g.phase[m] = 0, members)
     for r in riders
         d = values[r].definition::Reduction
         push!(g.reductions, r)
-        g.terms[r] = operand_term(graph, inside, g, d.operand, identity_index(d.iteration), Domain(d.iteration))
+        g.terms[r] = operand_term(graph, inside, g, d.operand, identity_index(d.iteration), Domain(d.iteration), memo)
         g.phase[r] = 0
     end
     g

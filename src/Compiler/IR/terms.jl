@@ -153,21 +153,58 @@ mentions(t::Recomputed, n) = mentions(t.body, n)
 mentions(::Union{Lit, Stat}, n) = false
 stats(t::Term) = [s.value for s in subterms((t,); nested = true) if s isa Stat]
 
-show_term(io, t::Load) = print(io, "%", t.value, "[", join(map(string, t.index), ", "), "]")
-show_term(io, t::Lit) = print(io, repr(t.value))
-show_term(io, t::Ix{T}) where {T} = print(io, T, "(", t.expr, ")")
-show_term(io, t::Stat) = print(io, "⟨%", t.value, "⟩")
-function show_term(io, t::Recomputed)
+# A term is shown as the tree it computes, but for a subterm it reaches
+# along several paths that would be long written out: named `#k=` where it is
+# first written, `#k` after. A chain of maps each reading the last twice
+# would otherwise be written out in text doubling with each map, and a term's
+# text is the key its kernel's times are recorded under.
+const NAMED_TERM_SIZE = 64
+
+struct TermNames
+    sizes::Dict{Term, Int}
+    paths::Dict{Term, Int}
+    names::Dict{Term, Int}
+end
+
+children(t::Apply) = t.args
+children(t::Recomputed) = (t.body,)
+children(::Term) = ()
+
+function TermNames(t::Term)
+    sizes, paths = Dict{Term, Int}(), Dict{Term, Int}()
+    # Each distinct subterm's size as a tree, saturating, and the paths to it.
+    function visit(t)
+        paths[t] = get(paths, t, 0) + 1
+        haskey(sizes, t) && return sizes[t]
+        sizes[t] = min(1 + sum(visit, children(t); init = 0), typemax(Int) ÷ 4)
+    end
+    visit(t)
+    TermNames(sizes, paths, Dict{Term, Int}())
+end
+
+show_term(io, t::Load, _) = print(io, "%", t.value, "[", join(map(string, t.index), ", "), "]")
+show_term(io, t::Lit, _) = print(io, repr(t.value))
+show_term(io, t::Ix{T}, _) where {T} = print(io, T, "(", t.expr, ")")
+show_term(io, t::Stat, _) = print(io, "⟨%", t.value, "⟩")
+function show_term(io, t::Union{Apply, Recomputed}, n::TermNames)
+    if n.sizes[t] > NAMED_TERM_SIZE && n.paths[t] > 1
+        haskey(n.names, t) && return print(io, "#", n.names[t])
+        n.names[t] = length(n.names) + 1
+        print(io, "#", n.names[t], "=")
+    end
+    show_parts(io, t, n)
+end
+function show_parts(io, t::Recomputed, n)
     print(io, "⟪%", t.value, " = fold over ", join(t.extents, "×"), " of ")
-    show_term(io, t.body)
+    show_term(io, t.body, n)
     print(io, "⟫")
 end
-function show_term(io, t::Apply)
+function show_parts(io, t::Apply, n)
     print(io, t.f, "(")
     for (k, a) in enumerate(t.args)
         k > 1 && print(io, ", ")
-        show_term(io, a)
+        show_term(io, a, n)
     end
     print(io, ")")
 end
-Base.show(io::IO, t::Term) = show_term(io, t)
+Base.show(io::IO, t::Term) = show_term(io, t, TermNames(t))
