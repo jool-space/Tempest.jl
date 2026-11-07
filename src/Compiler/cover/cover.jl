@@ -290,7 +290,10 @@ function cover(d::Decider)
     function forms(set)
         isdisjoint(set, d.pinned) || return true
         try
-            fixed_group(start.graph, start.stored, deps, set)
+            # Trials run on several threads at once, and grouping fills the
+            # dependencies' caches as it goes: each its own, the ancestors
+            # shared. One shared had its dictionaries written at once.
+            fixed_group(start.graph, start.stored, Dependencies(deps.owner, deps.groups, deps.up), set)
             true
         catch e
             e isa NotAGroup || rethrow()
