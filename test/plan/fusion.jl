@@ -52,6 +52,21 @@ end
     @test maximum(g -> maximum(t -> length(string(t)), values(g.terms)), ex.plan.groups) < 10_000
 end
 
+# A term is asked whether it varies along a fold's sweep once, not once per
+# path to each load: the gradient of a loop stepping by two, unrolled, each
+# step reading the state three times, the weight's gradient a fold over the
+# steps, had not been emitted in ten minutes.
+@testset "a fold of a term reaching its loads along many paths" begin
+    σ(x) = 1 / (1 + exp(-x))
+    f(xs, a, U) = (s = a; for t in 1:2:13; z = s ./ (1 .+ abs.(U * xs[:, :, t])); s = σ.(z) .* s .+ (1 .- σ.(z)) .* tanh.(z); end; sum(abs2, s))
+    g = (ys...) -> T.withgradient(f, ys...)
+    args = (data(3, 1, 14), data(3, 1; scale = 0.5), data(3, 3; scale = 0.5))
+    p = trace(g, args...)
+    seconds = @elapsed ex = prepare(p, args...)
+    @test seconds < 60
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(g(args...)))
+end
+
 # Writes into an allocation are functional updates that plan with their
 # readers: padding read by a reduction, a concatenation read by a map and a
 # slice written then read are one kernel each, which stores only its result.

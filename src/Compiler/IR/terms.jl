@@ -32,7 +32,10 @@ struct Apply <: Term
     args::Tuple{Vararg{Term}}
     eltype::DataType
     hash::UInt
-    Apply(f, args, eltype) = intern(new(f, args, eltype, hash(f, hash(args, hash(eltype, 0x5d3e7a6b1c4f9e21)))))
+    # The variables it mentions, from its parts' (see `variables`).
+    variables::UInt64
+    Apply(f, args, eltype) = intern(new(f, args, eltype, hash(f, hash(args, hash(eltype, 0x5d3e7a6b1c4f9e21))),
+        mapreduce(variables, |, args; init = UInt64(0))))
 end
 
 Base.hash(t::Apply, h::UInt) = hash(t.hash, h)
@@ -62,7 +65,8 @@ struct Recomputed <: Term
     # its body in every reader's term, so that planning Qwen3.5-4B's step
     # with a projection recomputed took 23 s, most of it hashing.
     hash::UInt
-    Recomputed(value, index, extents, body) = intern(new(value, index, extents, body, hash((value, index, extents, body), 0x2b8f4c1d7e6a3095)))
+    variables::UInt64
+    Recomputed(value, index, extents, body) = intern(new(value, index, extents, body, hash((value, index, extents, body), 0x2b8f4c1d7e6a3095), variables(body)))
 end
 
 Base.hash(t::Recomputed, h::UInt) = hash(t.hash, h)
@@ -145,11 +149,26 @@ function stored_reads(t::Term)
     reads
 end
 
+# The variables a term mentions, as bits: variable `n` at bit `n` up to 63,
+# bit 64 for any after. A term reaching a load along many paths, as a chain
+# of maps each reading the last twice does, is asked of each variable once
+# per term, not once per path: an unrolled loop's gradient, walked as a tree,
+# took longer than ten minutes to emit.
+variable_bit(n::Int) = n < 64 ? UInt64(1) << (n - 1) : UInt64(1) << 63
+variables(a::Var) = variable_bit(a.n)
+variables(a::Union{Div, Mod}) = variables(a.e)
+variables(a::Indirect) = mapreduce(variables, |, a.index; init = UInt64(0))
+variables(e::Affine) = mapreduce(t -> variables(t.first), |, e.terms; init = UInt64(0))
+variables(t::Load) = mapreduce(variables, |, t.index; init = UInt64(0))
+variables(t::Ix) = variables(t.expr)
+variables(t::Union{Apply, Recomputed}) = t.variables
+variables(::Union{Lit, Stat}) = UInt64(0)
+
 "Whether term `t` depends on variable `n` of its domain."
 mentions(t::Load, n) = any(e -> mentions(e, n), t.index)
 mentions(t::Ix, n) = mentions(t.expr, n)
-mentions(t::Apply, n) = any(a -> mentions(a, n), t.args)
-mentions(t::Recomputed, n) = mentions(t.body, n)
+mentions(t::Union{Apply, Recomputed}, n) = n < 64 ? t.variables & variable_bit(n) != 0 :
+    t.variables & variable_bit(n) != 0 && (t isa Apply ? any(a -> mentions(a, n), t.args) : mentions(t.body, n))
 mentions(::Union{Lit, Stat}, n) = false
 stats(t::Term) = [s.value for s in subterms((t,); nested = true) if s isa Stat]
 
