@@ -623,7 +623,14 @@ dimensions here, since it lives in a buffer too; `compile` returns numbers.
 """
 outputs(ex::Executable) = ex.outputs
 
-kernel_slots(p, g) = sort!(collect(union(group_reads(p.graph, g), [v for v in members(g) if p.stored[v]])))
+# The buffers a group's kernels take, in the order the group first mentions
+# their values (`appearance`), as `canonical` numbers them: groups alike take
+# theirs in one order, and generate one kernel, however the values are numbered.
+function kernel_slots(p, g)
+    slots = union(group_reads(p.graph, g), [v for v in members(g) if p.stored[v]])
+    order = Dict(v => k for (k, v) in enumerate(appearance(p, g)))
+    sort!(collect(slots); by = v -> (get(order, v, typemax(Int)), v))
+end
 
 "The floor's kernels for one group, in launch order."
 struct FloorKernels

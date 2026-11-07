@@ -163,9 +163,9 @@ fold_key(d::Reduction) = string(fold_name(d.fold), d.reduced)
 fold_key(d::Scan) = string(fold_name(d.fold), d.axes, d.reverse ? " reversed" : "", d.exclusive ? " exclusive" : "")
 fold_key(d::Keyed) = string(fold_name(d.fold), " by key ", d.key)
 
-# A group across programs: value numbers in order of appearance, with each
-# value's type and shape.
-function canonical(p::Plan, g::Group)
+# A group as the plan numbers its values: its members in order, each with
+# its term.
+function numbered_text(p::Plan, g::Group)
     io = IOBuffer()
     print(io, g.kind, " ", g.domain)
     for m in members(g)
@@ -173,8 +173,17 @@ function canonical(p::Plan, g::Group)
         what = m in g.reductions ? fold_key(v.definition) : "value"
         print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", g.terms[m])
     end
+    String(take!(io))
+end
+
+"The values a group mentions, in the order its text first mentions them: the order `canonical` numbers them in."
+appearance(p::Plan, g::Group) = unique!([parse(Int, m.match[2:end]) for m in eachmatch(r"%\d+", numbered_text(p, g))])
+
+# A group across programs: value numbers in order of appearance, with each
+# value's type and shape.
+function canonical(p::Plan, g::Group)
     numbers = Dict{String, Int}()
-    text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
+    text = replace(numbered_text(p, g), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
     shapes = map(sort!(collect(numbers); by = last)) do (s, k)
         v = p.graph.values[parse(Int, s[2:end])]
         string("%", k, " ", v.eltype, v.dims)
