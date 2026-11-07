@@ -340,6 +340,21 @@ function stepped_seconds(d::Decider, p::Plan, g::Group)
     sp.steps * sum(x -> something(x.measured, x.choice.estimate), sp.decisions; init = 0.0)
 end
 
+# The shape value `v` has, read at `index` by a state of shape `dims`, among
+# the state's axes: where each of its axes is one of the state's, in their
+# order, its extent there, and one along the state's others, which it is
+# spread over. Nothing where it is read otherwise.
+function spread_start(v::Value, index, dims)
+    (v.scalar || length(index) != length(v.dims)) && return nothing
+    along = Int[]
+    for (j, e) in enumerate(index)
+        k = findfirst(q -> e == var(q), eachindex(dims))
+        (k === nothing || !isempty(along) && k <= last(along) || v.dims[j] != dims[k]) && return nothing
+        push!(along, k)
+    end
+    ntuple(q -> q in along ? dims[q] : 1, length(dims))
+end
+
 # Of the storage a value of the step is at across the steps, the one at the
 # address least aligned: a kernel is built for the alignment of the storage
 # it is built on, as cuTile's arrays state it in their type, and may be
@@ -382,6 +397,14 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         elseif init isa Read && !any(e -> mentions(e, cd.axis), init.index) && buffers[init.value] !== nothing &&
                 reads_storage(values[init.value], init.index[1:end], drop_axis(values[c].dims, cd.axis))
             () -> copyto!(slice(c, first_step), view(buffers[init.value], 1:(storage_length(values[c]) ÷ steps)))
+        elseif init isa Read && buffers[init.value] !== nothing &&
+                (spread = spread_start(values[init.value], init.index, drop_axis(values[c].dims, cd.axis))) !== nothing
+            # A start read along some of the state's axes, in their order, and
+            # the same along the others, as a learned first state repeated
+            # over a batch, is spread over the others.
+            from = reshape(view(buffers[init.value], 1:storage_length(values[init.value])), spread)
+            to = reshape(slice(c, first_step), drop_axis(values[c].dims, cd.axis))
+            () -> (to .= from; nothing)
         else
             nothing
         end

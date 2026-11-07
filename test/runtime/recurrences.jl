@@ -65,6 +65,28 @@
             end
         end
     end
+    # A first state learned as a vector and repeated over the batch: each
+    # step's slice where the steps start is it spread over the batch, and
+    # the steps run as plans of their own, forward and back. Read so, the
+    # start had left the recurrence to the floor's kernel stepping through
+    # it, an LSTM's training step 1.76 s against 5.6 ms.
+    batched(p, xs, h0) = (h = repeat(h0, 1, size(xs, 2));
+        Tuple(map(first, accumulate((s, x) -> lstm_cell(p, s, x), eachslice(xs; dims = 3); init = (h, h)))))
+    batched_grad = (p, xs, h0) -> T.withgradient((q, x, h) -> sum(h -> sum(abs2, h), batched(q, x, h)), p, xs, h0)
+    batch_args = (weights, data(2, 4, 5; scale = 0.5), data(3; scale = 0.1))
+    for (f, loops) in ((batched, 1), (batched_grad, 2))
+        eager = C.leaves(f(batch_args...))
+        ex = prepare(trace(f, batch_args...), batch_args...)
+        @test count(k -> k isa C.SteppedKernels, ex.kernels) == loops
+        @test agree(C.leaves(outputs(execute!(ex))), eager; rtol = 1.0e-10)
+        if CUDA_FUNCTIONAL
+            device(x) = x isa AbstractArray ? CuArray(single(x)) : x isa NamedTuple ? map(device, x) : x
+            host(x) = x isa AbstractArray ? single(x) : x isa NamedTuple ? map(host, x) : x
+            ex = prepare(trace(f, map(host, batch_args)...), map(device, batch_args)...; target = T.CUDATarget(T.cuBLASProducts(); precision = :full))
+            @test count(k -> k isa C.SteppedKernels, ex.kernels) == loops
+            @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), eager; rtol = 1.0e-4)
+        end
+    end
     # The weights' gradient sums each step's part: pinned to ride the
     # backward's steps, a fold of its group, and the plan agrees.
     args = (data(3, 3; scale = 0.5), data(3, 6; scale = 0.2), data(3; scale = 0.1))
