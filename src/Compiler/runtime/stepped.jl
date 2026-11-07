@@ -340,6 +340,13 @@ function stepped_seconds(d::Decider, p::Plan, g::Group)
     sp.steps * sum(x -> something(x.measured, x.choice.estimate), sp.decisions; init = 0.0)
 end
 
+# Of the storage a value of the step is at across the steps, the one at the
+# address least aligned: a kernel is built for the alignment of the storage
+# it is built on, as cuTile's arrays state it in their type, and may be
+# pointed only at storage aligned as much. A step's slice of a value of `n`
+# elements along the steps starts at `(t - 1)n` of them, aligned as `n` is.
+least_aligned(buffers) = argmin(b -> trailing_zeros(reinterpret(UInt, pointer(b))), collect(buffers))
+
 """
     build_stepped(d, p, g, buffers) -> (launch, description) or nothing
 
@@ -382,6 +389,10 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     any(isnothing, starts) && return nothing
     sums = s.sums
     start = () -> (foreach(x -> x(), starts); foreach(r -> fill!(buffers[r], zero(values[r].eltype)), sums))
+    sequence = cd.reverse ? (steps:-1:1) : (1:steps)
+    # Where state `k` is at step `t`: where the recurrence starts at the
+    # first, else the value it is carried from one step back.
+    state_at(k, t) = t == first_step ? slice(cs[k], t) : slice(fs[k], cd.reverse ? t + 1 : t - 1)
     bvalues = bp.graph.values
     slots = Any[allocate(target, UInt8, bytes) for bytes in st.sizes]
     bbuffers = Vector{Any}(nothing, length(bvalues))
@@ -394,7 +405,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         k <= s.states && continue
         if first(leaf) === :position
             positions[k] = upload(target, [last(leaf)(t - 1) for t in 1:steps])
-            bbuffers[k] = view(positions[k], first_step:first_step)
+            bbuffers[k] = least_aligned(view(positions[k], t:t) for t in sequence)
             continue
         end
         first(leaf) === :sum && (bbuffers[k] = buffers[last(leaf)]; continue)
@@ -410,9 +421,9 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         any(t -> first(t) == id, taken) && continue
         def = v.definition
         if haskey(moving, id)
-            bbuffers[id] = slice(moving[id], first_step)
+            bbuffers[id] = least_aligned(slice(moving[id], t) for t in sequence)
         elseif id <= s.states
-            bbuffers[id] = slice(cs[id], first_step)
+            bbuffers[id] = least_aligned(state_at(id, t) for t in sequence)
         elseif def isa ConstantArray
             bbuffers[id] = upload(target, vec(collect(def.data)))
         elseif st.slots[id] > 0
@@ -433,11 +444,10 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     # value it is carried from one step back.
     readers(v) = [k for (k, bg) in enumerate(bp.groups) if v in kernel_slots(bp, bg)]
     users = Dict(v => readers(v) for v in [1:s.states; collect(keys(moving)); collect(keys(positions))])
-    sequence = cd.reverse ? (steps:-1:1) : (1:steps)
     moves = map(sequence) do t
         ms = Tuple{Int, Int, Any}[]
-        for (k, (c, f)) in enumerate(zip(cs, fs))
-            state = t == first_step ? slice(c, t) : slice(f, cd.reverse ? t + 1 : t - 1)
+        for k in eachindex(cs)
+            state = state_at(k, t)
             foreach(l -> push!(ms, (l, k, state)), users[k])
         end
         for (v, u) in moving

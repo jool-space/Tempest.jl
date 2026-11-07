@@ -801,7 +801,7 @@ function launch_kernels(kernels, workspaces, buffers, schedule, target)
         at = length(flatten!(Any[], f))
         places = Place[]
         for (spec, a) in zip(k.args, arrays)
-            spec.buffer isa Int && push!(places, Place(at + 1, spec.buffer, UInt(a.ptr) - reinterpret(UInt, pointer(buffers[spec.buffer]))))
+            spec.buffer isa Int && push!(places, Place(at + 1, spec.buffer, UInt(a.ptr) - reinterpret(UInt, pointer(buffers[spec.buffer])), UInt(1) << min(7, trailing_zeros(UInt(a.ptr)))))
             at += length(flatten!(Any[], a))
         end
         (launch, places)
@@ -809,11 +809,16 @@ function launch_kernels(kernels, workspaces, buffers, schedule, target)
     (TileRun(first.(built), last.(built), (scratch, buffers)), BuiltTiles(schedule, kernels))
 end
 
-"An array's address among a launch's parameters: its box, its value and its offset in bytes."
+"""
+An array's address among a launch's parameters: its box, its value, its
+offset in bytes, and the alignment of the address it was built on, which
+its kernel was compiled for (cuTile's arrays state it in their type).
+"""
 struct Place
     box::Int
     value::Int
     offset::UInt
+    align::UInt
 end
 
 "The launches of a claim's kernels, in order, the places of the values' arrays among each one's parameters, and what they read kept alive."
@@ -831,7 +836,9 @@ function Tempest.Compiler.Implement.repoint!(r::TileRun, value, buffer)
     for (l, places) in zip(r.launches, r.places), p in places
         p.value == value || continue
         box = l.boxes[p.box]
-        box[] = reinterpret(typeof(box[]), reinterpret(UInt, pointer(buffer)) + p.offset)
+        to = reinterpret(UInt, pointer(buffer)) + p.offset
+        to % p.align == 0 || error("a cuTile kernel built for $(Int(p.align))-byte aligned storage of %$value was pointed at an address aligned less")
+        box[] = reinterpret(typeof(box[]), to)
     end
     r
 end

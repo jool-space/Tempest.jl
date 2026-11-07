@@ -101,6 +101,17 @@
             @test count(k -> occursin("cuTile recurrence", string(k)), ex.kernels) == loops
             @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(f, args...), args...)); rtol = 1.0e-4)
         end
+        # The cell's gradient, its sums riding the steps, by cuTile's kernels:
+        # a step's slice of three numbers starts 12 bytes after the last's,
+        # and the reversed steps start at the last, aligned to 16. Each
+        # kernel is built on its least aligned slice, which it is compiled
+        # for; built on the first, it read the next ones wrong.
+        args = (data(3, 3; scale = 0.5), data(3, 5; scale = 0.2), data(3; scale = 0.1))
+        q = trace(grad(cell), map(single, args)...)
+        sums = C.riding_sums(prepare(q, map(single, args)...; build = false).plan)
+        ex = prepare(q, map(x -> CuArray(single(x)), args)...; ride = sums, measure = :none, target = T.CUDATarget(T.cuTileGenerator()))
+        @test count(k -> k isa C.SteppedKernels, ex.kernels) == 1
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(grad(cell), args...), args...)); rtol = 1.0e-4)
     end
 end
 
