@@ -1161,6 +1161,9 @@ function recomputable_folds(graph, kept = Set{Int}())
         # The folds v reaches through maps, with the index at which each reads v.
         consumers = Tuple{Int, Tuple{Vararg{Affine}}}[]
         pending = [(u, v, identity_index(values[v].dims)) for u in unique(users[v])]
+        # Each reader at each index once: maps reading v along many paths,
+        # as a gated update's step reads its state thrice, are as many.
+        seen = Set(pending)
         ok = true
         while ok && !isempty(pending)
             u, w, index = pop!(pending)
@@ -1172,7 +1175,9 @@ function recomputable_folds(graph, kept = Set{Int}())
                 if du isa Reduction
                     push!(consumers, (u, at))
                 elseif du isa Pointwise && !(u in results) && !materialized[u]
-                    append!(pending, [(x, u, at) for x in unique(users[u])])
+                    for x in unique(users[u])
+                        (x, u, at) in seen || (push!(seen, (x, u, at)); push!(pending, (x, u, at)))
+                    end
                 else
                     ok = false
                 end

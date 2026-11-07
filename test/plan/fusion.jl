@@ -67,6 +67,34 @@ end
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(g(args...)))
 end
 
+# The folds proposed for recomputing are found walking each map reading a
+# fold at each index once, not once per path to it: the gradient of two
+# loops stepping by two, unrolled (each step slices an input the second's
+# does not read, which keeps them from rolling), the second's step reading
+# its state three times, had not been proposed in a minute and a half.
+@testset "folds proposed through maps reading them along many paths" begin
+    σ(x) = 1 / (1 + exp(-x))
+    function f(xs, a, b, W, U, G)
+        s1, s2 = a, b
+        for t in 1:2:13
+            z = W * (U * xs[:, :, t])
+            s1, s2 = tanh.(z), tanh.(z)
+        end
+        for t in 1:2:13
+            x = xs[:, :, t]
+            z = G * s1 .+ s1
+            s1, s2 = σ.(z) .* s1 .+ (1 .- σ.(z)) .* tanh.(z), tanh.(z)
+        end
+        sum(abs2, s1) + sum(s2) * 0.3
+    end
+    g = (ys...) -> T.withgradient(f, ys...)
+    args = (data(1, 2, 14), (data(2, n; scale = 0.5) for n in (2, 2, 2, 1, 2))...)
+    planned = prepare(trace(g, args...), args...; build = false).plan
+    seconds = @elapsed folds = C.recomputable_folds(planned.graph)
+    @test seconds < 30
+    @test !isempty(folds)
+end
+
 # Writes into an allocation are functional updates that plan with their
 # readers: padding read by a reduction, a concatenation read by a map and a
 # slice written then read are one kernel each, which stores only its result.
