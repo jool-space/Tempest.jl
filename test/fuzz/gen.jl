@@ -38,8 +38,8 @@ struct Case
 end
 
 # A case with some of its parts replaced, as the shrinker makes them.
-function Base.copy(c::Case; extents = c.extents, args = c.args, lines = c.lines, terms = c.terms)
-    Case(c.seed, c.family, extents, args, c.globals, lines, terms, c.notes)
+function Base.copy(c::Case; extents = c.extents, args = c.args, globals = c.globals, lines = c.lines, terms = c.terms)
+    Case(c.seed, c.family, extents, args, globals, lines, terms, c.notes)
 end
 
 # An extent's expression evaluated: names, integers, and Base's arithmetic.

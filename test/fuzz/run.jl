@@ -33,7 +33,11 @@
 # its seeds. One case again, its source and every stage:
 #
 #     julia --project=test test/fuzz/repro.jl SEED [--cuda] [--big] [--show] [--lock FILE]
+#         [--shrink] [--stage NAME]
 #
+# and with `--shrink` its statements removed and extents made smaller while
+# the same stage fails the same way, the smallest case written as a script to
+# shrunk-SEED.jl in `--out`. Faults found and not yet closed are in found.jl.
 # runtests.jl skips this directory.
 
 const HERE = @__DIR__
