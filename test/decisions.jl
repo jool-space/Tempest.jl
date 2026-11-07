@@ -180,23 +180,25 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         @test built > 0
         @test built <= distinct(ex.plan)
         # A fold's state is named by its place in the group, so layers alike
-        # share kernels however their values are numbered: the stack given
-        # its layers last to first, each read under another number, builds
-        # none that the stack has not. A deeper stack is no such test: the
-        # search reaches its first layers in another order, and the stack of
-        # 4 recomputed the first layer's product, a close call (55.5 μs
-        # against 55.7, estimated), where the stack of 8 joined its
-        # backward's kernels instead.
+        # share kernels however their values are numbered: in the stack given
+        # its layers last to first, each read under another number, a group
+        # alike one of the stack's and decided the same has its kernels. Which
+        # groups there are is the search's: it reaches the layers in another
+        # order, and where recomputing a layer's product is a close call by
+        # the estimates a run fits, one stack recomputes it into its
+        # backward's kernel and the other does not.
+        ext = Base.get_extension(Tempest, :cuTileExt)
         reversed_loss(layers, x) = sum(abs2, foldr((l, y) -> stack_layer(y, l), layers; init = x))
-        function built_by(f, args...)
-            p = differentiate(trace(f, args...))
-            before = C.cache_counts()
-            prepare(p, args...; target = T.CUDATarget(T.cuTileGenerator()), measure = false)
-            after = C.cache_counts()
-            (after.compiled - before.compiled) + (after.loaded - before.loaded)
+        kernel_keys(k) = [C.content_key("cuTile kernel", ext.source(t)) for t in k.kernels]
+        function kernels_by_group(f, args...)
+            ex = prepare(differentiate(trace(f, args...)), args...; target = T.CUDATarget(T.cuTileGenerator()), measure = false)
+            Dict((C.canonical(ex.plan, g), d.choice.key) => kernel_keys(k) for (g, d, k) in zip(ex.plan.groups, ex.decisions, ex.kernels))
         end
-        @test built_by(stack_loss, x, layers) > 0
-        @test built_by(reversed_loss, reverse(layers), x) == 0
+        forward = kernels_by_group(stack_loss, x, layers)
+        reversed = kernels_by_group(reversed_loss, reverse(layers), x)
+        alike = intersect(keys(forward), keys(reversed))
+        @test !isempty(alike)
+        @test all(k -> forward[k] == reversed[k], alike)
     end
     function per_layer_plan(L)
         layers, x = stack(L, identity)
