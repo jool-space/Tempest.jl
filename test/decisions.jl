@@ -1,8 +1,10 @@
 # What a user relies on of the plans Tempest decides, as tests: that the
 # spelling of a layout does not change them, that one rule decides fusion,
-# that identical layers cost the same each, and that the estimates that
-# decide hold up when measured. What holds of kernels, coverage, the runtime
-# and the cache is tested where each lives. Each property has cases that hold
+# and that identical layers cost the same each. That the estimates that decide
+# hold up when measured is a timing of the device, which a shared GPU and each
+# run's fitted rates move, and is checked apart from the suite, in
+# test/bench/decisions.jl. What holds of kernels, coverage, the runtime and
+# the cache is tested where each lives. Each property has cases that hold
 # and cases that do not yet: a case not met is `@test_broken` under a testset
 # that names what closes the gap, as the coverage suite does. A closed gap
 # fails here as an unexpected pass, and its case moves up.
@@ -246,92 +248,11 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
     end
 end
 
-# The coverage suite's compositions, in a module of their own: their names
-# clash with this file's.
-module Coverage include(joinpath(@__DIR__, "fixtures", "compositions.jl")) end
-
-within(e, t) = max(e, t) <= C.ESTIMATE_ERROR * min(e, t)
-
-# A group chosen by estimate among several options: the choice is within the
-# close-call factor of its measurement, and no option measures faster beyond
-# the noise, since an implementation's own alternatives (a product's tiles)
-# are measured, not ranked by the estimate. Each side of a comparison made
-# by estimate is within the factor of its measurement, and each such
-# comparison stands when measured.
-# Pointwise work inside a product's sweep (a softcap's tanh, HSTU's SiLU) is
-# priced per position by a constant measured at one shape, at full occupancy.
-# Where the kernel's occupancy or sweep differs from that shape's, as HSTU's
-# recomputing kernels' and the softcap's tf32 kernels' do, the estimate misses
-# by up to three times, though the decision stands.
-const SWEEP_SHAPE = "a sweep's pointwise work priced per position at one shape and occupancy (TRIALS: the constants of the cost model)"
-in_sweep(c, precision) = occursin("SiLU", c.name) || occursin("softcap", c.name) && precision === :tf32
-# A launch of fewer blocks than the device runs at once, its operands read
-# from memory, loads them before it computes: the two add rather than
-# overlap, and cuBLAS's 256×512·384 product at full precision takes 14 μs
-# where it is estimated at 9, timed from memory (11.8 from the cache).
-const ONE_WAVE = "a launch of one wave from memory, its loads and its products added rather than overlapped (`OVERLAP`, src/Compiler/cover/cost.jl)"
-one_wave(c, precision) = c.name == "linear, bias, GELU" && precision === :full
-# A launch's bytes are priced at the bandwidth its reads are fit on, writes
-# too; timed from memory, writes that fit the cache land there and reach
-# memory after it. Attention's backward with its scores and dp stored writes
-# p and ds from the log-sum-exp's kernel, where Δ no longer waits for it:
-# 4.2 MB read and 4.2 MB written, estimated at 35 μs and timed at 19, what
-# the reads take. In full precision the function's step misses so where the
-# backward would recompute the scores: the exponential, 2 MB read and 2 MB
-# written, is estimated at 18 μs and timed at 10, and that side of the
-# comparison at 326 to 428 μs from run to run, timed at 270, about the
-# close-call factor. At TF32 the forward misses so where it would store the
-# scores: the product writing them, 2 MB, is estimated at 20 μs and timed at
-# 8.5, and with the softmax over the stored scores stepping in matrices
-# (14.6 μs) that side comes to 34.8 against 23.0, just past the factor; the
-# decision, recomputing them, stands at 22.1.
-const CACHED_WRITES = "a launch's writes priced at the bandwidth of its reads, where timed from memory they land in the cache (`fit_memory!`, src/Compiler/cover/calibrate.jl)"
-const STORED_SCORES = ("attention as a function", "written out with contract and logsumexp", "softmax spelled exp(s - max) / sum",
-    "the function, then a residual", "written out, then a residual", "the function, and a reduction of its output")
-cached_writes(c, precision) = c.name == "the function, a training step" ||
-    precision === :tf32 && (c.name == "written out, a training step" || c.name in STORED_SCORES)
-
-@testset "estimates that decide are within the close-call factor, or measured" begin
+# An estimate is a launch's work, bytes, flops and blocks, priced on the
+# target's lines; the work names no rate of its own. Whether the estimates
+# hold up when measured is test/bench/decisions.jl's.
+@testset "an estimate prices work on the target's lines" begin
     @test !hasfield(Tempest.Compiler.Implement.Work, :rate)
-    CUDA_FUNCTIONAL && @testset "$(c.name), $precision" for precision in (:full, :tf32), c in Coverage.COMPOSITIONS
-        d = C.Decider(T.CUDATarget(; precision), C.rewrite(C.lower(c.program)); measure = :close)
-        p, considered = C.cover(d)
-        timed(q, g, o) = (C.measure!(d, q, g, o); d.record[o.key])
-        held = Bool[]
-        for g in p.groups
-            x = C.decide(d, p, g)
-            x.how === :estimated && length(x.options) > 1 || continue
-            push!(held, within(x.choice.estimate, timed(p, g, x.choice)))
-            push!(held, all(o -> timed(p, g, o) >= (1 - d.rates.noise) * timed(p, g, x.choice), x.options))
-        end
-        # A comparison decided by estimate stands when measured; times within
-        # the device's noise are a tie, which the estimate decides.
-        stands = Bool[]
-        for k in filter(k -> k.comparison.how === :estimated, considered)
-            measured = map(side -> sum(s -> timed(s[1], s[2], s[3].choice), side; init = 0.0), k.comparison.sides)
-            push!(stands, abs(measured[2] - measured[1]) <= d.rates.noise * minimum(measured) || (measured[2] < measured[1]) == C.cheaper(k.comparison))
-            append!(held, within.((k.comparison.old, k.comparison.new), measured))
-        end
-        if in_sweep(c, precision)
-            @testset "gap: $SWEEP_SHAPE" begin
-                @test_skip all(stands)
-                @test_skip all(held)
-            end
-        elseif one_wave(c, precision)
-            @testset "gap: $ONE_WAVE" begin
-                @test all(stands)
-                @test_skip all(held)
-            end
-        elseif cached_writes(c, precision)
-            @testset "gap: $CACHED_WRITES" begin
-                @test all(stands)
-                @test_skip all(held)
-            end
-        else
-            @test all(stands)
-            @test all(held)
-        end
-    end
 end
 
 # Gaps the probes of unfamiliar spellings found, each under what closes it.
