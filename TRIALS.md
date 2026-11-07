@@ -360,6 +360,46 @@ result and 5.53 ms a step at batch 64, 19.9 s and 33.2 ms at 1024, as the
 `accumulate` form. A selection stepping by more than one stays unrolled, as
 does a loop of maps alone.
 
+Checked by loops drawn at random, 6 and 7 November: one to three states
+and a number, weights passed or captured, an input's slices forward, back
+or by two, states assigned in turn or at once, read after the loop or
+collected at each step, a second loop after the first; each run eagerly
+in Float64, traced, interpreted and prepared on the CPU, its gradient
+against central differences and prepared again with sums made to ride and
+folds recomputed at random, and on CUDA in Float32 (a checker outside the
+repository). Of some eighteen thousand drawn, fourteen faults, each taken
+with a test of its own. Wrong results: a state no cycle of states runs
+through read where nothing had been written (on main too, through
+`accumulate`), now its next value one step back; crossing states, one
+whose next value only the other's reads, left without what it is carried
+from (main's forward 9% off); ties of a maximum sharing its cotangent,
+NaN on CUDA where a recomputed sum differed in its last bit, now the
+element `findmax` finds, as Zygote's rule gives it; a step's cuTile
+kernels built on the first step's slices and pointed at the others, less
+aligned than cuTile had compiled them for, a gradient 1.25 off at three
+hidden units; and a product in a cuTile recurrence's step whose factor
+the step computes, its padded lanes a 0/0 the weight's zeros multiplied,
+NaN. Refusals of programs that plan: kernels in a cycle, from states
+crossing or swapping, a join, or a sum offered to ride steps it could not
+(one summing a batch as long as the steps, one reading a second
+recurrence); two states given one value; a name a fold's launch never
+bound. Planning exponential in a term's paths, built, shown, hashed and
+asked what it mentions along each: forty maps each reading the last
+twice had taken hours, an unrolled loop's gradient over ten minutes. And
+the cover's trials writing one dictionary from several threads. Four of
+the fourteen were walks of the graph through operands, which leave out
+what a state is carried from. Refused by name, as before: a scan in a
+recurrence's cycle, 7% of the loops drawn; states of two shapes in one
+recurrence, 2%. Preparing the LSTM below takes 1.40 s warm against main's
+1.30, its first 1 to 2 s longer.
+
+The LSTM's training step against torch 2.14.0 on the GB10, 7 November,
+TF32, 32 inputs through 256 hidden, 100 steps, each alone on the device
+and captured as a graph: at batch 64, cuDNN's `nn.LSTM` 2.05 ms, the
+cell as a loop under `torch.compile` 3.42, the loop eager 6.14, Tempest
+5.53; at 1024, 24.8, 20.4, 32.1 and 33.0. Tempest runs a step as about
+ten launches, a split product forward and seven kernels back.
+
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
 it, and a program for a new size is a new preparation. Decode escapes it, its
