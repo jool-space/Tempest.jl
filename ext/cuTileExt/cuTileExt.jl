@@ -152,6 +152,7 @@ function Base.show(io::IO, s::TileSchedule)
         s.options.workers === nothing || print(io, ", ", s.options.workers, " worker warps")
         s.options.transposes && print(io, ", transposed folds added")
         s.options.inner > 0 && print(io, ", inner products ", s.options.inner, " deep")
+        s.occupancy === nothing || print(io, ", occupancy ", s.occupancy)
         return
     end
     print(io, s.sketch, " ", join(extent(s), "×"), ", tile ", join(tiles(s), "×"))

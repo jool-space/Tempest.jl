@@ -95,10 +95,10 @@ end
 
 # The claim under tile `(tm, tn, tk)`, its sum split `split` ways, over
 # `tiling`; nothing when the generator cannot express the group over it.
-function product_claim(g::GroupView, tiling, tm, tn, tk, split, precision; options = PLAIN)
+function product_claim(g::GroupView, tiling, tm, tn, tk, split, precision; options = PLAIN, occupancy = nothing)
     M, K, N = tiling[1:3]
     t = [TileAxis(M.axes, M.extent, tm, false), TileAxis(K.axes, K.extent, tk, true), TileAxis(N.axes, N.extent, tn, false), tiling[4:end]...]
-    s = TileSchedule(:product, t, split, nothing, 8, precision, options)
+    s = TileSchedule(:product, t, split, occupancy, 8, precision, options)
     c = Context(g, s)
     all(r -> products_of(c, r), g.reductions) && any(r -> has_product(c, r), g.reductions) && expressible_over(c) ? Claim(s) : nothing
 end
@@ -182,7 +182,7 @@ function product_variants(target, g::GroupView, c::Claim)
     for (tk, split) in unique(tiles)
         (tk, split) == (K.tile, s.splits) && continue
         options = split > 1 ? ProductOptions(s.options.workers, false, s.options.inner) : s.options
-        x = product_claim(g, s.tiling, M.tile, N.tile, tk, split, s.precision; options)
+        x = product_claim(g, s.tiling, M.tile, N.tile, tk, split, s.precision; options, s.occupancy)
         x === nothing || push!(found, x)
     end
     !isempty(facts.recomputed) && named_options() === nothing || return found
@@ -191,7 +191,15 @@ function product_variants(target, g::GroupView, c::Claim)
     deeper = any(t -> any(>(step), t.extents), facts.recomputed) ? [ProductOptions(o.workers, o.transposes, o.inner > 0 ? 0 : 2step)] : ProductOptions[]
     for options in [[ProductOptions(x.workers, x.transposes, o.inner) for x in product_options(target, g, s)]; deeper]
         options == o && continue
-        x = product_claim(g, s.tiling, M.tile, N.tile, K.tile, s.splits, s.precision; options)
+        x = product_claim(g, s.tiling, M.tile, N.tile, K.tile, s.splits, s.precision; options, s.occupancy)
+        x === nothing || push!(found, x)
+    end
+    # Two blocks a multiprocessor, as cuTile's own attention kernel asks:
+    # BFloat16 attention's forward took 50 μs so against 62 at tileiras's
+    # choice (1024 positions, 64 features, causal).
+    for occupancy in (nothing, 2)
+        occupancy == s.occupancy && continue
+        x = product_claim(g, s.tiling, M.tile, N.tile, K.tile, s.splits, s.precision; options = o, occupancy)
         x === nothing || push!(found, x)
     end
     found
