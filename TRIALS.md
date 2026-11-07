@@ -14,29 +14,25 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**Attention's training step costs nearly six forwards.** At 1024
-positions, TF32, causal, 64 features, 8 heads and batch 2, the forward
-takes 0.145 ms and the training step 0.815 ms; at 2048, 0.458 and 2.67 ms
-(measured on 27 October; the masked-attention trial's table has 2.79 and
-10.57 ms for the step, when the partition banned recomputing folds and the
-step stored the scores and their probabilities). The cover now recomputes
-the scores, the probabilities' gradient and the output's dot with its
-gradient inside the backward's sweep, so the step stores the log-sum-exp
-and no probabilities, 20 MiB at 1024, in four kernels: the log-sum-exp, a
-pass of its own recomputing the scores (75 μs); the forward (168 μs); the
-loss; and one backward kernel writing the three gradients (570 μs). What
-stands trial: that backward kernel, which recomputes the scores in both
-orientations, once for the key and value gradients and once, transposed,
-for the query gradient (`ext/cuTileExt/build.jl`); and the log-sum-exp's
-pass, since no group writes a fold over fewer of its kept axes than its
-domain has, and the forward's online fold already holds the statistic
-(`src/Compiler/plan/planner.jl`, `fixed_group`). Challenger:
-FlashAttention-2 (`flash_attn/flash_attn_triton.py`), whose forward writes
-the log-sum-exp beside the output and whose backward recomputes the scores
-once per tile, accumulating the query gradient atomically. Judged by the
-step's time at 1024 and 2048 positions against the forward's, which
-FlashAttention holds near two and a half, and by the bytes the step
-stores; the answers agreeing with the interpreter.
+**BFloat16 attention's forward trails FlashAttention-2.** At 1024
+positions, causal, 64 features, 8 heads and batch 2, the forward takes 50
+μs and FlashAttention-2's 41; at 2048, 166 and 128 (the table under the
+training step's trial). The softmax's weights computed as powers of two with
+denormals flushed, and products that recompute a fold searched at an
+occupancy of two, took it there from 67 and 220. cuTile.jl's own attention
+kernel (`examples/fmha.jl`), FlashAttention-2's algorithm written by hand in
+the same tile language, takes 37 μs at 1024 under a 64×64 tile. What stands
+trial: the product kernel's tiles, which the generator lays out in the full
+rank of the tiling and reshapes to matrices around each product
+(`ext/cuTileExt/emit.jl`, `matrix_tile`, `from_matrix`, `emit_fold!`).
+Reshaped to three dimensions and straight back, the scores leaving the first
+product or the weights entering the second cost the hand kernel 6 to 13 μs,
+tileiras moving them through shared memory; the generated kernel does both
+at every step, in 2224 instructions against the hand kernel's 992, 78 of
+them stores to shared memory against 4. Challenger: the hand kernel, whose
+scores and weights stay matrices from one product to the next. Judged by the
+forward's time at 1024 and 2048 positions against FlashAttention-2 and the
+hand kernel, the answers agreeing with the interpreter.
 
 **Time to first execution, cold and warm.** From `using Tempest` to a
 program's first result: cold, in a new process with an empty kernel cache
@@ -442,6 +438,34 @@ on explicit refs, transparent to tracing, with its own derivative) and Exo
 to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
+
+**Attention's training step: the code wins.** On trial was the step's
+cost against the forward's, near six forwards at 1024 positions (TF32,
+causal, 64 features, 8 heads, batch 2), judged against FlashAttention-2's,
+held near two and a half. The step now runs in three kernels: the forward
+writing the log-sum-exp beside the output, the loss, and one backward
+kernel whose transposed sweep adds the query gradient atomically. The
+challengers ran on the GB10 on the same problem with torch 2.14:
+`scaled_dot_product_attention` under each backend that takes it, and
+FlexAttention compiled with a causal block mask; the loss the sum of the
+output's squares, the gradients those of the queries, keys and values,
+replayed as CUDA graphs, TF32 allowed:
+
+| μs, forward / step | 1024 positions | 2048 positions |
+|---|---|---|
+| Tempest, BFloat16 | 50 / 197 | 166 / 637 |
+| FlashAttention-2 (SDPA flash), BFloat16 | 41 / 310 | 128 / 807 |
+| FlexAttention, BFloat16 | 43 / 293 | 141 / 841 |
+| cuDNN (SDPA), BFloat16 | 60 / 341 | 163 / 938 |
+| Tempest, TF32 | 95 / 410 | 330 / 1408 |
+| FlexAttention, TF32 | 91 / 746 | 305 / 2511 |
+| SDPA memory-efficient, TF32 | 219 / 1098 | 737 / 3690 |
+
+On this device FlashAttention-2's step costs 6.3 to 7.5 of its forwards, not
+two and a half, and Tempest's step is the fastest in both precisions: the
+ratio was the wrong judge, and the step's time is the right one. What is not
+judged, named: the BFloat16 step's gradients against the interpreter, which
+these runs did not compare; the forward, which trails, has its own trial.
 
 **A kernel is keyed without Tempest's code and checked by what it uses of it,
 adopted.** On trial was the kernel cache's key holding the identity of every
