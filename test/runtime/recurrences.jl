@@ -150,7 +150,9 @@ end
 # states crossing, two swapping, and a second-order recurrence, the last
 # state carried from the state as it was, whose loops roll through
 # `accumulate`. Two states given one value, written twice and computed once,
-# are each carried from a value of its own.
+# are each carried from a value of its own. A state whose next value only
+# another state's next value reads is kept with what it is carried from: the
+# recurrence had been left out, its states without a kernel.
 @testset "states assigned at once" begin
     W, U = data(3, 3; scale = 0.3), data(3, 2; scale = 0.3)
     crossing(xs, a, b) = (s1 = a; s2 = b; for t in axes(xs, 2); s1, s2 = tanh.(W * s2 .+ U * xs[:, t]), 0.5 .* s1 .+ 0.5 .* tanh.(s2); end; sum(s1) + sum(abs2, s2))
@@ -160,7 +162,17 @@ end
     twins(xs, a, b) = (s1 = a; s2 = b; r = sum(a) * 0.1;
         for t in axes(xs, 2); z = s2 ./ (1 .+ abs.(U * xs[:, t])) .+ s1; s2 = tanh.(z); s1 = tanh.(z); r = 0.5 * r + 0.01 * sum(abs2, z); end;
         sum(abs2, s1) + sum(s2) + r)
-    for f in (crossing, swapping, second, twins)
+    σ(x) = 1 / (1 + exp(-x))
+    function crossed(xs, a, b)
+        s1 = a; s2 = b; s3 = a .* 0.5
+        for t in axes(xs, 2)
+            z3 = (U * xs[:, t]) ./ (1 .+ abs.(s3))
+            z4 = s2 .* (sum(U * xs[:, t]) * 0.1)
+            s1, s2, s3 = σ.(z3) .* s3 .+ (1 .- σ.(z3)) .* tanh.(z3), tanh.(z4), σ.(z4) .* s1 .+ (1 .- σ.(z4)) .* tanh.(z4)
+        end
+        sum(s2) + sum(abs2, s3)
+    end
+    for f in (crossing, swapping, second, twins, crossed)
         p = trace(f, args...)
         @test count(n -> n.op isa C.Loop, p.nodes) > 0
         @test only(C.leaves(outputs(execute!(prepare(p, args...)))))[] ≈ f(args...)

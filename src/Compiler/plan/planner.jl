@@ -424,15 +424,26 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     values = graph.values
     n = length(values)
     # What the results read, directly or through others: nothing else runs.
+    # A state read keeps what it is carried from, after it, to a fixpoint: a
+    # state whose next value only another state's reads, as crossing states'
+    # are, was left with no kernel.
     live = falses(n)
     for o in graph.results, r in read_values(o)
         live[r] = true
     end
-    for id in n:-1:1
-        live[id] || continue
-        for o in operands(values[id].definition), r in read_values(o)
-            live[r] = true
+    while true
+        for id in n:-1:1
+            live[id] || continue
+            for o in operands(values[id].definition), r in read_values(o)
+                live[r] = true
+            end
         end
+        grown = false
+        for (id, v) in enumerate(values)
+            d = v.definition
+            live[id] && d isa Carried && d.from isa Read && !live[d.from.value] && (live[d.from.value] = grown = true)
+        end
+        grown || break
     end
     # Each sum riding a recurrence's steps, by the recurrence's state, and
     # the values between it and the cycle, which its steps compute.
