@@ -166,3 +166,34 @@ end
     args = (data(3, 3, 3; scale = 0.4), data(4, 3; scale = 0.5))
     @test only(C.leaves(outputs(execute!(prepare(trace(f, args...), args...)))))[] ≈ f(args...)
 end
+
+# A sum rides a recurrence's steps where it adds them up: not the state
+# after them over an axis as long as they are, nor a state of a second
+# recurrence, whose step reads the first's, at each step, by the first's
+# steps, which would compute the second's state too; by the second's, each
+# offered once.
+@testset "sums riding a recurrence add its steps up" begin
+    W = data(2, 2; scale = 0.5)
+    after(a, xs) = (h = a; for t in axes(xs, 3); h = tanh.(W * h .+ xs[:, :, t]); end; sum(h))
+    function second(a, b, xs)
+        s, u = a, b
+        acc = []
+        for t in axes(xs, 3)
+            z = tanh.(W * s .+ xs[:, :, t])
+            s = 0.5 .* s .+ 0.5 .* z
+            u = 0.5 .* u .+ 0.5 .* tanh.(z)
+            push!(acc, u)
+        end
+        sum(abs2, stack(acc))
+    end
+    for (f, args, offered) in ((after, (data(2, 3), data(2, 3, 3)), 0), (second, (data(2, 3), data(2, 3), data(2, 3, 3)), 1))
+        p = trace(f, args...)
+        @test count(n -> n.op isa C.Loop, p.nodes) == 1
+        planned = prepare(p, args...; build = false).plan
+        sums = C.riding_sums(planned)
+        @test length(sums) == offered
+        for r in sums
+            @test C.execute(C.plan(planned.graph; ride = [r]), args...)[1] ≈ f(args...)
+        end
+    end
+end

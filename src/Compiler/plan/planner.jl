@@ -867,7 +867,8 @@ the recurrence's steps with it: computed at each step from the cycle's
 values there, the sum adding each step's part as the steps run, as a weight's
 gradient adds each step's while its operands are fresh. Each is a map or a
 fold that only `r` and the others read; nothing where `r` reads no value of
-the cycle, or another reads one of them.
+the cycle, or another reads one of them, or a state is carried from one, or
+`r` sums an axis other than the steps.
 """
 function riding(graph, live, cycle, r)
     values = graph.values
@@ -892,15 +893,52 @@ function riding(graph, live, cycle, r)
     set = Set([between; r])
     users = readers(graph)
     all(u -> all(w -> !live[w] || w in set, users[u]), between) || return nothing
+    # A state reads the value it is carried from, which no reader counts.
+    any(u -> u in between, (carried_from(graph, c) for (c, v) in enumerate(values) if v.definition isa Carried && v.definition.from isa Read)) && return nothing
+    # Each value of the cycle and between at its axis along the steps, from
+    # the states'; the sum adds them up where it reads them along an axis it
+    # sums, not a step's alone or along another.
+    along = Dict{Int, Int}(c => values[c].definition.axis for c in cycle if values[c].definition isa Carried)
+    for u in sort!([[w for w in cycle if !haskey(along, w)]; between])
+        e = values[u].definition
+        k = steps_iteration(e, length(values[u].dims), along)
+        k === nothing && return nothing
+        k == 0 && continue
+        if e isa Reduction
+            k in e.reduced && return nothing
+            k = count(j -> !(j in e.reduced), 1:k)
+        end
+        along[u] = k
+    end
+    k = steps_iteration(d, 0, along)
+    k isa Int && k in d.reduced || return nothing
     between
+end
+
+# The axis of `d`'s iteration along a recurrence's steps, where it reads each
+# value along them, by its axis there in `along`, a step at a time: 0 where
+# it reads none, nothing where it reads one otherwise or along two. A map
+# iterates over its `rank` axes, a fold over its iteration's.
+function steps_iteration(d, rank, along)
+    n = d isa Reduction ? length(d.iteration) : rank
+    k = 0
+    for o in operands(d)
+        o isa Read && haskey(along, o.value) || continue
+        e = o.index[along[o.value]]
+        j = findfirst(i -> e == var(i), 1:n)
+        j === nothing && return nothing
+        k in (0, j) || return nothing
+        k = j
+    end
+    k
 end
 
 """
     riding_sums(plan) -> values
 
 The sums of `plan` that could ride the steps of one of its recurrences:
-computed apart from them, over an axis as long as the steps, reading the
-recurrence's cycle through values only they read (see `riding`).
+computed apart from them, over the steps, reading the recurrence's cycle
+through values only they read (see `riding`), each once.
 """
 function riding_sums(p::Plan)
     graph = p.graph
@@ -916,12 +954,9 @@ function riding_sums(p::Plan)
         c = first(cs)
         live[c] || continue
         k = p.owner[c]
-        cd = values[c].definition
-        steps = values[c].dims[cd.axis]
         for (r, v) in enumerate(values)
             d = v.definition
-            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(fs) || continue
-            any(a -> d.iteration[a] == steps, d.reduced) || continue
+            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(fs) && !(r in found) || continue
             riding(graph, live, cycle, r) === nothing || push!(found, r)
         end
     end
