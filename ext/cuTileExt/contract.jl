@@ -25,10 +25,10 @@
 # keys) does that work once per step and per block, so its rows stay in one
 # tile when they fit, and the depth of its steps is its own question.
 # `TEMPEST_PRODUCT_TILE=m,n,k` names one tile instead, with no variants, for
-# experiments. The products inside a recomputed fold step at the depth
-# measured best for the class: 16 at full precision, 32 otherwise; a
-# schedule's options may name another, a variant measured as the tiles are
-# (see `product_variants`).
+# experiments, in the orientations it fits as named. The products inside a
+# recomputed fold step at the depth measured best for the class: 16 at full
+# precision, 32 otherwise; a schedule's options may name another, a variant
+# measured as the tiles are (see `product_variants`).
 product_step(precision, T) = T === Float32 && precision === :full ? 16 : 32
 
 full_precision(target, T) = T === Float32 && target.precision === :full
@@ -103,12 +103,33 @@ function product_claim(g::GroupView, tiling, tm, tn, tk, split, precision; optio
     all(r -> products_of(c, r), g.reductions) && any(r -> has_product(c, r), g.reductions) && expressible_over(c) ? Claim(s) : nothing
 end
 
+# A product commutes, so which factor's axes are the tile's rows is the
+# schedule's: the claims of both orientations, the factors' order in the term
+# deciding neither. The orientations differ in what a sweep can do: softcapped
+# attention's backward (16 features, 70 positions, causal) adds its
+# transposed folds keeping the keys as rows, 29.8 μs, and steps its folds by
+# their masks keeping the queries, 61.3.
 function product_claims(target, g::GroupView)
     facts = product_facts(target, g)
     facts === nothing && return Claim[]
     found = product_axes(g)
     found === nothing && return Claim[]
     M, N, K, B = found
+    orientations = [(M, N), (N, M)]
+    # A tile named for an experiment is that tile: the orientations it fits
+    # as named, unless it fits neither.
+    override = get(ENV, "TEMPEST_PRODUCT_TILE", "")
+    if !isempty(override)
+        named = Tuple(parse.(Int, split(override, ",")))
+        extent(axes) = prod(k -> g.domain[k], axes; init = 1)
+        exact = filter(((R, C),) -> fitted(named, extent(R), extent(C), extent(K)) == named, orientations)
+        isempty(exact) || (orientations = exact)
+    end
+    reduce(vcat, [oriented_claims(target, g, facts, R, C, K, B) for (R, C) in orientations])
+end
+
+# The claims of a product whose tile rows are `M` and columns `N`.
+function oriented_claims(target, g::GroupView, facts, M, N, K, B)
     extent(axes) = prod(k -> g.domain[k], axes; init = 1)
     m, n, k, b = extent(M), extent(N), extent(K), extent(B)
     max(m, n, k, b) < typemax(Int32) ÷ 2 || return Claim[]

@@ -257,7 +257,10 @@ end
         (Einops.@einsum(v, exp.(s .- T.logsumexp(s; dims = 1)), "d n h b, n g h b -> d (g h) b"), s))
     q3, k3, v3 = single(data(64, 8, 3; scale = 0.1)), single(data(64, 200, 2, 3; scale = 0.2)), single(data(64, 200, 2, 3; scale = 0.3))
     p = trace(scored, q3, k3, v3, n)
-    ex = withenv(() -> prepare(p, map(CuArray, (q3, k3, v3, n))...; target), "TEMPEST_PRODUCT_TILE" => "64,4,16")
+    # Four queries by eight keys a tile, which only the scores' orientation
+    # with the queries as rows fits: blocks many enough that their sum is not
+    # split, which a block ruled out could not skip.
+    ex = withenv(() -> prepare(p, map(CuArray, (q3, k3, v3, n))...; target), "TEMPEST_PRODUCT_TILE" => "4,8,16")
     @test any(k -> occursin("masked tiles skipped", string(k)), ex.kernels)
     for m in (n, Int32[200, 5, 64])
         bind!(ex, 4 => CuArray(m))

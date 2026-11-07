@@ -88,10 +88,15 @@ end
         @test length(tiles) >= 6
         again = prepared(:close)
         @test again.choice.key == staged.choice.key && length(again.options) == length(staged.options)
-        # Every option: the four output tiles at both depths, split and
-        # not, but the tile of 32 output blocks, which does not split.
+        # Every option, in both orientations, the product commuting: each
+        # orientation's four output tiles at the default depth, and the
+        # variants of those measured best.
         every = prepared(:all)
-        @test length(staged.options) < length(every.options) == 14
+        @test length(staged.options) < length(every.options)
+        rows(o) = o.claim.schedule.tiling[1].axes
+        orientations = unique(map(rows, every.options))
+        @test length(orientations) == 2
+        @test all(r -> length(unique(tile(o)[1:2] for o in every.options if rows(o) == r && tile(o)[3] == 16)) == 4, orientations)
         @test all(t -> t[1:3] in [(tm, tn, tk) for (tm, tn) in ((64, 64), (128, 64), (64, 128), (32, 64)) for tk in (16, 32)],
             map(tile, every.options))
     end
