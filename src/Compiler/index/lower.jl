@@ -606,16 +606,29 @@ function splice_step!(nodes, body::LoopBody, inputs)
             throw(ArgumentError("a $(op_name(op)) in a recurrence's step is not supported yet"))
         end
     end
-    for (k, c) in carries
+    # Nodes lowering makes one value: one operation on alike inputs, each
+    # state its own.
+    alike = collect(eachindex(nodes))
+    if length(carries) > 1
+        table = Dict{Any, Int}()
+        for (i, nd) in enumerate(nodes)
+            (nd.op isa Carry || isempty(nd.inputs) && !(nd.op isa Constant)) && continue
+            alike[i] = get!(table, (nd.op, map(j -> alike[j], nd.inputs), nd.dims, nd.eltype, nd.scalar), i)
+        end
+    end
+    taken = Set{Int}()
+    for (k, c) in sort!(collect(carries))
         n = nodes[c]
         next = at[step.results[body.carried[k]]]
         # A state carried from a state as it was, `(x, last) -> (f(x, last),
         # x)`, is carried from a copy of it: a value of its own, as each
-        # state's next one is.
-        if nodes[next].op isa Carry
+        # state's next one is; so is a state whose next value another's is,
+        # `s1, s2 = tanh.(z), tanh.(z)`.
+        if nodes[next].op isa Carry || alike[next] in taken
             one_ = (push!(nodes, Node(Constant(one(n.eltype)), (), (), n.eltype, true)); length(nodes))
             next = emit!(Map(*), (next, one_), n.dims, n.eltype)
         end
+        push!(taken, get(alike, next, next))
         nodes[c] = Node(Carry(next, body.reverse), n.inputs, n.dims, n.eltype, n.scalar)
     end
     [at[r] for r in step.results]
