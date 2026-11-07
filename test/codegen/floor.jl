@@ -164,3 +164,14 @@ if CUDA_FUNCTIONAL
         @test isapprox(Array(outputs(execute!(ex))), sum(x; dims = 2); rtol = 1.0e-10)
     end
 end
+
+# A fold the group's items do not cover runs in a launch of its own, which
+# reads the group's folds from storage: those inside a fold it recomputes
+# too. A softmax's normalization twice, differentiated, sums over every
+# position a term recomputing the row's maximum and sum.
+@testset "a fold of its own launch reads the folds it recomputes from storage" begin
+    f(s) = (for _ in 1:2; z = exp.(s .- maximum(s; dims = 1)); s = tanh.(z .- sum(z; dims = 1) ./ 3); end; sum(abs2, s) + sum(s) * 0.3)
+    grad = s -> T.withgradient(f, s)
+    s = data(3, 2)
+    @test agree(C.leaves(outputs(execute!(prepare(trace(grad, s), s)))), C.leaves(grad(s)))
+end

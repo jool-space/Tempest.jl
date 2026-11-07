@@ -429,10 +429,14 @@ function recurrence_kernel(graph, stored, g::Group, slots)
 end
 
 # A term with the group's reductions read from storage, at their placements,
-# for a launch that runs after the group's own.
-stored_statistics(t::Stat, graph, g) = Load(t.value, placement(graph, g, t.value))
-stored_statistics(t::Apply, graph, g) = Apply(t.f, map(a -> stored_statistics(a, graph, g), t.args), t.eltype)
-stored_statistics(t::Term, graph, g) = t
+# for a launch that runs after the group's own: inside the folds it
+# recomputes too, whose bodies read them as well. Each subterm is rewritten
+# once, as a term reaches one along many paths.
+stored_statistics(t::Term, graph, g, memo = Dict{Term, Term}()) = get!(() -> restored(t, graph, g, memo), memo, t)
+restored(t::Stat, graph, g, memo) = Load(t.value, placement(graph, g, t.value))
+restored(t::Apply, graph, g, memo) = Apply(t.f, map(a -> stored_statistics(a, graph, g, memo), t.args), t.eltype)
+restored(t::Recomputed, graph, g, memo) = Recomputed(t.value, t.index, t.extents, stored_statistics(t.body, graph, g, memo))
+restored(t::Term, graph, g, memo) = t
 
 # A fold the group's items do not cover, on the floor: one item per position of
 # its kept axes, sweeping its reduced axes and recomputing its operand.
