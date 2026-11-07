@@ -395,8 +395,16 @@ function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices,
         push!(st, :($masked = $(valid === nothing ? x : :(ifelse.($valid, $x, $(T(-Inf)))))))
         push!(st, :($top = max.($m, maximum($masked; dims = $p))))
         push!(st, :($shift = $(lse_shift).($top)))
-        push!(st, :($rise = exp.($m .- $shift)))
-        push!(st, :($w = exp.($masked .- $shift)))
+        # Each weight as 2 to the power of its exponent in bits, denormals
+        # flushed: the weights are at most one, the largest one, so a weight
+        # flushed lies below the sum's rounding. BFloat16 attention's
+        # forward took 37 μs so in cuTile's own kernel, 45 through `exp`
+        # (1024 positions, 64 features, causal).
+        L = T(log2(ℯ))
+        push!(st, :($(ct.Intrinsics.fpmode_begin)(nothing, true)))
+        push!(st, :($rise = exp2.(($m .- $shift) .* $L)))
+        push!(st, :($w = exp2.(($masked .- $shift) .* $L)))
+        push!(st, :($(ct.Intrinsics.fpmode_end)()))
         push!(st, :($m = $top))
         scope[Apply(Weight(), (y,), T)] = w
     end
