@@ -875,13 +875,22 @@ function riding(graph, live, cycle, r)
     d = values[r].definition
     d isa Reduction && d.fold isa SumFold && !(r in cycle) || return nothing
     inside = Set(cycle)
-    # Each value up to `r` that reads the cycle, through others; and those
-    # `r` reads, through others.
-    reaches, read = falses(r), falses(r)
+    # Each value that reads the cycle, through others or a state carried
+    # from one that does, as a second recurrence whose step reads the
+    # first's; and those `r` reads, through others.
+    reaches, read = falses(length(values)), falses(r)
     read[r] = true
-    for u in minimum(cycle):r
-        u in inside && (reaches[u] = true; continue)
-        reaches[u] = any(o -> any(x -> x <= r && reaches[x], read_values(o)), operands(values[u].definition))
+    carried = [(c, carried_from(graph, c)) for (c, v) in enumerate(values) if v.definition isa Carried && v.definition.from isa Read]
+    while true
+        for u in eachindex(values)
+            reaches[u] && continue
+            reaches[u] = u in inside || any(o -> any(x -> reaches[x], read_values(o)), operands(values[u].definition))
+        end
+        grown = false
+        for (c, f) in carried
+            !reaches[c] && reaches[f] && (reaches[c] = grown = true)
+        end
+        grown || break
     end
     reaches[r] || return nothing
     for u in r:-1:1
@@ -894,7 +903,7 @@ function riding(graph, live, cycle, r)
     users = readers(graph)
     all(u -> all(w -> !live[w] || w in set, users[u]), between) || return nothing
     # A state reads the value it is carried from, which no reader counts.
-    any(u -> u in between, (carried_from(graph, c) for (c, v) in enumerate(values) if v.definition isa Carried && v.definition.from isa Read)) && return nothing
+    any(((_, f),) -> f in set, carried) && return nothing
     # Each value of the cycle and between at its axis along the steps, from
     # the states'; the sum adds them up where it reads them along an axis it
     # sums, not a step's alone or along another.

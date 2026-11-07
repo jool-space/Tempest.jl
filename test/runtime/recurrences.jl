@@ -175,7 +175,8 @@ end
 # after them over an axis as long as they are, nor a state of a second
 # recurrence, whose step reads the first's, at each step, by the first's
 # steps, which would compute the second's state too; by the second's, each
-# offered once.
+# offered once. Nor by the first's, in a gradient, a sum reading the
+# second's cycle, which its states reach through what they are carried from.
 @testset "sums riding a recurrence add its steps up" begin
     W = data(2, 2; scale = 0.5)
     after(a, xs) = (h = a; for t in axes(xs, 3); h = tanh.(W * h .+ xs[:, :, t]); end; sum(h))
@@ -199,5 +200,21 @@ end
         for r in sums
             @test C.execute(C.plan(planned.graph; ride = [r]), args...)[1] ≈ f(args...)
         end
+    end
+    σ(x) = 1 / (1 + exp(-x))
+    function crossing(xs, a1, a2, U)
+        s1 = a1; s2 = a2; s3 = s1
+        for t in axes(xs, 2)
+            z3 = s1 .+ U * xs[:, t] .- s2 .* (sum(s1) * 0.1)
+            z4 = s2 .* (sum(U * xs[:, t]) * 0.1)
+            s1, s2, s3 = σ.(z3) .* s1 .+ (1 .- σ.(z3)) .* tanh.(z3), 0.5 .* s2 .+ 0.5 .* tanh.(z4), 0.5 .* s3 .+ 0.5 .* tanh.(z4)
+        end
+        sum(abs2, s1) + sum(s2) * 0.3 + sum(s3) * 0.3
+    end
+    grad = (ys...) -> T.withgradient(crossing, ys...)
+    args = (data(2, 5), data(2), data(2), data(2, 2; scale = 0.5))
+    planned = prepare(trace(grad, args...), args...; build = false).plan
+    for r in C.riding_sums(planned)
+        @test agree(C.execute(C.plan(planned.graph; ride = [r]), args...), C.leaves(grad(args...)))
     end
 end
