@@ -804,8 +804,10 @@ awaits_sweep(graph, deps, g::Group, v) = g.kind === :scan &&
 # Recurrences: their carried states, the value each is carried from, and the
 # cycle between, the values that read a state and that a value a state is
 # carried from reads, both through others: what its group computes at each
-# step. States whose cycles read each other's are one recurrence's, as an
-# LSTM's hidden state and its cell are, each step reading both.
+# step. States each carried from a value reading the other, through others,
+# are one recurrence's: an LSTM's hidden state and its cell, each step
+# reading both, and two states assigned at once, `s1, s2 = f(s2), g(s1)`,
+# though neither state's value is carried from one that reads it.
 function recurrences(graph)
     carried = Tuple{Int, Int}[]
     for (c, v) in enumerate(graph.values)
@@ -818,20 +820,19 @@ function recurrences(graph)
     cycles = [recurrence_cycle(graph, [c], [f]) for (c, f) in carried]
     length(carried) <= 1 && return [([c], [f], cycle) for ((c, f), cycle) in zip(carried, cycles)]
     up = ancestors(graph)
-    reads(a, b) = any(w -> any(u -> up[w][u], b), a)
-    # Joined while any two read each other's cycles.
-    sets = [[k] for k in eachindex(carried)]
-    joined = true
-    while joined
-        joined = false
-        for i in eachindex(sets), j in (i + 1):length(sets)
-            a, b = union((cycles[k] for k in sets[i])...), union((cycles[k] for k in sets[j])...)
-            !isdisjoint(a, b) || reads(a, b) && reads(b, a) || continue
-            append!(sets[i], sets[j])
-            deleteat!(sets, j)
-            joined = true
-            break
+    # Which states each state's value is carried from reads, through others.
+    n = length(carried)
+    reach = [[up[f][c] for (c, _) in carried] for (_, f) in carried]
+    for m in 1:n, k in 1:n
+        reach[k][m] || continue
+        for j in 1:n
+            reach[m][j] && (reach[k][j] = true)
         end
+    end
+    sets = Vector{Int}[]
+    for k in 1:n
+        any(set -> k in set, sets) && continue
+        push!(sets, [j for j in 1:n if j == k || reach[k][j] && reach[j][k]])
     end
     map(sort!(sets; by = minimum)) do set
         cs, fs = [carried[k][1] for k in sort(set)], [carried[k][2] for k in sort(set)]

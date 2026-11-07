@@ -123,3 +123,23 @@ end
         @test agree(C.leaves(outputs(execute!(prepare(trace(grad, args...), args...)))), C.leaves(grad(args...)))
     end
 end
+
+# States assigned at once, each carried from a value reading the other, are
+# one recurrence, though neither's value is carried from one reading it: two
+# states crossing, two swapping, and a second-order recurrence, the last
+# state carried from the state as it was, whose loops roll through
+# `accumulate`.
+@testset "states assigned at once" begin
+    W, U = data(3, 3; scale = 0.3), data(3, 2; scale = 0.3)
+    crossing(xs, a, b) = (s1 = a; s2 = b; for t in axes(xs, 2); s1, s2 = tanh.(W * s2 .+ U * xs[:, t]), 0.5 .* s1 .+ 0.5 .* tanh.(s2); end; sum(s1) + sum(abs2, s2))
+    swapping(xs, a, b) = (r = last(accumulate(((s1, s2), x) -> (tanh.(s2 .+ U * x), s1), eachslice(xs; dims = 2); init = (a, b))); sum(r[1]) + sum(abs2, r[2]))
+    args = (data(2, 5; scale = 0.4), data(3; scale = 0.2), data(3; scale = 0.3))
+    second(xs, a, b) = (r = last(accumulate(((y, last), x) -> (tanh.(1.5 .* y .- 0.5 .* last .+ U * x), y), eachslice(xs; dims = 2); init = (a, b))); sum(abs2, r[1]) + sum(r[2]))
+    for f in (crossing, swapping, second)
+        p = trace(f, args...)
+        @test count(n -> n.op isa C.Loop, p.nodes) > 0
+        @test only(C.leaves(outputs(execute!(prepare(p, args...)))))[] ≈ f(args...)
+        grad = (ys...) -> T.withgradient(f, ys...)
+        @test agree(C.leaves(outputs(execute!(prepare(trace(grad, args...), args...)))), C.leaves(grad(args...)))
+    end
+end

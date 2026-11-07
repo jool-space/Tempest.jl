@@ -608,7 +608,15 @@ function splice_step!(nodes, body::LoopBody, inputs)
     end
     for (k, c) in carries
         n = nodes[c]
-        nodes[c] = Node(Carry(at[step.results[body.carried[k]]], body.reverse), n.inputs, n.dims, n.eltype, n.scalar)
+        next = at[step.results[body.carried[k]]]
+        # A state carried from a state as it was, `(x, last) -> (f(x, last),
+        # x)`, is carried from a copy of it: a value of its own, as each
+        # state's next one is.
+        if nodes[next].op isa Carry
+            one_ = (push!(nodes, Node(Constant(one(n.eltype)), (), (), n.eltype, true)); length(nodes))
+            next = emit!(Map(*), (next, one_), n.dims, n.eltype)
+        end
+        nodes[c] = Node(Carry(next, body.reverse), n.inputs, n.dims, n.eltype, n.scalar)
     end
     [at[r] for r in step.results]
 end
