@@ -202,10 +202,23 @@ function fold_pullback(f::Relative, x, y, g, axes, full, tape)
     g * exp(x - y)
 end
 
-# Tied extrema share the cotangent equally.
-function fold_pullback(::Union{MaxFold, MinFold}, x, y, g, axes, full, tape)
-    ties = cast(node(x).eltype, x == y)
-    ties * (g / reduce_handle(tape, ties, axes; scalar = full))
+# An extreme's cotangent goes to the element `findmax` or `findmin` finds,
+# the first of equals, as Zygote's does: a fold of each element with its
+# position finds it, and the position, an integer, is the same wherever the
+# fold runs. Shared among the elements equal to the extreme, it compared
+# each with an extreme computed elsewhere, and a recomputed element can
+# differ in its last bit, as a sum's order does on a device: none was
+# equal, and the cotangent was NaN.
+function fold_pullback(f::Union{MaxFold, MinFold}, x, y, g, axes, full, tape)
+    xn = node(x)
+    T = xn.eltype
+    largest = f isa MaxFold
+    positions = h(tape, constant!(tape, reshape(1:prod(xn.dims), xn.dims)))
+    pairs = record_map(tuple, x, positions)
+    init = Initial{(largest ? typemin(T) : typemax(T), typemax(Int))}()
+    where = GenericFold(; init, lift = identity, combine = Better{largest}(), observe = last)
+    index = h(tape, record!(tape, Reduce(where, axes), (pairs.id,), node(y).dims, Int; scalar = full))
+    cast(T, positions == index) * g
 end
 
 # A product's partial by one element is the product of the others, computed
