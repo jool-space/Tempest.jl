@@ -364,15 +364,32 @@ function step_roots(c::Context, f, body, sums)
     f isa Relative{Exponential} ? [first(shifted_parts(c, body)); factors] : factors
 end
 
+# The plane an exponential fold steps in: its `y`'s, when the swept axis is
+# one of its two (see `plane`); nothing otherwise. A sum it adds elementwise
+# that spans no other wide axis adds in it too.
+function step_plane(c::Context, f, body, p)
+    f isa Relative{Exponential} || return nothing
+    P = plane(c, first(shifted_parts(c, body)))
+    P !== nothing && p in P ? P : nothing
+end
+
+in_step_plane(c::Context, P, term) = P !== nothing && issubset(wide_axes(c, term), P)
+
+# The shape of what a term sums to along tile axis `p`: over the step's
+# plane where it lies in it, else over the tiling.
+summed_shape(c::Context, P, term, p) = in_step_plane(c, P, term) ?
+    Base.setindex(plane_shape(c, term, P), 1, findfirst(==(p), P)) : Base.setindex(spanned_shape(c, term), 1, p)
+
 # Accumulators of sums, named from `prefix`: an exponential fold's running maximum,
 # over the lanes `y` spans but the swept ones, then each sum's, a product's
 # matrix or the lanes its term spans.
 function sum_accumulators!(st, c::Context, f, body, sums, p, prefix)
-    starts = Any[product === nothing ? :(fill($(zero(term.eltype)), $(Base.setindex(spanned_shape(c, term), 1, p)))) :
+    P = step_plane(c, f, body, p)
+    starts = Any[product === nothing ? :(fill($(zero(term.eltype)), $(summed_shape(c, P, term, p)))) :
         :(fill(0.0f0, ($(tile(c)[product[3]]), $(tile(c)[product[4]])))) for (term, product) in sums]
     if f isa Relative{Exponential}
         y = first(shifted_parts(c, body))
-        pushfirst!(starts, :(fill($(shifted_type(c, f, body)(-Inf)), $(Base.setindex(spanned_shape(c, y), 1, p)))))
+        pushfirst!(starts, :(fill($(shifted_type(c, f, body)(-Inf)), $(summed_shape(c, P, y, p)))))
     end
     acc = [Symbol(prefix, :_, i) for i in eachindex(starts)]
     foreach((a, x) -> push!(st, :($a = $x)), acc, starts)
@@ -381,19 +398,30 @@ end
 
 # One step of the sums. An exponential fold's running maximum rises to the step's
 # first, and its sums scale by how much it rose; lanes past the swept extent
-# weigh nothing. Then each sum adds its terms.
+# weigh nothing. Then each sum adds its terms. In its plane, the fold's
+# weights and what lies in it are matrices (see `plane`), and the weights
+# are also a tile over the tiling for what reads them there.
 function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices, p)
     # Tiles that cover the swept axis exactly have no lanes past it.
     c.s.tiling[p].extent % c.s.tiling[p].tile == 0 && (valid = nothing)
+    P = step_plane(c, f, body, p)
+    d = P === nothing ? p : findfirst(==(p), P)
+    lanes = valid
+    if P !== nothing && valid !== nothing
+        lanes = gensym(:valid)
+        push!(st, :($lanes = reshape($valid, $(map(q -> q == p ? tile(c)[p] : 1, P)))))
+    end
     rise = nothing
+    rise_tiled = nothing
     if f isa Relative{Exponential}
         y = first(shifted_parts(c, body))
         T = shifted_type(c, f, body)
-        x = as_accumulator(st, scope[y], T, term_eltype(y, c.g), spanned_shape(c, y))
+        x = P === nothing ? as_accumulator(st, scope[y], T, term_eltype(y, c.g), spanned_shape(c, y)) :
+            as_accumulator(st, in_plane(c, scope, y, P), T, term_eltype(y, c.g), plane_shape(c, y, P))
         m = first(acc)
         masked, top, shift, rise, w = gensym(:y), gensym(:top), gensym(:shift), gensym(:rise), gensym(:weight)
-        push!(st, :($masked = $(valid === nothing ? x : :(ifelse.($valid, $x, $(T(-Inf)))))))
-        push!(st, :($top = max.($m, maximum($masked; dims = $p))))
+        push!(st, :($masked = $(lanes === nothing ? x : :(ifelse.($lanes, $x, $(T(-Inf)))))))
+        push!(st, :($top = max.($m, maximum($masked; dims = $d))))
         push!(st, :($shift = $(lse_shift).($top)))
         # Each weight as 2 to the power of its exponent in bits, denormals
         # flushed: the weights are at most one, the largest one, so a weight
@@ -406,15 +434,39 @@ function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices,
         push!(st, :($w = exp2.(($masked .- $shift) .* $L)))
         push!(st, :($(ct.Intrinsics.fpmode_end)()))
         push!(st, :($m = $top))
-        scope[Apply(Weight(), (y,), T)] = w
+        weight = Apply(Weight(), (y,), T)
+        rise_tiled = rise
+        if P === nothing
+            scope[weight] = w
+        else
+            tiled = gensym(:weight)
+            push!(st, :($tiled = reshape($w, $(spanned_shape(c, y)))))
+            scope[weight] = tiled
+            scope[matrix_key(c, weight)] = w
+            rise_tiled = :(reshape($rise, $(Base.setindex(spanned_shape(c, y), 1, p))))
+        end
     end
     for ((term, product), a) in zip(sums, acc[(end - length(sums) + 1):end])
         if product === nothing
             emit_tiles!(k, st, c, [term], scope, indices...)
-            x = valid === nothing ? scope[term] : :(ifelse.($valid, $(scope[term]), $(zero(term.eltype))))
-            push!(st, :($a = $a .* $rise .+ sum($x; dims = $p)))
+            if in_step_plane(c, P, term)
+                x = in_plane(c, scope, term, P)
+                x = lanes === nothing ? x : :(ifelse.($lanes, $x, $(zero(term.eltype))))
+                push!(st, :($a = $a .* $rise .+ sum($x; dims = $d)))
+            else
+                x = valid === nothing ? scope[term] : :(ifelse.($valid, $(scope[term]), $(zero(term.eltype))))
+                push!(st, :($a = $a .* $rise_tiled .+ sum($x; dims = $p)))
+            end
         else
-            rise === nothing || push!(st, :($a = $a .* $(matrix_tile(c, rise, product[3], product[4]))))
+            i, j = product[3], product[4]
+            if rise !== nothing
+                # The rise spans the plane's other axis alone, a lane of the
+                # product's matrix where that is one of its two.
+                q = P === nothing ? nothing : P[3 - d]
+                scale = q !== nothing && q in (i, j) ? :(reshape($rise, $(map(x -> x == q ? tile(c)[q] : 1, (i, j))))) :
+                    matrix_tile(c, rise_tiled, i, j)
+                push!(st, :($a = $a .* $scale))
+            end
             accumulate_product!(st, c, scope, product, a, indices[p], p)
         end
     end
@@ -448,10 +500,13 @@ function shared_sums(c::Context, phase, sums)
 end
 
 # The state at the end of the sweep: an exponential fold's running maximum, and the
-# sums.
-function sum_state(c::Context, sums, acc)
+# sums, each over the tiling; those over the step's plane reshaped to it.
+function sum_state(c::Context, f, body, sums, acc, p)
+    P = step_plane(c, f, body, p)
     k = length(acc)::Int - length(sums)::Int
-    Any[acc[1:k]; [product === nothing ? a : from_matrix(c, a, product[3], product[4]) for ((_, product), a) in zip(sums, acc[(k + 1):end])]]
+    tiled(term, a) = in_step_plane(c, P, term) ? :(reshape($a, $(Base.setindex(spanned_shape(c, term), 1, p)))) : a
+    head = Any[tiled(first(shifted_parts(c, body)), a) for a in acc[1:k]]
+    Any[head; [product === nothing ? tiled(term, a) : from_matrix(c, a, product[3], product[4]) for ((term, product), a) in zip(sums, acc[(k + 1):end])]]
 end
 
 # A group's fold in a sweep along the schedule's swept axis: its sums, its
@@ -478,7 +533,7 @@ function fold_step!(k, st, c::Context, r, sums, acc, scope, valid, indices)
 end
 
 fold_state!(st, c::Context, r, sums, acc) =
-    sums === nothing ? reduce_state!(st, fold_of(c, r), accumulator(c, r), acc, sweep_axis(c.s)) : sum_state(c, sums, acc)
+    sums === nothing ? reduce_state!(st, fold_of(c, r), accumulator(c, r), acc, sweep_axis(c.s)) : sum_state(c, fold_of(c, r), c.g.terms[r], sums, acc, sweep_axis(c.s))
 
 phase_roots(c::Context, phase, sums) = unique(Term[x for r in phase for x in step_roots(c, fold_of(c, r), c.g.terms[r], sums[r])])
 

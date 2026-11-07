@@ -280,9 +280,16 @@ one_wave(c, precision) = c.name == "linear, bias, GELU" && precision === :full
 # backward would recompute the scores: the exponential, 2 MB read and 2 MB
 # written, is estimated at 18 μs and timed at 10, and that side of the
 # comparison at 326 to 428 μs from run to run, timed at 270, about the
-# close-call factor.
+# close-call factor. At TF32 the forward misses so where it would store the
+# scores: the product writing them, 2 MB, is estimated at 20 μs and timed at
+# 8.5, and with the softmax over the stored scores stepping in matrices
+# (14.6 μs) that side comes to 34.8 against 23.0, just past the factor; the
+# decision, recomputing them, stands at 22.1.
 const CACHED_WRITES = "a launch's writes priced at the bandwidth of its reads, where timed from memory they land in the cache (`fit_memory!`, src/Compiler/cover/calibrate.jl)"
-cached_writes(c, precision) = c.name == "the function, a training step" || c.name == "written out, a training step" && precision === :tf32
+const STORED_SCORES = ("attention as a function", "written out with contract and logsumexp", "softmax spelled exp(s - max) / sum",
+    "the function, then a residual", "written out, then a residual", "the function, and a reduction of its output")
+cached_writes(c, precision) = c.name == "the function, a training step" ||
+    precision === :tf32 && (c.name == "written out, a training step" || c.name in STORED_SCORES)
 
 @testset "estimates that decide are within the close-call factor, or measured" begin
     @test !hasfield(Tempest.Compiler.Implement.Work, :rate)

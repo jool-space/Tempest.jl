@@ -381,10 +381,11 @@ Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Conte
             continue
         end
         name = gensym(:t)
+        matrix = Ref{Any}(nothing)
         expr = if t isa Load
             load_tile(k, c, t, indices)
         elseif t isa Recomputed
-            emit_fold!(k, statements, c, t, indices)
+            emit_fold!(k, statements, c, t, indices; matrix)
         elseif t isa Ix
             x = index_tile(k, c, t.expr, indices)
             T = term_eltype(t, c.g)
@@ -397,6 +398,16 @@ Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Conte
         end
         push!(statements, :($name = $expr))
         names[t] = name
+        P = plane(c, t)
+        P === nothing && continue
+        if t isa Apply && !any(a -> names[a] isa Vector, t.args)
+            args = map(a -> in_plane(c, names, a, P), t.args)
+            matrix[] = t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
+        end
+        matrix[] === nothing && continue
+        m = gensym(:m)
+        push!(statements, :($m = $(matrix[])))
+        names[matrix_key(c, t)] = m
     end
     names
 end
@@ -864,8 +875,8 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = sw
     tk = tile(c)[p]
     fa, fb = product_factor(c, a), product_factor(c, b)
     xa, xb = gensym(:a), gensym(:b)
-    push!(st, :($xa = $(matrix_tile(c, names[fa], i, p))))
-    push!(st, :($xb = $(matrix_tile(c, names[fb], p, j))))
+    push!(st, :($xa = $(matrix_of(c, names, fa, i, p))))
+    push!(st, :($xb = $(matrix_of(c, names, fb, p, j))))
     # Padded steps of the swept axis read zeros from loads, but a computed
     # factor need not vanish there, nor be finite: each is zero there, as a
     # load's zero times a computed infinity is not. A value the kernel holds,
@@ -934,6 +945,53 @@ end
 spanned_shape(c::Context, t::Term) =
     ntuple(q -> any(k -> mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
 
+# Matrices. A product kernel's term that spans two of its tile axes of more
+# than one lane is also computed as a matrix over them (its plane, the two in
+# the tiling's order), beside its tile over the whole tiling: tileiras moves a
+# matrix product's operand or result through shared memory when it is
+# reshaped, even to the same shape and back, so the scores leaving one
+# product and the weights entering the next stay matrices from one to the
+# other. What reads only the tiles, the matrices beside them unused, compiles
+# as before, and the other way round. BFloat16 attention's forward took 36 μs
+# so against 50 (1024 positions, 64 features, causal; cuTile's own kernel,
+# 37), its sweep rewritten so by hand 34 against 51, identical bits.
+struct Planar end
+
+matrix_key(c::Context, t::Term) = Apply(Planar(), (t,), term_eltype(t, c.g))
+
+# The tile axes of more than one lane that `t` spans.
+wide_axes(c::Context, t::Term) =
+    [q for q in eachindex(c.s.tiling) if tile(c)[q] > 1 && any(k -> mentions(t, k), c.s.tiling[q].axes)]
+
+# The plane of a term a product kernel computes as a matrix; nothing for any
+# other.
+function plane(c::Context, t::Term)
+    c.s.sketch === :product || return nothing
+    axes = wide_axes(c, t)
+    length(axes) == 2 ? (axes[1], axes[2]) : nothing
+end
+
+# The shape of `t` over plane `P`: the tile along each of the two it spans,
+# one along the other.
+plane_shape(c::Context, t::Term, P) = map(q -> any(k -> mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, P)
+
+# Term `a`, which spans no wide axis outside plane `P`, over it: its matrix,
+# a number as it is, or its tile reshaped, a tile of one axis or none.
+function in_plane(c::Context, names, a::Term, P)
+    x = names[a]
+    x isa Number && return x
+    key = matrix_key(c, a)
+    haskey(names, key) && return names[key]
+    :(reshape($(ct.broadcast_to)($(tile_of(x)), $(spanned_shape(c, a))), $(plane_shape(c, a, P))))
+end
+
+# Term `x` as a `(u, w)` matrix: its own, where it has one.
+function matrix_of(c::Context, names, x::Term, u, w)
+    key = matrix_key(c, x)
+    haskey(names, key) || return matrix_tile(c, names[x], u, w)
+    u < w ? names[key] : :(permutedims($(names[key]), (2, 1)))
+end
+
 # A body that folds elementwise holds a step of itself in the tile, at most
 # `RECOMPUTED_ELEMENTS`: causal attention's backward recomputes its sum over
 # 64 features at 64 queries a step, 4096 elements, and softcapped attention's
@@ -973,7 +1031,7 @@ end
 # piece: as a recurrence's step computes what it reads of its state whole,
 # flash-linear-attention's `v_new` (computing it in each step's lanes instead
 # runs four times as many products, each a quarter the size, 1.5× slower).
-Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @nospecialize(indices))
+Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @nospecialize(indices); matrix = nothing)
     e = fold_context(c, t)
     n = length(c.s.tiling)
     p = n + 1
@@ -1013,9 +1071,17 @@ Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @n
     steps == 1 || unrolled || push!(st, :(for $j in Int32(1):Int32($steps)
         $(first(only(runs))...)
     end))
-    state = sums !== nothing ? sum_state(e, sums, acc) : direct ? acc : reduce_state!(st, f, A, acc, p)
+    state = sums !== nothing ? sum_state(e, f, t.body, sums, acc, p) : direct ? acc : reduce_state!(st, f, A, acc, p)
     stat = observe!(st, f, A, T, state)
     result = gensym(:stat)
     push!(st, :($result = reshape($stat, $(shape[1:n]))))
+    # A sum of one product over the plane of the fold's value is a matrix
+    # already: its observation over the product's matrix is the value's.
+    if matrix !== nothing && f isa SumFold && sums !== nothing && length(sums) == 1 && sums[1][2] !== nothing
+        i, j = sums[1][2][3], sums[1][2][4]
+        if plane(c, t) == minmax(i, j)
+            matrix[] = observe!(st, f, A, T, Any[i < j ? only(acc) : :(permutedims($(only(acc)), (2, 1)))])
+        end
+    end
     result
 end
