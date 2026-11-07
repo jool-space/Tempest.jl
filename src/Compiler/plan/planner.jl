@@ -398,9 +398,13 @@ function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = 
     users = readers(graph)
     n = length(graph.values)
     shared = filter(id -> !any(s -> id in s, fixed) && recomputable(p, users, id, live, results, s.materialized), 1:n)
-    isempty(shared) && return p
-    stored[shared] .= false
-    group_values(graph, stored, live, results, fixed, s.riders)
+    if !isempty(shared)
+        stored[shared] .= false
+        p = group_values(graph, stored, live, results, fixed, s.riders)
+    end
+    # Within a preparation that verifies, every plan the cover tries.
+    VERIFYING[] && verify(p)
+    p
 end
 
 # What `plan` decides before it forms kernels: the graph with its results

@@ -67,6 +67,8 @@ Tempest.Compiler.replay!
 Tempest.Compiler.outputs
 Tempest.Compiler.Plan
 Tempest.Compiler.group_views
+Tempest.Compiler.verify
+Tempest.Compiler.InvalidPlan
 ```
 
 ### Adding a target

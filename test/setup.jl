@@ -14,6 +14,10 @@ end
 
 const CUDA_FUNCTIONAL = CUDACore.functional()
 
+# Every plan a preparation forms is verified (see `Tempest.Compiler.verify`),
+# unless the environment says otherwise.
+get!(ENV, "TEMPEST_VERIFY", "true")
+
 # Measurements the tests take stay out of the user's tuning record.
 ENV["TEMPEST_CACHE"] = mktempdir()
 CUDA_FUNCTIONAL && haskey(ENV, "TEMPEST_RATES") && (mkpath(C.tuning_directory()); cp(ENV["TEMPEST_RATES"], C.rates_path(T.CUDATarget())))

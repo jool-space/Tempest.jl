@@ -325,7 +325,9 @@ function plan_step(d::Decider, p::Plan, g::Group)
     first_sum = length(s.leaves) - length(s.sums)
     replaces = [bp.graph.results[length(s.stored) + j].value => first_sum + j for j in eachindex(s.sums)]
     bp, order, st = storage(bp, replaces; in_place = k -> writes_in_place(ds[k]))
-    SteppedPlan(s, bd, bp, ds[order], st, values[c].dims[cd.axis])
+    ds = ds[order]
+    VERIFYING[] && verify(bp, st; in_place = k -> writes_in_place(ds[k]))
+    SteppedPlan(s, bd, bp, ds, st, values[c].dims[cd.axis])
 end
 
 """

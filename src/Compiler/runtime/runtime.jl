@@ -68,7 +68,7 @@ end
 
 
 """
-    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = (), ride = (), build = true) -> Executable
+    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = (), ride = (), build = true, verify) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
@@ -117,6 +117,11 @@ every map the backward reads, as a trial's comparison.
 executable can be explained, not run, on a machine without the target's
 device. No claim is timed, and claims are priced on nominal rates.
 
+`verify = true` checks every plan the preparation forms, the cover's trials
+among them, and the storage of the one it runs, throwing where one breaks an
+invariant the kernels rely on (see `Tempest.Compiler.verify`). It is the
+default where the environment sets `TEMPEST_VERIFY=true`, as the tests do.
+
 A training loop, where the step returns the loss and the new parameters and
 optimizer state:
 
@@ -135,7 +140,7 @@ For a function called on new arguments each time, `compile` does the binding
 and copying.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = :close,
-        replaces = (), by_reference = (), recompute = (), ride = (), partition::Bool = true, build::Bool = true)
+        replaces = (), by_reference = (), recompute = (), ride = (), partition::Bool = true, build::Bool = true, verify::Bool = verifying())
     # The terms an earlier preparation interned are of its program.
     IR.forget_terms!()
     forget_matches!()
@@ -176,7 +181,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     # then what fails runs on the next option, the floor last (see
     # `build_group`). The last plan's buffers are let go first. Without
     # `build`, implementations compile nothing as they claim (`compiling`).
-    ex = Base.ScopedValues.with(Implement.COMPILING => build) do
+    ex = Base.ScopedValues.with(Implement.COMPILING => build, VERIFYING => verify) do
         ex = planned(program, d, inputs, pairs, input, by_reference, build)
         for _ in 2:PLANS
             any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
@@ -214,6 +219,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
     ds = ds[order]
+    VERIFYING[] && verify(p, s; in_place = k -> writes_in_place(ds[k]))
     if !build
         none(n) = Vector{Any}(nothing, n)
         return Executable(program, p, target, s, Any[], none(length(values)),

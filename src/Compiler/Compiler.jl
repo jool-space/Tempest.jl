@@ -70,6 +70,7 @@ include("plan/masks.jl")
 include("plan/cpu.jl")
 include("plan/explain.jl")
 include("plan/storage.jl")
+include("plan/verify.jl")
 
 # Code generation and prepared programs.
 include("codegen/scalar.jl")
