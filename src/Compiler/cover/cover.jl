@@ -152,23 +152,35 @@ forms_group(q) = !(q isa Union{Recompute, Store, Ride})
 group_sets(q::Vector{Vector{Int}}) = q
 group_sets(q) = [fixes(q)]
 
-# The groups of `p` that hold value `v`: its own, and those owning what it loads.
-held(p::Plan, v) = v > length(p.owner) ? Int[] : filter!(!=(0), [p.owner[v]; [p.owner[r] for r in loaded(p, v)]])
+# The groups of `p` that hold value `v`: its own, and those owning what it
+# loads; a map no group owns is computed inside the groups that read it,
+# directly or through values not stored, and is held by them. Without them a
+# map's storing apart had one key in every plan, and its price in the
+# starting plan passed for its price in the plan a storing taken had
+# changed: in `w * log10.(1 .+ x .^ 2)`, storing `1 .+ x .^ 2` as well lost
+# by 8% measured against the product computing everything, a margin a shared
+# runner flipped, where against the plan storing the log10 map it loses by
+# estimate.
+held(p::Plan, a::Around, v) =
+    v > length(p.owner) ? Int[] :
+    p.owner[v] == 0 && !p.stored[v] ? reached(p, a, v) :
+    filter!(!=(0), [p.owner[v]; [p.owner[r] for r in loaded(p, v)]])
 
 """
 A proposal's place in a plan, by the values it fixes: the groups that hold
 them (`held`), in the order the planner forms them, and its values among
 them, numbered as `canonical` numbers one group's. Proposals with one key in
 the generator's plan are the same edit in identical layers, and are planned
-once. The groups that read its values are not among them: in a stack of
-layers those include a sum over every layer, such as an optimizer's update of
-weights every layer reads, in which each layer's term sits at a place of its
-own, and no two layers would be alike. Each group's text is written once into
-`texts`, which the keys of one plan's proposals share.
+once. The groups that read its stored values are not among them: in a stack
+of layers those include a sum over every layer, such as an optimizer's update
+of weights every layer reads, in which each layer's term sits at a place of
+its own, and no two layers would be alike. The groups that recompute a map
+no group owns are, being where it is computed. Each group's text is written
+once into `texts`, which the keys of one plan's proposals share.
 """
 function proposal_key(p::Plan, a::Around, q, texts = Dict{Int, String}())
     around = Set{Int}()
-    foreach(v -> union!(around, held(p, v)), fixes(q))
+    foreach(v -> union!(around, held(p, a, v)), fixes(q))
     io = IOBuffer()
     for j in sort!(collect(around); by = j -> a.places[j])
         print(io, get!(() -> group_text(p, p.groups[j]), texts, j))

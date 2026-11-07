@@ -114,6 +114,30 @@ C.build_claim(::DeclinesLog10, claim, target, g, buffers) = g.reference(target, 
     @test occursin("is stored apart", sprint(explain, ex))
 end
 
+# Each map of such a kernel is proposed to be stored apart (the square, the
+# sum, the log10 and the product's terms), the one applying the function
+# first by its gain; the others, priced in the starting plan against the
+# kernel computing everything, are priced again in the plan that storing
+# changed. There the maps the log10 map reads (numbered before it) are its
+# own kernel's, which storing one apart leaves as it is: the comparison has
+# no groups on either side, where the starting plan's had the product
+# computing everything against the product reading the map.
+@testset "a map stored apart is priced in the plan a storing taken changed" begin
+    a, b = data(6, 5; scale = 0.3), data(5, 4)
+    p = trace((a, b) -> a * log10.(1 .+ b .^ 2), a, b)
+    ex = prepare(p, a, b; target = T.CPUTarget(DeclinesLog10()))
+    @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
+    stores = filter(c -> c.proposal isa C.Store, ex.considered)
+    accepted = only(filter(c -> c.accepted, stores))
+    @test ex.plan.graph.values[accepted.proposal.value].definition.f === log10
+    @test length(stores) == 4
+    for c in filter(c -> !c.accepted, stores)
+        @test all(((plan, _, _),) -> plan.stored[accepted.proposal.value], c.comparison.sides[1])
+        c.proposal.value < accepted.proposal.value || continue
+        @test isempty(c.comparison.sides[1]) && isempty(c.comparison.sides[2])
+    end
+end
+
 # A variant that fails to build is no option either, though the claim it
 # varies, which builds, offers it again whenever the options are searched.
 # The record times the variant faster, so it is chosen and fails first.
