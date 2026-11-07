@@ -6,8 +6,9 @@
 # extensions/ holds NNlib's, Einops's and SpecialFunctions' functions on traced
 # arrays and numbers; cuda/ what runs only on CUDA; decisions.jl,
 # interfaces.jl and show.jl span the parts. setup.jl is evaluated in every test's module; fixtures/ holds
-# programs that several tests include, and bench/ the scripts that time
-# Tempest; neither runs as a test.
+# programs that several tests include, bench/ the scripts that time Tempest,
+# and fuzz/ the randomized program checker (fuzz/run.jl) with the faults it
+# found open; none runs as a test.
 using ParallelTestRunner
 using Tempest
 import CUDACore
@@ -23,7 +24,7 @@ catch err
 end
 
 testsuite = find_tests(@__DIR__)
-filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/") && !startswith(name, "bench/"), testsuite)
+filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/") && !startswith(name, "bench/") && !startswith(name, "fuzz/"), testsuite)
 # Without CUDA, cuda/ is dropped whole, and the tests elsewhere skip their
 # cases on CUDA.
 CUDA_FUNCTIONAL || filter!(((name, _),) -> !startswith(name, "cuda/"), testsuite)
