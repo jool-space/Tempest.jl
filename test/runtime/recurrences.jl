@@ -143,3 +143,26 @@ end
         @test agree(C.leaves(outputs(execute!(prepare(trace(grad, args...), args...)))), C.leaves(grad(args...)))
     end
 end
+
+# A recurrence's state reads, after its first step, what its value is
+# carried from reads: a kernel reading the state runs after the
+# recurrence's, which reads that. No kernel joins a value the recurrence
+# reads with a sum over its states, which the cover had proposed: a map the
+# step reads and a number carried beside the states, from the sum.
+@testset "a kernel reading a recurrence's state runs after what it reads" begin
+    W, U, b = data(4, 4; scale = 0.3), data(4, 3; scale = 0.3), data(4; scale = 0.2)
+    σ(x) = 1 / (1 + exp(-x))
+    function f(xs, a)
+        s1 = a; s2 = a; r = sum(a) * 0.1
+        for t in axes(xs, 3)
+            z2 = tanh.(transpose(W) * (U * xs[:, :, t]))
+            z3 = 0.5 .* z2 .+ b
+            z4 = z3 .+ s2
+            s1, s2 = 0.5 .* s2 .+ 0.5 .* tanh.(z3), σ.(z4) .* s1 .+ (1 .- σ.(z4)) .* tanh.(z2)
+            r = 0.5 * r + 0.01 * sum(abs2, z4)
+        end
+        sum(abs2, s1) + sum(s2) * 0.3 + r
+    end
+    args = (data(3, 3, 3; scale = 0.4), data(4, 3; scale = 0.5))
+    @test only(C.leaves(outputs(execute!(prepare(trace(f, args...), args...)))))[] ≈ f(args...)
+end

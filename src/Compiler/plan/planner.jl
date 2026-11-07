@@ -256,13 +256,28 @@ read_values(o::Read) = [o.value; gathered_values(o)]
 read_values(o::Operand) = gathered_values(o)
 
 # The values each value reads, directly or through others, as a mask over
-# the values.
+# the values. A recurrence's state reads, after its first step, the value it
+# is carried from and what that reads, though it comes after: a kernel that
+# reads the state runs after the recurrence's, which reads all of it. As
+# values after the state read it, the reads are taken again until no value
+# reads more.
 function ancestors(graph)
     n = length(graph.values)
     up = [falses(n) for _ in 1:n]
-    for (id, v) in enumerate(graph.values), o in operands(v.definition), r in read_values(o)
-        up[id][r] = true
-        up[id] .|= up[r]
+    carried = [(c, v.definition.from.value) for (c, v) in enumerate(graph.values) if v.definition isa Carried && v.definition.from isa Read]
+    grown = true
+    while grown
+        grown = false
+        for (id, v) in enumerate(graph.values), o in operands(v.definition), r in read_values(o)
+            up[id][r] = true
+            up[id] .|= up[r]
+        end
+        for (c, f) in carried
+            before = count(up[c])
+            up[c][f] = true
+            up[c] .|= up[f]
+            grown |= count(up[c]) > before
+        end
     end
     up
 end
