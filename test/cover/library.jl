@@ -24,11 +24,13 @@ layout(s) = (s.size, s.strides, s.offset)
     h = only(bound(PRODUCT, (a, b) -> a * b, BFloat16.(single(a)), BFloat16.(single(b))))
     @test h.arrays.A.eltype === h.arrays.C.eltype === BFloat16
     # Attention's scores, keys by queries summing features: heads and batch
-    # are one axis of the batch, whose strides chain.
+    # are one axis of the batch, whose strides chain. Keys and queries alike
+    # in shape, either is the template's first factor.
     q, k = data(16, 32, 2, 3), data(16, 32, 2, 3)
     s = only(bound(PRODUCT, (q, k) -> C.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4)), q, k))
     @test s.extents == (m = 32, k = 16, b = 6, n = 32)
-    @test s.arrays.A.strides == (16, 1, 512) && s.arrays.C.strides == (32, 1, 1024)
+    @test s.arrays.A.strides == (16, 1, 512) && s.arrays.B.strides == (1, 16, 512)
+    @test s.arrays.C.strides[3] == 1024 && sort!(collect(s.arrays.C.strides[1:2])) == [1, 32]
     # Stored batch first, heads after: no one stride steps the batch of all three.
     @test all(isnothing, bound(PRODUCT, (q, k) -> C.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 4, 3)), q, k))
     @test all(isnothing, bound(PRODUCT, (a, b) -> a * b .+ 1, a, b))

@@ -179,14 +179,12 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         built = (after.compiled - before.compiled) + (after.loaded - before.loaded) - (trials() - tried)
         @test built > 0
         @test built <= distinct(ex.plan)
-        # A fold's state is named by its place in the group, so layers alike
-        # share kernels however their values are numbered: in the stack given
-        # its layers last to first, each read under another number, a group
-        # alike one of the stack's and decided the same has its kernels. Which
-        # groups there are is the search's: it reaches the layers in another
-        # order, and where recomputing a layer's product is a close call by
-        # the estimates a run fits, one stack recomputes it into its
-        # backward's kernel and the other does not.
+        # A fold's state is named by its place in the group, and a
+        # commutative function's operands are ordered by where they read
+        # before what, so layers alike plan and build alike however their
+        # values are numbered: the stack given its layers last to first, each
+        # read under another number, has the stack's groups, decided the same,
+        # with the same kernels.
         ext = Base.get_extension(Tempest, :cuTileExt)
         reversed_loss(layers, x) = sum(abs2, foldr((l, y) -> stack_layer(y, l), layers; init = x))
         kernel_keys(k) = [C.content_key("cuTile kernel", ext.source(t)) for t in k.kernels]
@@ -196,9 +194,7 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
         end
         forward = kernels_by_group(stack_loss, x, layers)
         reversed = kernels_by_group(reversed_loss, reverse(layers), x)
-        alike = intersect(keys(forward), keys(reversed))
-        @test !isempty(alike)
-        @test all(k -> forward[k] == reversed[k], alike)
+        @test reversed == forward
     end
     function per_layer_plan(L)
         layers, x = stack(L, identity)

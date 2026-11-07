@@ -23,10 +23,15 @@ struct Ix{T} <: Term
     expr::Affine
 end
 
+# Exact under IEEE arithmetic in either order, `min` and `max` included.
+commutative(f) = f in (+, *, min, max, &, |, xor, ==, !=)
+
 # `f` is untyped: terms are data to plan and emit, and an `Apply{typeof(f)}` would
 # compile every method that handles terms again for each function applied.
 # Its hash is computed once, from its parts' (see `Recomputed`), and it is
-# interned (see `intern`).
+# interned (see `intern`). A commutative function's arguments are kept in one
+# order (`term_order`), wherever the term is built: planned from the graph,
+# or with its indices renamed, as a transposed fold's is.
 struct Apply <: Term
     f::Any
     args::Tuple{Vararg{Term}}
@@ -34,8 +39,11 @@ struct Apply <: Term
     hash::UInt
     # The variables it mentions, from its parts' (see `variables`).
     variables::UInt64
-    Apply(f, args, eltype) = intern(new(f, args, eltype, hash(f, hash(args, hash(eltype, 0x5d3e7a6b1c4f9e21))),
-        mapreduce(variables, |, args; init = UInt64(0))))
+    function Apply(f, args, eltype)
+        commutative(f) && length(args) > 1 && (args = Tuple(sort!(collect(Term, args); lt = (a, b) -> term_order(a, b) < 0, alg = InsertionSort)))
+        intern(new(f, args, eltype, hash(f, hash(args, hash(eltype, 0x5d3e7a6b1c4f9e21))),
+            mapreduce(variables, |, args; init = UInt64(0))))
+    end
 end
 
 Base.hash(t::Apply, h::UInt) = hash(t.hash, h)
@@ -70,6 +78,48 @@ struct Recomputed <: Term
 end
 
 Base.hash(t::Recomputed, h::UInt) = hash(t.hash, h)
+
+# An order on terms by what they compute at the kernel's indices, never by
+# the numbers of the values they read, so that groups alike up to the
+# numbering of their values, as identical layers are whichever the program
+# takes first, have one term and one kernel. The graph orders a value's
+# operands by number, in the value's own indices, which a group's domain
+# renames; ties keep that order. Values come first, then positions, then
+# constants, as the graph orders operands.
+term_order(a::Term, b::Term) = a === b ? 0 : (r = cmp(term_rank(a), term_rank(b))) != 0 ? r : same_rank_order(a, b)
+
+term_rank(::Load) = 0
+term_rank(::Stat) = 1
+term_rank(::Recomputed) = 2
+term_rank(::Apply) = 3
+term_rank(::Term) = 4
+term_rank(::Ix) = 5
+term_rank(::Lit) = 6
+
+index_order(a, b) = cmp(map(affine_key, a), map(affine_key, b))
+same_rank_order(a::Load, b::Load) = index_order(a.index, b.index)
+same_rank_order(a::Ix{S}, b::Ix{T}) where {S, T} = (r = cmp(string(S), string(T))) != 0 ? r : cmp(affine_key(a.expr), affine_key(b.expr))
+same_rank_order(a::Lit, b::Lit) = cmp(string(typeof(a.value), " ", repr(a.value)), string(typeof(b.value), " ", repr(b.value)))
+function same_rank_order(a::Apply, b::Apply)
+    r = cmp(string(a.f), string(b.f))
+    r != 0 && return r
+    r = cmp(string(a.eltype), string(b.eltype))
+    r != 0 && return r
+    r = cmp(length(a.args), length(b.args))
+    r != 0 && return r
+    for (x, y) in zip(a.args, b.args)
+        r = term_order(x, y)
+        r != 0 && return r
+    end
+    0
+end
+function same_rank_order(a::Recomputed, b::Recomputed)
+    r = index_order(a.index, b.index)
+    r != 0 && return r
+    r = cmp(a.extents, b.extents)
+    r != 0 ? r : term_order(a.body, b.body)
+end
+same_rank_order(a::Term, b::Term) = 0
 
 # Terms are interned as they are built: one equal to a term built before is
 # that term. Each of the cover's trials plans the program again, building

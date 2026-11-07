@@ -47,9 +47,6 @@ struct Pointwise{F} <: Definition
     end
 end
 
-# Exact under IEEE arithmetic in either order, `min` and `max` included.
-commutative(f) = f in (+, *, min, max, &, |, xor, ==, !=)
-
 # A total order on operands by content: reads, then positions, then constants.
 operand_key(o::Read) = (0, o.value, map(affine_key, o.index))
 operand_key(o::IndexOperand) = (1, affine_key(o.expr))
