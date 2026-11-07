@@ -867,11 +867,16 @@ function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = sw
     push!(st, :($xa = $(matrix_tile(c, names[fa], i, p))))
     push!(st, :($xb = $(matrix_tile(c, names[fb], p, j))))
     # Padded steps of the swept axis read zeros from loads, but a computed
-    # factor need not vanish there.
+    # factor need not vanish there, nor be finite: each is zero there, as a
+    # load's zero times a computed infinity is not. A value the kernel holds,
+    # as a recurrence's step computes its members, is computed, not loaded:
+    # a step's 0/0 in its padded lanes made the product NaN.
     E = c.s.tiling[p].extent
-    if E % tk != 0 && !(fa isa Load && fb isa Load)
-        push!(st, :($xa = ifelse.(reshape($(ct.arange)($tk), (1, $tk)) .<= Int32($E) - ($t - Int32(1)) * Int32($tk), $xa,
-            $(zero(term_eltype(fa, c.g))))))
+    if E % tk != 0
+        loaded(f) = f isa Load && !haskey(c.held, f.value)
+        inside(shape) = :(reshape($(ct.arange)($tk), $shape) .<= Int32($E) - ($t - Int32(1)) * Int32($tk))
+        loaded(fa) || push!(st, :($xa = ifelse.($(inside((1, tk))), $xa, $(zero(term_eltype(fa, c.g))))))
+        loaded(fb) || push!(st, :($xb = ifelse.($(inside((tk, 1))), $xb, $(zero(term_eltype(fb, c.g))))))
     end
     Ta, Tb = term_eltype(fa, c.g), term_eltype(fb, c.g)
     if Ta !== Tb
@@ -996,10 +1001,8 @@ Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @n
             for (r, x) in hoisted)
         names = emit_tiles!(k, loop, e, unique(step_roots(e, f, t.body, sums)), pieces, indices..., at)
         valid = gensym(:valid)
-        if sums === nothing || f isa Relative
-            lanes = ntuple(q -> q == p ? tp : 1, p)
-            push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
-        end
+        lanes = ntuple(q -> q == p ? tp : 1, p)
+        push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))
         if sums !== nothing
             sum_step!(k, loop, e, f, t.body, sums, acc, names, valid, (indices..., at), p)
         else

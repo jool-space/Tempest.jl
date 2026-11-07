@@ -112,6 +112,16 @@
         ex = prepare(q, map(x -> CuArray(single(x)), args)...; ride = sums, measure = :none, target = T.CUDATarget(T.cuTileGenerator()))
         @test count(k -> k isa C.SteppedKernels, ex.kernels) == 1
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(grad(cell), args...), args...)); rtol = 1.0e-4)
+        # A product in a recurrence's step whose factor the step computes,
+        # held in the kernel and not loaded: at three hidden units in tiles of
+        # four, its padded lanes are the step's 0/0, which the product had
+        # multiplied by the weight's zeros there, NaN.
+        rnn(W, a) = (s = a; for t in 1:7; z = transpose(W) * s; s = tanh.(z ./ (1 .+ abs.(z .- sum(z; dims = 1)))); end; sum(abs2, s))
+        args = (data(3, 3; scale = 0.5), data(3, 2; scale = 0.5))
+        q = trace(grad(rnn), map(single, args)...)
+        ex = prepare(q, map(x -> CuArray(single(x)), args)...; measure = :none, target = T.CUDATarget(T.cuTileGenerator()))
+        @test count(k -> occursin("cuTile recurrence", string(k)), ex.kernels) == 2
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(grad(rnn), args...), args...)); rtol = 1.0e-4)
     end
 end
 
