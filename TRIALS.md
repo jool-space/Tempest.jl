@@ -367,7 +367,7 @@ collected at each step, a second loop after the first; each run eagerly
 in Float64, traced, interpreted and prepared on the CPU, its gradient
 against central differences and prepared again with sums made to ride and
 folds recomputed at random, and on CUDA in Float32 (a checker outside the
-repository). Of some eighteen thousand drawn, fourteen faults, each taken
+repository). Of some twenty-one thousand drawn, fifteen faults, each taken
 with a test of its own. Wrong results: a state no cycle of states runs
 through read where nothing had been written (on main too, through
 `accumulate`), now its next value one step back; crossing states, one
@@ -384,14 +384,19 @@ crossing or swapping, a join, or a sum offered to ride steps it could not
 (one summing a batch as long as the steps, one reading a second
 recurrence); two states given one value; a name a fold's launch never
 bound. Planning exponential in a term's paths, built, shown, hashed and
-asked what it mentions along each: forty maps each reading the last
-twice had taken hours, an unrolled loop's gradient over ten minutes. And
-the cover's trials writing one dictionary from several threads. Four of
-the fourteen were walks of the graph through operands, which leave out
-what a state is carried from. Refused by name, as before: a scan in a
-recurrence's cycle, 7% of the loops drawn; states of two shapes in one
-recurrence, 2%. Preparing the LSTM below takes 1.40 s warm against main's
-1.30, its first 1 to 2 s longer.
+asked what it mentions along each, and folds proposed for recomputing
+found along each path to them: forty maps each reading the last twice
+had taken hours, an unrolled loop's gradient over ten minutes, two
+unrolled loops' over eleven. And the cover's trials writing one
+dictionary from several threads. Four of the fifteen were walks of the
+graph through operands, which leave out what a state is carried from.
+Refused by name, as before: a scan in a recurrence's cycle, 7% of the
+loops drawn; states of two shapes in one recurrence, 2%. Unrolled still:
+a loop whose step slices an input it does not read. Preparing the LSTM
+below takes 1.40 s warm against main's 1.30, its first 1 to 2 s longer.
+Its first state learned as a vector and repeated over the batch had left
+the recurrence to the floor's kernel stepping through it, 1.76 s a
+training step; now spread where the steps start, 5.6 ms.
 
 The LSTM's training step against torch 2.14.0 on the GB10, 7 November,
 TF32, 32 inputs through 256 hidden, 100 steps, each alone on the device
