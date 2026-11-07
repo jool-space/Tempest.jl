@@ -14,26 +14,6 @@ or the challenger does not fit a stated constraint, named.
 
 ## Open
 
-**BFloat16 attention's forward trails FlashAttention-2.** At 1024
-positions, causal, 64 features, 8 heads and batch 2, the forward takes 50
-μs and FlashAttention-2's 41; at 2048, 166 and 128 (the table under the
-training step's trial). The softmax's weights computed as powers of two with
-denormals flushed, and products that recompute a fold searched at an
-occupancy of two, took it there from 67 and 220. cuTile.jl's own attention
-kernel (`examples/fmha.jl`), FlashAttention-2's algorithm written by hand in
-the same tile language, takes 37 μs at 1024 under a 64×64 tile. What stands
-trial: the product kernel's tiles, which the generator lays out in the full
-rank of the tiling and reshapes to matrices around each product
-(`ext/cuTileExt/emit.jl`, `matrix_tile`, `from_matrix`, `emit_fold!`).
-Reshaped to three dimensions and straight back, the scores leaving the first
-product or the weights entering the second cost the hand kernel 6 to 13 μs,
-tileiras moving them through shared memory; the generated kernel does both
-at every step, in 2224 instructions against the hand kernel's 992, 78 of
-them stores to shared memory against 4. Challenger: the hand kernel, whose
-scores and weights stay matrices from one product to the next. Judged by the
-forward's time at 1024 and 2048 positions against FlashAttention-2 and the
-hand kernel, the answers agreeing with the interpreter.
-
 **Time to first execution, cold and warm.** From `using Tempest` to a
 program's first result: cold, in a new process with an empty kernel cache
 and no record; warm, in a new process whose cache holds every kernel and
@@ -439,6 +419,42 @@ to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
 
+**BFloat16 attention's forward: matrices from one product to the next,
+adopted.** On trial was the product kernel's tiles laid out in the full rank
+of the tiling and reshaped to matrices around each product
+(`ext/cuTileExt/emit.jl`): reshaped to three dimensions and straight back,
+the scores leaving the first product or the weights entering the second
+cost cuTile.jl's own attention kernel (`examples/fmha.jl`) 6 to 13 μs,
+tileiras moving them through shared memory, and the generated kernel did
+both at every step, in 2224 instructions against that kernel's 992. The
+challenger was that kernel, FlashAttention-2's algorithm written by hand in
+the same tile language, whose scores and weights stay matrices. A product
+kernel's term spanning two of its tile axes of more than one lane is now also
+computed as a matrix over them, and an exponential fold whose shifted part is
+one steps in that plane, its weights entering the next product as they are;
+the tiles over the whole tiling beside them, unused, compile to nothing
+(`plane`, `in_plane`, `matrix_of`; `step_plane` in `ext/cuTileExt/build.jl`).
+The softmax's weights are powers of two with denormals flushed, and products
+that recompute a fold are searched at an occupancy of two, as that kernel
+asks. Judged on the GB10 at 64 features, 8 heads, batch 2, causal, on fresh
+records, the answers agreeing as before:
+
+| μs | 1024 positions | 2048 positions |
+|---|---|---|
+| forward, before | 67.4 | 220.4 |
+| forward, after | 36.2 | 123.7 |
+| cuTile's own kernel, 64×64 tile | 37.4 | 121.5 |
+| FlashAttention-2 (SDPA flash) | 41 | 128 |
+| training step, before / after | 217 / 191 | 735 / 597 |
+
+What is not judged, named: at 1024 positions the staged search's pick
+differs between records, 36.2 or 41.1 μs, two schedules within one percent
+of each other timed from memory; a 64×64 tile with products 64 deep inside
+the scores at an occupancy of two runs in 33.5 μs, and the search, one
+variant at a time, does not reach it; TF32 moves little (92.6 μs against
+97.2 at 1024); and the backward's transposed sweep still reshapes the query
+gradient's matrix to add it at each step.
+
 **Attention's training step: the code wins.** On trial was the step's
 cost against the forward's, near six forwards at 1024 positions (TF32,
 causal, 64 features, 8 heads, batch 2), judged against FlashAttention-2's,
@@ -465,7 +481,7 @@ On this device FlashAttention-2's step costs 6.3 to 7.5 of its forwards, not
 two and a half, and Tempest's step is the fastest in both precisions: the
 ratio was the wrong judge, and the step's time is the right one. What is not
 judged, named: the BFloat16 step's gradients against the interpreter, which
-these runs did not compare; the forward, which trails, has its own trial.
+these runs did not compare; the forward, which trailed, had its own trial, above.
 
 **A kernel is keyed without Tempest's code and checked by what it uses of it,
 adopted.** On trial was the kernel cache's key holding the identity of every
