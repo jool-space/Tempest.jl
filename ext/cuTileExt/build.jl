@@ -345,15 +345,22 @@ function sweep_sums(c::Context, f, body, p)
         W = shifted_type(c, f, body)
         w = Apply(Weight(), (y,), W)
         return map(gs) do g
-            g isa Lit && isone(g.value) && return (w, bilinear_over(c, SumFold(), w, p))
+            g isa Lit && isone(g.value) && return (w, oriented(bilinear_over(c, SumFold(), w, p)))
             term_eltype(g, c.g) === W || (g = Apply(Cast{W}(), (g,), W))
             term = Apply(*, (g, w), W)
-            (term, bilinear_over(c, SumFold(), term, p))
+            (term, oriented(bilinear_over(c, SumFold(), term, p)))
         end
     end
-    product = bilinear_over(c, f, body, p)
+    product = oriented(bilinear_over(c, f, body, p))
     product === nothing ? nothing : [(body, product)]
 end
+
+# A product's matrix over its two axes in the tiling's order, its factors
+# swapped where the term names them the other way: a product commutes, and
+# its matrix permuted after it, to the plane its value lies in (see `plane`),
+# moves through shared memory as a reshaped one does. Naming the queries
+# before the keys, BFloat16 attention's forward took 48.6 μs so against 36.2.
+oriented(product) = product === nothing || product[3] < product[4] ? product : (product[2], product[1], product[4], product[3])
 
 # The terms a step computes before its sums add: the products' factors but
 # the weights, which the step computes, and an exponential fold's `y`; or the term
