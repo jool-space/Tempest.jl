@@ -55,8 +55,15 @@ function agreement(ex, case)
     (errors[worst], paths(expected, "")[worst], first(errors))
 end
 
+# A case is checked as it is, or, where its reference is past the host, by a
+# smaller case standing for it, prepared and checked in its place.
+checked(case) = (c = get(case, :check, true); c isa NamedTuple ? c : c ? case : nothing)
+
+prepared(case) = prepare(trace(case.step, case.args...), map(device, case.args)...; target = case.target, replaces = case.replaces)
+
 function measure(case; check)
-    check &= get(case, :check, true)
+    stand_in = checked(case)
+    check &= stand_in !== nothing
     started = time()
     program = trace(case.step, case.args...)
     ex = prepare(program, map(device, case.args)...; target = case.target, replaces = case.replaces)
@@ -64,10 +71,41 @@ function measure(case; check)
     CUDACore.synchronize()
     prep_s = time() - started
     println("prepared in ", round(prep_s; digits = 1), " s, ", length(ex.kernels), " kernels")
-    agrees, worst, first_output = check ? agreement(ex, case) : (NaN, "", NaN)
+    agrees, worst, first_output = check ? agreement(stand_in === case ? ex : prepared(stand_in), stand_in) : (NaN, "", NaN)
     check && println("agreement with Float64 eager ", agrees, " at ", worst, "; the first output's ", first_output)
     step_ms = step_milliseconds(ex)
     println("step ", step_ms, " ms")
+    path = get(ENV, "TEMPEST_CORPUS_PROFILE", "")
+    isempty(path) || profile(path, ex)
+    path = get(ENV, "TEMPEST_CORPUS_EXPLAIN", "")
+    isempty(path) || open(io -> Tempest.Compiler.explain(io, ex), path, "w")
     note = join(filter(!isempty, [get(case, :note, ""), check ? "worst at $worst, the first output to $(round(first_output; sigdigits = 2))" : ""]), "; ")
     (; prep_s, kernels = length(ex.kernels), step_ms, agreement = agrees, precision = case.precision, note)
+end
+
+"""
+Every kernel of a prepared step timed alone, as rows of a tab-separated file
+at `path`: its place, microseconds, what runs it, the group's kind and
+domain, the bytes it moves at least (what it reads once and writes), the
+flops of its products as its implementation estimates them, the cover's
+estimate in microseconds, and the kernel as it describes itself.
+"""
+function profile(path, ex)
+    C = Tempest.Compiler
+    open(path, "w") do io
+        println(io, join(("kernel", "us", "runner", "kind", "domain", "bytes", "flops", "estimate_us", "description"), '\t'))
+        for k in eachindex(ex.kernels)
+            g = ex.plan.groups[k]
+            d = ex.decisions[k]
+            seconds = C.time_launch(ex.target, ex.launches[k])
+            implementation = d === nothing ? nothing : d.choice.implementation
+            work = implementation === nothing ? Any[] :
+                Base.invokelatest(C.Implement.estimate, implementation, d.choice.claim, ex.target, C.group_view(ex.plan, g))
+            flops = sum(w -> w.flops + w.recomputed, work; init = 0.0)
+            estimate = d === nothing ? NaN : 1.0e6 * d.choice.estimate
+            description = first(replace(string(ex.kernels[k]), r"[\t\n]" => " "), 300)
+            println(io, join((k, round(1.0e6 * seconds; digits = 2), C.runner(ex, k), g.kind, g.domain, C.group_bytes(ex.plan, g),
+                flops, round(estimate; digits = 2), description), '\t'))
+        end
+    end
 end

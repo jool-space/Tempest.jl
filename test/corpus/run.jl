@@ -31,7 +31,12 @@
 # seconds (1800). The SM clock recorded is the median of the clocks seen
 # while the GPU was busy (challengers/clocked.sh). TEMPEST_CORPUS_CHECK=0
 # skips the Float64 reference: its gradient is the interpreter's on the CPU,
-# which holds every value it computes. A job killed by a signal stops the
+# which holds every value it computes, and a program whose reference is past
+# the host's memory is checked by a smaller instance its `check` names.
+# TEMPEST_CORPUS_PROFILE names a file for every kernel of the step timed
+# alone, with what runs it, its bytes and flops and the cover's estimate, and
+# TEMPEST_CORPUS_EXPLAIN one for the plan; the warm run writes them last.
+# A job killed by a signal stops the
 # run: on this machine that is the memory the GPU shares running out.
 # runtests.jl skips this directory.
 
