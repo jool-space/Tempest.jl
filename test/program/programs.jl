@@ -270,7 +270,10 @@ end
         @test isequal(interpret(p, x), f(x))
         @test isequal(on_host(outputs(execute!(prepare(p, x)))), f(x))
     end
-    @test interpret(trace(x -> count(>(0), x; init = Int32(2)), x), x) isa Int
+    # The count's type is the one Base adds `init` and a truth value in, which
+    # differs between Julia's versions.
+    counted = x -> count(>(0), x; init = Int32(2))
+    @test interpret(trace(counted, x), x) === counted(x)
 end
 
 # A norm is its formula, the elements' powers summed, without Base's division
