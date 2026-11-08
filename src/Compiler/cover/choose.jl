@@ -91,16 +91,19 @@ mutable struct Decider
     failed::Dict{String, Failure}
     # Each recurrence's step planned (by `group_identity`; see `stepped_plan`).
     stepped::Dict{Any, Any}
+    # How many times the graph's kernels run: a recurrence's step's run once
+    # per step (see `plan_step`).
+    steps::Int
 end
 
-function Decider(target, graph; measure = :close, recompute = (), keep = (), ride = ())
+function Decider(target, graph; measure = :close, recompute = (), keep = (), ride = (), steps = 1)
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     calibration = load_record(calibration_path)
     r = dry ? rates(target) : target_rates(target)
     Decider(target, measurable(target), graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
         Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
-        Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}())
+        Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}(), steps)
 end
 
 # Forget every decision and option, so that the cover plans again from what
@@ -220,7 +223,15 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
         implementation === nothing ? Any[] : Any[Base.invokelatest(variants, implementation, d.target, view, claim)...])
 end
 
-"Every claim on a group but those that failed to build, cheapest estimate first; the floor when none is left."
+"""
+Every claim on a group but those that failed to build, cheapest estimate
+first; the floor when none is left, and beside them for a map whose kernel runs
+once per step of a recurrence: there each is measured (see
+`measured_ranks`), as the floor compiles once per shape and a step's kernel
+runs as many times as there are steps. A stencil's step, which cuTile reads
+through a gather at each shifted position, took 4.5 μs in cuTile and 2.2 on
+the floor.
+"""
 function options(d::Decider, p::Plan, g::Group)
     view = group_view(p, g)
     # The protocol is called in the latest world here and wherever the
@@ -232,7 +243,7 @@ function options(d::Decider, p::Plan, g::Group)
     riders = g.kind === :recurrence && !isempty(g.reductions)
     os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) if !riders for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
     filter!(o -> !haskey(d.failed, o.key), os)
-    isempty(os) && push!(os, choice(d, p, g, view, nothing, nothing))
+    (isempty(os) || d.steps > 1 && g.kind === :pointwise) && push!(os, choice(d, p, g, view, nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
 
@@ -279,13 +290,18 @@ end
 # implementation when it made several: alternatives it offers for
 # measurement, which the estimate cannot rank. None when the best stands
 # alone, unless it has variants: then it is measured to seed their search.
+# Where the kernels run once per step, the floor and the best claim are
+# measured beside each other (see `options`).
 function measured_ranks(d::Decider, os)
     best = first(os)
     alone = isempty(best.variants)
     length(os) == 1 && return d.measure === :all || !alone ? [1] : Int[]
     searched(o) = o.implementation !== nothing && o.implementation === best.implementation
+    claimed = findfirst(o -> o.implementation !== nothing, os)
+    floor = d.steps > 1 && any(o -> o.implementation === nothing, os)
+    beside(k, o) = floor && (o.implementation === nothing || k == claimed)
     ranks = d.measure === :all || best.borrowed ? collect(eachindex(os)) :
-        [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate) || searched(o)]
+        [k for (k, o) in enumerate(os) if o.borrowed || close_call(o.estimate, best.estimate) || searched(o) || beside(k, o)]
     length(ranks) == 1 && alone ? Int[] : ranks
 end
 

@@ -194,6 +194,9 @@ end
     if CUDA_FUNCTIONAL
         ex = prepare(trace(heat, map(single, args)...), map(x -> CuArray(single(x)), args)...)
         @test stepped(ex) == [true, true]
+        # The backward's step recomputes the maps of the cotangent its
+        # stencil reads at each neighbour: one kernel a step, as forward.
+        @test [length(k.kernels) for k in ex.kernels if k isa C.SteppedKernels] == [1, 1]
         @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), C.leaves(heat(args...)); rtol = 1.0e-4)
     end
 end

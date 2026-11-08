@@ -325,7 +325,7 @@ function plan_step(d::Decider, p::Plan, g::Group)
     c = first(g.outputs)
     cd = values[c].definition::Carried
     cd.axis == length(values[c].dims) || return nothing
-    bd = Decider(d.target, s.graph; measure = d.measure === :dry ? :dry : d.measure)
+    bd = Decider(d.target, s.graph; measure = d.measure === :dry ? :dry : d.measure, steps = values[c].dims[cd.axis])
     bp, _ = cover(bd)
     search!(bd, bp)
     ds = decisions(bd, bp)

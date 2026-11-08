@@ -3,7 +3,8 @@
 # that measures best, a comparison measured where the record refutes an
 # estimate, what a kernel's tiles read again, of a value and of a shifted
 # read's border, and what a view reaches, products proposed apart from a
-# fold among them that is not one, and the implementations a target names.
+# fold among them that is not one, a step's map measured on the floor beside
+# its claim, and the implementations a target names.
 include("../fixtures/programs.jl")
 
 # Claims are timed on buffers of their own, which a kernel reads as data:
@@ -252,6 +253,24 @@ end
     chosen = C.decide(d, base, g).choice
     work = only(C.estimate(chosen.implementation, chosen.claim, target, C.group_view(base, g)))
     @test 0 < work.reread < sizeof(u)
+end
+
+# A map whose kernel runs once per step of a recurrence is offered to the
+# floor beside its claim, and both are measured: the floor compiles once per
+# shape, and a stencil's step, which cuTile reads through gathers, ran
+# faster there. A program's map run once is not.
+@testset "a step's map measures the floor beside its claim" begin
+    u = single(data(256, 256; scale = 0.1))
+    graph = C.lower(trace(u -> exp.(u) .* 2, u))
+    target = T.CUDATarget(T.cuTileGenerator())
+    for steps in (1, 100)
+        d = C.Decider(target, graph; measure = :none, steps)
+        base = C.generator_plan(d)
+        os = C.options(d, base, only(base.groups))
+        floor = findfirst(o -> o.implementation === nothing, os)
+        @test (floor !== nothing) == (steps > 1)
+        steps > 1 && @test sort(C.measured_ranks(d, os)) == eachindex(os)
+    end
 end
 
 # An implementation of a package not loaded.
