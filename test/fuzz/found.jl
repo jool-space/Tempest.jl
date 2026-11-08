@@ -39,7 +39,15 @@ end
 @testset "found by the randomized checker" begin
     # Seeds 106 and 234 (loop), on the CPU: refused by name, "a recurrence
     # whose step scans, scatters or writes is not supported yet", a scan in
-    # the cycle of states as TRIALS counts it.
+    # the cycle of states as TRIALS counts it. A recurrence's group is a term
+    # for each member, which the CPU's `run_recurrence!`, the floor's
+    # estimate and `verify` start from, and a scan has no term of an
+    # element; `step_graph` copies only maps and folds. What closes it: a
+    # recurrence group that runs only a step at a time, its scan a member
+    # without a term; `recurrence_places` placing a scan, every axis its
+    # own; `step_graph` copying the scan with the steps' axis dropped; and
+    # the cover offering it no claim and no floor, the CPU running its
+    # step's plan as the stepped run does.
     @testset "a recurrence whose step scans a state prepares" begin
         a = 0.5 .* randn(Xoshiro(106010101), 1, 1)
         @test_broken runs(scanning_step, a) && prepared(scanning_step, a) ≈ scanning_step(a)
