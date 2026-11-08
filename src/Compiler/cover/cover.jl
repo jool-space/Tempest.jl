@@ -283,7 +283,7 @@ function cover(d::Decider)
         any(x -> fixes(x[1]) == q.group, proposals) || push!(proposals, (q, nothing))
     end
     if any_recomputes_folds(d.target)
-        for v in sort!(collect(recomputable_folds(d.graph, union(d.pinned, d.kept))))
+        for v in sort!(collect(recomputable_folds(d.graph, d.kept; pinned = d.pinned)))
             push!(proposals, (Recompute(v), nothing))
         end
     end

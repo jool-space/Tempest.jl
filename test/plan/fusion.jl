@@ -207,10 +207,28 @@ end
     @test !any(v -> s.stored[v] && widening(v), eachindex(graph.values))
     # The recomputed maps take no fold from the proposals, and with every
     # proposal taken nothing the size of the scores is stored.
-    folds = C.recomputable_folds(graph, Set(recomputed))
+    folds = C.recomputable_folds(graph; pinned = Set(recomputed))
     @test folds == C.recomputable_folds(graph)
     p = C.plan(graph; recompute = union(recomputed, folds))
     @test all(v -> !p.stored[v] || prod(p.graph.values[v].dims) < 70 * 70, eachindex(p.graph.values))
+end
+
+# A fold stored nests nothing: attention's scores read the projections, which
+# a training step that replaces its weights in place keeps stored, and are
+# proposed with them kept, where with them recomputed they would be
+# recomputed inside every step of the scores' readers' sweeps, and are not.
+@testset "a fold kept stored does not keep a fold that reads it from the proposals" begin
+    function projected(x, wq, wk, wv)
+        heads(w) = reshape(w * x, 8, 2, 12, 2)
+        sum(abs2, Ops.attention(heads(wq), heads(wk), heads(wv); causal = true))
+    end
+    args = (data(16, 24), (data(16, 16; scale = 0.2) for _ in 1:3)...)
+    graph = C.rewrite(C.lower(differentiate(trace(projected, args...))))
+    folds(dims) = Set(v for (v, x) in enumerate(graph.values) if x.definition isa C.Reduction && x.dims == dims && !graph.backward[v])
+    projections, scores = folds((16, 24)), folds((12, 2, 12, 2))
+    @test length(projections) == 3 && length(scores) == 1
+    @test isdisjoint(C.recomputable_folds(graph; pinned = projections), scores)
+    @test issubset(scores, C.recomputable_folds(graph, projections))
 end
 
 # A scatter by index arrays is a sum by key, which joins the kernel computing

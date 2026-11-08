@@ -1151,9 +1151,15 @@ end
 # fold that reads it there joins its group as a later phase instead). A fold
 # recomputed inside a reader's sweep, at positions that move along its own
 # reduced axes, does not recompute such a fold in turn: nested sweeps multiply
-# the work past what a plan should price.
+# the work past what a plan should price. Folds in `pinned`, recomputed
+# already, are not proposed and nest as the selected do; folds in `kept`,
+# stored, are not proposed and nest nothing. Counted as recomputed, the
+# projections a training step's update replaces in place, which stay stored,
+# kept attention's scores and their gradient from the proposals, and GPT-2's
+# layer stored both, 201 MB each: 19.1 ms a layer's step, against 12.4 with
+# both recomputed.
 # Whether recomputing pays is the cover's decision, by cost.
-function recomputable_folds(graph, kept = Set{Int}())
+function recomputable_folds(graph, kept = Set{Int}(); pinned = Set{Int}())
     s = storing(graph)
     graph, results, materialized = s.graph, s.results, s.materialized
     values = graph.values
@@ -1161,7 +1167,7 @@ function recomputable_folds(graph, kept = Set{Int}())
     selected = Set{Int}()
     for v in eachindex(values)
         d = values[v].definition
-        d isa Reduction && !(v in results) && !materialized[v] && !(v in kept) || continue
+        d isa Reduction && !(v in results) && !materialized[v] && !(v in kept) && !(v in pinned) || continue
         # The folds v reaches through maps, with the index at which each reads v.
         consumers = Tuple{Int, Tuple{Vararg{Affine}}}[]
         pending = [(u, v, identity_index(values[v].dims)) for u in unique(users[v])]
@@ -1191,7 +1197,7 @@ function recomputable_folds(graph, kept = Set{Int}())
         own = Tuple(var(k) for k in eachindex(d.iteration) if !(k in d.reduced))
         all(((u, at),) -> values[u].definition.iteration != d.iteration || at != own, consumers) || continue
         hoisted = all(((u, at),) -> !any(k -> any(e -> mentions(e, k), at), values[u].definition.reduced), consumers)
-        hoisted || !recomputes(values, v, union(selected, kept), results, materialized) || continue
+        hoisted || !recomputes(values, v, union(selected, pinned), results, materialized) || continue
         push!(selected, v)
     end
     selected
