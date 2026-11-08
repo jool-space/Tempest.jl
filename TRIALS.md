@@ -427,7 +427,8 @@ capturing its graph, an internal cuBLAS error, twice). The LSTM at batch 64,
 3.40; at 1024, 32.8 ms and 92 s, against 24.6 and 20.7 (torch takes no
 optimizer step). test/bench/gpt.jl's step, 1.19 ms and 70 s cold, against
 the same model under `torch.compile` captured as a graph, 1.31 ms; at GPT-2
-124M's geometry, batch 4, 878 ms and 224 s cold, against 264 ms. The heat
+124M's geometry, batch 4, 878 ms and 224 s cold, against 264 ms, and since
+the GPT-2 step's entry 275 ms and 231 s cold, against 262. The heat
 equation on a 256×256 grid, its steps `accumulate`d so that they roll: 1.89
 s at 100 steps and 18.9 s at 1000, against 0.34 and 3.6 ms for a kernel a
 step in CUDA.jl, both recurrences of the gradient on the floor; written as a
@@ -441,9 +442,70 @@ and 3.61 at 2411 MHz, 3.8 and 3.6 times, the forward alone 0.63 ms at 100,
 its kernels 2.4 to 3.7 μs each against the hand loop's 1.7. Agreement with
 Float64 is 3e-4 to 1e-3 where the products are TF32, and 2e-6 for the heat
 equation in Float32; the GPT's 8e-2 is a weight Adam's first step moves by
-its rate times the sign of a gradient near zero, and at GPT-2's geometry it
-is unchecked, the interpreter's Float64 gradient holding more than the
-host's memory.
+its rate times the sign of a gradient near zero, and at GPT-2's geometry,
+whose Float64 gradient the interpreter holds past the host's memory, one
+layer at batch 1 stands for it, 6e-2 so and its loss to 1e-6.
+
+**The GPT-2 step.** The corpus's GPT at GPT-2 124M's geometry (12 layers,
+768 wide, 12 heads of 64, FFN 3072, T 1024, vocabulary 50257, batch 4, TF32,
+Adam in place) took 878 ms against `torch.compile`'s 264, where the small
+shape is at parity. Profiled by kernel (`TEMPEST_CORPUS_PROFILE`, each kernel timed
+alone), 648 ms were attention's backward, and 636 of them two kernels a
+layer, 40 and 13 ms, recomputing the log-sum-exp of the scores, an array a
+thousandth of their size, in a sweep that read the scores again. The cover
+had chosen that by estimate, 3.5 ms against 5.9 for storing it, when both
+kernels had already been measured; it now measures a comparison wherever the
+record refutes an estimate on either side (`compare`,
+`src/Compiler/cover/choose.jl`). And the backward summed the probabilities'
+gradient over the keys, as large as the scores, where FlashAttention-2 sums
+the output's gradient against the output over the features: the exchange of
+the two sums (`exchanged_sums`, `src/Compiler/plan/rewrites.jl`) matched axes
+only where a factor reads one alone, and the GPT's values are read from the
+projection they reshape, at `i1 + 64·i2`; it now pairs axes read among
+others at their multiples. On the GB10 in one session, TF32, the step timed
+as a captured graph, the kernels timed alone summed by part, the roofline
+the larger of the bytes a part's kernels read once and write at 230 GB/s and
+its flops at cuBLAS's 43 TFLOP/s:
+
+| part | ms, before | ms, after | roofline fraction | implementation |
+|---|---|---|---|---|
+| attention, backward | 648.5 | 54.7 | 0.10 fused, 0.88 as planned | cuTile |
+| attention, forward | 21.0 | 42.0 | 0.09 fused, 1.06 as planned | cuTile |
+| FFN products and SwiGLU, backward | 49.0 | 47.7 | 0.68 | cuBLAS, cuTile with the SwiGLU's gradient |
+| head and cross-entropy, forward and backward | 40.6 | 40.8 | 0.54 | cuBLAS, cuTile online softmax |
+| FFN products, forward | 20.6 | 20.6 | 0.79 | cuTile (gate and up as one), cuBLAS |
+| Adam, 111 kernels | 18.8 | 19.2 | 1.00 | cuTile |
+| QKV and output products, backward | 14.3 | 14.2 | 0.90 | cuBLAS, cuTile |
+| QKV and output products, forward | 6.2 | 6.2 | 1.03 | cuBLAS |
+| RMSNorm, forward and backward | 9.4 | 9.5 | 1.0 to 1.7 | cuTile |
+| rotary positions, forward and backward | 3.6 | 3.7 | 1.4 | cuTile |
+| embedding's scatter with the last norm's backward | 1.1 | 1.1 | 1.4 | cuTile |
+| step, kernels summed / captured graph | 833 / 874 | 260 / 278 | | |
+
+By the corpus in the same session, SM clocks 2480 to 2550 MHz: 275 ms a
+step, 538 kernels, against `torch.compile`'s 262 captured as a graph and 264
+without, and torch eager's 356; checked by one layer at batch 1 with the
+full vocabulary and length against Float64, the loss to 1.0e-6 and the
+worst output 6.0e-2, a weight Adam's first step moves by its rate times the
+sign of a gradient near zero, as at the small shape.
+
+What remains open, named. Attention is planned as the eager form, the
+scores and the probabilities stored by the forward (201 MB a layer each),
+the scores' gradient stored by the backward: 97 ms of the step, against
+under 10 for its flops at TF32, where the attention trial's three kernels
+recompute the scores. Pinned to be recomputed (`prepare`'s `recompute`), the
+scores fold alone takes a layer's step, at batch 4 and a vocabulary of 256,
+from 19.2 to 13.8 ms, some 65 ms of the full step; the cover never proposes
+it, since `recomputable_folds` takes the projections the scores read first,
+and proposed alone (tried, not kept) its trial was never compared, a plan
+the cover does not price. Reaching that form is the cover's search over
+recomputing several folds together, not one proposal at a time. The head's
+softmax over 50257 sweeps the logits twice and writes their gradient, 12 ms
+against 7 for one read and one write, and its three products run at 31 to 38
+TFLOP/s. Adam's 111 kernels are at the memory's rate already; one kernel over
+every parameter would save only their launches, well under a millisecond in
+a captured graph. Cold preparation is 231 s, warm 56, past the gate of a
+minute; that is the trial of the time to first execution.
 
 Not on the docket: the kernel-author question, how a kernel no implementation
 claims is written by hand in a package. Pallas (a kernel in the same language
