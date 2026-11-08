@@ -310,7 +310,7 @@ function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
     # that are neither traced nor numbers bound into it.
     result === nothing || resize!(tape.nodes, mark)
     inputs = filter(a -> a isa Union{Traced, Number}, collect(args))
-    g = length(inputs) == length(args) ? f : Bound(f, map(a -> a isa Union{Traced, Number} ? Slot() : a, args))
+    g = length(inputs) == length(args) ? f : Bound(f, map(a -> a isa Union{Traced, Number} ? Slot() : fixed(a), args))
     record_map(g, inputs...)
 end
 
@@ -409,10 +409,19 @@ end
 
 struct Slot end
 
+# A type fixed as an argument, kept in the type of `Bound` rather than as a
+# `DataType` among its fields, so that what `f(Int32, x)` returns infers as
+# it does called directly.
+struct FixedType{T} end
+fixed(a) = a
+fixed(::Type{T}) where {T} = FixedType{T}()
+unfixed(a) = a
+unfixed(::FixedType{T}) where {T} = T
+
 fill_slots(::Tuple{}, xs) = ()
 fill_slots(fixed::Tuple, xs) = first(fixed) isa Slot ?
     (first(xs), fill_slots(Base.tail(fixed), Base.tail(xs))...) :
-    (first(fixed), fill_slots(Base.tail(fixed), xs)...)
+    (unfixed(first(fixed)), fill_slots(Base.tail(fixed), xs)...)
 (b::Bound)(xs...) = b.f(fill_slots(b.fixed, xs)...)
 Base.show(io::IO, b::Bound) = print(io, b.f)
 

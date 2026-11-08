@@ -250,6 +250,21 @@ end
     end
 end
 
+# A function that does not run on traced numbers, given a type, is recorded
+# whole with the type bound into it, and its element type is what the
+# function returns given the type: a branch on its argument picks a number
+# of the type.
+signed_one(::Type{T}, x) where {T} = x > 0 ? one(T) : -one(T)
+
+@testset "a map recorded whole, given a type" begin
+    x = data(8, 6)
+    f(x) = signed_one.(Int32, x)
+    p = trace(f, x)
+    @test any(n -> n.op isa C.Map && n.op.f isa C.Bound, p.nodes)
+    @test isequal(interpret(p, x), f(x))
+    @test isequal(outputs(execute!(prepare(p, x))), f(x))
+end
+
 # Truth values fold as numbers do: a count is a sum of them in the type Base
 # counts in, `any` and `all` their largest and smallest, along `dims` too.
 @testset "counts, any and all" begin
