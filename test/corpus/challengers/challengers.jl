@@ -66,3 +66,17 @@ function lstm_torch(lines)
 end
 
 CHALLENGERS["lstm"] = [(; name = "torch", command = shape -> `bash $(launcher("lstm_torch.sh")) $shape`, parse = lstm_torch)]
+
+## gpt
+
+# gpt_torch.py, and heat_cuda.jl, print one JSON line per way they run.
+function json_rows(lines)
+    map(json_lines(lines)) do l
+        kernels = field(l, "kernels")
+        (; side = field(l, "side"), precision = field(l, "precision"), cold_prep_s = field(l, "first_step_s"),
+            step_ms = field(l, "step_ms"), kernels = kernels === nothing ? "" : round(Int, kernels),
+            agreement = something(field(l, "agreement"), ""), note = something(field(l, "note"), ""))
+    end
+end
+
+CHALLENGERS["gpt"] = [(; name = "torch", command = shape -> `bash $(launcher("gpt_torch.sh")) $shape`, parse = json_rows)]
