@@ -49,8 +49,9 @@ end
 # in a loop: `chunks` lists (axis, loop variable, chunk), and `bases` the block
 # index of each kept axis before chunking. The `heavy` axis, with whether it
 # is reversed (see `heavy_axis`), varies slowest of all, outside the swizzle.
-function block_indices!(st, c::Context; limit = 3, heavy = nothing)
+function block_indices!(st, c::Context; limit = 3, heavy = nothing, swizzled = c.s.swizzle > 0)
     s = c.s
+    body = Expr[]
     kept = [i for i in eachindex(s.tiling) if !s.tiling[i].reduced]
     heavy === nothing || (kept = [filter(!=(first(heavy)), kept); first(heavy)])
     blocks(i) = cld(cld(s.tiling[i].extent, s.tiling[i].tile), s.tiling[i].chunk)
@@ -58,10 +59,10 @@ function block_indices!(st, c::Context; limit = 3, heavy = nothing)
     grid = Int[]
     chunks = Tuple{Int, Symbol, Int}[]
     rest = kept
-    if s.swizzle > 0 && length(kept) >= 2 && (heavy === nothing || length(kept) > 2)
+    if swizzled && length(kept) >= 2 && (heavy === nothing || length(kept) > 2)
         i, j = kept[1], kept[2]
         ti, tj = s.tiling[i], s.tiling[j]
-        push!(st, :((block_i, block_j) = $swizzle(Int32($(ti.extent)), Int32($(tj.extent)), Int32($(ti.tile)),
+        push!(body, :((block_i, block_j) = $swizzle(Int32($(ti.extent)), Int32($(tj.extent)), Int32($(ti.tile)),
             Int32($(tj.tile)), Int32($(s.swizzle)), $(ct.bid)(1))))
         indices[i], indices[j] = :block_i, :block_j
         push!(grid, blocks(i) * blocks(j))
@@ -70,23 +71,23 @@ function block_indices!(st, c::Context; limit = 3, heavy = nothing)
     own = length(grid) + length(rest) <= limit ? length(rest) : max(0, limit - length(grid) - 1)
     for i in rest[1:own]
         name = Symbol(:block_, i)
-        push!(st, :($name = $(ct.bid)($(length(grid) + 1))))
+        push!(body, :($name = $(ct.bid)($(length(grid) + 1))))
         indices[i] = name
         push!(grid, blocks(i))
     end
     shared = rest[(own + 1):end]
     if !isempty(shared)
-        push!(st, :(remaining = $(ct.bid)($(length(grid) + 1)) - Int32(1)))
+        push!(body, :(remaining = $(ct.bid)($(length(grid) + 1)) - Int32(1)))
         for i in shared
             name = Symbol(:block_, i)
-            push!(st, :($name = rem(remaining, Int32($(blocks(i)))) + Int32(1)), :(remaining = div(remaining, Int32($(blocks(i))))))
+            push!(body, :($name = rem(remaining, Int32($(blocks(i)))) + Int32(1)), :(remaining = div(remaining, Int32($(blocks(i))))))
             indices[i] = name
         end
         push!(grid, prod(blocks, shared))
     end
     if heavy !== nothing && last(heavy)
         i = first(heavy)
-        push!(st, :($(indices[i]) = Int32($(blocks(i)) + 1) - $(indices[i])))
+        push!(body, :($(indices[i]) = Int32($(blocks(i)) + 1) - $(indices[i])))
     end
     bases = copy(indices)
     for i in kept
@@ -96,6 +97,12 @@ function block_indices!(st, c::Context; limit = 3, heavy = nothing)
         push!(chunks, (i, j, chunk))
         indices[i] = :(($(bases[i]) - Int32(1)) * Int32($chunk) + $j)
     end
+    # The driver takes few blocks along the grid's second and third axes
+    # (`GRID_SIDE`): a layout that would put more there is laid along the
+    # first alone, every kept axis a digit of the one block index, the first
+    # varying fastest as before.
+    any(k -> grid[k] > GRID_SIDE, 2:length(grid)) && return block_indices!(st, c; limit = 1, heavy, swizzled = false)
+    append!(st, body)
     indices, isempty(grid) ? (1,) : Tuple(grid), chunks, bases
 end
 

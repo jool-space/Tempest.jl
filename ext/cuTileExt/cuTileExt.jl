@@ -43,6 +43,9 @@ const SPLIT_KEPT_BLOCKS = (32, 64) # kept tiles below which a streamed axis spli
 const SPLIT_TARGET_BLOCKS = 256
 const FULL_TILE_ELEMENTS = 1024
 const POINTWISE_ELEMENTS = 1024
+# Blocks the driver takes along the grid's second and third axes; the first
+# takes many more (Tile IR allows 2^24 along each).
+const GRID_SIDE = 65535
 
 """
 A tile axis: a group of the domain's axes, collapsed, tiled, and reduced (swept)

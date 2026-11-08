@@ -151,6 +151,7 @@ end
 
 function TileLaunch(fun::CuFunction, @nospecialize(f), @nospecialize(args), grid)
     any(>(ct.MAX_GRID_DIM), grid) && error("grid $grid exceeds Tile IR's 24-bit limit")
+    any(>(GRID_SIDE), grid[2:end]) && error("grid $grid exceeds the driver's $GRID_SIDE blocks along the second and third axes")
     # The kernel function's captured values come first, the seed of cuTile's
     # kernel state last. The seed is drawn once, not at each launch as
     # cuTile's own launches draw it: Tempest's kernels draw none of cuTile's

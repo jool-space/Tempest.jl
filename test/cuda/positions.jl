@@ -66,3 +66,19 @@ end
     @test !(only(ex.kernels) isa C.FloorKernels)
     @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, x, s)])
 end
+
+# A pointwise tiling of 1024×1 over a domain whose second axis has more tiles
+# than the driver takes along the grid's second axis (65535) is laid along
+# the first axis alone: a stored product's elements, (1024, 1024, 1024), had
+# a million blocks refused at launch while the cover measured it.
+@testset "more blocks than the grid's second axis takes" begin
+    ext = Base.get_extension(Tempest, :cuTileExt)
+    a, b = single(data(1024, 1)), single(data(1, 70000; scale = 0.3))
+    p = trace((a, b) -> a .* b, a, b)
+    ex = prepare(p, CuArray(a), CuArray(b); target = T.CUDATarget(T.cuTileGenerator()))
+    tiles = only(ex.kernels)
+    @test tiles isa ext.BuiltTiles
+    @test all(k -> all(<=(ext.GRID_SIDE), k.grid[2:end]), tiles.kernels)
+    @test prod(only(tiles.kernels).grid) >= 70000
+    @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, a, b)])
+end
