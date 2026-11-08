@@ -149,6 +149,20 @@ function reads_storage(v::Value, index, dims)
     dense_address(v.dims, index, d) == dense_address(dims, identity_index(dims), d)
 end
 
+# What `masked` finds of a graph's values: each value's mask (`of`), and what
+# the walks under it find of a value read at an index, which the walks from
+# many values share (see plan/masks.jl): the indices it reads at and its
+# condition's mask (`walks`), the masks it is computed from (`found`), and
+# what it is where a mask fails (`known`).
+struct Masks
+    of::Dict{Int, Any}
+    walks::Dict{Any, Any}
+    found::Dict{Any, Vector{Vector{Affine}}}
+    known::Dict{Any, Any}
+end
+
+Masks() = Masks(Dict{Int, Any}(), Dict{Any, Any}(), Dict{Any, Vector{Vector{Affine}}}(), Dict{Any, Any}())
+
 """
     IndexGraph
 
@@ -156,9 +170,9 @@ A program at the index level: values in topological order, the values that are
 arguments, and each result as a read over the result's own shape (results may be
 layouts of values, or constants). `rewrites` notes the values that rewrites of
 the graph made, and what each rewrote. `backward` marks the values of the
-program's backward, where a reverse pass recorded it. `masks` holds each
-value's mask as `masked` finds it, once per graph: every view of a group
-asks it of the values the group reads.
+program's backward, where a reverse pass recorded it. `masks` holds what
+`masked` finds (`Masks`), once per graph: every view of a group asks it of
+the values the group reads.
 """
 struct IndexGraph
     values::Vector{Value}
@@ -169,11 +183,11 @@ struct IndexGraph
     result_eltype::Vector{DataType}
     rewrites::Vector{Pair{Int, String}}
     backward::BitVector
-    masks::Base.Lockable{Dict{Int, Any}, ReentrantLock}
+    masks::Base.Lockable{Masks, ReentrantLock}
 end
 
 IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int, String}[], backward = falses(length(values))) =
-    IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites, backward, Base.Lockable(Dict{Int, Any}()))
+    IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites, backward, Base.Lockable(Masks()))
 
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands

@@ -14,15 +14,13 @@ The formulas over `v`'s axes that mask it, each at most zero where the mask
 holds, and the number `v` is where the mask fails; nothing when `v` is no
 such value.
 """
-masked(graph::IndexGraph, v) = @lock graph.masks get!(() -> masked_of(graph, v), graph.masks[], v)
+masked(graph::IndexGraph, v) = @lock graph.masks get!(() -> masked_of(graph, v), graph.masks[].of, v)
 
 function masked_of(graph::IndexGraph, v)
     d = Domain(graph.values[v].dims)
     index = Tuple(var(k) for k in 1:length(graph.values[v].dims))
-    found = Vector{Affine}[]
-    value_masks!(found, graph, v, index, d, 0)
-    for m in unique(found)
-        x = masked_value(graph, v, index, m, d, 0)
+    for m in value_masks(graph, v, index, d, false)
+        x = masked_value(graph, v, index, m, d, false)
         x isa Number && return (m, x)
     end
     nothing
@@ -54,45 +52,90 @@ compared(graph, o::Read, through, d) = held_formula(o.value, map(through, o.inde
 compared(graph, o, through, d) = nothing
 
 # The masks of the `ifelse` definitions `v`, read at `index`, is computed
-# from, through the pointwise values it reads, each value at each index once:
-# values read by several, as a derivative's are, are a graph, not a tree.
-function value_masks!(found, graph::IndexGraph, v, index, d::Domain, depth, seen = Set{Any}())
-    depth < 32 || return
-    (v, index) in seen && return
-    push!(seen, (v, index))
-    def = graph.values[v].definition
-    def isa Pointwise || return
-    through(e) = substitute(e, index, d)
-    if def.f === ifelse && length(def.operands) == 3 && def.operands[1] isa Read && def.operands[3] isa Literal
-        o = def.operands[1]
-        m = mask_of(graph, o.value, map(through, o.index), d)
-        m === nothing || push!(found, m)
-    end
-    for o in def.operands
-        o isa Read && value_masks!(found, graph, o.value, map(through, o.index), d, depth + 1, seen)
-    end
+# from, through the pointwise values it reads, in the order a walk from `v`
+# meets them. Each value at each index is walked once in a graph (`found`):
+# values read by several, as a derivative's are, are a graph, not a tree, and
+# a value read at its own positions, as each step of a loop reads the step
+# before, asks what that value is asked itself. The walk follows one read at
+# positions shifted from the reader's, as a slice of masked scores is read
+# (`shifted` once it has), and no second: a stencil reads the step before at
+# shifted positions, and following every shift meets each value of the steps
+# before at a cone of positions that grows with the steps.
+function value_masks(graph::IndexGraph, v, index, d::Domain, shifted)
+    found = graph.masks[].found
+    key = (v, index, d, shifted)
+    haskey(found, key) && return found[key]
+    found[key] = masks_of(graph, v, index, d, shifted)
 end
+
+function masks_of(graph::IndexGraph, v, index, d::Domain, shifted)
+    masks = Vector{Affine}[]
+    def = graph.values[v].definition
+    def isa Pointwise || return masks
+    w = walked(graph, v, index, d)
+    w.condition !== nothing && def.operands[3] isa Literal && push!(masks, w.condition)
+    for (o, at) in zip(def.operands, w.indices)
+        o isa Read || continue
+        shift = shifts(o.index)
+        shifted && shift && continue
+        union!(masks, value_masks(graph, o.value, at, d, shifted || shift))
+    end
+    masks
+end
+
+# What a walk meets at a map read at `index`: the mask its `ifelse`'s
+# condition is, when it is one, and the index each operand is read at, the
+# same whatever mask is asked of it (`walks`).
+function walked(graph::IndexGraph, v, index, d::Domain)
+    walks = graph.masks[].walks
+    key = (v, index, d)
+    haskey(walks, key) && return walks[key]
+    walks[key] = walk_of(graph, v, index, d)
+end
+
+function walk_of(graph::IndexGraph, v, index, d::Domain)
+    def = graph.values[v].definition
+    through(e) = substitute(e, index, d)
+    indices = map(o -> o isa Read ? map(through, o.index) : nothing, def.operands)
+    condition = def.f === ifelse && length(def.operands) == 3 && def.operands[1] isa Read ? mask_of(graph, def.operands[1].value, indices[1], d) : nothing
+    (; condition, indices)
+end
+
+# Whether an index reads at positions shifted from the reader's: a formula of
+# it adds a constant to the reader's variables, there or under a quotient, a
+# remainder or a gather, as a slice, a stencil's neighbours and a circular
+# shift do. A permutation, a broadcast and a reshape shift nothing, and reads
+# that shift nothing meet a value at few positions however many steps they
+# cross.
+shifts(index) = any(shifts, index)
+shifts(e::Affine) = !isempty(e.terms) && e.constant != 0 || any(t -> shifts(t.first), e.terms)
+shifts(a::Var) = false
+shifts(a::Union{Div, Mod}) = shifts(a.e)
+shifts(a::Indirect) = shifts(a.index)
 
 # What `v`, read at `index`, is where `mask` fails, when the mask's literal
 # decides it: a number; `:finite` for an input, a fold, an index, and for
-# what sums, scales, exponentiates or converts those; nothing when unknown.
-# Each value at each index is asked once (`known`).
-function masked_value(graph::IndexGraph, v, index, mask, d::Domain, depth, known = Dict{Any, Any}())
-    depth < 32 || return nothing
-    haskey(known, (v, index)) && return known[(v, index)]
-    known[(v, index)] = masked_value_of(graph, v, index, mask, d, depth, known)
+# what sums, scales, exponentiates or converts those; nothing when unknown,
+# as a map read through a second shift is (see `value_masks`). Each value at
+# each index is asked once a mask in a graph (`known`).
+function masked_value(graph::IndexGraph, v, index, mask, d::Domain, shifted)
+    known = graph.masks[].known
+    key = (v, index, mask, d, shifted)
+    haskey(known, key) && return known[key]
+    known[key] = masked_value_of(graph, v, index, mask, d, shifted)
 end
 
-function masked_value_of(graph::IndexGraph, v, index, mask, d::Domain, depth, known)
+function masked_value_of(graph::IndexGraph, v, index, mask, d::Domain, shifted)
     val = graph.values[v]
     def = val.definition
     def isa Pointwise || return :finite
-    through(e) = substitute(e, index, d)
-    operand(o) = o isa Literal ? o.value : o isa IndexOperand ? :finite :
-        o isa Read ? masked_value(graph, o.value, map(through, o.index), mask, d, depth + 1, known) : nothing
-    if def.f === ifelse && length(def.operands) == 3 && def.operands[1] isa Read
-        o = def.operands[1]
-        mask_of(graph, o.value, map(through, o.index), d) == mask && return operand(def.operands[3])
+    w = walked(graph, v, index, d)
+    function read_value(o, at)
+        shift = shifts(o.index)
+        shifted && shift && graph.values[o.value].definition isa Pointwise && return nothing
+        masked_value(graph, o.value, at, mask, d, shifted || shift)
     end
-    masked_result(def.f, val.eltype, map(operand, def.operands))
+    operand(o, at) = o isa Literal ? o.value : o isa IndexOperand ? :finite : o isa Read ? read_value(o, at) : nothing
+    w.condition == mask && return operand(def.operands[3], w.indices[3])
+    masked_result(def.f, val.eltype, map(operand, def.operands, w.indices))
 end

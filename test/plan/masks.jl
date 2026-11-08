@@ -55,3 +55,44 @@
     h = C.lower(trace((s, doc) -> ifelse.((i .<= j) .& (reshape(doc, :, 1) .== reshape(doc, 1, :)), s, -Inf32), s, doc))
     @test C.masked(h, length(h.values)) !== nothing && first(C.masked(h, length(h.values))) == [window[1]]
 end
+
+# A stencil's step reads the step before at shifted positions, so what a walk
+# from a value meets of the steps before is a cone of positions that grows
+# with the steps. The walk follows one shift, and meets each value at each
+# position once in a graph, so a heat equation of 20 steps, copied and
+# written or as maps of padded slices, prepares in a few seconds, as its
+# gradient does: before, the first took minutes and its gradient did not
+# finish. The bound is loose so that a loaded machine passes; what it guards
+# is the growth with the steps.
+@testset "a stencil's masks are found in time linear in its steps" begin
+    function written(u, steps)
+        for _ in 1:steps
+            v = copy(u)
+            inner = u[2:(end - 1), 2:(end - 1)]
+            v[2:(end - 1), 2:(end - 1)] = inner .+ 0.1f0 .* (u[1:(end - 2), 2:(end - 1)] .+ u[3:end, 2:(end - 1)] .+
+                u[2:(end - 1), 1:(end - 2)] .+ u[2:(end - 1), 3:end] .- 4 .* inner)
+            u = v
+        end
+        u
+    end
+    function mapped(u, steps)
+        i, j = reshape(1:size(u, 1), :, 1), reshape(1:size(u, 2), 1, :)
+        interior = (i .> 1) .& (i .< size(u, 1)) .& (j .> 1) .& (j .< size(u, 2))
+        for _ in 1:steps
+            up, down = vcat(u[1:1, :], u[1:(end - 1), :]), vcat(u[2:end, :], u[end:end, :])
+            left, right = hcat(u[:, 1:1], u[:, 1:(end - 1)]), hcat(u[:, 2:end], u[:, end:end])
+            u = ifelse.(interior, u .+ 0.1f0 .* (up .+ down .+ left .+ right .- 4 .* u), u)
+        end
+        u
+    end
+    forward(heat) = (u, steps) -> heat(u, steps)
+    gradient(heat) = (u, steps) -> T.withgradient(w -> sum(heat(w, steps)), u)
+    u = single(data(16, 16))
+    for heat in (written, mapped), f in (forward(heat), gradient(heat))
+        prepare(trace(u -> f(u, 2), u), u)
+        p = trace(u -> f(u, 20), u)
+        seconds = @elapsed (ex = prepare(p, u))
+        @test seconds < 30
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, u)); rtol = 1.0e-4)
+    end
+end
