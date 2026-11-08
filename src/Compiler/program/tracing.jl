@@ -452,6 +452,20 @@ Base.maximum(f, x::TracedArray; dims = :) = maximum(map(f, x); dims)
 Base.minimum(f, x::TracedArray; dims = :) = minimum(map(f, x); dims)
 Base.prod(f, x::TracedArray; dims = :) = prod(map(f, x); dims)
 
+# Truth values fold as numbers do: `count` sums them in the type Base adds
+# them to `init` in, a small integer widened to `Int`, and `any` and `all` are
+# their largest and smallest. Base's loops stop at the first that decides, a
+# branch on each element.
+function Base.count(f, x::TracedArray; dims = :, init = 0)
+    S = typeof(Base.add_sum(init, false))
+    total = sum(S.(f.(x)); dims)
+    dims isa Colon ? init + total : init .+ total
+end
+Base.any(x::TracedArray{Bool}; dims = :) = maximum(x; dims)
+Base.all(x::TracedArray{Bool}; dims = :) = minimum(x; dims)
+Base.any(f::Function, x::TracedArray; dims = :) = any(f.(x); dims)
+Base.all(f::Function, x::TracedArray; dims = :) = all(f.(x); dims)
+
 """
     Tempest.logsumexp(x; dims = :)
 

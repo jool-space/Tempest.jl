@@ -151,6 +151,8 @@ case!("Base", "reduce(max, x; dims = 1)", x -> reduce(max, x; dims = 1), x)
 case!("Base", "accumulate(+, x; dims = 1)", x -> accumulate(+, x; dims = 1), x)
 case!("Base", "count(>(0), x)", x -> count(>(0), x), x)
 case!("Base", "any(>(1), x)", x -> any(>(1), x), x)
+case!("Base", "count(x .> 0; dims = 2)", x -> count(x .> 0; dims = 2), x)
+case!("Base", "all(x .< 10)", x -> all(x .< 10), x)
 case!("Base", "zero(x) .+ x", x -> zero(x) .+ x, x)
 
 ## Running and comparing.

@@ -60,6 +60,8 @@ with_zero(x) = (y = copy(x); y[2, 3] = 0; y)
 const PROGRAMS = [
     ("dot product", (a, b) -> sum(a .* b), (data(32), data(32; scale = 0.3))),
     ("sum abs2 tanh", x -> sum(abs2, tanh.(x)), (data(8, 6),)),
+    ("rounded, counted and tested", x -> sum(abs2, x .* round.(Int32, 3 .* x)) + count(>(0), x) * sum(x) + all(x .< 3) * sum(abs2, x) +
+        sum(any(x .> 1; dims = 1) .* x), (data(8, 6),)),
     ("full logsumexp", x -> T.logsumexp(x), (data(8, 6),)),
     ("maximum and shifted sum", x -> sum(exp.(x .- maximum(x))), (data(8, 6),)),
     ("log-sum-exp written out", x -> sum(written_logsumexp(x; dims = 1) .* data(1, 6)), (data(8, 6),)),

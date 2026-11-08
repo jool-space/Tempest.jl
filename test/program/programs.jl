@@ -249,3 +249,26 @@ end
         @test isequal(outputs(execute!(prepare(p, x))), f(x))
     end
 end
+
+# Truth values fold as numbers do: a count is a sum of them in the type Base
+# counts in, `any` and `all` their largest and smallest, along `dims` too.
+@testset "counts, any and all" begin
+    x = data(8, 6)
+    @testset "$name" for (name, f) in [
+        ("count(>(0), x)", x -> count(>(0), x)),
+        ("count(x .> 0)", x -> count(x .> 0)),
+        ("count(x .> 0; dims = 2)", x -> count(x .> 0; dims = 2)),
+        ("count(>(0), x; init = Int32(2))", x -> count(>(0), x; init = Int32(2))),
+        ("any(>(1), x)", x -> any(>(1), x)),
+        ("any(x .> 3)", x -> any(x .> 3)),
+        ("all(x .< 10)", x -> all(x .< 10)),
+        ("all(<(1), x; dims = 1)", x -> all(<(1), x; dims = 1)),
+        ("any(x .> 1; dims = 2)", x -> any(x .> 1; dims = 2)),
+    ]
+        p = trace(f, x)
+        @test !any(n -> n.op isa C.Map && n.op.f isa C.Bound, p.nodes)
+        @test isequal(interpret(p, x), f(x))
+        @test isequal(on_host(outputs(execute!(prepare(p, x)))), f(x))
+    end
+    @test interpret(trace(x -> count(>(0), x; init = Int32(2)), x), x) isa Int
+end
