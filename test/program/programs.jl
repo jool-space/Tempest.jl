@@ -272,3 +272,15 @@ end
     end
     @test interpret(trace(x -> count(>(0), x; init = Int32(2)), x), x) isa Int
 end
+
+# A norm is its formula, the elements' powers summed, without Base's division
+# by the largest element first, which branches on the elements.
+@testset "norms" begin
+    x = data(8, 6)
+    @test length(trace(norm, x).nodes) == 4
+    @testset "p = $p" for p in (2, 1, Inf, -Inf, 0, 3, 0.5)
+        @test interpret(trace(x -> norm(x, p), x), x) ≈ norm(x, p)
+    end
+    @test interpret(trace(normalize, x), x) ≈ normalize(x)
+    @test interpret(trace(x -> norm(x), Float32.(x)), Float32.(x)) isa Float32
+end

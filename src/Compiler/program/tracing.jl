@@ -1020,6 +1020,24 @@ function LinearAlgebra.dot(x::TracedArray{<:Real}, y::TracedArray{<:Real})
     sum(vec(x) .* vec(y))
 end
 
+# A norm is its formula. Base's divides the elements by the largest first, so
+# that their squares do not overflow, which branches on the elements; a sum
+# accumulates in Float32 at least, wide enough for the squares of the numbers
+# a network holds.
+function LinearAlgebra.norm(x::TracedArray{<:Real}, p::Real = 2)
+    p == 2 && return sqrt(float(sum(abs2, x)))
+    p == 1 && return float(sum(abs, x))
+    p == Inf && return float(maximum(abs, x))
+    p == -Inf && return float(minimum(abs, x))
+    T = float(eltype(x))
+    p == 0 && return T(count(!iszero, x))
+    # The power in the elements' type, as Base takes it.
+    q = T(p)
+    sum(abs.(T.(x)) .^ q)^inv(q)
+end
+
+LinearAlgebra.normalize(x::TracedArray{<:Real}, p::Real = 2) = x ./ norm(x, p)
+
 # Tracing a function.
 
 # What becomes a program's input among the leaves of its arguments: arrays.
