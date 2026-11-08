@@ -496,15 +496,20 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         ms
     end
     # Each state at every step but the first is the value it is carried
-    # from one step back: one copy of all of them.
+    # from one step back: one copy of all of them, of each state something
+    # outside the recurrence reads. The rest are read by the steps alone, from
+    # the values they are carried from: copied, the 100 states of a 256×256
+    # heat equation took 0.21 ms a recurrence, more than its steps.
+    read_outside(c) = any(o -> o isa Read && o.value == c, p.graph.results) || any(bg -> bg !== g && c in group_reads(p.graph, bg), p.groups)
+    copied = [(c, f) for (c, f) in zip(cs, fs) if read_outside(c)]
     n = storage_length(values[first(cs)]) ÷ steps
     total = storage_length(values[first(cs)])
-    finish = if steps == 1
+    finish = if steps == 1 || isempty(copied)
         () -> nothing
     elseif cd.reverse
-        () -> foreach(((c, f),) -> copyto!(view(buffers[c], 1:(total - n)), view(stacked(f), (n + 1):total)), zip(cs, fs))
+        () -> foreach(((c, f),) -> copyto!(view(buffers[c], 1:(total - n)), view(stacked(f), (n + 1):total)), copied)
     else
-        () -> foreach(((c, f),) -> copyto!(view(buffers[c], (n + 1):total), view(stacked(f), 1:(total - n))), zip(cs, fs))
+        () -> foreach(((c, f),) -> copyto!(view(buffers[c], (n + 1):total), view(stacked(f), 1:(total - n))), copied)
     end
     run = SteppedRun(launches, moves, copies, start, finish, (slots, bbuffers, built, positions, own))
     (run, SteppedKernels(steps, Any[b[2] for b in built], sums))
