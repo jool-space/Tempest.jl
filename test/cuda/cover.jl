@@ -1,9 +1,9 @@
 # The cover on CUDA: claims timed on buffers of their own, choices measured and
 # kept in the tuning record, a search that tries the variants of the option
 # that measures best, a comparison measured where the record refutes an
-# estimate, what a kernel's tiles read again and what a view
-# reaches, products proposed apart from a fold among them that is not one, and
-# the implementations a target names.
+# estimate, what a kernel's tiles read again, of a value and of a shifted
+# read's border, and what a view reaches, products proposed apart from a
+# fold among them that is not one, and the implementations a target names.
 include("../fixtures/programs.jl")
 
 # Claims are timed on buffers of their own, which a kernel reads as data:
@@ -234,6 +234,24 @@ end
     chosen = C.decide(d, base, g).choice
     moved = sum(v -> C.value_bytes(base.graph.values[v]), [collect(C.group_reads(base.graph, g)); filter(v -> base.stored[v], C.members(g))])
     @test only(C.estimate(chosen.implementation, chosen.claim, target, C.group_view(base, g))).bytes == moved
+end
+
+# A stencil's step reads its grid at each neighbour, the index held at the
+# border where a shift runs off it: the loads at the border read a row or a
+# column, and only what a column load reads is read again by every tile of
+# 256×4 along the second axis. The estimate counts those columns, not the
+# whole grid each time.
+@testset "what a shifted read reads again" begin
+    u = single(data(256, 256; scale = 0.1))
+    shifted(u) = vcat(u[1:1, :], u[1:(end - 1), :]) .+ vcat(u[2:end, :], u[end:end, :]) .+
+        hcat(u[:, 1:1], u[:, 1:(end - 1)]) .+ hcat(u[:, 2:end], u[:, end:end])
+    target = T.CUDATarget(T.cuTileGenerator())
+    d = C.Decider(target, C.lower(trace(shifted, u)); measure = :none)
+    base = C.generator_plan(d)
+    g = only(base.groups)
+    chosen = C.decide(d, base, g).choice
+    work = only(C.estimate(chosen.implementation, chosen.claim, target, C.group_view(base, g)))
+    @test 0 < work.reread < sizeof(u)
 end
 
 # An implementation of a package not loaded.

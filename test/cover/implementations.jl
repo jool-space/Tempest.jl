@@ -86,6 +86,12 @@ end
     @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, u); rtol = 1.0e-12)
 end
 
+@testset "the floor reads a value loaded at several positions once" begin
+    u = data(8, 8)
+    bytes(f) = (p = C.plan(C.lower(trace(f, u))); only(C.floor_estimate(p, only(p.groups))).bytes)
+    @test bytes(u -> u .+ vcat(u[2:end, :], u[end:end, :])) == bytes(u -> 2 .* u)
+end
+
 # A claim that fails to build is no option once it has, and the program is
 # planned again: each map of the group it claimed is proposed to be stored
 # apart. This implementation claims products and maps alike as free, and

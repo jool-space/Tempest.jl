@@ -993,17 +993,44 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
         end
         n
     end
+    # What the blocks read again of value `v`: each load of it reads again,
+    # in every further block that reads what it reads, the positions its
+    # index reaches, a border's row where a shifted read's index is held at
+    # the edge; at most the whole value as often as its most read load is.
+    # The whole value each time, a stencil's step was priced at 66.6 μs for
+    # the 6.1 it took.
+    domain = Domain(g.domain)
+    reached_at(t) = reached_elements((t,), g.values[t.value].dims, domain)
+    function rereads(v)
+        s.sketch === :product && return 0.0
+        n = prod(g.values[v].dims; init = 1)
+        again = 0.0
+        for t in unique(l for m in members(g) if haskey(g.terms, m) for l in loads(g.terms[m]) if l.value == v)
+            along = prod(ax -> reading_blocks(t, ax, g.domain), kept; init = 1)
+            split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
+            again += reached_at(t) / n * (along * split - 1)
+        end
+        min(again, times_read(v) - 1)
+    end
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
     streaming, swept, inner = applied(c, roots)
     prior = [b for k in kernels for (_, (_, b)) in k.before]
     main = findfirst(k -> k.name != INITIAL_STATES && !any(b -> b === k, prior), kernels)
     combined(r) = (g.values[r].fold isa Overwrite ? 1 : 2) * prod(k -> g.domain[k], g.values[r].reduced; init = 1)
-    elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) : reachable(a)
+    # A view reaches no more of a value than its loads do: a gather's view
+    # is of the whole buffer, a step's slice of a value along the steps of
+    # which it reads.
+    function reach_of(v)
+        ts = [l for m in members(g) if haskey(g.terms, m) for l in loads(g.terms[m]) if l.value == v]
+        isempty(ts) ? typemax(Int) : reached_elements(ts, g.values[v].dims, domain)
+    end
+    elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) :
+        a.buffer isa Int ? min(reachable(a), reach_of(a.buffer)) : reachable(a)
     map(enumerate(kernels)) do (i, kernel)
         moved(a) = elements(kernel, a) * sizeof(element(a)) * (i == main && a.buffer isa Int ? share(a.buffer) : 1.0)
         bytes = sum(a -> a.buffer isa Int ? moved(a) : 0.0, kernel.args; init = 0.0)
         passed = sum(a -> a.buffer isa Int ? 0.0 : moved(a), kernel.args; init = 0.0)
-        reread = i == main ? sum(a -> a.buffer isa Int ? moved(a) * (times_read(a.buffer) - 1) : 0.0, kernel.args; init = 0.0) : 0.0
+        reread = i == main ? sum(a -> a.buffer isa Int ? moved(a) * rereads(a.buffer) : 0.0, kernel.args; init = 0.0) : 0.0
         blocks = prod(kernel.grid; init = 1)
         i == main ? Work(bytes; reread, passed, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) :
             Work(bytes; passed, blocks)

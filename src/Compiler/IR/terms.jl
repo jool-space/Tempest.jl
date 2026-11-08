@@ -3,7 +3,7 @@
 # literals, index expressions, the kernel's own reductions and the folds it
 # recomputes.
 
-public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, mentions,
+public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, reached_elements, mentions,
     product_factors
 
 abstract type Term end
@@ -168,6 +168,23 @@ function subterms(roots; nested = false, known = t -> false)
 end
 
 loads(t::Term) = [s for s in subterms((t,); nested = true) if s isa Load]
+
+"""
+    reached_elements(ts, dims, domain)
+
+The elements of a value of `dims` that loads `ts` of it reach over `domain`:
+along each axis, the span of the positions their indices take there, one
+where they are held, as a slice's index is; every element where an index
+mentions a variable past the domain's, as the body of a fold recomputed
+inside does.
+"""
+function reached_elements(ts, dims, d::Domain)
+    length(d) < 63 && all(t -> variables(t) < variable_bit(length(d) + 1), ts) || return prod(dims; init = 1)
+    prod(eachindex(dims); init = 1) do k
+        ranges = [affine_range(t.index[k], d) for t in ts]
+        min(dims[k], maximum(last, ranges) - minimum(first, ranges) + 1)
+    end
+end
 
 """
     product_factors(fold, term) -> (x, y) or nothing

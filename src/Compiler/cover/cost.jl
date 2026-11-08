@@ -118,17 +118,35 @@ function group_bytes(p::Plan, g::Group)
         loaded(a) || delete!(reads, a)
     end
     written(v) = !p.stored[v] ? 0 : starts_from_storage(graph, v) ? combined_bytes(graph.values[v]) : value_bytes(graph.values[v])
-    Float64(sum(v -> value_bytes(graph.values[v]), reads; init = 0) + sum(written, members(g); init = 0))
+    Float64(sum(v -> read_bytes(p, g, v), reads; init = 0) + sum(written, members(g); init = 0))
 end
 
-# The floor reads every load at every point of the domain, one item a thread;
-# a fold's or a scan's item sweeps the axes it folds along. Where the target
-# splits a reduction's items (`split`, see `Split`), the lanes of their parts
-# share the device, and each phase of folds is a launch more.
+# The bytes of value `v` group `g` reads: where its loads reach, a step's
+# slice of a value along the steps say, when the group only loads it; whole
+# when the group gathers from it or reads it otherwise.
+function read_bytes(p::Plan, g::Group, v)
+    val = p.graph.values[v]
+    all(m -> haskey(g.terms, m) && !(v in key_reads(p.graph, m)), members(g)) || return value_bytes(val)
+    terms = [g.terms[m] for m in members(g)]
+    gathers(s) = s isa Load ? any(e -> v in indirect_values(e), s.index) : s isa Ix && v in indirect_values(s.expr)
+    any(gathers, subterms(terms; nested = true)) && return value_bytes(val)
+    ts = [l for t in terms for l in loads(t) if l.value == v]
+    isempty(ts) && return value_bytes(val)
+    sizeof(val.eltype) * min(storage_length(val), reached_elements(ts, val.dims, Domain(g.domain)))
+end
+
+# The floor reads each value a member loads at every point of the domain,
+# one item a thread; a fold's or a scan's item sweeps the axes it folds
+# along. A value a member loads at several positions of a point, a stencil's
+# neighbours, is read from memory once: its other loads find it in the
+# cache, where neighbouring items brought it. Where the target splits a
+# reduction's items (`split`, see `Split`), the lanes of their parts share
+# the device, and each phase of folds is a launch more.
 function floor_estimate(p::Plan, g::Group, split = (items, positions, adjacent) -> nothing)
     g.kind === :recurrence && return recurrence_floor_estimate(p, g)
     points = prod(g.domain; init = 1)
-    per_point = sum(m -> sum(l -> sizeof(p.graph.values[l.value].eltype), loads(g.terms[m]); init = 0), members(g); init = 0)
+    loaded(m) = unique(l.value for l in loads(g.terms[m]))
+    per_point = sum(m -> sum(v -> sizeof(p.graph.values[v].eltype), loaded(m); init = 0), members(g); init = 0)
     bytes = Float64(points * per_point) + group_bytes(p, g)
     items = g.kind in (:reduction, :scan) ? prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1) : points
     s = group_split(p.graph, g, split)
