@@ -284,3 +284,34 @@ end
     @test interpret(trace(normalize, x), x) ≈ normalize(x)
     @test interpret(trace(x -> norm(x), Float32.(x)), Float32.(x)) isa Float32
 end
+
+# Rotations, circular shifts and repeats are reads of the array by formulas of
+# the position, as a reversal is, of as many nodes at every size: Base's loops
+# over the elements would record two for each. Their derivatives read back by
+# formulas too, gathering and scattering nothing.
+@testset "rotations, circular shifts and repeats" begin
+    @testset "$name" for (name, f) in [
+        ("rotl90(x)", rotl90),
+        ("rotr90(x)", rotr90),
+        ("rot180(x)", rot180),
+        ("rotl90(x, 3)", x -> rotl90(x, 3)),
+        ("circshift(x, (1, 0))", x -> circshift(x, (1, 0))),
+        ("circshift(x, (-3, 5))", x -> circshift(x, (-3, 5))),
+        ("circshift(x, 2)", x -> circshift(x, 2)),
+        ("circshift(x, [1, 1])", x -> circshift(x, [1, 1])),
+        ("repeat(x, 2, 1)", x -> repeat(x, 2, 1)),
+        ("repeat(x, 16, 16)", x -> repeat(x, 16, 16)),
+        ("repeat(x; inner = (1, 2))", x -> repeat(x; inner = (1, 2))),
+        ("repeat(x; inner = (2, 1, 2), outer = (1, 3))", x -> repeat(x; inner = (2, 1, 2), outer = (1, 3))),
+        ("repeat(x[:, 1], 3)", x -> repeat(x[:, 1], 3)),
+    ]
+        x = data(8, 6)
+        p = trace(f, x)
+        @test interpret(p, x) == f(x)
+        @test outputs(execute!(prepare(p, x))) == f(x)
+        @test length(trace(f, data(64, 62)).nodes) == length(trace(f, data(256, 254)).nodes) == length(p.nodes)
+        for q in (p, differentiate(trace(x -> sum(abs2, f(x)), x)))
+            @test !any(v -> v.definition isa Union{C.Keyed, C.ConstantArray}, C.lower(q).values)
+        end
+    end
+end

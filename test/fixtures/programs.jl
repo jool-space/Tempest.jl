@@ -101,6 +101,8 @@ const PROGRAMS = [
     ("rotation by a constant permutation", (x, c, s) -> sum(abs2, x .* c .+ x[[3, 4, 1, 2], :] .* s), (data(4, 6), data(4, 1), data(4, 1; scale = 0.3))),
     ("vec and dropdims", x -> sum(abs2, vec(dropdims(sum(x; dims = 1); dims = 1))), (data(8, 6),)),
     ("Cartesian indices, the diagonal and dot", x -> sum(abs2, diag(x)) + x[CartesianIndex(2, 3)] + dot(x, tanh.(x)), (data(6, 6),)),
+    ("circular shifts, rotations and repeats", x -> sum(abs2, circshift(x, (1, -2)) .* data(8, 6)) + sum(rotr90(x) .* data(6, 8)) +
+        sum(abs2, repeat(x; inner = (1, 2), outer = (2, 1)) .* data(16, 12)), (data(8, 6),)),
     ("norms and a normalized vector", (x, u) -> norm(x) + norm(x, 1) + norm(x, 3) + sum(normalize(u) .* data(8; scale = 0.3)),
      (data(8, 6), data(8; scale = 0.5))),
     ("map over two arrays", (x, y) -> sum(abs2, map((a, b) -> a * b + a, x, y)), (data(8, 6), data(8, 6; scale = 0.4))),

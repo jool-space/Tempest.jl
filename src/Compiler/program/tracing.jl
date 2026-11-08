@@ -821,6 +821,43 @@ Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
 # A reversal is a selection by reversed ranges, not a loop of swaps.
 Base.reverse(x::TracedArray; dims = :) = x[ntuple(k -> dims isa Colon || k in dims ? (size(x, k):-1:1) : (1:size(x, k)), ndims(x))...]
 
+# So are the rotations, a reversal of the transpose. A circular shift swaps
+# the slices on either side of the shift, concatenated, as JAX rolls an
+# array: a read by formulas whose adjoint reads back by them, where a read by
+# positions wrapped around would have a scatter by them.
+Base.rotl90(x::TracedArray{<:Any, 2}) = reverse(permutedims(x); dims = 1)
+Base.rotr90(x::TracedArray{<:Any, 2}) = reverse(permutedims(x); dims = 2)
+Base.rot180(x::TracedArray{<:Any, 2}) = reverse(x)
+
+Base.circshift(x::TracedArray, shift::Real) = circshift(x, (shift,))
+Base.circshift(x::TracedArray, shifts) = circshift(x, Tuple(shifts))
+function Base.circshift(x::TracedArray, shifts::Tuple{Vararg{Integer}})
+    y = copy(x)
+    for k in 1:min(ndims(x), length(shifts))
+        n = size(x, k)
+        s = mod(shifts[k], n)
+        s == 0 && continue
+        slice(r) = y[ntuple(j -> j == k ? r : Colon(), ndims(x))...]
+        y = cat(slice((n - s + 1):n), slice(1:(n - s)); dims = k)
+    end
+    y
+end
+
+# A repeat is a broadcast: each axis of `x` between an axis of `inner` copies
+# before it and one of `outer` copies after, filled out, and the three merged,
+# so that the copies of an element are adjacent and those of the axis follow
+# one another.
+function Base.repeat(x::TracedArray; inner = nothing, outer = nothing)
+    inner = inner === nothing ? () : Tuple(inner)
+    outer = outer === nothing ? () : Tuple(outer)
+    n = max(ndims(x), length(inner), length(outer))
+    copies(counts, k) = k <= length(counts) ? Int(counts[k]) : 1
+    apart = Tuple(Iterators.flatten((1, size(x, k), 1) for k in 1:n))
+    spread = Tuple(Iterators.flatten((copies(inner, k), size(x, k), copies(outer, k)) for k in 1:n))
+    y = TracedArray(x.tape, filled(x.tape, reshape(x, apart).id, spread))
+    reshape(y, ntuple(k -> prod(spread[(3k - 2):3k]), n))
+end
+
 # Triangles are masks of positions, not loops over elements.
 LinearAlgebra.tril(x::TracedArray{<:Any, 2}, k::Integer = 0) =
     ifelse.(reshape(1:size(x, 1), :, 1) .- reshape(1:size(x, 2), 1, :) .>= -k, x, zero(eltype(x)))
