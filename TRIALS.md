@@ -431,7 +431,14 @@ the same model under `torch.compile` captured as a graph, 1.31 ms; at GPT-2
 equation on a 256×256 grid, its steps `accumulate`d so that they roll: 1.89
 s at 100 steps and 18.9 s at 1000, against 0.34 and 3.6 ms for a kernel a
 step in CUDA.jl, both recurrences of the gradient on the floor; written as a
-plain loop it unrolls, 200 kernels and 0.66 ms at 100 steps. Agreement with
+plain loop it unrolls, 200 kernels and 0.66 ms at 100 steps. Taken: a
+recurrence whose step reads its state shifted runs a step at a time (where
+cuTile's one kernel, on a grid of up to 2048 positions, had read the state
+before writing it, 6% off), and a plain loop whose step selects from the
+step before rolls; the heat gradient, a cuTile kernel a step forward and two
+back, 1.27 ms at 100 steps and 13.1 ms at 1000 against the hand loop's 0.333
+and 3.61 at 2411 MHz, 3.8 and 3.6 times, the forward alone 0.63 ms at 100,
+its kernels 2.4 to 3.7 μs each against the hand loop's 1.7. Agreement with
 Float64 is 3e-4 to 1e-3 where the products are TF32, and 2e-6 for the heat
 equation in Float32; the GPT's 8e-2 is a weight Adam's first step moves by
 its rate times the sign of a gradient near zero, and at GPT-2's geometry it
