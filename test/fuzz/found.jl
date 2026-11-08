@@ -51,16 +51,6 @@ function softmax_step(xs, a1, a2, U)
 end
 
 @testset "found by the randomized checker" begin
-    # Seed 72 (fold), on the CPU: `relative_sums` takes the negation in
-    # `exp(-m)`, with `m` a maximum, for the difference `exp(y - m)` of a
-    # softmax, and `dependent` fails to split its one operand in two
-    # (BoundsError on a Tuple{Read}).
-    @testset "a sum of exponentials of a negated maximum is not taken for one relative to the maximum" begin
-        x = randn(Xoshiro(72), 3, 3)
-        f(x) = sum(exp.(-maximum(x; dims = 2)))
-        @test_broken runs(f, x) && prepared(f, x) ≈ f(x)
-    end
-
     # Seeds 106 and 234 (loop), on the CPU: refused by name, "a recurrence
     # whose step scans, scatters or writes is not supported yet", a scan in
     # the cycle of states as TRIALS counts it.

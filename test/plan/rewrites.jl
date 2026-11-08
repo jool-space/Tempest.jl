@@ -172,6 +172,16 @@ relative_folds(g) = [v.definition.fold for v in g.values if v.definition isa C.R
     @test planned(by_hand) == planned(x -> T.logsumexp(x; dims = 1))
 end
 
+# The law is for a sum of `exp(y - m)`: the exponential of a negated maximum
+# has no `y`, and its sum stays a sum.
+@testset "a sum of exponentials of a negated maximum is not relative to the maximum" begin
+    x = data(3, 3)
+    f(x) = sum(exp.(-maximum(x; dims = 2)))
+    g = C.rewrite(C.lower(trace(f, x)))
+    @test count(v -> v.definition isa C.Reduction{IR.SumFold}, g.values) == 1
+    @test agree(C.execute(recomputing(g), x), [f(x)])
+end
+
 # A fold whose state is a tuple, as Base spells it: `mapreduce` with a lift to
 # the state, a merge and a tuple `init`, then what the state means, which reads
 # its components. It is one fold, with no tuple stored or left in the graph:

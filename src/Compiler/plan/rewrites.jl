@@ -450,7 +450,10 @@ function dependent(graph, r, F, fr::Frame)
     domain = Domain(d.iteration)
     for (x, rest) in applications(graph, factors(graph, d.operand, domain), fr.law, domain)
         applies(graph, x, -) || continue
-        y, m = inner(graph, x, domain)
+        # A negation `-m` is `-` of one operand; the law is for a difference.
+        operands = inner(graph, x, domain)
+        length(operands) == 2 || continue
+        y, m = operands
         m isa Read && m.value == F && eltype_of(graph, y) === eltype_of(graph, x) === graph.values[F].eltype || continue
         index = aligned(graph, fr.fold, m.index, d.reduced, domain)
         (index === nothing || through(fr.y, index, domain) != y) && continue
