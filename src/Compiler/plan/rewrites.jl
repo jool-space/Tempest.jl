@@ -281,9 +281,13 @@ end
 # The axes of `extents` that a sum's iteration axes are, such that its
 # factors `gs`, read over them, are the factors `fs` in some order; nothing
 # when no order makes them so. Each axis is matched where a factor reads it
-# alone along one of its own axes.
+# along one of its own axes, alone or among other axes each at a multiple of
+# its own, as a reshaped array reads its columns: `i1 + 64·i2` against
+# `64·i2 + i5` matches `i1` with `i5` and `i2` with `i2`. A GPT's values, read
+# so from the projection they reshape, matched no axis of the features, and
+# its attention's backward summed the probabilities' gradient over the keys,
+# as large as the scores, rather than the output's over the features.
 function matched_axes(gs, fs, iteration, extents)
-    sole(e) = e.constant == 0 && length(e.terms) == 1 && e.terms[1].second == 1 && e.terms[1].first isa Var ? e.terms[1].first.n : 0
     function match(i, σ, used)
         if i > length(gs)
             all(!iszero, σ) && allunique(σ) && all(k -> iteration[k] == extents[σ[k]], eachindex(σ)) || return nothing
@@ -298,11 +302,9 @@ function matched_axes(gs, fs, iteration, extents)
             if g isa Read
                 g.value == f.value || continue
                 ok = true
-                for (a, b) in zip(g.index, f.index)
-                    k, l = sole(a), sole(b)
-                    k == 0 && continue
-                    l == 0 || τ[k] == 0 || τ[k] == l || (ok = false; break)
-                    l == 0 || (τ[k] = l)
+                for (a, b) in zip(g.index, f.index), (k, l) in paired_axes(a, b)
+                    τ[k] == 0 || τ[k] == l || (ok = false; break)
+                    τ[k] = l
                 end
                 ok || continue
             end
@@ -312,6 +314,17 @@ function matched_axes(gs, fs, iteration, extents)
         nothing
     end
     match(1, zeros(Int, length(iteration)), Int[])
+end
+
+# The axes two index entries read at the same multiples, each of `a`'s with
+# the one of `b`'s at its multiple: both sums of distinct multiples of axes,
+# alike but for which axes. None for any other pair.
+function paired_axes(a::Affine, b::Affine)
+    variables(e) = all(t -> t.first isa Var, e.terms)
+    multiples(e) = map(last, e.terms)
+    a.constant == b.constant && variables(a) && variables(b) && allunique(multiples(a)) && sort(multiples(a)) == sort(multiples(b)) ||
+        return Pair{Int, Int}[]
+    [t.first.n => only(u.first.n for u in b.terms if u.second == t.second) for t in a.terms]
 end
 
 # The program's rounding of the sum `s` reads to half precision, read where

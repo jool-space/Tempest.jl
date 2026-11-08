@@ -82,6 +82,22 @@ end
     @test agree(C.execute(recomputing(g), q, k, v), filter(!isnothing, C.leaves(interpret(p, q, k, v))))
 end
 
+# Values read from the projection they reshape, as a GPT's are, at
+# `i1 + 4·i2` for feature `i1` of head `i2`: the sums match axis for axis by
+# the multiples they read them at, and the gradient still sums over features.
+@testset "a sum's product read through a reshape is exchanged" begin
+    q, k = data(4, 2, 6, 2; scale = 0.3), data(4, 2, 6, 2; scale = 0.2)
+    x, w = data(8, 12; scale = 0.1), data(8, 8; scale = 0.05)
+    f(q, k, x, w) = sum(abs2, Ops.attention(q, k, reshape(w' * x, 4, 2, 6, 2); causal = true))
+    p = differentiate(trace(f, q, k, x, w))
+    g = C.rewrite(C.lower(p))
+    exchanged = [id for (id, note) in g.rewrites if startswith(note, "sums exchanged")]
+    @test length(exchanged) == 1
+    d = g.values[only(exchanged)].definition
+    @test map(k -> d.iteration[k], d.reduced) == (4,)
+    @test agree(C.execute(recomputing(g), q, k, x, w), filter(!isnothing, C.leaves(interpret(p, q, k, x, w))))
+end
+
 # With `rounded`, the exchanged sum reads the output as a half-precision
 # forward rounds it, as FlashAttention's and cuDNN's backward read theirs: the
 # forward stores the rounded output, and not the Float32 sum as well. The
