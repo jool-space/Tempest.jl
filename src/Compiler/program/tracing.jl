@@ -1123,6 +1123,10 @@ Program with 3 nodes: Float64(3,) → Float64
 """
 trace(f, args...) = first(trace_meeting(f, args...))
 
+const GLOBAL_DRAW = "the traced function drew from Julia's global random number generator: the numbers were drawn \
+    when the program was traced and are constants in it, the same each time it runs. Draw them outside the traced \
+    function and pass them in as an array"
+
 # `trace`, and the arrays it met as constants, as they were.
 function trace_meeting(f, args...)
     tape = Tape()
@@ -1138,7 +1142,12 @@ function trace_meeting(f, args...)
     traced = rebuild(stand_in, args)
     position = Dict(id => k for (k, id) in enumerate(arguments))
     input_structure = structure_of(t -> t isa Union{Traced, TracedArray} ? position[t.id] : nothing, traced)
+    # A draw from a generator is made as `f` runs, so the program holds the
+    # numbers drawn as constants. Only the global generator's are seen: its
+    # state moves.
+    drawn = copy(Random.default_rng())
     output = f(traced...)
+    copy(Random.default_rng()) == drawn || @warn GLOBAL_DRAW
     results = Int[]
     output_structure = structure_of(output) do leaf
         # Any other leaf, `nothing` as a gradient has for an integer argument,

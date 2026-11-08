@@ -18,6 +18,7 @@ to themselves, such as the arithmetic that builds index expressions.
 module Compiler
 
 using LinearAlgebra
+import Random
 using BFloat16s: BFloat16
 using Republic: @republic
 # The derivatives packages state with `@scalar_rule` (`stated_derivatives`).

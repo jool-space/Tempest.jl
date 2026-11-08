@@ -159,6 +159,7 @@ case!("Base", "any(>(1), x)", x -> any(>(1), x), x)
 case!("Base", "count(x .> 0; dims = 2)", x -> count(x .> 0; dims = 2), x)
 case!("Base", "all(x .< 10)", x -> all(x .< 10), x)
 case!("Base", "zero(x) .+ x", x -> zero(x) .+ x, x)
+case!("Base", "x .+ rand(Float32, size(x))", x -> x .+ rand(Float32, size(x)), x)
 
 ## Running and comparing.
 

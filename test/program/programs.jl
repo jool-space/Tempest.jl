@@ -315,3 +315,22 @@ end
         end
     end
 end
+
+# A draw from Julia's global generator is made when the program is traced, so
+# the numbers drawn are constants of the program, and tracing says so; a
+# generator of the program's own, keyed by a seed passed in, draws anew.
+import Random
+
+@testset "a draw from the global generator" begin
+    x = Float32.(data(8, 6))
+    drawn = r"drew from Julia's global random number generator"
+    @test_logs (:warn, drawn) trace(x -> x .+ rand(Float32, size(x)), x)
+    @test_logs (:warn, drawn) trace(x -> NNlib.rrelu.(x), x)
+    @test_logs trace((x, s) -> Ops.dropout(x, s; rate = 0.25), x, Int32[7])
+    # A generator passed in draws when the program is traced too, but its
+    # state is the caller's to move, unseen.
+    @testset "gap: a draw from a generator passed in warns once a draw from any generator is seen while tracing" begin
+        _, logs = Test.collect_test_logs(() -> trace(x -> x .+ rand(Random.Xoshiro(1), Float32, size(x)), x))
+        @test_broken !isempty(logs)
+    end
+end
