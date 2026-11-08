@@ -148,3 +148,34 @@ end
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(grad(args...)); rtol = 1.0e-3)
     end
 end
+
+# A stencil's steps: each position reads its neighbours at the step before,
+# the grid shifted by one, its index wrapped where the shift runs off it, so
+# no position's steps are apart from the others' and the floor's kernel
+# steps through every position alone. The step is a program of its own, its
+# reads quotients and remainders of its positions, and runs a step at a
+# time, forward and back.
+@testset "stencils stepped" begin
+    function interior(u)
+        i = reshape(Int32(1):Int32(size(u, 1)), :, 1)
+        j = reshape(Int32(1):Int32(size(u, 2)), 1, :)
+        (i .> 1) .& (i .< size(u, 1)) .& (j .> 1) .& (j .< size(u, 2))
+    end
+    function diffuse(u, inside)
+        up, down = vcat(u[1:1, :], u[1:(end - 1), :]), vcat(u[2:end, :], u[end:end, :])
+        left, right = hcat(u[:, 1:1], u[:, 1:(end - 1)]), hcat(u[:, 2:end], u[:, end:end])
+        ifelse.(inside, u .+ eltype(u)(0.2) .* (up .+ down .+ left .+ right .- 4 .* u), u)
+    end
+    evolve(u, q) = (inside = interior(u); last(accumulate((v, s) -> diffuse(v, inside) .+ s, eachslice(q; dims = 3); init = u)))
+    heat(u, q) = T.withgradient(v -> sum(abs2, evolve(v, q)), u)
+    args = (data(8, 8), data(8, 8, 5; scale = 0.01))
+    stepped(ex) = [k isa C.SteppedKernels for (k, g) in zip(ex.kernels, ex.plan.groups) if g.kind === :recurrence]
+    ex = prepare(trace(heat, args...), args...)
+    @test stepped(ex) == [true, true]
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(heat(args...)); rtol = 1.0e-10)
+    if CUDA_FUNCTIONAL
+        ex = prepare(trace(heat, map(single, args)...), map(x -> CuArray(single(x)), args)...)
+        @test stepped(ex) == [true, true]
+        @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), C.leaves(heat(args...)); rtol = 1.0e-4)
+    end
+end

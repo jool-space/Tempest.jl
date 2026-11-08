@@ -107,7 +107,10 @@ function step_graph(graph::IndexGraph, stored, g::Group)
             return
         end
         o isa Read || return
-        all(is_affine, o.index) || (ok[] = false; return)
+        # A quotient or remainder of the position, as a shifted read's
+        # wrapped index, is the step's own index; a gather would read an
+        # index array the step does not hold.
+        all(e -> isempty(indirect_values(e)), o.index) || (ok[] = false; return)
         at = si == 0 ? Int[] : findall(e -> mentions(e, si), collect(o.index))
         if isempty(at)
             visit(o.value, 0)

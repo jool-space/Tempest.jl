@@ -740,7 +740,18 @@ end
 const RECURRENCE_TILES = (16, 32, 64)
 const RECURRENCE_STATE = 2048
 
+# Whether load `l` reads a state as the kernel holds it, each axis of the
+# state at its own position (see `held_tile`). A state read elsewhere, as a
+# stencil reads its neighbours, would be read from the storage the kernel
+# writes the step's state to only after the step: such a step runs a step
+# at a time instead.
+reads_held(g::GroupView, l::Load) = g.values[l.value].carried === nothing || allunique(l.index) && all(plain_variable, l.index)
+
+# Whether `e` is one variable, of the domain or of a fold within it.
+plain_variable(e) = length(e.terms) == 1 && only(e.terms).first isa Var && e == var(only(e.terms).first.n)
+
 function recurrence_claims(target, g::GroupView)
+    all(m -> all(l -> reads_held(g, l), loads(g.terms[m])), g.outputs) || return Claim[]
     (; axis, parallel, inner) = recurrence_axes(g)
     D = g.domain
     spans(m) = [k for k in eachindex(D) if any(e -> mentions(e, k), g.placement[m])]
