@@ -224,6 +224,16 @@ Base.float(x::Traced{T}) where {T} = cast(float(T), x)
 Base.oftype(x::Traced{T}, y::Real) where {T} = convert(T, y)
 Base.oftype(x::Traced{T}, y::Traced) where {T} = cast(T, y)
 
+# Rounding to a type, `round(Int, x)` or `floor(Int32, x)`, is Base's: the
+# number rounded in the mode, then converted. Base asks a new number for its
+# rounding by mode, which is the primitive of that name.
+Base.round(x::Traced, ::RoundingMode{:Nearest}) = round(x)
+Base.round(x::Traced, ::RoundingMode{:Down}) = floor(x)
+Base.round(x::Traced, ::RoundingMode{:Up}) = ceil(x)
+Base.round(x::Traced, ::RoundingMode{:ToZero}) = trunc(x)
+# A value outside the type is undefined, as a kernel's conversion leaves it.
+Base.unsafe_trunc(::Type{T}, x::Traced) where {T <: Integer} = cast(T, trunc(x))
+
 for f in (:zero, :one, :typemin, :typemax, :eps, :floatmin, :floatmax)
     @eval begin
         Base.$f(::Traced{T}) where {T} = $f(T)

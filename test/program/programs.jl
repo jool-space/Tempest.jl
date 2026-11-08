@@ -230,3 +230,22 @@ T.scalar_partials(::typeof(xlogy), z, x, y) = (log(y), x / y)
     @test only(T.gradient(x -> sum(x ./ 3), Float32[1, 2])) isa Vector{Float32}
     @test all(n -> n.eltype !== Float64, differentiate(trace(x -> sum(x ./ 3), Float32[1, 2])).nodes)
 end
+
+# Rounding to an integer type rounds in the mode and converts, as Base does:
+# a map of the rounding and one of the conversion, the program's.
+@testset "rounding to an integer type" begin
+    x = 3 .* data(8, 6)
+    @testset "$name" for (name, f) in [
+        ("round(Int, x)", x -> round.(Int, x)),
+        ("floor(Int32, x)", x -> floor.(Int32, x)),
+        ("ceil(Int32, x)", x -> ceil.(Int32, x)),
+        ("trunc(Int32, x)", x -> trunc.(Int32, x)),
+        ("unsafe_trunc(Int32, x)", x -> unsafe_trunc.(Int32, x)),
+        ("round(x, RoundDown)", x -> round.(x, RoundDown)),
+    ]
+        p = trace(f, x)
+        @test all(n -> isempty(n.inputs) || n.op isa C.Map && !(n.op.f isa C.Bound), p.nodes)
+        @test isequal(interpret(p, x), f(x))
+        @test isequal(outputs(execute!(prepare(p, x))), f(x))
+    end
+end
