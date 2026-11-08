@@ -16,3 +16,30 @@ function field(line, key)
 end
 
 json_lines(lines) = filter(l -> startswith(l, "{"), lines)
+
+## node
+
+# bench_node.py: a line per compile mode, its first step's seconds and its
+# steady milliseconds a step, or the launcher's line for a mode that failed.
+node_torch(lines) = map(json_lines(lines)) do l
+    side = "torch " * field(l, "compile")
+    failed = field(l, "failed")
+    failed === nothing || return (; side, note = "unavailable: " * failed)
+    (; side, precision = field(l, "precision"), cold_prep_s = field(l, "first_step_s"), step_ms = field(l, "step_ms"),
+        note = "torch " * field(l, "torch") * ", steady over 100 steps")
+end
+
+# bench_node_port.jl: its first run, which compiles, and a second.
+function node_reactant(lines)
+    runs = json_lines(lines)
+    length(runs) == 2 || return []
+    first_run, second = runs
+    [(; side = "reactant", precision = "xla " * field(first_run, "precision"), cold_prep_s = field(first_run, "first_step_s"),
+        warm_prep_s = field(second, "first_step_s"), step_ms = min(field(first_run, "step_ms"), field(second, "step_ms")),
+        note = "reactant " * field(first_run, "reactant") * ", steady over 100 steps, loss read each step")]
+end
+
+CHALLENGERS["node"] = [
+    (; name = "torch", command = shape -> `bash $(launcher("node_torch.sh")) $shape`, parse = node_torch),
+    (; name = "reactant", command = shape -> shape == "small" ? `bash $(launcher("node_reactant.sh"))` :
+        "its script fixes batch 128", parse = node_reactant)]
