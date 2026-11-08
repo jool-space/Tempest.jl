@@ -78,7 +78,9 @@ end
     trial = C.plan(graph; recompute = [q])
     recomputing = [g for g in trial.groups if q in C.recomputed_in(g)]
     @test !isempty(recomputing)
-    foreach(g -> foreach(o -> d.record[o.key] = 1.0, C.options(d, trial, g)), recomputing)
+    # The options a decision chooses among are the searched ones, whose keys
+    # differ from the unsearched options' where the search grew variants.
+    foreach(g -> foreach(o -> d.record[o.key] = 1.0, C.decide(d, trial, g).options), recomputing)
     c = C.compare(d, trial, base)
     @test c.how === :measured
     @test !C.cheaper(c)
