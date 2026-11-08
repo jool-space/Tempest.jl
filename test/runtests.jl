@@ -31,13 +31,23 @@ filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/") && !st
 # cases on CUDA.
 CUDA_FUNCTIONAL || filter!(((name, _),) -> !startswith(name, "cuda/"), testsuite)
 
-# The device's rates are measured here, once and alone: workers share the GPU
-# and would measure badly. Each copies the file into its own tuning directory.
+# The device's rates the plans are priced on. Where the tests carry them for
+# the device (fixtures/rates), those: calibrated anew, an estimate close to
+# another's falls either way from run to run, and in CI the other job shares
+# the device, so the plans the tests check would differ by chance. Otherwise,
+# or with TEMPEST_CALIBRATE set, they are measured here, once and alone:
+# workers share the GPU and would measure badly. Each worker copies the file
+# into its own tuning directory. A fixture is the file this writes, copied.
 if CUDA_FUNCTIONAL
-    import cuBLAS, cuTile
+    import cuBLAS, cuTile, cuDNN
     ENV["TEMPEST_CACHE"] = mktempdir()
-    foreach(precision -> Tempest.Compiler.calibrate!(Tempest.CUDATarget(; precision)), (:full, :tf32, :tf32x3))
-    ENV["TEMPEST_RATES"] = Tempest.Compiler.rates_path(Tempest.CUDATarget())
+    fixed = joinpath(@__DIR__, "fixtures", "rates", basename(Tempest.Compiler.rates_path(Tempest.CUDATarget())))
+    if isfile(fixed) && !haskey(ENV, "TEMPEST_CALIBRATE")
+        ENV["TEMPEST_RATES"] = fixed
+    else
+        foreach(precision -> Tempest.Compiler.calibrate!(Tempest.CUDATarget(; precision)), (:full, :tf32, :tf32x3))
+        ENV["TEMPEST_RATES"] = Tempest.Compiler.rates_path(Tempest.CUDATarget())
+    end
 end
 
 # Every worker loads the same packages, so no test sees an extension that an

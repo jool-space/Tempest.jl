@@ -298,13 +298,14 @@ function fit_memory!(d::Decider, among = implementations(d.target))
     end
 end
 
-"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function in products of Float32 factors, now rather than on first need; the half classes' are priced on first need."
+"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function in products of each, now rather than on first need, so that a rates file it writes prices every plan alike wherever it is read."
 function calibrate!(target)
     d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none)
     packages = unique(map(package_name, implementations(target)))
     foreach(p -> memory!(d, p), packages)
-    foreach(T -> foreach(p -> line!(d, p, T), packages), (Float32, Float16, BFloat16))
-    applied!(d)
+    types = (Float32, Float16, BFloat16)
+    foreach(T -> foreach(p -> line!(d, p, T), packages), types)
+    applied!(d, types)
 end
 
 # The device's rates as it reports them. A target that cannot measure has fixed rates.
