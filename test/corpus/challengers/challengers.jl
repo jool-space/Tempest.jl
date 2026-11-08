@@ -43,3 +43,26 @@ CHALLENGERS["node"] = [
     (; name = "torch", command = shape -> `bash $(launcher("node_torch.sh")) $shape`, parse = node_torch),
     (; name = "reactant", command = shape -> shape == "small" ? `bash $(launcher("node_reactant.sh"))` :
         "its script fixes batch 128", parse = node_reactant)]
+
+## lstm
+
+# torch_lstm.py: `  NAME   T ms` for each way it runs the step, best of 20
+# events; the ones captured as graphs are recorded.
+function lstm_torch(lines)
+    header = something(findfirst(l -> startswith(l, "B="), lines), 0)
+    header == 0 && return []
+    compile = match(r"compile ([0-9.]+) s", lines[header])
+    version = match(r"torch (\S+)", lines[header]).captures[1]
+    rows = []
+    for (label, side) in (("cudnn graph", "torch cudnn"), ("loop graph", "torch loop"), ("loop compiled graph", "torch compiled loop"))
+        i = findfirst(l -> occursin(Regex("^  $label +[0-9]"), l), lines)
+        i === nothing && continue
+        ms = parse(Float64, match(r"([0-9.]+) ms", lines[i]).captures[1])
+        prep = side == "torch compiled loop" ? parse(Float64, compile.captures[1]) : nothing
+        push!(rows, (; side, precision = "tf32", cold_prep_s = something(prep, ""), step_ms = ms,
+            note = "torch $version, a CUDA graph's replay, best of 20, no optimizer step"))
+    end
+    rows
+end
+
+CHALLENGERS["lstm"] = [(; name = "torch", command = shape -> `bash $(launcher("lstm_torch.sh")) $shape`, parse = lstm_torch)]
