@@ -1127,6 +1127,10 @@ const GLOBAL_DRAW = "the traced function drew from Julia's global random number 
     when the program was traced and are constants in it, the same each time it runs. Draw them outside the traced \
     function and pass them in as an array"
 
+const BRANCH = "the traced function branches on a value known only when the program runs, a `Traced{Bool}` where \
+    Julia needs a `Bool`: choose between values with `ifelse.(c, a, b)` or by a mask, and fold truth values with \
+    `any`, `all` or `count`"
+
 # `trace`, and the arrays it met as constants, as they were.
 function trace_meeting(f, args...)
     tape = Tape()
@@ -1146,7 +1150,16 @@ function trace_meeting(f, args...)
     # numbers drawn as constants. Only the global generator's are seen: its
     # state moves.
     drawn = copy(Random.default_rng())
-    output = f(traced...)
+    output = try
+        f(traced...)
+    catch err
+        # Julia has no method for `if` on a number of a package's: a branch on
+        # a traced truth value fails where it is taken, in Julia's words,
+        # which this explains. Thrown while Julia's is handled, it keeps
+        # Julia's, and where the branch is, as its cause.
+        err isa TypeError && err.got isa Traced{Bool} && throw(ArgumentError(BRANCH))
+        rethrow()
+    end
     copy(Random.default_rng()) == drawn || @warn GLOBAL_DRAW
     results = Int[]
     output_structure = structure_of(output) do leaf

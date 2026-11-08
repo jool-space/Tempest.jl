@@ -147,6 +147,7 @@ case!("Base", "rot180(x)", rot180, x)
 case!("Base", "repeat(x; inner = (2, 1), outer = (1, 3))", x -> repeat(x; inner = (2, 1), outer = (1, 3)), x)
 case!("Base", "sort(u)", sort, u)
 case!("Base", "sort(x; dims = 1)", x -> sort(x; dims = 1), x)
+case!("Base", "any(x .> 1) ? x : -x", x -> any(x .> 1) ? x : -x, x)
 case!("Base", "map(abs, x)", x -> map(abs, x), x)
 case!("Base", "map(+, x, y)", (x, y) -> map(+, x, y), x, y)
 case!("Base", "mapreduce(abs2, +, x)", x -> mapreduce(abs2, +, x), x)
@@ -205,7 +206,8 @@ function classify(err, frames)
     names = Set(f.func for f in frames[1:something(outer, length(frames) + 1) - 1])
     message = sprint(showerror, err)
     detail = first(replace(first(split(message, '\n')), r"\s+" => " "), 110)
-    why = if err isa TypeError && err.got isa C.Traced && err.expected === Bool ||
+    why = if occursin("branches on a value known only when the program runs", message) ||
+             err isa TypeError && err.got isa C.Traced && err.expected === Bool ||
              err isa MethodError && err.f === Bool && any(traced_value, err.args)
         "branches on array values"
     elseif :LogicalIndex in names || err isa MethodError && any(a -> a isa Tuple && any(traced_value, a), err.args)

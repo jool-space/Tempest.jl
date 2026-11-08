@@ -334,3 +334,22 @@ import Random
         @test_broken !isempty(logs)
     end
 end
+
+# A branch on a traced truth value is taken by Julia, which asks for a `Bool`
+# and fails: tracing says in its words what the program did and what to write
+# instead, keeping Julia's error, where the branch is, as its cause.
+@testset "a branch on a value known only when the program runs" begin
+    x = data(8, 6)
+    branches = "branches on a value known only when the program runs"
+    @test occursin(branches, message(() -> trace(x -> sum(x) > 0 ? x : -x, x)))
+    @test occursin(branches, message(() -> trace(x -> sort(vec(x)), x)))
+    @test occursin(branches, message(() -> T.gradient(x -> x[1] > 0 && x[2] > 0 ? sum(x) : 0.0, x)))
+    cause = try
+        trace(x -> sum(x) > 0 ? x : -x, x)
+    catch
+        first(current_exceptions()).exception
+    end
+    @test cause isa TypeError && cause.got isa C.Traced{Bool}
+    # What the refusal names instead traces.
+    @test interpret(trace(x -> ifelse(any(x .> 1), 1.0, -1.0) .* x, x), x) == (any(x .> 1) ? x : -x)
+end
