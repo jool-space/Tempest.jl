@@ -17,9 +17,10 @@ part added.
 """
 struct StepGraph
     graph::IndexGraph
-    # Each argument's value outside and the axis it is sliced along, 0 for
-    # whole; `(:position, T)`, the step's position as a `T`; or `(:sum, r)`,
-    # sum `r` riding the steps.
+    # Each argument's value outside, the axis it is sliced along, 0 for
+    # whole, and how many steps on from the step its slice is, as
+    # `xs[:, t + 1]`; `(:position, T)`, the step's position as a `T`; or
+    # `(:sum, r)`, sum `r` riding the steps.
     leaves::Vector{Any}
     # Each result's value outside, stored a step at a time; the sums' results follow.
     stored::Vector{Int}
@@ -62,15 +63,19 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     # The values the states are carried from first, in the states' order.
     members = [fs; [m for m in g.outputs if !(m in cs) && !(m in fs)]]
     any(m -> along(m) === nothing, members) && return nothing
-    # The values a step needs, each with its axis along the steps or 0, and
-    # how: :state, :leaf, or :step, computed in the step.
-    kinds = Dict{Tuple{Int, Int}, Symbol}()
-    order = Tuple{Int, Int}[]
+    # The values a step needs, each with its axis along the steps or 0 and
+    # the steps on from the step it is read at, and how: :state, :leaf, or
+    # :step, computed in the step. Only an argument is read steps on.
+    kinds = Dict{Tuple{Int, Int, Int}, Symbol}()
+    order = Tuple{Int, Int, Int}[]
     positions = Set{DataType}()
     ok = Ref(true)
-    function visit(u, s)
-        haskey(kinds, (u, s)) && return
-        kind = if u in cs
+    function visit(u, s, on = 0)
+        haskey(kinds, (u, s, on)) && return
+        kind = if on != 0
+            stored[u] && !(u in cycle) && s == length(values[u].dims) || (ok[] = false)
+            :leaf
+        elseif u in cs
             s == cd.axis || (ok[] = false)
             :state
         elseif u in cycle
@@ -83,7 +88,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         else
             :step
         end
-        kinds[(u, s)] = kind
+        kinds[(u, s, on)] = kind
         ok[] || return
         if kind === :step
             v = values[u]
@@ -92,7 +97,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
             si = d isa Reduction && s > 0 ? [k for k in eachindex(d.iteration) if !(k in d.reduced)][s] : s
             foreach(o -> visit_operand(o, si), operands(d))
         end
-        push!(order, (u, s))
+        push!(order, (u, s, on))
     end
     function visit_operand(o, si)
         if o isa IndexOperand
@@ -106,8 +111,8 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         at = si == 0 ? Int[] : findall(e -> mentions(e, si), collect(o.index))
         if isempty(at)
             visit(o.value, 0)
-        elseif length(at) == 1 && o.index[only(at)] == var(si)
-            visit(o.value, only(at))
+        elseif length(at) == 1 && o.index[only(at)].terms == var(si).terms
+            visit(o.value, only(at), o.index[only(at)].constant)
         else
             ok[] = false
         end
@@ -137,7 +142,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     any(==(0), axes) && return nothing
     # The arguments first, the states the first of them, the sums last; then
     # the step's values in the graph's order.
-    leaves = Any[[(c, cd.axis) for c in cs]; [key for key in order if kinds[key] === :leaf]; [(:position, T) for T in positions]; [(:sum, r) for r in sums]]
+    leaves = Any[[(c, cd.axis, 0) for c in cs]; [key for key in order if kinds[key] === :leaf]; [(:position, T) for T in positions]; [(:sum, r) for r in sums]]
     steps = [key for key in sort(order) if kinds[key] === :step]
     id = Dict{Any, Int}()
     new = Value[]
@@ -148,13 +153,13 @@ function step_graph(graph::IndexGraph, stored, g::Group)
             v = values[last(leaf)]
             push!(new, Value(Input(k), v.dims, v.eltype, v.scalar))
         else
-            u, s = leaf
+            u, s, _ = leaf
             v = values[u]
             push!(new, Value(Input(k), drop_axis(v.dims, s), v.eltype, s == 0 && v.scalar))
         end
         id[leaf] = length(new)
     end
-    for (u, s) in steps
+    for (u, s, _) in steps
         v = values[u]
         d = v.definition
         if d isa Reduction
@@ -171,11 +176,11 @@ function step_graph(graph::IndexGraph, stored, g::Group)
             any(isnothing, os) && return nothing
             push!(new, Value(Pointwise(d.f, Tuple(os)), dims, v.eltype, v.scalar))
         end
-        id[(u, s)] = length(new)
+        id[(u, s, 0)] = length(new)
     end
     results = Operand[]
     for m in members
-        b = id[(m, along(m))]
+        b = id[(m, along(m), 0)]
         push!(results, Read(b, identity_index(new[b].dims)))
     end
     stored_order = members
@@ -226,7 +231,7 @@ function restricted(o::Operand, s, d::Domain, id)
     end
     o isa Read || return nothing
     at = s == 0 ? 0 : something(findfirst(e -> mentions(e, s), collect(o.index)), 0)
-    key = (o.value, at)
+    key = (o.value, at, at == 0 ? 0 : o.index[at].constant)
     haskey(id, key) || return nothing
     index = Affine[]
     for (k, e) in enumerate(o.index)
@@ -422,8 +427,10 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     slots = Any[allocate(target, UInt8, bytes) for bytes in st.sizes]
     bbuffers = Vector{Any}(nothing, length(bvalues))
     taken = sort!([st.donated; st.overwrites]; by = first)
-    # Values along the steps, by the step graph's value: an argument sliced, or a result.
+    # Values along the steps, by the step graph's value: an argument sliced,
+    # or a result; and the steps on from each step an argument's slice is.
     moving = Dict{Int, Int}()
+    on = Dict{Int, Int}()
     # The steps' positions, as each type read, uploaded once.
     positions = Dict{Int, Any}()
     for (k, leaf) in enumerate(s.leaves)
@@ -434,8 +441,8 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
             continue
         end
         first(leaf) === :sum && (bbuffers[k] = buffers[last(leaf)]; continue)
-        u, a = leaf
-        a == 0 ? (bbuffers[k] = buffers[u]) : (moving[k] = u)
+        u, a, ahead = leaf
+        a == 0 ? (bbuffers[k] = buffers[u]) : (moving[k] = u; on[k] = ahead)
     end
     for (k, u) in enumerate(s.stored)
         moving[bp.graph.results[k].value] = u
@@ -446,7 +453,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
         any(t -> first(t) == id, taken) && continue
         def = v.definition
         if haskey(moving, id)
-            bbuffers[id] = least_aligned(slice(moving[id], t) for t in sequence)
+            bbuffers[id] = least_aligned(slice(moving[id], t + get(on, id, 0)) for t in sequence)
         elseif id <= s.states
             bbuffers[id] = least_aligned(state_at(id, t) for t in sequence)
         elseif def isa ConstantArray
@@ -476,7 +483,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
             foreach(l -> push!(ms, (l, k, state)), users[k])
         end
         for (v, u) in moving
-            buffer = slice(u, t)
+            buffer = slice(u, t + get(on, v, 0))
             foreach(l -> push!(ms, (l, v, buffer)), users[v])
         end
         for (v, x) in positions

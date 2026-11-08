@@ -273,3 +273,27 @@ end
         @test agree(C.execute(C.plan(planned.graph; ride = [r]), args...), C.leaves(grad(args...)))
     end
 end
+
+# A step run alone reads an input's slice a step on as it reads the step's:
+# a loop over `xs[:, :, t]` from its second slice has a gradient whose sum
+# for the weights reads `xs` one step past the step's position, and every
+# sum offered rides.
+@testset "a sum riding a recurrence reads an input steps on" begin
+    function shifted(xs, a1, a2, U)
+        s1, s2 = a1, a2
+        for t in 2:4
+            z = U * xs[:, :, t] .+ s1 .* s2
+            e = exp.(z .- maximum(z; dims = 1))
+            s2 = 0.5 .* s2 .+ 0.5 .* tanh.(e)
+        end
+        sum(s2) * 0.3
+    end
+    grad = (ys...) -> T.withgradient(shifted, ys...)
+    args = (data(2, 1, 5), data(1, 1; scale = 0.5), data(1, 1; scale = 0.7), data(1, 2; scale = 0.1))
+    q = trace(grad, args...)
+    sums = C.riding_sums(prepare(q, args...; build = false).plan)
+    @test length(sums) == 2
+    for r in sums
+        @test agree(C.leaves(outputs(execute!(prepare(q, args...; ride = [r])))), C.leaves(grad(args...)))
+    end
+end

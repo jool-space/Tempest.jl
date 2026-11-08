@@ -36,20 +36,6 @@ function scanning_step(a1)
     sum(acc[end])
 end
 
-# Seed 1040 (loop, drawn with --big), as shrunk.
-function softmax_step(xs, a1, a2, U)
-    s1 = a1
-    s2 = a2
-    for t in 2:4
-        x = xs[:, :, t]
-        z1 = s1 .* s2
-        z2 = (U * x) .+ z1
-        z4 = exp.(z2 .- maximum(z2; dims = 1))
-        s2 = 0.5 .* s2 .+ 0.5 .* tanh.(z4)
-    end
-    sum(s2) * 0.3
-end
-
 @testset "found by the randomized checker" begin
     # Seeds 106 and 234 (loop), on the CPU: refused by name, "a recurrence
     # whose step scans, scatters or writes is not supported yet", a scan in
@@ -57,24 +43,6 @@ end
     @testset "a recurrence whose step scans a state prepares" begin
         a = 0.5 .* randn(Xoshiro(106010101), 1, 1)
         @test_broken runs(scanning_step, a) && prepared(scanning_step, a) ≈ scanning_step(a)
-    end
-
-    # Seed 1040 (loop), on the CPU and on CUDA: `riding_sums` offers a sum of
-    # the gradient that `prepare` then refuses to make ride, "a recurrence
-    # with sums riding its steps runs only a step at a time".
-    @testset "every sum riding_sums offers rides" begin
-        args = (randn(Xoshiro(1040013682), 2, 1, 5), 0.5 .* randn(Xoshiro(1040012903), 1, 1),
-            0.5 .* randn(Xoshiro(1040012904), 1, 1), 0.09 .* randn(Xoshiro(1040003422), 1, 2))
-        q = C.trace((xs...) -> T.withgradient(softmax_step, xs...), args...)
-        sums = C.riding_sums(C.prepare(q, args...).plan)
-        rides(s) = try
-            C.prepare(q, args...; ride = [s])
-            true
-        catch
-            false
-        end
-        @test !isempty(sums)
-        @test_broken all(rides, sums)
     end
 
     # Seeds 1052 and 1060 (scan, drawn with --cuda), on CUDA in Float32 only:
