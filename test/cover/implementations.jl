@@ -1,8 +1,9 @@
 # Implementations propose and claim, and the cover takes by cost: candidates
 # of an implementation's own in place of the generator's groups, recomputing
 # a fold where it is read, priced where an implementation claims every kernel
-# that recomputes it, and storing a map apart from a kernel that applies a
-# function an implementation cannot lower, or whose claim failed to build.
+# that recomputes it, recomputing maps read shifted in the kernel that reads
+# them, and storing a map apart from a kernel that applies a function an
+# implementation cannot lower, or whose claim failed to build.
 
 # An implementation that proposes each product alone, grown from its fold, in
 # place of the generator's product with the work after it; it claims a lone
@@ -64,6 +65,25 @@ C.estimate(::RecomputesOverThree{Cheap}, claim, target, g) where {Cheap} =
         @test (q in reduce(union, map(C.recomputed_in, p.groups); init = Set{Int}())) == cheap
         @test all(g -> !isempty(C.claims(RecomputesOverThree{cheap}(), d.target, C.group_view(p, g))), p.groups)
     end
+end
+
+# A map read at several positions is stored, and the kernel that reads it
+# shifted, as a stencil reads its neighbours, reads it from memory: the cover
+# proposes recomputing the maps of the kernel that stores it there, and one
+# kernel is cheaper than two.
+@testset "a kernel of maps read shifted is recomputed in the kernel that reads them" begin
+    u = data(8, 8; scale = 0.1)
+    neighbours(w) = vcat(w[1:1, :], w[1:(end - 1), :]) .+ vcat(w[2:end, :], w[end:end, :])
+    p = trace(u -> (w = exp.(u) .* 2; w .+ neighbours(w)), u)
+    d = C.Decider(T.CPUTarget(), C.lower(p); measure = :none)
+    base = C.generator_plan(d)
+    @test length(base.groups) == 2
+    proposed = only(C.shifted_maps(base))
+    @test proposed.values == [v for v in eachindex(base.stored) if base.stored[v] && base.owner[v] == base.owner[first(proposed.values)]]
+    ex = prepare(p, u)
+    @test length(ex.kernels) == 1
+    @test any(c -> c.proposal isa C.RecomputeMaps && c.accepted, ex.considered)
+    @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, u); rtol = 1.0e-12)
 end
 
 # A claim that fails to build is no option once it has, and the program is

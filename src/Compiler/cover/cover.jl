@@ -114,6 +114,19 @@ struct Recompute
 end
 
 """
+The maps a kernel stores, recomputed in the one kernel that reads them: a
+proposal of the planner's own, for a kernel of maps another reads at shifted
+positions, as a stencil reads its neighbours. A map read once at each
+position is recomputed by its reader already (see `recomputable`); read at
+several, it is stored, and the kernel that stores it costs a launch and a
+round trip through memory where recomputing it costs a few operations at
+each position read.
+"""
+struct RecomputeMaps
+    values::Vector{Int}
+end
+
+"""
 A map stored apart rather than recomputed in the kernels that read it: a
 proposal of the planner's own, for each map of a kernel that applies a scalar
 function an implementation cannot lower (see `lowers`), or that a claim
@@ -146,9 +159,10 @@ fixes(q::Vector{Int}) = q
 fixes(q::Vector{Vector{Int}}) = reduce(vcat, q)
 fixes(q::Join) = q.group
 fixes(q::Union{Recompute, Store, Ride}) = [q.value]
+fixes(q::RecomputeMaps) = q.values
 
 # Whether a proposal fixes sets of values as groups, and the sets.
-forms_group(q) = !(q isa Union{Recompute, Store, Ride})
+forms_group(q) = !(q isa Union{Recompute, RecomputeMaps, Store, Ride})
 group_sets(q::Vector{Vector{Int}}) = q
 group_sets(q) = [fixes(q)]
 
@@ -188,6 +202,7 @@ function proposal_key(p::Plan, a::Around, q, texts = Dict{Int, String}())
     q isa Join && print(io, " || join %", q.value)
     q isa Vector{Vector{Int}} && print(io, " || apart ", join((join(map(v -> "%$v", set), " ") for set in q), " | "))
     q isa Recompute && print(io, " || recompute")
+    q isa RecomputeMaps && print(io, " || recompute maps")
     q isa Ride && print(io, " || ride")
     # A stored map is inlined in the terms of the groups it reaches: its
     # definition tells it from the group's other maps.
@@ -250,6 +265,26 @@ function joins(p::Plan)
     found
 end
 
+# The stored maps of each kernel of maps that one other kernel alone reads,
+# one of them at several positions: each kernel's a proposal to recompute
+# them there (see `RecomputeMaps`). A map read at one position, as a
+# product reads its factor, is not read shifted.
+function shifted_maps(p::Plan)
+    a = Around(p, Vector{Int}[])
+    found = RecomputeMaps[]
+    for (k, g) in enumerate(p.groups)
+        g.kind === :pointwise || continue
+        stored = [m for m in a.owned[k] if p.stored[m]]
+        all(m -> p.graph.values[m].definition isa Pointwise, stored) || continue
+        readers = unique(j for m in stored for j in a.reading[m] if j != k)
+        length(readers) == 1 || continue
+        reader = p.groups[only(readers)]
+        positions(v) = unique(l.index for m in members(reader) if haskey(reader.terms, m) for l in loads(reader.terms[m]) if l.value == v)
+        any(v -> length(positions(v)) > 1, stored) && push!(found, RecomputeMaps(stored))
+    end
+    found
+end
+
 """
     cover(decider) -> (plan, considered)
 
@@ -282,6 +317,7 @@ function cover(d::Decider)
     for q in joins(base)
         any(x -> fixes(x[1]) == q.group, proposals) || push!(proposals, (q, nothing))
     end
+    foreach(q -> push!(proposals, (q, nothing)), shifted_maps(base))
     if any_recomputes_folds(d.target)
         for v in sort!(collect(recomputable_folds(d.graph, d.kept; pinned = d.pinned)))
             push!(proposals, (Recompute(v), nothing))
@@ -319,6 +355,7 @@ function cover(d::Decider)
         sets = Vector{Int}[s for x in all if forms_group(x) for s in group_sets(x)]
         recompute = Set{Int}(d.pinned)
         foreach(x -> x isa Recompute && push!(recompute, x.value), all)
+        foreach(x -> x isa RecomputeMaps && union!(recompute, x.values), all)
         store = Set{Int}(x.value for x in all if x isa Store)
         ride = [collect(d.rides); [x.value for x in all if x isa Ride]]
         # A value belongs to one proposal.
@@ -478,6 +515,9 @@ function explain(io::IO, p::Plan, c::Considered)
         return
     elseif q isa Recompute
         c.accepted && println(io, "%", q.value, " is recomputed where it is read", why)
+        return
+    elseif q isa RecomputeMaps
+        c.accepted && println(io, join(map(v -> "%$v", q.values), " "), " are recomputed in the kernel that reads them", why)
         return
     elseif q isa Store
         c.accepted && println(io, "%", q.value, " is stored apart, in a kernel of its own", why)
