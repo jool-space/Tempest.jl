@@ -411,6 +411,33 @@ the GPT step and the guard rails, with the cold cost bounded as the staged
 search bounds it, and on a second device when there is one, where the
 constants are a guess and a search is not.
 
+**Whole programs against their challengers.** The corpus (`test/corpus`): a
+neural ODE's training step, an LSTM's, a GPT's, and a heat equation's
+gradient, each written as a user writes it and run against its challengers
+by one command (`run.jl`), cold and warm, timed as a captured graph and
+checked against the step run in Float64, one row of a record per run
+(`summarize.jl` prints the table). Judged by two gates: a step past 1.1
+times its best challenger's, or a cold preparation past 60 s, opens a trial.
+On the GB10, 8 November, TF32 where there are products, SM clocks 2400 to
+2550 MHz as read: the neural ODE at batch 128, 6.6 to 7.3 ms a step over
+four runs and 45 to 48 s cold, against Reactant's 9.9 to 11.0 ms and torch
+`reduce-overhead`'s 11.2 (`max-autotune`, compiled from nothing, fails
+capturing its graph, an internal cuBLAS error, twice). The LSTM at batch 64,
+5.73 ms and 71 s cold, against cuDNN's 2.00 and the cell compiled by torch
+3.40; at 1024, 32.8 ms and 92 s, against 24.6 and 20.7 (torch takes no
+optimizer step). test/bench/gpt.jl's step, 1.19 ms and 70 s cold, against
+the same model under `torch.compile` captured as a graph, 1.31 ms; at GPT-2
+124M's geometry, batch 4, 878 ms and 224 s cold, against 264 ms. The heat
+equation on a 256×256 grid, its steps `accumulate`d so that they roll: 1.89
+s at 100 steps and 18.9 s at 1000, against 0.34 and 3.6 ms for a kernel a
+step in CUDA.jl, both recurrences of the gradient on the floor; written as a
+plain loop it unrolls, 200 kernels and 0.66 ms at 100 steps. Agreement with
+Float64 is 3e-4 to 1e-3 where the products are TF32, and 2e-6 for the heat
+equation in Float32; the GPT's 8e-2 is a weight Adam's first step moves by
+its rate times the sign of a gradient near zero, and at GPT-2's geometry it
+is unchecked, the interpreter's Float64 gradient holding more than the
+host's memory.
+
 Not on the docket: the kernel-author question, how a kernel no implementation
 claims is written by hand in a package. Pallas (a kernel in the same language
 on explicit refs, transparent to tracing, with its own derivative) and Exo
