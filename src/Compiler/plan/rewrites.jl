@@ -322,8 +322,8 @@ end
 function paired_axes(a::Affine, b::Affine)
     variables(e) = all(t -> t.first isa Var, e.terms)
     multiples(e) = map(last, e.terms)
-    a.constant == b.constant && variables(a) && variables(b) && allunique(multiples(a)) && sort(multiples(a)) == sort(multiples(b)) ||
-        return Pair{Int, Int}[]
+    a.constant == b.constant && variables(a) && variables(b) && length(a.terms) == length(b.terms) && allunique(multiples(a)) &&
+        issetequal(multiples(a), multiples(b)) || return Pair{Int, Int}[]
     [t.first.n => only(u.first.n for u in b.terms if u.second == t.second) for t in a.terms]
 end
 
