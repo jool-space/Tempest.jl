@@ -173,6 +173,24 @@ end
     ex = prepare(trace(heat, args...), args...)
     @test stepped(ex) == [true, true]
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(heat(args...)); rtol = 1.0e-10)
+    # Written as a plain loop over the source's slices, its steps hold no
+    # fold, but each selects its neighbours from the step before, which an
+    # unrolled step does not fuse into the next: rolled, as the accumulate.
+    function plain(u, q)
+        inside = interior(u)
+        for t in axes(q, 3)
+            u = diffuse(u, inside) .+ q[:, :, t]
+        end
+        u
+    end
+    looped(u, q) = T.withgradient(v -> sum(abs2, plain(v, q)), u)
+    p = trace(looped, args...)
+    @test count(n -> n.op isa C.Loop, p.nodes) > 0
+    ex = prepare(p, args...)
+    @test stepped(ex) == [true, true]
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(looped(args...)); rtol = 1.0e-10)
+    # A loop of maps alone, each position reading its own, stays unrolled.
+    @test !any(n -> n.op isa C.Loop, trace(u -> (for _ in 1:6; u = tanh.(u) .* 0.5; end; sum(u)), args[1]).nodes)
     if CUDA_FUNCTIONAL
         ex = prepare(trace(heat, map(single, args)...), map(x -> CuArray(single(x)), args)...)
         @test stepped(ex) == [true, true]

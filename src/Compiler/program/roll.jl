@@ -54,6 +54,12 @@ end
 # and rolled would run a step at a time.
 folds(n::Node) = n.op isa Union{Reduce, Contract, Accumulate}
 
+# Or node `k` of a step selects from a value of its steps, not one the loop
+# captures, as a stencil reads its neighbours shifted: unrolled, a step
+# reading the last at other positions than its own does not fuse with it,
+# a kernel a step.
+shifts(nodes, k, p) = nodes[k].op isa Select && nodes[k].inputs != nodes[k - p].inputs
+
 # Nodes alike may be: of one operation's type, shape and element type.
 signature(n::Node) = hash((typeof(n.op), n.dims, n.eltype, n.scalar, length(n.inputs)))
 
@@ -86,7 +92,7 @@ function periodic_window(nodes, lo, last, alike_at = nothing)
         periods >= 2 || continue
         push!(accepted, p)
         all(k -> rollable(nodes[k]), (last - periods * p + 1):last) || continue
-        any(k -> folds(nodes[k]), (last - p + 1):last) || continue
+        any(k -> folds(nodes[k]) || shifts(nodes, k, p), (last - p + 1):last) || continue
         first = last - periods * p + 1
         # The period before, reading where the loop starts what each step
         # after reads of the step before, is the loop's first step.

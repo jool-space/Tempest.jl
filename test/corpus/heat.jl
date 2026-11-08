@@ -6,10 +6,8 @@
 #
 # The steps are `accumulate` over the source's slices, the form Tempest rolls
 # into one loop (TRIALS: recurrences): at 20 steps 2 kernels forward and 4 for
-# the gradient. Written as a plain `for` loop, whether copying the interior
-# and writing it back or as maps of padded slices, with or without reading the
-# source's slice `q[:, :, t]`, the step holds no fold and the loop unrolls: 20
-# to 39 kernels forward and 40 to 81 for the gradient at 20 steps.
+# the gradient. A plain `for` loop over `q[:, :, t]` rolls as well, its steps
+# selecting their neighbours from the step before.
 using Random
 import Tempest as T
 
