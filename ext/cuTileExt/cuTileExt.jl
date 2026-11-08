@@ -622,6 +622,10 @@ const SCAN_KEPT_TILE = 64
 
 function scan_claims(g::GroupView)
     R = sort!(collect(g.primary_axes))
+    # A scan along an axis of one element, which the index level narrows
+    # away, folds along none: no axis to sweep, and the floor's line of one
+    # element is all it does.
+    isempty(R) && return Claim[]
     R == collect(first(R):last(R)) || return Claim[]
     for r in g.reductions
         v = g.values[r]

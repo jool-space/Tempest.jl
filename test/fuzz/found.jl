@@ -52,24 +52,4 @@ end
         a = 0.5 .* randn(Xoshiro(106010101), 1, 1)
         @test_broken runs(scanning_step, a) && prepared(scanning_step, a) ≈ scanning_step(a)
     end
-
-    # Seeds 1052 and 1060 (scan, drawn with --cuda), on CUDA in Float32 only:
-    # a scan along an axis of one element, `accumulate(max, …)` as drawn and
-    # `cumsum` alike, of a 1×1 or a 3×1 matrix, fails to plan, BoundsError on
-    # an empty Vector{Union{}}; the CPU's plan runs it, and so does CUDA's
-    # along an axis of three.
-    @testset "a scan along an axis of one element prepares on CUDA" begin
-        if CUDACore.functional()
-            x = Float32.(randn(Xoshiro(1060003517), 1, 1))
-            f(x) = sum(abs2, accumulate(max, x; dims = 2)) * 0.1f0
-            g(x) = sum(abs2, cumsum(x; dims = 2))
-            on_device(f, x) = try
-                Array(only(C.leaves(C.outputs(C.execute!(C.prepare(C.trace(f, x), CuArray(x); measure = :none))))))[]
-            catch
-                nothing
-            end
-            @test_broken on_device(f, x) ≈ f(x)
-            @test_broken on_device(g, x) ≈ g(x)
-        end
-    end
 end

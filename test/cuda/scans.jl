@@ -4,7 +4,8 @@
 # commute; with maps around them and a fold beside them; and reversed, in a
 # cumulative sum's derivative. Base's `accumulate` by a function of the
 # user's runs in sequence, and an exclusive scan, which derivatives make, has
-# no tile realization yet: both stay on the floor.
+# no tile realization yet: both stay on the floor, as does a scan along an
+# axis of one element, which folds along none.
 include("../fixtures/programs.jl")
 
 @testset "scans on cuTile" begin
@@ -28,7 +29,9 @@ include("../fixtures/programs.jl")
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 1.0e-4)
     end
     for (f, args) in [((a, b) -> recurrence(a, b), (single(data(700)), single(data(700)))),
-        (x -> T.withgradient(x -> sum(cumprod(1 .+ 0.001f0 .* x; dims = 1)), x), (x,))]
+        (x -> T.withgradient(x -> sum(cumprod(1 .+ 0.001f0 .* x; dims = 1)), x), (x,)),
+        (x -> sum(abs2, accumulate(max, x; dims = 2)) * 0.1f0, (single(data(1, 1)),)),
+        (x -> sum(abs2, cumsum(x; dims = 2)), (single(data(3, 1)),)), (x -> cumsum(x; dims = 1), (single(data(1, 3)),))]
         p = trace(f, args...)
         ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget(T.cuTileGenerator()))
         @test !(:scan in sketches(ex))
