@@ -507,6 +507,51 @@ every parameter would save only their launches, well under a millisecond in
 a captured graph. Cold preparation is 231 s, warm 56, past the gate of a
 minute; that is the trial of the time to first execution.
 
+**The laws are hand-written matchers.** Every algorithm Tempest knows as a
+rewrite lives in `src/Compiler/plan/rewrites.jl` (758 lines) as a function
+that walks the index graph and tests its shape by hand: the exchanged sums
+(`exchanged_sums`, `matched_axes`, `paired_axes`, `aligned`), the relative
+folds (`relative_sums`, `applications`, `dependent`, `admissible`), the
+statistics kept beside them (`kept_statistics`) and the folds that observe a
+function of others (`compose_observes`). The file's header says laws are
+data; the two that are (`Exponential`, `Square`) are the φ of one mechanism,
+and everything that decides where the mechanism applies is code. The cost
+showed in one day of the corpus and the checker: `dependent` took a
+one-operand negation for a difference and crashed; `matched_axes` saw no
+axis read through a reshape, so FA2's identity never fired on a GPT and its
+attention backward cost 648 of 878 ms; and the same shape of code elsewhere
+had the same holes, the stepped run refusing a wrapped index
+(`src/Compiler/runtime/stepped.jl`) and cuTile's recurrence claiming a state
+read at a neighbour's position. Each was closed by widening one condition,
+and nothing says which conditions a law has, so the checker draws programs
+over the whole algebra and finds a law's hole only by chance, and the plan
+verifier cannot ask whether an application preserved the program. What
+stands trial: the laws' matching and preconditions as code, in the
+functions named. The challenger: a pattern layer, where a law is a pattern
+over definitions and operands with variables, its preconditions as data
+beside it (which operands are reads of which values, which axes a sum
+reduces, which element types are exact), its rewrite a function of the
+match, and one matcher applies every law. Read in tinygrad's `UPat` and
+`PatternMatcher` (`tinygrad/uop/ops.py` in the local clone), where every
+pass from the tensor graph to the kernel is a list of patterns over one
+node type, and in Exo's scheduling rewrites, each checked for equivalence as
+it is applied; the strategy review's search report weighs both and the
+e-graph systems that take the same shape to its end. Judged on three
+counts. First, the four laws written as patterns match what they match
+today: every test in `test/plan/rewrites.jl` and every plan of the
+rewritten-sums fixtures unchanged in structure, and the corpus's GPT and
+attention steps within noise. Second, each law is checked alone: the checker
+draws programs that meet its pattern and fails the law, not the program,
+when the rewritten graph disagrees with the program run in Float64, and each
+application is checked where it is made, the rewritten value against the
+value it replaces on the program's own inputs, which is the equivalence
+check the verifier lacks. Third, the layer costs no lines: `rewrites.jl`
+with the matcher is no longer than it is now, and today's four holes read
+as preconditions in the laws' own data. The trial closes against the
+challenger if a law cannot be written as a pattern without a general
+predicate over the whole graph, that law named; it closes for the code if
+the patterns match less, or match the same at more lines.
+
 Not on the docket: the kernel-author question, how a kernel no implementation
 claims is written by hand in a package. Pallas (a kernel in the same language
 on explicit refs, transparent to tracing, with its own derivative) and Exo
