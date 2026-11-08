@@ -414,7 +414,13 @@ identities!(known, p::Plan) = get!(known, p) do
     (ids, Set(ids))
 end
 
-# Compare plan `b` with plan `a`. Close calls are measured.
+# Compare plan `b` with plan `a`. Close calls are measured, and so is a
+# comparison where the record already refutes an estimate on either side, a
+# kernel measured past its estimate's error: an estimate that misprices one
+# kernel decides nothing. The log-sum-exp of GPT-2's attention recomputed in
+# the two backward kernels that read it was estimated at 3.5 ms against 5.9
+# for the kernels of the plan that stores it, when those two had been
+# measured at 40 and 13 ms.
 function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
     ids_a, ia = identities!(known, a)
     ids_b, ib = identities!(known, b)
@@ -424,7 +430,7 @@ function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
     da, db = decided(only_a), decided(only_b)
     ea = sum(x -> x[3].choice.estimate, da; init = 0.0)
     eb = sum(x -> x[3].choice.estimate, db; init = 0.0)
-    if d.measure === :all || (d.measure === :close && close_call(ea, eb))
+    if d.measure === :all || (d.measure === :close && (close_call(ea, eb) || any(x -> refuted(d, x[3].choice), [da; db])))
         build_unmeasured!(d, [(p, g, x.choice) for (p, g, x) in [da; db]])
         foreach(((p, g, x),) -> measure!(d, p, g, x.choice), [da; db])
     end
@@ -436,6 +442,9 @@ function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
     end
     Comparison(ea, eb, :estimated, (da, db))
 end
+
+# Whether the record holds a time for a choice beyond its estimate's error.
+refuted(d::Decider, o::Choice) = haskey(d.record, o.key) && !close_call(d.record[o.key], o.estimate)
 
 # Buffers for a group's reads and stored members, shared by every plan the
 # decider considers (they number values alike), filled so that measuring reads

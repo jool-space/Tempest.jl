@@ -1,6 +1,7 @@
 # The cover on CUDA: claims timed on buffers of their own, choices measured and
 # kept in the tuning record, a search that tries the variants of the option
-# that measures best, what a kernel's tiles read again and what a view
+# that measures best, a comparison measured where the record refutes an
+# estimate, what a kernel's tiles read again and what a view
 # reaches, products proposed apart from a fold among them that is not one, and
 # the implementations a target names.
 include("../fixtures/programs.jl")
@@ -57,6 +58,30 @@ end
     rewrite((k, t) -> 1.0e-5)
     @test only(prepared().decisions).choice.key == first(x.options).key
     @test isapprox(Array(only(C.leaves(outputs(execute!(prepared()))))), interpret(p, a, b); rtol = 2 * eps(Float16))
+end
+
+# A proposal is compared by measurement where the record refutes an estimate
+# on either side: here every claim on the kernel that recomputes `q` takes a
+# second by the record, far past its estimate, and recomputing it is
+# measured, and loses, however far apart the estimates are.
+@testset "a comparison the record refutes is measured" begin
+    x, w = single(data(64, 48)), single(data(64, 64))
+    function f(x, w)
+        q = C.contract(w, x, (1, 2), (1, 3), (2, 3))
+        s = C.contract(q, q, (1, 2), (1, 3), (2, 3))
+        T.logsumexp(s; dims = 1)
+    end
+    graph = C.lower(trace(f, x, w))
+    q = only(C.recomputable_folds(graph))
+    d = C.Decider(T.CUDATarget(), graph)
+    base = C.generator_plan(d)
+    trial = C.plan(graph; recompute = [q])
+    recomputing = [g for g in trial.groups if q in C.recomputed_in(g)]
+    @test !isempty(recomputing)
+    foreach(g -> foreach(o -> d.record[o.key] = 1.0, C.options(d, trial, g)), recomputing)
+    c = C.compare(d, trial, base)
+    @test c.how === :measured
+    @test !C.cheaper(c)
 end
 
 @testset "the search is staged" begin
