@@ -80,3 +80,7 @@ function json_rows(lines)
 end
 
 CHALLENGERS["gpt"] = [(; name = "torch", command = shape -> `bash $(launcher("gpt_torch.sh")) $shape`, parse = json_rows)]
+
+## heat
+
+CHALLENGERS["heat"] = [(; name = "cuda", command = shape -> `bash $(launcher("heat_cuda.sh")) $shape`, parse = json_rows)]
