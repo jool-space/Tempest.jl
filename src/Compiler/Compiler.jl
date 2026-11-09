@@ -53,8 +53,9 @@ public Plan, group_views, concurrently
 # The compiler's own work, tallied.
 include("work.jl")
 
-# The tables of answers a session keeps, and forgetting them.
-public forget_session!
+# The tables of answers a session keeps, the extensions' among them, and
+# forgetting them.
+public SessionTable, forget_session!
 include("session.jl")
 
 # The program level.
