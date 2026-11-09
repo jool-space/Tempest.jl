@@ -219,14 +219,19 @@ end
 # the output so, and a forward that writes it rounded need not keep it in
 # Float32 too.
 function exchanged_sums(graph::IndexGraph; rounded::Bool = false)
-    sums = Pair{Int, Vector{Tuple{Operand, Int}}}[]
+    # The sums before each, by their factors (see `factor_key`).
+    sums = Dict{Vector{Tuple{Int, Int, UInt}}, Vector{Pair{Int, Vector{Tuple{Operand, Int}}}}}()
+    users = rounded ? readers(graph) : Vector{Int}[]
     found = Dict{Int, Any}()
     for (r, v) in enumerate(graph.values)
         v.definition isa Reduction{SumFold} || continue
         e = exchange(graph, r, sums)
-        rounded && e !== nothing && (e = merge(e, (; sum = rounded_sum(graph, e.sum))))
+        rounded && e !== nothing && (e = merge(e, (; sum = rounded_sum(graph, users, e.sum))))
         e === nothing || (found[r] = e)
-        v.scalar || push!(sums, r => factors(graph, v.definition.operand, Domain(v.definition.iteration), v.eltype))
+        if !v.scalar
+            fs = factors(graph, v.definition.operand, Domain(v.definition.iteration), v.eltype)
+            push!(get!(() -> Pair{Int, Vector{Tuple{Operand, Int}}}[], sums, factor_key(fs)), r => fs)
+        end
     end
     isempty(found) && return graph
     first(rebuild((b, r) -> haskey(found, r) ? exchanged!(b, graph, r, found[r]) : nothing, graph))
@@ -264,10 +269,16 @@ function exchange(graph, r, sums)
     nothing
 end
 
+# Factors as `matched_axes` matches them, in any order: each one's kind, power
+# and the value it reads. Sums are looked up by their factors' rather than
+# each compared, which took a pass over the sums before each sum a product
+# exchanges, as many as a program has layers.
+factor_key(fs) = sort!([(o isa Read ? o.value : 0, power, objectid(typeof(o))) for (o, power) in fs])
+
 # A sum among `sums` that is the sum over `reduced` of the product of `fs`,
 # operands of type `T` over `extents`: read at its index over the axes `kept`.
 function computed_sum(graph, sums, fs, extents, reduced, kept, T)
-    for (V, gs) in sums
+    for (V, gs) in get(sums, factor_key(fs), ())
         S = graph.values[V].definition
         graph.values[V].eltype === T && length(gs) == length(fs) && length(S.reduced) == length(reduced) || continue
         σ = matched_axes(gs, fs, S.iteration, extents)
@@ -329,9 +340,10 @@ end
 
 # The program's rounding of the sum `s` reads to half precision, read where
 # `s` reads the sum, or `s` itself when the program rounds it to none.
-function rounded_sum(graph, s::Read)
+function rounded_sum(graph, users, s::Read)
     V = s.value
-    for (W, w) in enumerate(graph.values)
+    for W in users[V]
+        w = graph.values[W]
         d = w.definition
         d isa Pointwise && d.f isa Cast && w.eltype <: HalfFloat && length(d.operands) == 1 || continue
         o = only(d.operands)
@@ -486,20 +498,41 @@ end
 # it is when something else reads it: a fold over the same axes, in the same
 # phase as the folds that were relative to it.
 function relative_sums(graph::IndexGraph)
+    users = readers(graph)
     F = 1
     while F <= length(graph.values)
         fr = frame(graph, F)
         seen = fr === nothing ? nothing : through_observe(fr.law, fr.observe)
-        rs = seen === nothing ? Int[] : [r for (r, w) in enumerate(graph.values) if w.definition isa Reduction{SumFold} && admissible(graph, r, F, fr)]
+        rs = seen === nothing ? Int[] : filter!(r -> admissible(graph, r, F, fr), mapped_sums(graph, users, F))
         if !isempty(rs)
             graph = first(rebuild(graph) do b, r
                 r in rs || return nothing
                 relative!(b, graph, r, F, fr, seen)
             end)
+            users = readers(graph)
         end
         F += 1
     end
     graph
+end
+
+# The sums that read value `F` through maps alone, in order: the only sums a
+# sum relative to `F` can be, since it reads `F` through a difference, the
+# law's function of it and products (see `dependent`). Asked of every sum,
+# each frame cost a walk of the graph, as many as a program has softmaxes and
+# norms: the 32-layer GPT step's rewrites took 10.9 s.
+function mapped_sums(graph, users, F)
+    found, pending, seen = Int[], [F], Set{Int}()
+    while !isempty(pending)
+        for u in users[pop!(pending)]
+            u in seen && continue
+            push!(seen, u)
+            d = graph.values[u].definition
+            d isa Pointwise && push!(pending, u)
+            d isa Reduction && d.fold isa SumFold && push!(found, u)
+        end
+    end
+    sort!(found)
 end
 
 # Σ c·g·φ(y - m) over the axes `m` reduces, `c` constant along them, is `c`
@@ -538,11 +571,20 @@ end
 function kept_statistics(graph::IndexGraph)
     live = live_values(graph)
     found = Dict{Int, Tuple{Int, Tuple{Vararg{Affine}}}}()
+    # The relative folds, by the value their `y` reads: a frame's statistic is
+    # kept beside one whose `y` is the frame's (see `embedding`).
+    relative = Dict{Int, Vector{Int}}()
+    for (R, w) in enumerate(graph.values)
+        e = w.definition
+        e isa Reduction && e.fold isa Relative || continue
+        y = element_y(graph, e.operand, Domain(e.iteration))
+        push!(get!(() -> Int[], relative, y_key(y)), R)
+    end
     for F in eachindex(graph.values)
         live[F] && graph.values[F].definition isa Reduction || continue
         fr = frame(graph, F)
         fr === nothing && continue
-        for R in eachindex(graph.values)
+        for R in get(relative, y_key(fr.y), Int[])
             live[R] && R != F || continue
             e = graph.values[R].definition
             e isa Reduction{<:Relative} && e.fold.law == fr.law && length(e.iteration) > length(fr.iteration) || continue
@@ -558,6 +600,11 @@ function kept_statistics(graph::IndexGraph)
         kept!(b, graph, id, found[id]...)
     end)
 end
+
+# What `y` reads, by which a relative fold's matches a frame's: read at
+# another index, a `y` is the same value's. Any `y` that reads none is alike.
+y_key(y::Read) = y.value
+y_key(y) = 0
 
 # The iteration index of the frame's fold over relative fold `R`'s domain at
 # which the frame's `y` is `R`'s, its reduced axes `R`'s, each of its other
@@ -663,11 +710,12 @@ function compose_observes(graph::IndexGraph)
     live = live_values(graph)
     users = readers(graph)
     results = Set(o.value for o in graph.results if o isa Read)
+    known = Dict{Int, Union{Nothing, Int}}()
     first(rebuild(graph) do b, id
         v = graph.values[id]
         d = v.definition
         d isa Pointwise && d.f !== tuple && all(o -> o isa Literal || o isa Read, d.operands) || return nothing
-        live[id] && (observed = observed_fold!(b, graph, id, users, live, results)) !== nothing && return observed
+        live[id] && (observed = observed_fold!(b, graph, id, users, live, results, known)) !== nothing && return observed
         reads = [relative_read(graph, o) for o in d.operands]
         folds = filter(!isnothing, reads)
         isempty(folds) && return nothing
@@ -727,6 +775,29 @@ function state_source(graph, d::Pointwise, dims, between)
     F
 end
 
+# The fold `state_source` finds for pointwise value `w`, each value's once in
+# `known`: the values between are found only where it finds one. Asked of
+# each map afresh, a chain of maps was walked again from each of its maps.
+source_of(graph, w, known) = get!(known, w) do
+    F = 0
+    d = graph.values[w].definition::Pointwise
+    for o in d.operands
+        o isa Literal && continue
+        o isa Read && o.index == identity_index(graph.values[w].dims) && graph.values[o.value].dims == graph.values[w].dims ||
+            return nothing
+        e = graph.values[o.value].definition
+        G = if e isa Reduction && e.fold isa GenericFold
+            o.value
+        elseif e isa Pointwise && e.f !== tuple
+            source_of(graph, o.value, known)
+        end
+        G === nothing && return nothing
+        F == 0 || G == 0 || F == G || return nothing
+        G == 0 || (F = G)
+    end
+    F
+end
+
 # `d` as an observe of the state of fold `F`: the fold's own observe where it
 # reads `F`.
 observing(graph, d::Pointwise, F) = Composed(d.f, map(d.operands) do o
@@ -736,11 +807,12 @@ end)
 
 # Value `id` as the fold it is a function of, observing it, when nothing else
 # that runs reads the fold or the values between; or nothing.
-function observed_fold!(b::Builder, graph, id, users, live, results)
+function observed_fold!(b::Builder, graph, id, users, live, results, known)
     v = graph.values[id]
-    between = Int[]
-    F = state_source(graph, v.definition, v.dims, between)
+    F = source_of(graph, id, known)
     F isa Int && F != 0 || return nothing
+    between = Int[]
+    state_source(graph, v.definition, v.dims, between)
     inside = Set([id; between])
     all(u -> !(u in results) && all(w -> w in inside || !live[w], users[u]), [F; between]) || return nothing
     r = graph.values[F].definition
