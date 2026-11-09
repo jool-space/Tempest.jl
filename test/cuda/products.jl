@@ -92,3 +92,29 @@ end
     @test length(ex.kernels) == 1 && length(only(grouped(ex)).products) == 8
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, whole, states...)); rtol = 1.0e-5)
 end
+
+# Two programs whose plans take cuBLAS products, called at once from tasks
+# of their own, share the extension's one handle per context and its one
+# workspace. A call sets the handle's stream and workspace and then
+# multiplies: on two threads the first round fails, cuBLAS's internal error
+# on that call and on every call after it on the handle (GB10 and RTX 6000
+# Ada, every run). A handle per task alone turns those loud errors into
+# silently wrong results, 780 of 4000 (GB10), the products then running
+# beside each other on the one workspace; with a workspace each, none. So
+# the handle per task must not come without the workspace: what closes both
+# is a handle per task and a workspace per executable, which its graphs
+# record as they record its buffers, and the extension builds a product
+# without knowing whose it is.
+@testset "cuBLAS products of two programs at once (gap: a handle per task, a workspace per executable)" begin
+    Ext = Base.get_extension(Tempest, :cuBLASExt)
+    took, done = Channel{Any}(2), Base.Event()
+    holding = [Threads.@spawn (put!(took, Ext.handle()); wait(done)) for _ in 1:2]
+    held = [take!(took) for _ in 1:2]
+    notify(done)
+    foreach(wait, holding)
+    @test_broken held[1] !== held[2]
+    a, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112))
+    cs = [compile((a, b) -> a * b, CuArray(a), CuArray(b); target = T.CUDATarget(T.cuBLASProducts())) for _ in 1:2]
+    workspaces = [only(l.lib.workspace for l in c.executable.launches if l isa Ext.Product) for c in cs]
+    @test_broken workspaces[1] !== workspaces[2]
+end
