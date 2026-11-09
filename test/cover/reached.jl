@@ -67,6 +67,18 @@ mlp(x, w) = sum(abs2, tanh.(w * x) .+ 1)
         _, replayed, covered = counted(() -> prepare(trace(mlp, x, w), x, w))
         @test (replayed, covered) == (0, 1)
     end
+    # Asked for the cover every time, a preparation replays nothing kept and
+    # keeps nothing.
+    kept() do
+        a = prepare(trace(mlp, x, w), x, w)
+        withenv("TEMPEST_REPLAY" => "false") do
+            b, replayed, covered = counted(() -> prepare(trace(mlp, x, w), x, w))
+            @test (replayed, covered) == (0, 1) && sprint(explain, a) == sprint(explain, b)
+            foreach(rm, decisions_files())
+            prepare(trace(mlp, x, w), x, w)
+            @test isempty(decisions_files())
+        end
+    end
 end
 
 @testset "decisions reached apart from the build, and a build on them" begin

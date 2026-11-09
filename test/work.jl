@@ -48,9 +48,10 @@ end
     @test counts[:plans] >= 1 && counts[:groupings] >= counts[:plans]
     @test counts[:tries] > 0 && counts[:walked] > 0 && counts[:terms] > 0 && counts[:options] > 0
     # The counts are the same each time, the trials planned side by side or
-    # not: the decisions kept are let go first, which it would replay.
-    rm(joinpath(C.tuning_directory(), "decisions"); recursive = true, force = true)
-    again, counted, _ = C.tallied(() -> prepare(p, x; build = false))
+    # not, the decisions kept not replayed.
+    again, counted, _ = withenv("TEMPEST_REPLAY" => "false") do
+        C.tallied(() -> prepare(p, x; build = false))
+    end
     @test counted == counts
     # Replayed, its work is the replay's: no trial planned, no cover.
     replayed, counted, phases = C.tallied(() -> prepare(p, x; build = false, verify = false))

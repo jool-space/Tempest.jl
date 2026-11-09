@@ -6,7 +6,9 @@
 # the exponent of each in the parameter, which a phase linear in the
 # program's size keeps near 1. Preparations are dry (`build = false`) on the
 # CUDA target, its claims priced on nominal rates: no device is touched, and
-# the numbers are the compiler's, not the device's.
+# the numbers are the compiler's, not the device's. Decisions are neither
+# replayed nor kept (TEMPEST_REPLAY=false): the second preparation covers as
+# the first did, rather than replaying what the first reached.
 #
 #   julia --project=test test/bench/scaling.jl [family ...] [--sizes 1,2,4] [--out file.tsv] [--build]
 #
@@ -224,7 +226,9 @@ function measured(make, n; build)
     f, args, replaces, target = make(n)
     program, traced = spent(() -> C.trace(f, args...))
     inputs = build ? map(on_device, args) : args
-    (ex, counts, phases), prepared = spent(() -> C.tallied(() -> C.prepare(program, inputs...; target, replaces, build, measure = :none)))
+    (ex, counts, phases), prepared = withenv("TEMPEST_REPLAY" => "false") do
+        spent(() -> C.tallied(() -> C.prepare(program, inputs...; target, replaces, build, measure = :none)))
+    end
     text, explained = spent(() -> sprint(T.explain, ex))
     phases = [:trace => traced; phases; :explain => explained]
     total = traced .+ prepared .+ explained

@@ -82,8 +82,8 @@ struct NotReplayed <: Exception end
 # The environment's settings that the cover does not read, or reads into
 # the decider's `measure`, which the key holds: every other `TEMPEST_`
 # setting is part of the key, as the generator's product tiles are.
-const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_MEASURE", "TEMPEST_SETTLE", "TEMPEST_RATES", "TEMPEST_CALIBRATE",
-    "TEMPEST_GPU_LOCK")
+const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_MEASURE", "TEMPEST_SETTLE", "TEMPEST_REPLAY", "TEMPEST_RATES",
+    "TEMPEST_CALIBRATE", "TEMPEST_GPU_LOCK")
 
 read_settings() = sort!([k => v for (k, v) in ENV if startswith(k, "TEMPEST_") && !(k in UNREAD_SETTINGS) && !startswith(k, "TEMPEST_CORPUS")])
 
@@ -104,22 +104,36 @@ file, hashed (see `content_key`): the same for the same program on the same
 target in every session, and another for any change in what it holds. A
 function is written out with what it captures, and one outside any package
 with its code, so two closures of one method over different values are two
-programs. Nothing where decisions are not kept: while a package
-precompiles, whose workload is to compile the cover, with nowhere to keep
-them, or for an implementation outside any package, whose claims are
-methods the key cannot name.
+programs. Nothing where decisions are not kept: where the environment's
+`TEMPEST_REPLAY=false` asks for the cover every time (see `keeping`), while
+a package precompiles, whose workload is to compile the cover, with nowhere
+to keep them, or for an implementation outside any package, whose claims
+are methods the key cannot name.
 """
 function decisions_key(d::Decider; measure = d.measure)
     parts = key_parts(d; measure)
     parts === nothing ? nothing : content_key(parts...)
 end
 
+"""
+    keeping() -> Bool
+
+Whether preparations keep their decisions and replay those kept: from the
+environment's `TEMPEST_REPLAY`, true unless it says false. Set false, a
+preparation neither replays nor keeps any, and its cover reaches them as it
+would on the record and the rates file with nothing kept: what the cover
+does now, for a probe that times it or a plan being looked into. A fresh
+`TEMPEST_CACHE` keeps nothing yet either, and holds no record and no
+kernels besides.
+"""
+keeping() = parse(Bool, get(ENV, "TEMPEST_REPLAY", "true"))
+
 # What `decisions_key` hashes, or nothing: the decider's, at measure level
 # `measure`, as a decider measuring nothing looks up those of one that
 # measured close calls (see `replayable`).
 function key_parts(d::Decider; measure = d.measure)
     dir = tuning_directory()
-    (dir === nothing || ccall(:jl_generating_output, Cint, ()) == 1) && return nothing
+    (dir === nothing || !keeping() || ccall(:jl_generating_output, Cint, ()) == 1) && return nothing
     implemented = Implementation[implementations(d.target)..., loaded_implementations()...]
     all(i -> identified(parentmodule(typeof(i))), implemented) || return nothing
     g = d.graph

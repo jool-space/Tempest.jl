@@ -95,7 +95,10 @@ replayed only where the cover would reach them again on the record as it is:
 a preparation that measured as it decided covers again on what it measured,
 until a cover measures nothing, three covers at most, and keeps the last
 one's; with the environment's `TEMPEST_SETTLE=false` it keeps the first's,
-which the next preparation reaches again.
+which the next preparation reaches again. With `TEMPEST_REPLAY=false` a
+preparation neither replays decisions nor keeps its own: the cover reaches
+them every time. A fresh `TEMPEST_CACHE` holds no decisions, no record and
+no kernels.
 
 A claim that fails to build is no option once it has: the program is planned
 again without it, each map of the group it claimed proposed to be stored
