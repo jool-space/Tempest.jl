@@ -122,13 +122,16 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
     position = invperm(order)
     p = Plan(graph, p.stored, p.groups[order], map(o -> o == 0 ? 0 : position[o], p.owner))
     n = length(graph.values)
+    # What each kernel reads, by its place in the order they run, in order.
+    reading = [sort!(collect(reads[j])) for j in order]
     last = copy(p.owner)
-    for (k, g) in enumerate(p.groups), r in group_reads(graph, g)
+    for (k, rs) in enumerate(reading), r in rs
         last[r] = max(last[r], k)
     end
     lifetimes = [p.owner[v] > 0 ? (p.owner[v]:last[v]) : (1:0) for v in 1:n]
     slots = zeros(Int, n)
-    sizes, busy = Int[], Int[] # per slot: its bytes, and the last kernel of the value in it
+    pool = SlotPool()
+    (; sizes, busy) = pool
     over = Dict(overwrites)
     reused, taken = Pair{Int, Int}[], Set{Tuple{Int, Int}}()
     # A value its kernel reads for the last time, at the address the kernel
@@ -139,7 +142,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         g = p.groups[k]
         # A scan's or a recurrence's kernel writes a step before it reads the next.
         g.kind in (:reduction, :pointwise) && in_place(order[k]) || return nothing
-        for b in sort!(collect(group_reads(graph, g)))
+        for b in reading[k]
             slots[b] > 0 && busy[slots[b]] == k && !((slots[b], k) in taken) && last[b] == k && p.owner[b] != k && !(b in results) || continue
             value_bytes(graph.values[b]) == value_bytes(graph.values[v]) && graph.values[b].eltype == graph.values[v].eltype || continue
             writes_over(graph, g, v, b) && return b
@@ -150,7 +153,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         if haskey(over, v)
             # The slot of the contents it writes over; none over an argument's storage.
             s = slots[over[v]]
-            s > 0 && (busy[s] = max(busy[s], last[v]))
+            s > 0 && occupy!(pool, s, last[v])
             slots[v] = s
             continue
         end
@@ -158,21 +161,76 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         if b !== nothing
             s = slots[b]
             push!(taken, (s, p.owner[v]))
-            busy[s] = max(busy[s], last[v])
+            occupy!(pool, s, last[v])
             slots[v] = s
             push!(reused, v => b)
             continue
         end
-        bytes = value_bytes(graph.values[v])
-        free = [s for s in eachindex(sizes) if busy[s] < p.owner[v]]
-        fits = filter(s -> sizes[s] >= bytes, free)
-        s = !isempty(fits) ? fits[argmin(sizes[fits])] : !isempty(free) ? free[argmax(sizes[free])] :
-            (push!(sizes, 0); push!(busy, 0); length(sizes))
-        sizes[s] = max(sizes[s], bytes)
-        busy[s] = last[v]
-        slots[v] = s
+        slots[v] = place!(pool, value_bytes(graph.values[v]), p.owner[v], last[v])
     end
     p, order, Storage(lifetimes, slots, sizes, donated, staged, overwrites, reused)
+end
+
+"""
+The slots stored values take: each slot's bytes (`sizes`) and the last
+kernel of the values in it (`busy`). The slots free before a kernel are
+kept by size, the least of each size first, and the busy ones by the kernel
+after which they free, so that a value finds its slot without a pass over
+every slot: with one, the backward of a stack of layers, whose activations
+live from the forward on, took a pass over thousands of slots for each
+value it stored.
+"""
+struct SlotPool
+    sizes::Vector{Int}
+    busy::Vector{Int}
+    # A heap of the free slots of each size, and the sizes, in order.
+    free::Dict{Int, Vector{Int}}
+    free_sizes::Vector{Int}
+    # A heap of the busy slots by `busy`, an entry gone stale once its slot's
+    # `busy` moved past it.
+    freeing::Vector{Tuple{Int, Int}}
+end
+
+SlotPool() = SlotPool(Int[], Int[], Dict{Int, Vector{Int}}(), Int[], Tuple{Int, Int}[])
+
+# Slot `s` busy until kernel `until` at least.
+function occupy!(pool::SlotPool, s, until)
+    until > pool.busy[s] || return
+    pool.busy[s] = until
+    heap_push!(pool.freeing, (until, s))
+end
+
+"""
+    place!(pool, bytes, k, until) -> slot
+
+The slot of a value of `bytes` written by kernel `k` and read last by
+kernel `until`: of the slots free before `k`, the smallest that fits it,
+or else the largest, grown to fit it, or else a new one; the least slot of
+those alike.
+"""
+function place!(pool::SlotPool, bytes, k, until)
+    (; sizes, busy, free, free_sizes, freeing) = pool
+    while !isempty(freeing) && first(freeing[1]) < k
+        b, s = heap_pop!(freeing)
+        b == busy[s] || continue
+        size = sizes[s]
+        haskey(free, size) || insert!(free_sizes, searchsortedfirst(free_sizes, size), size)
+        heap_push!(get!(() -> Int[], free, size), s)
+    end
+    i = min(searchsortedfirst(free_sizes, bytes), length(free_sizes))
+    s = if i == 0
+        push!(sizes, 0)
+        push!(busy, 0)
+        length(sizes)
+    else
+        size = free_sizes[i]
+        s = heap_pop!(free[size])
+        isempty(free[size]) && (delete!(free, size); deleteat!(free_sizes, i))
+        s
+    end
+    sizes[s] = max(sizes[s], bytes)
+    occupy!(pool, s, until)
+    s
 end
 
 # Kernels in an order where each runs after those it needs, otherwise in their
@@ -212,7 +270,7 @@ function runs_after(after, k, js)
     false
 end
 
-# A heap of integers, the least on top.
+# A heap, the least on top.
 function heap_push!(h, x)
     push!(h, x)
     i = length(h)
