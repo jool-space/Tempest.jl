@@ -1157,6 +1157,29 @@ Its first state learned as a vector and repeated over the batch had left
 the recurrence to the floor's kernel stepping through it, 1.76 s a
 training step; now spread where the steps start, 5.6 ms.
 
+Checked by programs drawn at random as well (test/fuzz/run.jl), seed 10's
+gradient did not prepare on CUDA: cuTile's estimate priced a kernel's read
+of a sum by key as that kernel's own sum, by the elements it combines along
+the sum's reduced axes taken as axes of the reader's domain, where the sum
+was another kernel's, as a gather's adjoint is wherever the rest of the
+gathered array's gradient is added to it. A reader over fewer axes than the
+sum reduces threw, and one over as many was priced for other elements than
+it reads; such a read is now priced as any read is, by what its loads
+reach. Of seeds 1 to 1000, forward and gradient, 185 programs read a sum
+by key from another kernel, and so does the corpus's GPT step. Six of
+them threw (seeds 10, 228, 268, 326 and 389) and now plan. On the GB10's
+rates no decision of the rest changes; the estimates of 135 of their
+kernels move, by 0.57 to 1.41 times. Timed alone, the 52 that read the sum
+where it lies come nearer their times, 1.46 times off to 1.43 on the
+geometric mean, and the 7 that read it through a gather go further, 1.60
+to 1.88: a gathered read is priced as its whole buffer, as any gathered
+value is, where the wrong price had been smaller. Open, for the estimate:
+the reach of a gather, which would need the index's extent; 916-grad's
+third kernel reads `%29[%2[i1] - 1, i2]`, priced at 10.27 μs (7.35
+before) against 4.11 timed. Open, before and after: seeds 347, 399 and 494
+do not plan on CUDA, cuTile's emitter asked for a view's spec where it has
+none.
+
 The LSTM's training step against torch 2.14.0 on the GB10, 7 November,
 TF32, 32 inputs through 256 hidden, 100 steps, each alone on the device
 and captured as a graph: at batch 64, cuDNN's `nn.LSTM` 2.05 ms, the

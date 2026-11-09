@@ -93,3 +93,33 @@ const SCATTERS = [
         @test agree(C.leaves(outputs(replay!(ex)))[2:2], reference; rtol = 1.0e-5)
     end
 end
+
+# A sum by key that a later kernel reads: a gather's adjoint, to which the
+# rest of the gathered vector's gradient is added. Seed 10 of the randomized
+# checker as drawn, whose gradient did not prepare on CUDA with cuTile, and
+# shrunk: a vector gathered by a matrix of indices, its sum by key over two
+# axes read by a kernel over one.
+function seed_10(x, y, i1)
+    v1 = reshape(x, 1, 32)
+    v2 = v1 .+ 0.1f0 .* mod.(Int32(3) .* reshape(Int32(1):Int32(32), 1, :) .+ reshape(Int32(1):Int32(1), :, 1), Int32(5))
+    v3 = ifelse.(reshape(1:1, :, 1) .<= reshape(1:32, 1, :), v1, 0.0f0)
+    v4 = v2 * transpose(v3)
+    v5 = v3[i1, :]
+    sum(v5 .* 0.3f0) + sum(abs2, v3) * 0.1f0
+end
+const KEYED_READS = [
+    ("seed 10 of the randomized checker", seed_10, (data(32), data(32), ones(Int32, 4, 1))),
+    ("a vector gathered by a matrix of indices", (x, i) -> sum(x[i] .* 0.3f0) + sum(abs2, x) * 0.1f0,
+     (data(32), Int32.(reshape(mod1.(7 .* (1:12), 32), 4, 3)))),
+]
+
+@testset "a sum by key read by a later kernel" begin
+    @testset "$name, $where" for (name, f, args) in KEYED_READS, (where, target) in (("cuTile", T.CUDATarget(T.cuTileGenerator())), ("every implementation", T.CUDATarget()))
+        args = map(single, args)
+        p = differentiate(trace(f, args...))
+        ex = prepare(p, map(CuArray, args)...; target)
+        keyed(v) = ex.plan.graph.values[v].definition isa C.Keyed
+        @test any(g -> any(keyed, C.group_reads(ex.plan.graph, g)), ex.plan.groups)
+        @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-5)
+    end
+end

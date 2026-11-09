@@ -970,7 +970,8 @@ end
 # products and the folds it recomputes.
 # A fold by key that starts from contents in storage is priced in place, as
 # the plan's bytes are: no launch copies the contents, and a kernel moves the
-# elements it combines, a sum reading them too.
+# elements it combines, a sum reading them too. A value another group folded
+# by key is read as any value is.
 function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
     # A transposed fold is priced as the kernel computes it, in the sweep's
@@ -1053,6 +1054,9 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     streaming, swept, inner = applied(c, roots)
     prior = [b for k in kernels for (_, (_, b)) in k.before]
     main = findfirst(k -> k.name != INITIAL_STATES && !any(b -> b === k, prior), kernels)
+    # The elements a fold by key of the group combines, along the axes of the
+    # domain it reduces.
+    keyed = keyed_folds(c)
     combined(r) = (g.values[r].fold isa Overwrite ? 1 : 2) * prod(k -> g.domain[k], g.values[r].reduced; init = 1)
     # A view reaches no more of a value than its loads do: a gather's view
     # is of the whole buffer, a step's slice of a value along the steps of
@@ -1061,7 +1065,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
         ts = [l for (_, l) in loads_of(v)]
         isempty(ts) ? typemax(Int) : reached_elements(ts, g.values[v].dims, domain)
     end
-    elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) :
+    elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && a.buffer in keyed ? combined(a.buffer) :
         a.buffer isa Int ? min(reachable(a), reach_of(a.buffer)) : reachable(a)
     map(enumerate(kernels)) do (i, kernel)
         moved(a) = elements(kernel, a) * sizeof(element(a)) * (i == main && a.buffer isa Int ? share(a.buffer) : 1.0)

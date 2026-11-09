@@ -301,6 +301,33 @@ end
     @test only(C.estimate(chosen.implementation, chosen.claim, target, C.group_view(base, g))).bytes == moved
 end
 
+# A kernel reading a sum by key that another kernel computes moves what it
+# reads of the sum, as of any value it reads; the elements a sum by key
+# combines are moved by the kernel that sums them. Priced as the summing
+# kernel, by the sum's reduced axes taken as axes of the reader's domain, a
+# reader over fewer axes than the sum reduces threw, as seed 10 of the
+# randomized checker did, and one over as many was priced for twice its
+# domain: 768 bytes where a kernel over 8×6 that reads the matrix and the
+# gather's adjoint and writes the gradient moves 576.
+@testset "what a kernel reading a sum by key moves" begin
+    target = T.CUDATarget(T.cuTileGenerator())
+    @testset "$name" for (name, f, args) in [
+        ("a vector gathered by a matrix of indices", (x, i) -> sum(x[i] .* 0.3f0) + sum(abs2, x) * 0.1f0,
+         (data(32), Int32.(reshape(mod1.(7 .* (1:12), 32), 4, 3)))),
+        ("a matrix gathered by two vectors", (x, i, j) -> sum(abs2, x[i, j]) + sum(abs2, x) * 0.1f0,
+         (data(8, 6), Int32[3, 1, 3, 8, 3], Int32[6, 6, 1])),
+    ]
+        args = map(single, args)
+        d = C.Decider(target, C.lower(differentiate(trace(f, args...))); measure = :none)
+        base = C.generator_plan(d)
+        g = only(g for g in base.groups if any(v -> base.graph.values[v].definition isa C.Keyed, C.group_reads(base.graph, g)))
+        chosen = C.decide(d, base, g).choice
+        @test chosen.implementation isa T.cuTileGenerator
+        moved = sum(v -> C.value_bytes(base.graph.values[v]), [collect(C.group_reads(base.graph, g)); filter(v -> base.stored[v], C.members(g))])
+        @test only(C.estimate(chosen.implementation, chosen.claim, target, C.group_view(base, g))).bytes == moved
+    end
+end
+
 # A stencil's step reads its grid at each neighbour, the index held at the
 # border where a shift runs off it: the loads at the border read a row or a
 # column, and only what a column load reads is read again by every tile of
