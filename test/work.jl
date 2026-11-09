@@ -53,8 +53,11 @@ end
         C.tallied(() -> prepare(p, x; build = false))
     end
     @test counted == counts
-    # Replayed, its work is the replay's: no trial planned, no cover.
-    replayed, counted, phases = C.tallied(() -> prepare(p, x; build = false, verify = false))
+    # Replayed, and not crosschecked, its work is the replay's: no trial
+    # planned, no cover.
+    replayed, counted, phases = withenv("TEMPEST_CROSSCHECK" => "false") do
+        C.tallied(() -> prepare(p, x; build = false))
+    end
     @test :replay in first.(phases) && !(:cover in first.(phases)) && counted[:trials] == 0
     @test sprint(explain, again) == sprint(explain, ex) == sprint(explain, replayed)
     @test !C.TALLYING[]
