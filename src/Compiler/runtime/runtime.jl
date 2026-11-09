@@ -211,19 +211,31 @@ them where the caller has them, for any arrays a call brings.
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = measuring(),
         replaces = (), by_reference = (), point::Bool = false, recompute = (), ride = (), partition::Bool = true, build::Bool = true,
         verify::Bool = verifying())
-    # The terms an earlier preparation interned are of its program.
-    IR.forget_terms!()
-    forget_matches!()
     s = setup(program; target, measure, replaces, recompute, ride, partition, build)
     prepared(s, decide!(s; verify), inputs...; by_reference, point, verify)
 end
 
 """
+The tables a preparation fills as it plans, its own, so that two at once, on
+two tasks, share none and neither empties the other's: the terms it interns
+(`IR.INTERNED`) and the library's matches of its groups (`MATCHES`).
+"""
+struct Tables
+    interned::IR.Interned
+    matches::Dict{Key, Vector{Binding}}
+end
+
+Tables() = Tables(IR.Interned(), Dict{Key, Vector{Binding}}())
+
+# `f()` with `t` as the tables of the preparation running.
+in_tables(f, t::Tables) = Base.ScopedValues.with(f, IR.INTERNED => t.interned, MATCHES => t.matches)
+
+"""
 A preparation set up, before it decides: the program, its decider as
 `prepare` makes it, on the program's index graph lowered and rewritten with
 the folds pinned, kept and riding, the results paired with the arguments
-they replace, the value of each argument, and whether it builds. `decide!`
-reaches its decisions and `prepared` builds them.
+they replace, the value of each argument, whether it builds, and its tables.
+`decide!` reaches its decisions and `prepared` builds them.
 """
 struct Setup{D}
     program::Program
@@ -231,52 +243,62 @@ struct Setup{D}
     pairs::Vector{Pair{Int, Int}}
     input::Dict{Int, Int}
     build::Bool
+    tables::Tables
+end
+
+# `f()` as preparation `s` runs it: within its tables, building as it does
+# and verifying as asked.
+running(f, s::Setup, verify) = in_tables(s.tables) do
+    Base.ScopedValues.with(f, Implement.COMPILING => s.build, VERIFYING => verify)
 end
 
 """
     setup(program; target, measure, replaces, recompute, ride, partition, build) -> Setup
 
 `program` set up as `prepare` sets it up, the keywords as `prepare` takes
-them: lowered, rewritten and partitioned, with its decider. It forgets
-nothing an earlier preparation interned or matched, as `prepare` does first.
+them: lowered, rewritten and partitioned, with its decider, and with tables
+of its own (see `Tables`), which `decide!`, `given` and `prepared` fill.
 """
 function setup(program::Program; target, measure = measuring(), replaces = (), recompute = (), ride = (), partition::Bool = true,
         build::Bool = true)
-    # Each phase marked (see `phase`).
-    lowered = phase(() -> lower(program), :lower)
-    graph = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
-    pairs = replacements(program, replaces)
-    input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
-    pinned = Set{Int}(recompute)
-    # A value reading an argument a result replaces is not recomputed:
-    # recomputed in the kernel that writes the result, it would read the
-    # argument where the result is written, and the result would be copied
-    # there instead (see `writes_over`). It reads it directly, or through
-    # maps, which may be recomputed with it. Each value's answer is kept:
-    # maps share operands, and walked afresh from every reader, a chain of
-    # them is walked once per path through it.
-    replaced = Set(input[a] for (_, a) in pairs)
-    answers = Dict{Int, Bool}()
-    function reads_replaced(v)
-        haskey(answers, v) && return answers[v]
-        d = graph.values[v].definition
-        answers[v] = any(operands(d)) do o
-            any(read_values(o)) do r
-                r in replaced || graph.values[r].definition isa Pointwise && reads_replaced(r)
+    tables = Tables()
+    in_tables(tables) do
+        # Each phase marked (see `phase`).
+        lowered = phase(() -> lower(program), :lower)
+        graph = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
+        pairs = replacements(program, replaces)
+        input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
+        pinned = Set{Int}(recompute)
+        # A value reading an argument a result replaces is not recomputed:
+        # recomputed in the kernel that writes the result, it would read the
+        # argument where the result is written, and the result would be copied
+        # there instead (see `writes_over`). It reads it directly, or through
+        # maps, which may be recomputed with it. Each value's answer is kept:
+        # maps share operands, and walked afresh from every reader, a chain of
+        # them is walked once per path through it.
+        replaced = Set(input[a] for (_, a) in pairs)
+        answers = Dict{Int, Bool}()
+        function reads_replaced(v)
+            haskey(answers, v) && return answers[v]
+            d = graph.values[v].definition
+            answers[v] = any(operands(d)) do o
+                any(read_values(o)) do r
+                    r in replaced || graph.values[r].definition isa Pointwise && reads_replaced(r)
+                end
             end
         end
+        kept = Set(v for (v, val) in enumerate(graph.values) if val.definition isa Reduction && !(v in pinned) && reads_replaced(v))
+        if partition
+            # The forward's maps the backward recomputes rather than reads (see
+            # `partition`).
+            saved, recomputed = phase(() -> Compiler.partition(graph), :partition)
+            filter!(!reads_replaced, recomputed)
+            foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
+            union!(pinned, recomputed)
+        end
+        d = phase(() -> Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride), :decider)
+        Setup(program, d, collect(Pair{Int, Int}, pairs), input, build, tables)
     end
-    kept = Set(v for (v, val) in enumerate(graph.values) if val.definition isa Reduction && !(v in pinned) && reads_replaced(v))
-    if partition
-        # The forward's maps the backward recomputes rather than reads (see
-        # `partition`).
-        saved, recomputed = phase(() -> Compiler.partition(graph), :partition)
-        filter!(!reads_replaced, recomputed)
-        foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
-        union!(pinned, recomputed)
-    end
-    d = phase(() -> Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride), :decider)
-    Setup(program, d, collect(Pair{Int, Int}, pairs), input, build)
 end
 
 """
@@ -293,9 +315,7 @@ claims fail to build.
 """
 function decide!(s::Setup; verify::Bool = verifying(), timer = s.decider.timer)
     s.decider.timer = timer
-    Base.ScopedValues.with(Implement.COMPILING => s.build, VERIFYING => verify) do
-        reach!(s.decider; settle = settling())
-    end
+    running(() -> reach!(s.decider; settle = settling()), s, verify)
 end
 
 """
@@ -305,7 +325,7 @@ Decisions `r`, reached for the preparation set up as `s` by a search
 elsewhere in this process, and the plan they form: replayed without what
 they rest on held against the files (see `given!`).
 """
-given(s::Setup, r) = given!(s.decider, r)
+given(s::Setup, r) = in_tables(() -> given!(s.decider, r), s.tables)
 
 """
     prepared(s, decided, inputs...; by_reference, point, verify) -> Executable
@@ -322,7 +342,7 @@ function prepared(s::Setup, decided, @nospecialize(inputs...); by_reference = ()
     # times at most; then what fails runs on the next option, the floor last
     # (see `build_group`). The last plan's buffers are let go first. Without
     # `build`, implementations compile nothing as they claim (`compiling`).
-    ex = Base.ScopedValues.with(Implement.COMPILING => s.build, VERIFYING => verify) do
+    ex = running(s, verify) do
         ex = phase(() -> planned(s, decided, inputs, by_reference, point), :planned)
         for _ in 2:PLANS
             any(x -> x !== nothing && x.how === :instead, ex.decisions) || break

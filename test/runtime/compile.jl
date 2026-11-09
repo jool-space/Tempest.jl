@@ -691,6 +691,46 @@ end
     @test s.compiled === c && isapprox(s(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
 end
 
+@testset "preparations on two tasks at once" begin
+    # Each plans as it would alone, though both intern terms and match the
+    # library as they plan, a search's beside a call's: the tables are each
+    # preparation's own. The LSTM's step and a layer's gradient, at once,
+    # three times over.
+    xs, h0 = data(2, 5; scale = 0.5), data(3; scale = 0.1)
+    p, m, v = lstm_weights(), map(zero, lstm_weights()), map(zero, lstm_weights())
+    layer, x = Dense(data(6, 4; scale = 0.3), data(6), tanh), data(4, 3; scale = 0.5)
+    step = trace(adam!, p, m, v, xs, h0)
+    gradient = trace((l, x) -> Tempest.withgradient(loss, l, x), layer, x)
+    alone = (sprint(explain, prepare(step, p, m, v, xs, h0)), sprint(explain, prepare(gradient, layer, x)))
+    for _ in 1:3
+        tasks = (Threads.@spawn(prepare(step, p, m, v, xs, h0)), Threads.@spawn(prepare(gradient, layer, x)))
+        a, b = fetch.(tasks)
+        @test (sprint(explain, a), sprint(explain, b)) == alone
+        @test agree(C.leaves(outputs(execute!(b))), C.leaves(Tempest.withgradient(loss, layer, x)))
+    end
+    # A preparation's tables are made as it is set up and held by it: none
+    # outside one, and each filled by its own preparation alone.
+    interned(s) = sum(((_, table),) -> sum(length, values(table); init = 0), s.tables.interned.tables)
+    s, t = C.setup(step; target = T.CPUTarget()), C.setup(step; target = T.CPUTarget())
+    C.decide!(t)
+    @test IR.INTERNED[] === nothing && C.MATCHES[] === nothing
+    @test s.tables !== t.tables && interned(t) > 0 && interned(s) == 0
+    # The tables only spare a preparation time: emptied again and again as it
+    # plans, its plan is the same. Were a term's identity to matter, as it
+    # would for a term holding a vector, whose `===` is the vector's
+    # identity rather than its contents', this would plan otherwise or fail.
+    done = Threads.Atomic{Bool}(false)
+    emptying = Threads.@spawn while !done[]
+        foreach(((lock, table),) -> @lock(lock, empty!(table)), s.tables.interned.tables)
+        @lock C.MATCHES_LOCK empty!(s.tables.matches)
+        yield()
+    end
+    emptied = sprint(explain, C.prepared(s, C.decide!(s), p, m, v, xs, h0))
+    done[] = true
+    wait(emptying)
+    @test emptied == alone[1]
+end
+
 if CUDA_FUNCTIONAL
     @testset "compiled on CUDA" begin
         m, x = Dense(single(data(64, 32; scale = 0.3)), single(data(64)), tanh), single(data(32, 16; scale = 0.5))

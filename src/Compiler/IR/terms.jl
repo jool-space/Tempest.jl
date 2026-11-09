@@ -133,20 +133,35 @@ same_rank_order(a::Term, b::Term) = 0
 # built apart walks both whole: comparing the groups of two plans took most
 # of preparing a chunked gated DeltaNet. Interned, their parts are the same
 # objects, at which `===` stops at once. The table only saves time: a term
-# not in it, as after `forget_terms!`, is equal to its like by its fields.
-const INTERNED = [(ReentrantLock(), Dict{UInt, Vector{Term}}()) for _ in 1:64]
+# not in it, as one built outside a preparation, is equal to its like by its
+# fields.
+
+"""
+The terms one preparation interned, by hash, in 64 tables each under a lock
+of its own, which the preparation's tasks share.
+"""
+struct Interned
+    tables::Vector{Tuple{ReentrantLock, Dict{UInt, Vector{Term}}}}
+end
+
+Interned() = Interned([(ReentrantLock(), Dict{UInt, Vector{Term}}()) for _ in 1:64])
+
+# The terms of the preparation running, a table each preparation makes as
+# it is set up and holds: two preparations at once, on two tasks, intern
+# apart, and neither's terms outlive it. Outside a preparation nothing is
+# interned.
+const INTERNED = Base.ScopedValues.ScopedValue{Union{Nothing, Interned}}(nothing)
 
 function intern(t::T) where {T <: Union{Apply, Recomputed}}
-    lock, table = INTERNED[t.hash % length(INTERNED) + 1]
+    interned = INTERNED[]
+    interned === nothing && return t
+    lock, table = interned.tables[t.hash % length(interned.tables) + 1]
     @lock lock begin
         alike = get!(() -> Term[], table, t.hash)
         k = findfirst(u -> u === t, alike)
         k === nothing ? (push!(alike, t); t) : alike[k]::T
     end
 end
-
-"Empty the table of interned terms, which holds every term built since."
-forget_terms!() = foreach(((lock, table),) -> @lock(lock, empty!(table)), INTERNED)
 
 term_eltype(t::Load, graph) = graph.values[t.value].eltype
 term_eltype(t::Lit, graph) = typeof(t.value)

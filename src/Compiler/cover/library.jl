@@ -65,12 +65,12 @@ end
 const TEMPLATE_GROUPS = SessionTable{Key, Any}()
 const PROBE_GROUPS = SessionTable{Tuple{UInt, Symbol}, Any}()
 
-# Matches are keyed by a group's terms, which one preparation shares: equal
-# terms of another are other objects, compared whole.
-const MATCHES = Dict{Key, Vector{Binding}}()
+# The matches of the preparation running, a table each preparation makes as
+# it is set up and holds, as it does its interned terms: matches are keyed by
+# a group's terms, which one preparation shares, where equal terms of another
+# are other objects, compared whole. Outside a preparation nothing is kept.
+const MATCHES = Base.ScopedValues.ScopedValue{Union{Nothing, Dict{Key, Vector{Binding}}}}(nothing)
 const MATCHES_LOCK = ReentrantLock()
-
-forget_matches!() = @lock MATCHES_LOCK empty!(MATCHES)
 
 # The template traced in Float32 at the probe's extents: what tells groups
 # apart before any is matched.
@@ -519,10 +519,11 @@ function bindings(l::Library, target, g)
         valued = sort!(Tuple{Int, DataType, Tuple{Vararg{Int}}, Bool}[(v, x.eltype, x.dims, x.stored) for (v, x) in g.values]; by = first)
         key = Key((objectid(t), k, rewrite_policy(target), g.kind, g.domain, Tuple(members(g)),
             Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(g.placement[m] for m in members(g)), Tuple(valued)))
-        bs = @lock MATCHES_LOCK get(MATCHES, key, missing)
+        matches = MATCHES[]
+        bs = matches === nothing ? missing : @lock MATCHES_LOCK get(matches, key, missing)
         if bs === missing
             bs = match_template(t, k, target, g)
-            @lock MATCHES_LOCK MATCHES[key] = bs
+            matches === nothing || @lock MATCHES_LOCK matches[key] = bs
         end
         append!(found, bs)
     end
