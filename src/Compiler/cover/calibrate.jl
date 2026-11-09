@@ -210,14 +210,6 @@ function time_reference(d::Decider, r::Reference)
     fastest
 end
 
-"""
-Each package's fastest claim of the implementations `among` on the group the
-planner forms for `f` over arrays like `args`: its seconds, timed as claims
-are, and its launches as the package estimates them.
-"""
-reference(d::Decider, among, f, args...; recomputing = false, floor = false) =
-    time_reference(d, build_reference(d, among, f, args...; recomputing, floor))
-
 # Products of factors of these shapes fit a package's line: the small one, too
 # small to split, its latency; the large one its rate; and the middle one,
 # whose few output tiles leave the device idle unless the package splits the
@@ -241,8 +233,16 @@ function fit!(d::Decider, T, among = implementations(d.target))
     key(p, what) = string(p, " ", class, " ", what)
     unfitted = [i for i in among if !fitted_line(d, package_name(i), class)]
     isempty(unfitted) && return nothing
-    times = map(shapes -> reference(d, unfitted, *, map(dims -> zeros(T, dims), shapes)...), REFERENCE_SHAPES)
-    recomputing = reference(d, unfitted, (a, b, c) -> (a * b) * c, map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)...; recomputing = true)
+    # The references built side by side, their kernels compiling at once,
+    # then timed one at a time, as `fit_applied_all!` builds its own.
+    products = [map(dims -> zeros(T, dims), shapes) for shapes in REFERENCE_SHAPES]
+    recomputed = map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)
+    built = concurrently(1:(length(products) + 1), d.target) do k
+        k <= length(products) ? build_reference(d, unfitted, *, products[k]...) :
+            build_reference(d, unfitted, (a, b, c) -> (a * b) * c, recomputed...; recomputing = true)
+    end
+    timed = [time_reference(d, r::Reference) for r in built]
+    times, recomputing = timed[1:(end - 1)], timed[end]
     # A reference's first launch: its time less those of the launches after
     # it, which merge split sums, and its flops over its share of the device.
     first_launch(t, work, package) = (t - sum(w -> seconds(w, d.rates, memory!(d, package), nothing), work[2:end]; init = 0.0),
@@ -281,7 +281,8 @@ function fit_memory!(d::Decider, among = implementations(d.target))
     key(p, what) = string(p, " memory ", what)
     unfitted = [i for i in among if !haskey(d.calibration, key(package_name(i), "bandwidth"))]
     floor = !haskey(d.calibration, key(:floor, "bandwidth"))
-    folds = map(n -> reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n); floor), MEMORY_COLUMNS)
+    built = concurrently(n -> build_reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n); floor), collect(MEMORY_COLUMNS), d.target)
+    folds = [time_reference(d, r::Reference) for r in built]
     for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
         latency, bandwidth = if all(fold -> haskey(fold, package), folds)
             bytes = [sum(w -> w.bytes, last(fold[package])) for fold in folds]
