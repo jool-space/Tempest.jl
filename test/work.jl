@@ -4,8 +4,24 @@
 # observer hears each phase begin and end, from every task, and what it
 # throws does not take a preparation down.
 
-# A gradient, so that the cover has proposals to try.
+# A gradient: a fold, the maps that read it, and their gradients.
 tallied_program(x) = differentiate(trace(x -> sum(abs2, tanh.(x) .- sum(x; dims = 1) ./ size(x, 1)), x))
+
+# A stack of `n` layers' gradients, each layer scaled by a constant of its
+# own: no two are alike, so that on the CUDA target the cover tries a
+# proposal in each, and compares those an implementation claims.
+function stacked(n)
+    ws = ntuple(k -> single(data(16, 16; scale = 1 + k / 8)) ./ 8, n)
+    x = single(data(16, 8))
+    function loss(ws, x)
+        h = x
+        for (k, w) in enumerate(ws)
+            h = tanh.(w * h) .* Float32(1 + k / 64)
+        end
+        sum(abs2, h)
+    end
+    trace((ws, x) -> T.withgradient(v -> loss(v, x), ws), ws, x), (ws, x)
+end
 
 @testset "off, the work is neither counted nor heard" begin
     @test !C.TALLYING[] && C.OBSERVER[] === nothing
@@ -37,8 +53,11 @@ end
     @test !C.TALLYING[]
     @test_throws ArgumentError C.tallied(() -> C.tallied(() -> nothing))
     @test !C.TALLYING[]
+    # The program above forms one kernel on the CUDA target, with nothing to
+    # propose.
     if CUDA_FUNCTIONAL
-        _, counts, phases = C.tallied(() -> prepare(p, x; target = T.CUDATarget(), build = false))
+        q, args = stacked(2)
+        _, counts, phases = C.tallied(() -> prepare(q, args...; target = T.CUDATarget(), build = false))
         @test :cover_pricing in first.(phases) && counts[:trials] >= 1 && counts[:compared] >= 1
     end
 end
