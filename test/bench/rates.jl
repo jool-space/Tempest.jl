@@ -10,7 +10,8 @@ using Tempest, CUDACore
 import cuBLAS, cuDNN, cuTile
 const C = Tempest.Compiler
 
-ENV["TEMPEST_CACHE"] = mktempdir()
+include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+run_stores!()
 target = Tempest.CUDATarget()
 foreach(precision -> C.calibrate!(Tempest.CUDATarget(; precision)), (:full, :tf32, :tf32x3))
 shipped = joinpath(C.shipped_directory(), basename(C.rates_path(target)))

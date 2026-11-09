@@ -24,6 +24,7 @@ the process exits, however it exits short of being killed. A directory given
 is kept, for a later run to read what this one left on purpose.
 """
 function run_stores!(dir = mktempdir())
+    mkpath(dir)
     foreach(((k, v),) -> ENV[k] = v, run_stores(dir))
     dir
 end

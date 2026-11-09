@@ -18,6 +18,8 @@
 # to start from instead.
 using Tempest, Test, NNlib, CUDACore, Einops
 import ChainRulesCore, SpecialFunctions, Statistics, cuBLAS, cuDNN, cuTile
+include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+run_stores!()
 include(joinpath(@__DIR__, "..", "setup.jl"))
 haskey(ENV, "TEMPEST_RATES") || foreach(precision -> C.calibrate!(T.CUDATarget(; precision)), (:full, :tf32, :tf32x3))
 

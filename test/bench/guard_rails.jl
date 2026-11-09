@@ -113,6 +113,12 @@ end
 const TARGET = T.CUDATarget(; precision = "--tf32" in ARGS ? :tf32 : "--tf32x3" in ARGS ? :tf32x3 : :full)
 filter!(a -> !(a in ("--tf32", "--tf32x3")), ARGS)
 
+# Run as a script, with stores of its own; prepare.jl, which includes it, names its own.
+if abspath(PROGRAM_FILE) == @__FILE__
+    include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+    run_stores!()
+end
+
 if abspath(PROGRAM_FILE) != @__FILE__
     # Included for its cases.
 elseif !isempty(ARGS) && ARGS[1] == "--cases"

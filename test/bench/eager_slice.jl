@@ -12,6 +12,10 @@ using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute
 import Tempest as T
 import Tempest.Compiler as C
 
+# Nothing kept by an earlier run is read, nor left for a later one.
+include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+run_stores!()
+
 sample(dims...; scale = 1.0f0) = 2.0f0 .* sin.(scale .* reshape(Float32.(1:prod(dims)), dims...))
 
 x, y = sample(8, 6; scale = 0.7f0), sample(8, 6; scale = 0.3f0)

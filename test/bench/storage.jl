@@ -9,7 +9,8 @@ using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute
 import Tempest as T
 
 # Plans by estimate, as the tests make them.
-ENV["TEMPEST_CACHE"] = mktempdir()
+include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+run_stores!()
 include(joinpath(@__DIR__, "..", "fixtures", "compositions.jl"))
 
 function report(name, p, args; target = T.CUDATarget())

@@ -307,5 +307,8 @@ end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     import cuBLAS, cuTile
+    # A cold preparation: nothing an earlier run kept is read.
+    include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+    run_stores!()
     GPT.main()
 end

@@ -1,9 +1,18 @@
 # Wall-clock time of preparing each guard-rail program and of its first
-# execution, in one process: run it in a new process with a cold cache and
-# again with a warm one. `--save path` writes the results, `--compare path`
-# checks them bit for bit against a saved run.
-#   julia --project=test test/bench/prepare.jl [--save|--compare path]
+# execution, in one process, each preparation covering (TEMPEST_REPLAY=false)
+# rather than replaying what an earlier run kept. `--stores DIR` keeps what a
+# run leaves on disk in DIR, the kernels compiled and the record measured: run
+# it twice with the same new DIR for a cold run and then a warm one. Without
+# it, a directory of the run's own, removed after. `--save path` writes the
+# results, `--compare path` checks them bit for bit against a saved run.
+#   julia --project=test test/bench/prepare.jl [--stores DIR] [--save|--compare path]
 include("guard_rails.jl")
+include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+let i = findfirst(==("--stores"), ARGS)
+    println("stores in ", i === nothing ? run_stores!() : run_stores!(ARGS[i + 1]))
+    i === nothing || deleteat!(ARGS, i:(i + 1))
+end
+ENV["TEMPEST_REPLAY"] = "false"
 using Serialization
 module Ops
 using Tempest

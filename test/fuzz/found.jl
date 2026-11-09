@@ -11,6 +11,11 @@ import cuBLAS, cuTile
 using Tempest, CUDACore, Test, Random, LinearAlgebra
 import Tempest as T, Tempest.Compiler as C
 
+# Each fault's case covers, in a directory of the run's own.
+include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+run_stores!()
+ENV["TEMPEST_REPLAY"] = "false"
+
 # The one number a case returns, as its plan computes it on the CPU.
 prepared(f, args...) = only(C.leaves(C.outputs(C.execute!(C.prepare(C.trace(f, args...), args...)))))
 runs(f, args...) = try

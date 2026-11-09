@@ -320,5 +320,9 @@ function main(args)
     end
 end
 
-# Run as a script; included, it defines the families.
-abspath(PROGRAM_FILE) == abspath(@__FILE__()) && main(ARGS)
+# Run as a script, with stores of its own; included, it defines the families.
+if abspath(PROGRAM_FILE) == abspath(@__FILE__())
+    include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+    run_stores!()
+    main(ARGS)
+end

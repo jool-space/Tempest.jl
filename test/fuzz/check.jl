@@ -9,6 +9,13 @@ import cuBLAS, cuTile
 using Tempest, CUDACore, Random, LinearAlgebra
 import Tempest as T, Tempest.Compiler as C, Tempest.Compiler.IR as IR
 
+# A case checks the cover: every preparation covers, none replays decisions
+# kept by an earlier run or, as the shrinker prepares a program again, by
+# this one; and nothing is kept outside this run's own directory.
+include(joinpath(@__DIR__, "..", "fixtures", "stores.jl"))
+run_stores!()
+ENV["TEMPEST_REPLAY"] = "false"
+
 isdefined(@__MODULE__, :Gen) || include(joinpath(@__DIR__, "gen.jl"))
 isdefined(@__MODULE__, :verdict) || include(joinpath(@__DIR__, "verdict.jl"))
 
