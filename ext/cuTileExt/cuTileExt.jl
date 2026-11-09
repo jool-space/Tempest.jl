@@ -991,10 +991,17 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     recomputed = recomputed_flops(c, [g.terms[m] for m in members(g) if haskey(g.terms, m) && !(m in g.reductions)]) +
         sum(rs -> live[first(rs)] * recomputed_flops(c, [g.terms[r] for r in rs]), values(classes); init = 0.0)
     swept_axes = [a for ax in s.tiling if ax.reduced for a in ax.axes]
+    # Each value's loads, with the member that loads it, found once: asked of
+    # each buffer of each kernel, a pass over every load of the group each, a
+    # group that sums many values priced in their number squared.
+    loading = Dict{Int, Vector{Tuple{Int, Load}}}()
+    for m in members(g), t in (haskey(g.terms, m) ? loads(g.terms[m]) : Load[])
+        push!(get!(() -> Tuple{Int, Load}[], loading, t.value), (m, t))
+    end
+    loads_of(v) = get(loading, v, Tuple{Int, Load}[])
     function share(v)
         f = 0.0
-        for m in members(g), t in (haskey(g.terms, m) ? loads(g.terms[m]) : Load[])
-            t.value == v || continue
+        for (m, t) in loads_of(v)
             f = max(f, m in g.reductions && any(a -> mentions(t, a), swept_axes) ? live[m] : 1.0)
         end
         f == 0.0 ? 1.0 : f
@@ -1016,8 +1023,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     function times_read(v)
         s.sketch === :product && return 1
         n = 1
-        for m in members(g), t in (haskey(g.terms, m) ? loads(g.terms[m]) : Load[])
-            t.value == v || continue
+        for (_, t) in loads_of(v)
             along = prod(ax -> reading_blocks(t, ax, g.domain), kept; init = 1)
             split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
             n = max(n, along * split)
@@ -1036,7 +1042,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
         s.sketch === :product && return 0.0
         n = prod(g.values[v].dims; init = 1)
         again = 0.0
-        for t in unique(l for m in members(g) if haskey(g.terms, m) for l in loads(g.terms[m]) if l.value == v)
+        for t in unique(l for (_, l) in loads_of(v))
             along = prod(ax -> reading_blocks(t, ax, g.domain), kept; init = 1)
             split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
             again += reached_at(t) / n * (along * split - 1)
@@ -1052,7 +1058,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     # is of the whole buffer, a step's slice of a value along the steps of
     # which it reads.
     function reach_of(v)
-        ts = [l for m in members(g) if haskey(g.terms, m) for l in loads(g.terms[m]) if l.value == v]
+        ts = [l for (_, l) in loads_of(v)]
         isempty(ts) ? typemax(Int) : reached_elements(ts, g.values[v].dims, domain)
     end
     elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && g.values[a.buffer].keyed ? combined(a.buffer) :
