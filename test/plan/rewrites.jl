@@ -233,16 +233,17 @@ end
     # Its derivative comes from its combine: two exclusive scans give each
     # element the fold of the rest, and the combine's own code the partials.
     # The gradient is the variance's written with sums. Planned, the fold
-    # rides the sweep of the scan before each element, and the scan after it
-    # computes the gradient: four kernels, with the count and the loss, where
-    # the sums spelling, a fold relative to the mean, has two.
+    # rides the sweep of the scan before each element, which stores what
+    # the element's pullback reads of it, and the scan after it computes the
+    # gradient: three kernels, with the loss, where the sums spelling, a fold
+    # relative to the mean, has two.
     @testset "a derivative for a fold Base spells" begin
         loss(x) = sum(base_variance(x; dims = 1))
         @test message(() -> differentiate(trace(loss, x))) == ""
         by_sums(x) = (m = sum(x; dims = 1) ./ size(x, 1); sum(sum(abs2, x .- m; dims = 1) ./ size(x, 1)))
         @test isapprox(last(T.gradient(loss, x)), last(T.gradient(by_sums, x)); rtol = 1.0e-12)
         p = C.plan(C.rewrite(C.lower(differentiate(trace(loss, x)))))
-        @test C.structure(p).kernels == 4 && count(g -> g.kind === :scan, p.groups) == 2
+        @test C.structure(p).kernels == 3 && count(g -> g.kind === :scan, p.groups) == 2
         @test C.structure(C.plan(C.rewrite(C.lower(differentiate(trace(by_sums, x)))))).kernels == 2
     end
 end
