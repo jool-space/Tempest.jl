@@ -64,6 +64,8 @@ mutable struct Executable{T <: Target}
     repetitions::Int
     # Whether its kernels were built; a plan alone can be explained, not run.
     built::Bool
+    # The decisions it was built on (see `Reached`).
+    reached::Any
 end
 
 
@@ -161,6 +163,34 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     # The terms an earlier preparation interned are of its program.
     IR.forget_terms!()
     forget_matches!()
+    s = setup(program; target, measure, replaces, recompute, ride, partition, build)
+    prepared(s, decide!(s; verify), inputs...; by_reference, verify)
+end
+
+"""
+A preparation set up, before it decides: the program, its decider as
+`prepare` makes it, on the program's index graph lowered and rewritten with
+the folds pinned, kept and riding, the results paired with the arguments
+they replace, the value of each argument, and whether it builds. `decide!`
+reaches its decisions and `prepared` builds them.
+"""
+struct Setup{D}
+    program::Program
+    decider::D # a `Decider`, defined with the cover
+    pairs::Vector{Pair{Int, Int}}
+    input::Dict{Int, Int}
+    build::Bool
+end
+
+"""
+    setup(program; target, measure, replaces, recompute, ride, partition, build) -> Setup
+
+`program` set up as `prepare` sets it up, the keywords as `prepare` takes
+them: lowered, rewritten and partitioned, with its decider. It forgets
+nothing an earlier preparation interned or matched, as `prepare` does first.
+"""
+function setup(program::Program; target, measure = measuring(), replaces = (), recompute = (), ride = (), partition::Bool = true,
+        build::Bool = true)
     # Each phase marked (see `phase`).
     lowered = phase(() -> lower(program), :lower)
     graph = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
@@ -195,36 +225,73 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         union!(pinned, recomputed)
     end
     d = phase(() -> Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride), :decider)
-    # Planned again while the last plan's builds failed, a few times at most;
-    # then what fails runs on the next option, the floor last (see
-    # `build_group`). The last plan's buffers are let go first. Without
+    Setup(program, d, collect(Pair{Int, Int}, pairs), input, build)
+end
+
+"""
+    decide!(s; verify) -> Decided
+
+The decisions of the preparation set up as `s` and the plan they form,
+reached as `prepare` reaches them (see `reach!`): replayed where decisions
+kept for it hold, else by the cover, settled.
+"""
+decide!(s::Setup; verify::Bool = verifying()) =
+    Base.ScopedValues.with(Implement.COMPILING => s.build, VERIFYING => verify) do
+        reach!(s.decider; settle = settling())
+    end
+
+"""
+    given(s, r) -> Decided
+
+Decisions `r`, reached for the preparation set up as `s` by a search
+elsewhere in this process, and the plan they form: replayed without what
+they rest on held against the files (see `given!`).
+"""
+given(s::Setup, r) = given!(s.decider, r)
+
+"""
+    prepared(s, decided, inputs...; by_reference, verify) -> Executable
+
+The preparation set up as `s` built on decisions `decided` (see `decide!`
+and `given`) and bound to `inputs`, as `prepare` builds it. Where claims
+fail to build, it decides again, knowing they failed, and builds again. The
+decisions it builds on are kept for a preparation of the same program to
+replay, unless they were replayed.
+"""
+function prepared(s::Setup, decided, @nospecialize(inputs...); by_reference = (), verify::Bool = verifying())
+    d = s.decider
+    # Decided and built again while the last plan's builds failed, a few
+    # times at most; then what fails runs on the next option, the floor last
+    # (see `build_group`). The last plan's buffers are let go first. Without
     # `build`, implementations compile nothing as they claim (`compiling`).
-    ex = Base.ScopedValues.with(Implement.COMPILING => build, VERIFYING => verify) do
-        ex, reached = phase(() -> planned(program, d, inputs, pairs, input, by_reference, build), :planned)
+    ex = Base.ScopedValues.with(Implement.COMPILING => s.build, VERIFYING => verify) do
+        ex = phase(() -> planned(s, decided, inputs, by_reference), :planned)
         for _ in 2:PLANS
             any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
             ex = nothing
-            ex, reached = phase(() -> planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build), :planned)
+            forget_decisions!(d)
+            ex = phase(() -> planned(s, decide!(s; verify), inputs, by_reference), :planned)
         end
         # Decisions the cover reached are kept, for a preparation of the
         # same program to replay (see `reach!`); those replayed are kept already.
-        reached.key === nothing || reached.settled || store_reached(settled(reached, d))
+        r = ex.reached
+        r.key === nothing || r.settled || store_reached(settled(r, d))
         ex
     end
     ex.built && phase(() -> bind!(ex, inputs...), :bind)
     ex
 end
 
-# The plans a preparation makes at most, each after builds that failed.
+# The plans a preparation builds at most, each after builds that failed.
 const PLANS = 4
 
-# The program planned by decider `d` and, with `build`, built on buffers of
-# its own, its inputs not yet bound, and what its decider reached (see
-# `reach!`): `prepare` once its graph is lowered.
-function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, build)
+# The program of preparation `prep` planned on `decided` and, where it
+# builds, built on buffers of its own, its inputs not yet bound.
+function planned(prep::Setup, decided, @nospecialize(inputs), by_reference)
+    program, d, pairs, input, build = prep.program, prep.decider, prep.pairs, prep.input, prep.build
     target = d.target
-    p, considered, ds, reached = reach!(d; settle = settling())
-    # The sections of `planned` after its decisions (see `lap!`).
+    p, considered, ds, reached = decided.plan, decided.considered, decided.decisions, decided.reached
+    # The sections of `planned` (see `lap!`).
     clock = mark()
     values = p.graph.values
     result_value(k) = p.graph.results[k].value
@@ -250,7 +317,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
             none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
             Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Any[], nothing,
             Vector{Union{Nothing, Readers}}(nothing, length(program.arguments)), none(length(program.arguments)),
-            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)), 1, false), reached
+            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)), 1, false, reached)
     end
     slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
     referenced = Vector{Any}(nothing, length(program.arguments))
@@ -312,7 +379,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
         launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, pointable, pointed, at, zeros(UInt, length(program.arguments)),
-        fill(false, length(program.arguments)), 1, true), reached
+        fill(false, length(program.arguments)), 1, true, reached)
 end
 
 runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))

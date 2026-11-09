@@ -5,13 +5,14 @@
 # that reads what else happened meanwhile, while `OBSERVER` holds one. Off,
 # a count, a mark or an event is a load and a branch.
 #
-# The phases a preparation marks: lower, rewrite, partition, decider and
-# planned, and bind after it; within planned, its decisions, replay where
-# kept decisions hold (see `reach!`) or else cover, then the sections search
-# and decisions, and after them the sections storage, verify, build and
-# executable (what the build leaves to assemble); a recurrence's step,
-# planned within the cover, marks its own cover, search and decisions within
-# it; within cover, the sections cover_start (the generator's plan),
+# The phases a preparation marks: lower, rewrite, partition and decider, as
+# it is set up (`setup`); its decisions (`decide!`), replay where kept
+# decisions hold (see `reach!`) or else cover, then the sections search and
+# decisions; planned, the build (`prepared`), its sections storage, verify,
+# build and executable (what the build leaves to assemble), again where
+# claims failed to build, after deciding again; and bind. A recurrence's
+# step, planned within the cover, marks its own cover, search and decisions
+# within it. Within cover, the sections cover_start (the generator's plan),
 # cover_search, cover_proposals, cover_keys, cover_trials, cover_search_ahead,
 # cover_pricing, cover_edits and cover_loop. Wherever they run: calibration,
 # burst (claims built side by side to be timed), timing, and compile, on the

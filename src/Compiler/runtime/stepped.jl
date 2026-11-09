@@ -328,7 +328,8 @@ function plan_step(d::Decider, p::Plan, g::Group)
     cd = values[c].definition::Carried
     cd.axis == length(values[c].dims) || return nothing
     bd = Decider(d, s.graph; steps = values[c].dims[cd.axis])
-    bp, _, ds, reached = reach!(bd)
+    decided = reach!(bd)
+    bp, ds, reached = decided.plan, decided.decisions, decided.reached
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     first_sum = length(s.leaves) - length(s.sums)
     replaces = [bp.graph.results[length(s.stored) + j].value => first_sum + j for j in eachindex(s.sums)]

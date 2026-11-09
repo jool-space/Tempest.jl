@@ -247,7 +247,19 @@ function replayable(d::Decider, key)
 end
 
 """
-    replay(d, r) -> (plan, considered, decisions) or nothing
+A preparation's decisions and the plan they form: the plan, the proposals
+the cover compared, each group's decision, and what was reached as it is
+kept (`Reached`), replayed or by the cover (see `reach!`).
+"""
+struct Decided
+    plan::Plan
+    considered::Vector{Any}
+    decisions::Vector{Any}
+    reached::Reached
+end
+
+"""
+    replay(d, r) -> Decided or nothing
 
 Decisions `r` replayed on decider `d`'s graph: the plan of the proposals
 taken, planned once, each group's text checked against the one kept, and
@@ -270,16 +282,15 @@ function replay(d::Decider, r::Reached)
         return nothing
     end
     Threads.atomic_add!(REACHED_COUNTS.replayed, 1)
-    (p, Any[r.considered...], Any[r.decisions...])
+    Decided(p, Any[r.considered...], Any[r.decisions...], r)
 end
 
 """
-    reach!(d) -> (plan, considered, decisions, reached)
+    reach!(d; settle = false) -> Decided
 
-The plan decider `d` runs, the proposals compared on the way and each
-group's decision, and what was reached, as it is kept (see `Reached`):
-replayed where decisions kept under the decider's key may be (see
-`replayable`), else reached by the cover. A recurrence's step within a
+The decisions of decider `d` and the plan they form: replayed where
+decisions kept under the decider's key may be (see `replayable`), else
+reached by the cover, settled with `settle` (see `covered!`). A recurrence's step within a
 preparation replayed is replayed from the preparation's. A preparation that
 verifies reaches its decisions by the cover too, and throws where the two
 differ.
@@ -294,18 +305,18 @@ function reach!(d::Decider; settle = false)
         step = last(within.steps[i])
         replayed = replay(d, step)
         replayed === nothing && throw(NotReplayed())
-        return (replayed..., step)
+        return replayed
     end
     key = decisions_key(d)
     stored = key === nothing ? nothing : replayable(d, key)
     stored === nothing && return covered!(d, key; settle = settle && key !== nothing)
     replayed = phase(() -> replay(d, stored), :replay)
-    replayed === nothing || VERIFYING[] || return (replayed..., stored)
+    replayed === nothing || VERIFYING[] || return replayed
     # The steps replayed are the cover's to plan again.
     empty!(d.stepped)
     found = covered!(d, key; settle)
     if VERIFYING[]
-        difference = replayed === nothing ? "the plan of the proposals taken" : differs(stored, found[4])
+        difference = replayed === nothing ? "the plan of the proposals taken" : differs(stored, found.reached)
         difference === nothing || error("decisions replayed differ from the cover's: ", difference)
     end
     found
@@ -320,7 +331,7 @@ const SETTLES = 3
 settling() = parse(Bool, get(ENV, "TEMPEST_SETTLE", "true"))
 
 """
-    covered!(d, key; settle = false) -> (plan, considered, decisions, reached)
+    covered!(d, key; settle = false) -> Decided
 
 The cover's decisions, with what was reached. With `settle`, a cover that
 measured or fitted as it decided is followed by another on what it left,
@@ -350,32 +361,58 @@ function cover_once!(d::Decider, key)
     clock = lap!(:search, clock)
     ds = decisions(d, p)
     lap!(:decisions, clock)
-    (p, considered, ds, reached(d, key, p, considered, ds))
+    Decided(p, considered, ds, reached(d, key, p, considered, ds))
 end
 
 """
-    differs(a, b) -> String or nothing
+    given!(d, r) -> Decided
+
+Decisions `r` replayed on decider `d`, as a search in this process has just
+reached them for it: what they rest on is not held against the files, and
+decisions that do not form their plan throw.
+"""
+function given!(d::Decider, r::Reached)
+    replayed = replay(d, r)
+    replayed === nothing && error("the decisions given do not form the plan they were reached with")
+    replayed
+end
+
+"""
+    differs(a, b; plan = false) -> String or nothing
 
 How decisions `a` differ from `b`, in a line, or nothing where they are the
-same: the proposals taken, the groups, each group's choice, how it was made,
-its time and its options, the proposals compared, and the steps of
-recurrences, each alike.
+same: the proposals taken, the groups, each group's decision, the proposals
+compared, and the steps of recurrences, each alike. With `plan`, only what
+builds the program: each group's choice by its key, and whether every option
+of it writes in place, which its storage reads (see `storage`); not how it
+was made, its time or its options, nor the proposals compared.
 """
-function differs(a::Reached, b::Reached)
-    map(repr, a.taken) == map(repr, b.taken) || return "the proposals taken"
+function differs(a::Reached, b::Reached; plan::Bool = false)
+    a.taken == b.taken || return "the proposals taken"
     a.groups == b.groups || return "the groups"
     length(a.decisions) == length(b.decisions) || return "the number of decisions"
+    text = plan ? runs_text : decision_text
     for (k, (x, y)) in enumerate(zip(a.decisions, b.decisions))
-        decision_text(x) == decision_text(y) || return string("the decision of group ", k, ": ", decision_text(x), " against ", decision_text(y))
+        text(x) == text(y) || return string("the decision of group ", k, ": ", text(x), " against ", text(y))
     end
-    map(considered_text, a.considered) == map(considered_text, b.considered) || return "the proposals compared"
+    plan || map(considered_text, a.considered) == map(considered_text, b.considered) || return "the proposals compared"
     map(first, a.steps) == map(first, b.steps) || return "the recurrences' steps"
     for ((_, x), (_, y)) in zip(a.steps, b.steps)
-        difference = differs(x, y)
+        difference = differs(x, y; plan)
         difference === nothing || return string("a recurrence's step: ", difference)
     end
     nothing
 end
+
+"""
+    same_plan(a, b) -> Bool
+
+Whether decisions `a` and `b` build the same program (see `differs`).
+"""
+same_plan(a::Reached, b::Reached) = differs(a, b; plan = true) === nothing
+
+runs_text(x::Decision) = string(x.choice.key, " ", all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options))
+runs_text(::Nothing) = "nothing"
 
 decision_text(x::Decision) = string(x.choice.key, " ", x.how, " ", x.measured, " ", x.choice.estimate, " ",
     join((string(o.key, " ", o.estimate) for o in x.options), "; "), " ", join((string(f.implementation, " ", f.reason) for f in x.failed), "; "))

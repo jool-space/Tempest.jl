@@ -69,6 +69,50 @@ mlp(x, w) = sum(abs2, tanh.(w * x) .+ 1)
     end
 end
 
+@testset "decisions reached apart from the build, and a build on them" begin
+    x, w = data(8, 4), data(8, 8)
+    kept() do
+        p = trace(mlp, x, w)
+        s = C.setup(p; target = T.CPUTarget())
+        decided, replayed, covered = counted(() -> C.decide!(s))
+        @test (replayed, covered) == (0, 1)
+        @test isempty(decisions_files())
+        r = decided.reached
+        ex, replayed, covered = counted(() -> C.prepared(s, decided, x, w))
+        @test (replayed, covered) == (0, 0)
+        @test ex.reached === r && length(decisions_files()) == 1
+        @test sprint(explain, ex) == sprint(explain, prepare(p, x, w))
+        @test agree(C.leaves(outputs(execute!(ex))), [mlp(x, w)])
+        # Decisions given to another preparation of the program, as a search
+        # behind a running program hands them over: replayed, what they rest
+        # on not held against the files.
+        s2 = C.setup(p; target = T.CPUTarget())
+        ex2, replayed, covered = counted(() -> C.prepared(s2, C.given(s2, r), x, w))
+        @test (replayed, covered) == (1, 0) && ex2.reached === r
+        @test sprint(explain, ex2) == sprint(explain, ex)
+        # Two preparations of one program in one process each reach and
+        # keep the same decisions: the later file stands, whole, and is replayed.
+        foreach(rm, decisions_files())
+        s1, s2 = C.setup(p; target = T.CPUTarget()), C.setup(p; target = T.CPUTarget())
+        d1, d2 = C.decide!(s1), C.decide!(s2)
+        @test C.differs(d1.reached, d2.reached) === nothing
+        C.prepared(s1, d1, x, w)
+        C.prepared(s2, d2, x, w)
+        @test length(decisions_files()) == 1 && C.differs(C.load_reached(basename(only(decisions_files()))), d2.reached) === nothing
+        _, replayed, covered = counted(() -> prepare(p, x, w))
+        @test (replayed, covered) == (1, 0)
+        # The same plan however it was reached; another where a group runs otherwise.
+        @test C.same_plan(r, C.Reached(merge(fields(r), (; considered = C.Considered[], how = :close))...))
+        @test !C.same_plan(r, C.Reached(merge(fields(r), (; decisions = reverse(r.decisions)))...))
+        # A decision timed otherwise builds the same program, and differs.
+        k = findfirst(!isnothing, r.decisions)
+        x = r.decisions[k]
+        timed = Any[r.decisions[1:(k - 1)]; C.Decision(x.choice, x.options, x.how, 1.0, x.failed); r.decisions[(k + 1):end]]
+        other = C.Reached(merge(fields(r), (; decisions = timed))...)
+        @test C.same_plan(r, other) && startswith(C.differs(r, other), "the decision of group $k")
+    end
+end
+
 @testset "a recurrence's steps are replayed with the program" begin
     function interior(u)
         i = reshape(Int32(1):Int32(size(u, 1)), :, 1)
@@ -236,13 +280,13 @@ C.build_claim(::CloseCalls, claim, target, g, buffers) = g.reference(target, buf
     target = T.CPUTarget(CloseCalls())
     kept() do
         d = C.Decider(target, graph)
-        _, _, _, r = C.reach!(d)
+        r = C.reach!(d).reached
         @test r.wanted == length(d.wanted) > 0
         # Each timed, at its estimate, none is wanted.
         for os in values(d.options), o in os
             o.key in d.wanted && C.save_record(C.record_path(target), o.key, o.estimate)
         end
-        _, _, _, r = C.reach!(C.Decider(target, graph))
+        r = C.reach!(C.Decider(target, graph)).reached
         @test r.wanted == 0
     end
 end
