@@ -1093,6 +1093,38 @@ challenger if a law cannot be written as a pattern without a general
 predicate over the whole graph, that law named; it closes for the code if
 the patterns match less, or match the same at more lines.
 
+**A second device: the RTX 6000 Ada faults where tileiras reads a tile
+transposed four deep.** On an RTX 6000 Ada (sm_89, 142 multiprocessors, 96
+MiB of L2, discrete memory; driver 580.178.04 with CUDA_Driver_jll's
+forward-compatible 13.3, runtime 13.4, tileiras 13.4.92 from CUDA_Tile_jll
+13.4.1, Tile IR bytecode 13.4, cuTile.jl at tree 491f899), main's suite
+meets `CUDA_ERROR_MISALIGNED_ADDRESS` in two tests:
+test/runtime/storage.jl's training step on CUDA, in a product of 16×32
+summing 4 whose left factor is read transposed, and test/cuda/cover.jl's
+products grouped with a product by a constant, in its streamed kernel. The
+error is sticky: what runs after it on the worker fails too, 16 errors from
+the two. The storage test's fault is cuTile's alone. A Float32 tile loaded
+(4, 16), permuted to (16, 4), and its product with a (4, 32) tile
+accumulated by `muladd`, in cuTile.jl without Tempest, faults; with 2, 8 or
+16 along the sum, or the left tile loaded (16, 4) as it lies, it agrees. The
+Tile IR is the same at 4 and 8 but for its shapes. The PTX tileiras emits
+for sm_89 at 4 reads the transposed tile with `ld.global.v2.b32` at
+`[%rd2+4]` and `[%rd2+12]`, where %rd2 is a multiple of 32 bytes past a
+128-byte-aligned base: four overlapping 8-byte loads, two of them at
+addresses 4 past a multiple of 8, where four predicated loads of one element
+each are meant. The grouped kernel also permutes the tiles it loads; its PTX
+is not yet read. Both tests plan alike on the Ada's rates and the GB10's,
+fault on the Ada under either, and run clean on the GB10 (sm_121) under the
+Ada's rates, as does the cuTile.jl form: it is the device's code generation,
+not a plan. Nothing in Tempest works around it. The scripts, the PTX and
+Tile IR at 4 and 8, and the outputs are in ~/dev/jool/challengers/sm89/:
+`cutile-only.jl` the minimal form, `cutile-ptx.jl` its Tile IR and PTX,
+`probe.jl` Tempest's smallest program that meets it, `(w, d) ->
+(permutedims(w) * d,)` with w 4×16 and d 4×32 on the generator alone,
+`misaligned.jl` the two tests' programs launch by launch. Closes when a
+tileiras's PTX for the minimal form has no misaligned load and the two tests
+pass on the Ada; whether to report it upstream is open.
+
 Not on the docket: the kernel-author question, how a kernel no implementation
 claims is written by hand in a package. Pallas (a kernel in the same language
 on explicit refs, transparent to tracing, with its own derivative) and Exo
