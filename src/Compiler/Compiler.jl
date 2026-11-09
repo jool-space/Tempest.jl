@@ -73,6 +73,7 @@ include("index/interpret.jl")
 
 # Plans: what is stored, and the kernels.
 include("plan/planner.jl")
+include("plan/replan.jl")
 include("plan/rewrites.jl")
 include("plan/partition.jl")
 include("plan/masks.jl")

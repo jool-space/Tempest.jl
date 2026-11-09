@@ -227,14 +227,18 @@ are planned once. Proposals whose trials there change groups alike
 (`edit_key`) are one edit in identical layers: priced once, and taken
 together. A proposal
 is priced again in the current plan when an edit taken already changed a
-group around it. Each trial plans the whole graph, and is compared with the
-plan it changes on the groups that differ. Every proposal compared is
+group around it. Each trial forms again only the kernels its proposals reach
+in the plan it changes (see `replanned`), and is compared with that plan on
+the groups that differ. Every proposal compared is
 returned, taken or not. Folds the decider pins are recomputed in every plan,
 and those it keeps are not proposed.
 """
 function cover(d::Decider)
     clock = mark()
-    base = generator_plan(d)
+    # The generator's plan (see `generator_plan`), with how it formed its
+    # kernels: a trial forms again only those its proposals reach.
+    based = Planned(d.graph, Inputs(d))
+    base = based.plan
     clock = lap!(:cover_start, clock)
     search!(d, base)
     clock = lap!(:cover_search, clock)
@@ -275,14 +279,16 @@ function cover(d::Decider)
     # there, where a trial would first form it, is not tried. A set holding a
     # pinned fold changes what is stored.
     start = storing(d.graph; recompute = d.pinned, ride = d.rides)
-    deps = Dependencies(start.graph)
+    unowned = zeros(Int, length(start.stored))
     function forms(set)
         isdisjoint(set, d.pinned) || return true
         try
-            # Trials run on several threads at once, and grouping fills the
-            # dependencies' caches as it goes: each its own, the ancestors
+            # Trials run on several threads at once, and forming fills the
+            # kernels' caches as it goes: each its own, the ancestors
             # shared. One shared had its dictionaries written at once.
-            fixed_group(start.graph, start.stored, Dependencies(deps.owner, deps.groups, deps.up), set)
+            k = Kernels(start.stored, unowned, Group[], based.grounds.up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}(),
+                DependsWalk(length(unowned)))
+            fixed_group(start.graph, Plain(k), set)
             true
         catch e
             e isa NotAGroup || rethrow()
@@ -291,15 +297,17 @@ function cover(d::Decider)
     end
     arounds = IdDict{Plan, Around}()
     around(p, taken) = get!(() -> Around(p, inputs(d, taken).fixed), arounds, p)
-    function trial(current, taken, qs)
+    function trial(current::Planned, taken, qs)
         tally!(:trials)
-        all = Proposal[taken; qs]
         if isempty(taken)
-            sets = inputs(d, all).fixed
+            sets = inputs(d, qs).fixed
             length(sets) == 1 && !forms(only(sets)) && return nothing
         end
-        plan_taking(d, all)
+        replanned_taking(current, taken, qs)
     end
+    # A trial's plan alone, which is what is priced: how it formed is kept
+    # only for the plans taken, which trials form near.
+    plan_of(p) = p === nothing ? nothing : p.plan
     # A proposal's comparison with the plan it is priced in, and the
     # implementation that claims its group: by key, once, where its kind
     # can be priced (`priceable`).
@@ -323,7 +331,7 @@ function cover(d::Decider)
     firsts = Dict{String, Any}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
     clock = lap!(:cover_keys, clock)
-    planned = Dict(k => Threads.@spawn(trial(base, Proposal[], Proposal[q])) for (k, q) in firsts)
+    planned = Dict(k => Threads.@spawn(plan_of(trial(based, Proposal[], Proposal[q]))) for (k, q) in firsts)
     trials = Dict(k => fetch_result(t) for (k, t) in planned)
     clock = lap!(:cover_trials, clock)
     # The groups by which the trials priced below differ from the starting
@@ -360,7 +368,7 @@ function cover(d::Decider)
     edit = [get!(() -> edit_key(known, base, trials[r[4]]), edits, r[4]) for r in ranked]
     clock = lap!(:cover_edits, clock)
     near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
-    current, considered, taken, done = base, Considered[], Proposal[], Set{Int}()
+    current, considered, taken, done = based, Considered[], Proposal[], Set{Int}()
     kept = Set(group_identity(base, g) for g in base.groups)
     # Those around which an edit taken already changed a group are priced
     # again in the current plan, by the first of them; the rest keep their
@@ -384,10 +392,10 @@ function cover(d::Decider)
             part = filter(moved, classes[later])
             isempty(part) && continue
             q = ranked[first(part)][2]
-            key = proposal_key(current, around(current, taken), q)
+            key = proposal_key(current.plan, around(current.plan, taken), q)
             (haskey(priced, key) || haskey(ahead, key)) && continue
             t = let p = current, before = copy(taken)
-                Threads.@spawn trial(p, before, Proposal[q])
+                Threads.@spawn plan_of(trial(p, before, Proposal[q]))
             end
             ahead[key] = t
             push!(spawned, t)
@@ -395,7 +403,7 @@ function cover(d::Decider)
     end
     price_ahead(q, i, key) = get!(priced, key) do
         t = pop!(ahead, key, nothing)
-        priced_plan(t === nothing ? trial(current, taken, Proposal[q]) : fetch_result(t), current, q, i)
+        priced_plan(t === nothing ? plan_of(trial(current, taken, Proposal[q])) : fetch_result(t), current.plan, q, i)
     end
     for n in eachindex(ranked)
         n in done && continue
@@ -407,7 +415,7 @@ function cover(d::Decider)
         for part in (filter(!moved, class), filter(moved, class))
             isempty(part) && continue
             _, q, i, key = ranked[first(part)]
-            x = moved(first(part)) ? price_ahead(q, i, proposal_key(current, around(current, taken), q)) : priced[key]
+            x = moved(first(part)) ? price_ahead(q, i, proposal_key(current.plan, around(current.plan, taken), q)) : priced[key]
             x === nothing && continue
             c, j = x
             cs = [Considered(ranked[m][2], j, c, cheaper(c)) for m in part]
@@ -422,7 +430,7 @@ function cover(d::Decider)
             for t in taking
                 p = trial(current, taken, Proposal[t.proposal])
                 p === nothing && continue
-                c = compare(d, p, current, known)
+                c = compare(d, p.plan, current.plan, known)
                 push!(considered, Considered(t.proposal, t.implementation, c, cheaper(c)))
                 cheaper(c) && (current = p; push!(taken, t.proposal))
             end
@@ -431,14 +439,14 @@ function cover(d::Decider)
             append!(considered, taking)
             append!(taken, [c.proposal for c in taking])
         end
-        kept = Set(group_identity(current, g) for g in current.groups)
+        kept = Set(group_identity(current.plan, g) for g in current.plan.groups)
         current === was || empty!(ahead)
     end
     # A trial planned ahead and not used is waited for, so none outlives the
     # cover; one that failed was of a plan the cover did not price.
     foreach(t -> try wait(t) catch end, spawned)
     lap!(:cover_loop, clock)
-    current, considered
+    current.plan, considered
 end
 
 """
@@ -454,6 +462,23 @@ function plan_taking(d::Decider, proposals)
     i = inputs(d, proposals)
     try
         plan(d.graph; fixed = i.fixed, i.recompute, i.store, i.ride)
+    catch e
+        e isa NotAGroup || rethrow()
+        nothing
+    end
+end
+
+"""
+    replanned_taking(current::Planned, taken, proposals) -> Planned or nothing
+
+The plan `current`, which has `taken` taken, with `proposals` taken after
+them, formed near it (see `replanned`); as `plan_taking`, nothing where two
+share a value or a set does not form one group.
+"""
+function replanned_taking(current::Planned, taken, proposals)
+    allunique(Iterators.flatten(fixes(x) for x in Iterators.flatten((taken, proposals)))) || return nothing
+    try
+        replanned(current, change(proposals))
     catch e
         e isa NotAGroup || rethrow()
         nothing

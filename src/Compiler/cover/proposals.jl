@@ -23,29 +23,15 @@ abstract type Proposal end
 Base.:(==)(a::P, b::P) where {P <: Proposal} = all(f -> getfield(a, f) == getfield(b, f), fieldnames(P))
 Base.hash(q::Proposal, h::UInt) = foldl((h, f) -> hash(getfield(q, f), h), fieldnames(typeof(q)); init = hash(typeof(q), h))
 
-"""
-What the planner is given, or what a proposal changes of it: the sets of
-values fixed as groups, in order, the folds recomputed where they are read,
-the maps stored apart, and the sums riding their recurrence's steps, in
-order. Changes compose by `merge`, the sets and sums of each after those
-before. A decider's own (`Inputs(d)`) recompute the folds it pins and ride
-the sums it was given.
-"""
-struct Inputs
-    fixed::Vector{Vector{Int}}
-    recompute::Set{Int}
-    store::Set{Int}
-    ride::Vector{Int}
-end
-
-Inputs(; fixed = Vector{Int}[], recompute = (), store = (), ride = ()) =
-    Inputs(collect(Vector{Int}, fixed), Set{Int}(recompute), Set{Int}(store), collect(Int, ride))
+# What the planner is given (see `Inputs`) as decider `d` gives it: the folds
+# it pins recomputed, the sums it was given riding.
 Inputs(d::Decider) = Inputs(; recompute = d.pinned, ride = d.rides)
 
-Base.merge(a::Inputs, b::Inputs) = Inputs([a.fixed; b.fixed], a.recompute ∪ b.recompute, a.store ∪ b.store, [a.ride; b.ride])
+"What proposals taken in order change of what the planner is given."
+change(proposals::AbstractVector) = foldl((i, q) -> merge(i, change(q)), proposals; init = Inputs())
 
 "What decider `d`'s planner is given with `proposals` taken, in order."
-inputs(d::Decider, proposals) = foldl((i, q) -> merge(i, change(q)), proposals; init = Inputs(d))
+inputs(d::Decider, proposals) = merge(Inputs(d), change(proposals))
 
 """
 The values a proposal is about: the sets it fixes as groups, the fold or the

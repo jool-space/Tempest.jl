@@ -32,8 +32,10 @@ const OBSERVER = Ref{Any}(nothing)
 # What is counted. Each is counted on whichever thread does it: the cover
 # plans its trials side by side.
 const COUNTED = (
-    :plans,      # plans formed (`plan`)
-    :groupings,  # times the planner formed every kernel (`group_values`)
+    :plans,      # plans formed (`plan`, `Planned`, `replanned`)
+    :groupings,  # grouping passes (`formation`)
+    :formed,     # kernels a grouping pass formed from their seeds (`formation`)
+    :reused,     # kernels a grouping pass took as formed before (see `replanned`)
     :tries,      # values tried in a group (`try_add!`)
     :walked,     # dependency walks (`depends`)
     :terms,      # terms built (`built_term`)

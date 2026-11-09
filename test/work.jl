@@ -1,9 +1,9 @@
 # The compiler's own work, counted and marked (src/Compiler/work.jl): off, a
 # count, a mark or an event costs nothing and allocates nothing; tallied, a
 # preparation's counts are the same each time and its phases are named, a
-# phase nested in itself counted once; an observer hears each phase begin
-# and end, from every task, and what it throws does not take a preparation
-# down.
+# phase nested in itself counted once, and the values the cover's trials try
+# grow with the trials alone; an observer hears each phase begin and end,
+# from every task, and what it throws does not take a preparation down.
 
 # A gradient: a fold, the maps that read it, and their gradients.
 tallied_program(x) = differentiate(trace(x -> sum(abs2, tanh.(x) .- sum(x; dims = 1) ./ size(x, 1)), x))
@@ -70,6 +70,51 @@ end
         _, counts, phases = C.tallied(() -> prepare(q, args...; target = T.CUDATarget(), build = false))
         @test :cover_pricing in first.(phases) && counts[:trials] >= 1 && counts[:compared] >= 1
     end
+end
+
+# The gradient of an RK4 of `n` steps of a two-layer field: each step's
+# kernels alike but for its constants, so that the cover tries proposals in
+# each, on the CUDA target as on the CPU.
+function rk4(n)
+    ps = (single(data(64, 32)) ./ 8, single(data(64, 1)) ./ 8, single(data(32, 64)) ./ 8, single(data(32, 1)) ./ 8)
+    u0 = single(data(32, 32))
+    function loss(ps)
+        w1, b1, w2, b2 = ps
+        f(v) = w2 * tanh.(w1 * v .+ b1) .+ b2
+        u = u0
+        for k in 1:n
+            dt = Float32(1 + k / 64) / n
+            k1 = f(u)
+            k2 = f(u .+ (dt / 2) .* k1)
+            k3 = f(u .+ (dt / 2) .* k2)
+            k4 = f(u .+ dt .* k3)
+            u = u .+ (dt / 6) .* (k1 .+ 2.0f0 .* k2 .+ 2.0f0 .* k3 .+ k4)
+        end
+        sum(abs2, u)
+    end
+    trace(ps -> T.withgradient(loss, ps), ps), (ps,)
+end
+
+@testset "a trial forms again only the kernels its proposals reach" begin
+    # Twice the steps, twice the trials. Each trial formed every kernel when
+    # it planned the whole graph, and the values tried grew four times:
+    # 127,841 at 4 steps and 521,467 at 8, with the test's packages loaded.
+    # Formed near the plan it changes, a trial forms again a median of 5
+    # kernels of 126 and of 255, and the values tried are 9,780 and 28,602:
+    # a trial that recomputes a fold forms again the kernels after it that
+    # looked at whether it was stored. Not verified, which plans each trial
+    # whole as well.
+    function tried(n)
+        q, args = rk4(n)
+        _, counts, _ = withenv("TEMPEST_REPLAY" => "false") do
+            C.tallied(() -> prepare(q, args...; target = T.CUDATarget(precision = :tf32), build = false, verify = false))
+        end
+        counts
+    end
+    four, eight = tried(4), tried(8)
+    @test eight[:tries] < 3.5 * four[:tries]
+    # Of the kernels the passes hold, all but one in ten taken as formed.
+    @test four[:reused] > 9 * four[:formed] && eight[:reused] > 9 * eight[:formed]
 end
 
 @testset "from several tasks, nothing is lost" begin

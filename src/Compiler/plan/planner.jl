@@ -86,6 +86,26 @@ struct Plan
     owner::Vector{Int}
 end
 
+"""
+What forming kernels reads the kernels formed so far, and what is stored,
+through: a context, given to every function that forms a kernel in place of
+the arrays. Five functions make the interface. Three read: whether a value
+is stored (`isstored`), whether a kernel formed so far owns it (`owned`),
+and whether values depend on a group's members, through what they read and
+the kernels that own it (`depends`). One writes: a kernel formed, its
+members owned by it (`formed!`). One brackets the forming of one kernel,
+which a context may note (`noted`). A plain context (`Plain`) reads the
+kernels and notes nothing; a recording one (`Recording`) notes what each
+kernel's forming read (see `Formed`), so that a plan formed again with a
+few values changed takes each kernel whose forming read none of them as it
+was (see `replanned`). A recurrence's step reads through a view of either
+(`Stepping`).
+
+A group is reused only if everything it read is unchanged, and everything
+it read went through here.
+"""
+abstract type Forming end
+
 # Where a group keeps a value it computes, as the value's index over the
 # domain: a fold of the group at the variables of the axes it keeps, any other
 # value over the whole domain or at the positions of the primary folds, or a
@@ -167,13 +187,13 @@ so a value read twice is one subterm, and built again at every path to it,
 a chain of maps each reading the last twice would take time doubling with
 each map.
 """
-Base.@nospecializeinfer function value_term(graph, stored, g::Group, v, @nospecialize(index), domain = Domain(g.domain), memo = Dict{Any, Term}())
+Base.@nospecializeinfer function value_term(graph, cx::Forming, g::Group, v, @nospecialize(index), domain = Domain(g.domain), memo = Dict{Any, Term}())
     key = (v, index, domain)
     haskey(memo, key) && return memo[key]
-    memo[key] = built_term(graph, stored, g, v, index, domain, memo)
+    memo[key] = built_term(graph, cx, g, v, index, domain, memo)
 end
 
-function built_term(graph, stored, g::Group, v, index, domain, memo)
+function built_term(graph, cx::Forming, g::Group, v, index, domain, memo)
     tally!(:terms)
     val = graph.values[v]
     d = val.definition
@@ -188,59 +208,59 @@ function built_term(graph, stored, g::Group, v, index, domain, memo)
     end
     if v in g.outputs
         index == placement(graph, g, v) || throw(OutsideGroup())
-        return definition_term(graph, stored, g, d, val, index, domain, memo)
+        return definition_term(graph, cx, g, d, val, index, domain, memo)
     end
-    stored[v] && return Load(v, index)
-    d isa Reduction && return fold_term(graph, stored, g, v, index, domain, memo)
+    isstored(cx, v) && return Load(v, index)
+    d isa Reduction && return fold_term(graph, cx, g, v, index, domain, memo)
     d isa Pointwise || return Load(v, index)
-    definition_term(graph, stored, g, d, val, index, domain, memo)
+    definition_term(graph, cx, g, d, val, index, domain, memo)
 end
 
-function definition_term(graph, stored, g, d::Pointwise, val, index, domain, memo = Dict{Any, Term}())
+function definition_term(graph, cx::Forming, g, d::Pointwise, val, index, domain, memo = Dict{Any, Term}())
     args = map(d.operands) do o
-        operand_term(graph, stored, g, o, index, domain, memo)
+        operand_term(graph, cx, g, o, index, domain, memo)
     end
     Apply(d.f, args, val.eltype)
 end
 
 # A fold recomputed where it is read: its operand over the domain extended by
 # its reduced axes.
-function fold_term(graph, stored, g, v, index, domain, memo = Dict{Any, Term}())
+function fold_term(graph, cx::Forming, g, v, index, domain, memo = Dict{Any, Term}())
     d = graph.values[v].definition::Reduction
     base = length(domain)
     extents = Tuple(d.iteration[k] for k in d.reduced)
     iteration = iteration_index(d, index, ntuple(j -> var(base + j), length(d.reduced)))
     extended = Domain((domain.extents..., extents...))
-    Recomputed(v, index, extents, operand_term(graph, stored, g, d.operand, iteration, extended, memo))
+    Recomputed(v, index, extents, operand_term(graph, cx, g, d.operand, iteration, extended, memo))
 end
 
 # The values `value_term` and `operand_term` would load for `v` or `o`, the
 # term's `stored_reads`, added to `reads`: found by the same rules from the
 # graph alone, each value visited once where the term repeats it at every
 # reader. Its formulas' gathers are the same at any index.
-function value_reads!(reads, seen, graph, stored, g::Group, v)
+function value_reads!(reads, seen, graph, cx::Forming, g::Group, v)
     v in seen && return reads
     push!(seen, v)
     d = graph.values[v].definition
     g.kind === :recurrence && v in g.outputs && return push!(reads, v)
     v in g.reductions && return reads
-    v in g.outputs && return foreach(o -> operand_reads!(reads, seen, graph, stored, g, o), operands(d))
-    stored[v] && return push!(reads, v)
-    d isa Reduction && return operand_reads!(reads, seen, graph, stored, g, d.operand)
+    v in g.outputs && return foreach(o -> operand_reads!(reads, seen, graph, cx, g, o), operands(d))
+    isstored(cx, v) && return push!(reads, v)
+    d isa Reduction && return operand_reads!(reads, seen, graph, cx, g, d.operand)
     d isa Pointwise || return push!(reads, v)
-    foreach(o -> operand_reads!(reads, seen, graph, stored, g, o), operands(d))
+    foreach(o -> operand_reads!(reads, seen, graph, cx, g, o), operands(d))
 end
 
-function operand_reads!(reads, seen, graph, stored, g, o)
+function operand_reads!(reads, seen, graph, cx::Forming, g, o)
     union!(reads, gathered_values(o))
-    o isa Read && value_reads!(reads, seen, graph, stored, g, o.value)
+    o isa Read && value_reads!(reads, seen, graph, cx, g, o.value)
     reads
 end
 
-operand_term(graph, stored, g, o::Read, index, domain, memo = Dict{Any, Term}()) =
-    value_term(graph, stored, g, o.value, map(e -> substitute(e, index, domain), o.index), domain, memo)
-operand_term(graph, stored, g, o::Literal, index, domain, memo = nothing) = Lit(o.value)
-operand_term(graph, stored, g, o::IndexOperand{T}, index, domain, memo = nothing) where {T} =
+operand_term(graph, cx::Forming, g, o::Read, index, domain, memo = Dict{Any, Term}()) =
+    value_term(graph, cx, g, o.value, map(e -> substitute(e, index, domain), o.index), domain, memo)
+operand_term(graph, cx::Forming, g, o::Literal, index, domain, memo = nothing) = Lit(o.value)
+operand_term(graph, cx::Forming, g, o::IndexOperand{T}, index, domain, memo = nothing) where {T} =
     Ix{T}(substitute(o.expr, index, domain))
 
 # An operand read from storage, as a term over its reader's domain: the
@@ -300,12 +320,15 @@ end
 DependsWalk(n::Int) = DependsWalk(falses(n), falses(n), falses(n), Set{Int}())
 
 """
-The kernels formed so far, the kernel that owns each value (zero for none
-yet), each value's ancestors, what each kernel reads, once asked, and what
-each member's term loads, once asked: a group tries many candidates against
-the same members. With them, the walk `depends` reuses.
+The kernels as they form: what is stored, the kernels formed so far, the
+kernel that owns each value (zero for none yet), each value's ancestors,
+what each kernel reads, once asked, and what each member's term loads, once
+asked: a group tries many candidates against the same members. With them,
+the walk `depends` reuses. Forming reads them through a context alone (see
+`Forming`).
 """
-struct Dependencies
+struct Kernels
+    stored::Vector{Bool}
     owner::Vector{Int}
     groups::Vector{Group}
     up::Vector{BitVector}
@@ -316,10 +339,148 @@ struct Dependencies
     walk::DependsWalk
 end
 
-Dependencies(owner, groups, up) =
-    Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}(), DependsWalk(length(owner)))
+Kernels(stored, up) = Kernels(stored, zeros(Int, length(stored)), Group[], up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}(),
+    DependsWalk(length(stored)))
 
-term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads, t)
+"""
+What a walk of what depends on a group found (see `depends`): no
+dependence; one on a value it was asked about, which no kernel can take
+away; or one found through what a kernel reads.
+"""
+@enum Walked apart_from direct through_kernels
+
+"""
+A walk of what depends on a group (see `depends`), as noted: what it was
+asked, whether the values `reads` depend on the members `group`; what it
+found; and its last root among the note's `roots`, the values it looked at
+the ancestors of.
+"""
+struct Walk
+    reads::Vector{Int}
+    group::Vector{Int}
+    found::Walked
+    stop::Int
+end
+
+"""
+What forming one kernel read, as a recording context notes it: the values
+whose storage it looked at (`stores`) and those it looked at whether a
+kernel owns (`owners`), each once, and its walks of what depends on the
+group (see `Walk`), with the values each looked at the ancestors of, in
+`roots`.
+"""
+struct Note
+    stores::Vector{Int}
+    owners::Vector{Int}
+    roots::Vector{Int}
+    walks::Vector{Walk}
+    # The values among `stores` and `owners`, to note each once.
+    stored_seen::BitVector
+    owned_seen::BitVector
+end
+
+Note(n::Int) = Note(Int[], Int[], Int[], Walk[], falses(n), falses(n))
+
+"""
+Where forming starts a kernel, in the order it forms them: each set fixed as
+a group (`:fixed`, at its place among them), each recurrence (`:recurrence`,
+at its place among the graph's), then each fold and each map no kernel holds
+yet, grown from it (`:fold` and `:map`, at the value).
+"""
+struct Seed
+    kind::Symbol
+    at::Int
+end
+
+Base.show(io::IO, s::Seed) = print(io, s.kind === :fixed ? "set fixed $(s.at)" : s.kind === :recurrence ? "recurrence $(s.at)" : "$(s.kind) %$(s.at)")
+
+"""
+A kernel as formed, from its seed (see `Seed`), before what no other kernel
+reads is left unstored; what it reads; and what its forming read (see
+`Note`), sorted.
+"""
+struct Formed
+    seed::Seed
+    group::Group
+    reads::Set{Int}
+    stores::Vector{Int}
+    owners::Vector{Int}
+    roots::Vector{Int}
+    walks::Vector{Walk}
+end
+
+"A context that reads the kernels as they form and notes nothing."
+struct Plain <: Forming
+    kernels::Kernels
+end
+
+"A context that reads the kernels as they form and notes what each kernel's forming read."
+struct Recording <: Forming
+    kernels::Kernels
+    note::Note
+end
+
+Recording(k::Kernels) = Recording(k, Note(length(k.stored)))
+
+"""
+A recurrence's step as its group forms its terms, through context `cx`: the
+values of the cycle the group does not keep are computed within the step,
+whether stored or not.
+"""
+struct Stepping <: Forming
+    cx::Forming
+    within::Set{Int}
+end
+
+isstored(cx::Plain, v) = cx.kernels.stored[v]
+isstored(cx::Recording, v) = (note!(cx.note.stores, cx.note.stored_seen, v); cx.kernels.stored[v])
+isstored(cx::Stepping, v) = !(v in cx.within) && isstored(cx.cx, v)
+
+owned(cx::Plain, v) = cx.kernels.owner[v] != 0
+owned(cx::Recording, v) = (note!(cx.note.owners, cx.note.owned_seen, v); cx.kernels.owner[v] != 0)
+
+note!(noted, seen, v) = (seen[v] || (seen[v] = true; push!(noted, v)); nothing)
+
+"""
+    noted(f, cx, graph, seed) -> (g, formed)
+
+The kernel `f()` forms through `cx` from `seed`, and what its forming read:
+a `Formed` where `cx` records, nothing where it does not.
+"""
+noted(f, cx::Plain, graph, seed) = (f(), nothing)
+
+function noted(f, cx::Recording, graph, seed)
+    n = cx.note
+    foreach(v -> n.stored_seen[v] = false, n.stores)
+    foreach(v -> n.owned_seen[v] = false, n.owners)
+    empty!(n.stores), empty!(n.owners), empty!(n.roots), empty!(n.walks)
+    g = f()
+    # The group the plan holds has its outputs trimmed; the one noted is kept as formed.
+    kept = Group(g.kind, g.domain, g.reductions, copy(g.outputs), g.terms, g.phase)
+    g, Formed(seed, kept, group_reads(graph, g), sort(n.stores), sort(n.owners), copy(n.roots), copy(n.walks))
+end
+
+"""
+    formed!(cx, g, reads = nothing)
+
+Kernel `g` formed: the next, owning its members, reading `reads` where given.
+"""
+function formed!(cx::Union{Plain, Recording}, g::Group, reads = nothing)
+    k = cx.kernels
+    push!(k.groups, g)
+    foreach(m -> k.owner[m] = length(k.groups), members(g))
+    reads === nothing || (k.reads[length(k.groups)] = reads)
+    nothing
+end
+
+# What a walk looked at, noted where `cx` records.
+walked_from!(cx::Plain, r) = nothing
+walked_from!(cx::Recording, r) = (push!(cx.note.roots, r); nothing)
+walk_found!(cx::Plain, reads, group, found) = nothing
+walk_found!(cx::Recording, reads, group, found) =
+    (push!(cx.note.walks, Walk(collect(Int, reads), collect(Int, group), found, length(cx.note.roots))); nothing)
+
+term_loads(cx::Union{Plain, Recording}, t::Term) = get!(() -> stored_reads(t), cx.kernels.loads, t)
 
 # Whether any of the values `reads` depends on a member of `group`: through
 # its ancestors, and through the kernels that own any of them, each of which
@@ -329,9 +490,10 @@ term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads
 # ancestors are among them, and their kernels were looked at.
 # The latest value pending is looked at first: values are numbered after
 # their operands, so its ancestors cover most of the others.
-function depends(graph, deps::Dependencies, reads, group)
+function depends(graph, cx::Union{Plain, Recording}, reads, group)
     tally!(:walked)
-    (; pending, covered, fresh, kernels) = deps.walk
+    k = cx.kernels
+    (; pending, covered, fresh, kernels) = k.walk
     fill!(pending, false)
     fill!(covered, false)
     empty!(kernels)
@@ -344,9 +506,13 @@ function depends(graph, deps::Dependencies, reads, group)
         pending[r] = false
         top = r
         covered[r] && continue
-        any(m -> m == r || deps.up[r][m], group) && return true
+        walked_from!(cx, r)
+        if any(m -> m == r || k.up[r][m], group)
+            walk_found!(cx, reads, group, r in reads ? direct : through_kernels)
+            return true
+        end
         # What `r` brings that is not covered yet, `r` among it.
-        up, f, c = deps.up[r].chunks, fresh.chunks, covered.chunks
+        up, f, c = k.up[r].chunks, fresh.chunks, covered.chunks
         for w in eachindex(c)
             f[w] = up[w] & ~c[w]
             c[w] |= f[w]
@@ -354,14 +520,15 @@ function depends(graph, deps::Dependencies, reads, group)
         fresh[r] = true
         covered[r] = true
         for u in findall(fresh)
-            k = deps.owner[u]
-            (k == 0 || k in kernels) && continue
-            push!(kernels, k)
-            for x in get!(() -> group_reads(graph, deps.groups[k]), deps.reads, k)
+            o = k.owner[u]
+            (o == 0 || o in kernels) && continue
+            push!(kernels, o)
+            for x in get!(() -> group_reads(graph, k.groups[o]), k.reads, o)
                 covered[x] || (pending[x] = true; top = max(top, x))
             end
         end
     end
+    walk_found!(cx, reads, group, apart_from)
     false
 end
 
@@ -370,41 +537,60 @@ end
 # loads may depend on it, and no member may already load it. With
 # `recomputing`, a fold joins a group whose folds would then cover different
 # positions only where it shares what they recompute (see `mixes`).
-function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomputing = true)
+function try_add!(graph, cx::Forming, g::Group, v; fold, recomputing = true)
     tally!(:tries)
     val = graph.values[v]
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
     index === nothing && return false
-    any(m -> v in term_loads(deps, g.terms[m]) || v in keyed_reads(graph, m), members(g)) && return false
+    any(m -> v in term_loads(cx, g.terms[m]) || v in keyed_reads(graph, m), members(g)) && return false
     any(in(members(g)), keyed_reads(graph, v)) && return false
     candidate = fold ? g : Group(g.kind, g.domain, g.reductions, push!(copy(g.outputs), v), g.terms, g.phase)
     # What the term would load, from the graph before the term is built: most
     # candidates fail here, and a term inlines every value recomputed in it.
     loads = Set{Int}()
-    fold ? operand_reads!(loads, Set{Int}(), graph, stored, candidate, val.definition.operand) :
-        value_reads!(loads, Set{Int}(), graph, stored, candidate, v)
+    fold ? operand_reads!(loads, Set{Int}(), graph, cx, candidate, val.definition.operand) :
+        value_reads!(loads, Set{Int}(), graph, cx, candidate, v)
     reads = append!(collect(loads), keyed_reads(graph, v))
     group = Set(members(g))
-    depends(graph, deps, reads, group) && return false
+    depends(graph, cx, reads, group) && return false
     t = try
-        fold ? operand_term(graph, stored, candidate, val.definition.operand, index, Domain(g.domain)) :
-        value_term(graph, stored, candidate, v, index)
+        fold ? operand_term(graph, cx, candidate, val.definition.operand, index, Domain(g.domain)) :
+        value_term(graph, cx, candidate, v, index)
     catch e
         e isa OutsideGroup || rethrow()
         return false
     end
     # A member reads the group's folds, or something the group reads.
-    shared = Set(r for m in members(g) for r in term_loads(deps, g.terms[m]))
+    shared = Set(r for m in members(g) for r in term_loads(cx, g.terms[m]))
     isempty(g.reductions) || !isempty(stats(t)) || any(in(shared), reads) || return false
     fold && !mixes(graph, g, v, t; recomputing) && return false
     # Nor may what the group reads from other kernels depend on `v`.
-    depends(graph, deps, filter(!in(group), shared), Set((v,))) && return false
+    depends(graph, cx, filter(!in(group), shared), Set((v,))) && return false
     push!(fold ? g.reductions : g.outputs, v)
     g.terms[v] = t
     g.phase[v] = maximum(s -> g.phase[s], stats(t); init = 0) + (fold ? 1 : 0)
     true
 end
+
+"""
+What the planner is given: the sets of values fixed as groups, in order, the
+folds recomputed where they are read, the maps stored apart, and the sums
+riding their recurrence's steps, in order (see `plan`). Inputs compose by
+`merge`, the sets and sums of each after those before: what each of the
+cover's proposals changes (see `change`).
+"""
+struct Inputs
+    fixed::Vector{Vector{Int}}
+    recompute::Set{Int}
+    store::Set{Int}
+    ride::Vector{Int}
+end
+
+Inputs(; fixed = Vector{Int}[], recompute = (), store = (), ride = ()) =
+    Inputs(collect(Vector{Int}, fixed), Set{Int}(recompute), Set{Int}(store), collect(Int, ride))
+
+Base.merge(a::Inputs, b::Inputs) = Inputs([a.fixed; b.fixed], a.recompute ∪ b.recompute, a.store ∪ b.store, [a.ride; b.ride])
 
 """
     plan(graph::IndexGraph; fixed = [], recompute = (), store = (), ride = ()) -> Plan
@@ -419,21 +605,80 @@ group, the values between computed at each step and not stored.
 """
 function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = (), ride = ())
     tally!(:plans)
-    s = storing(graph; recompute, store, ride)
-    graph, stored, live, results = s.graph, s.stored, s.live, s.results
+    i = Inputs(; fixed, recompute, store, ride)
+    s = storing(graph; i.recompute, i.store, i.ride)
+    first(passes(Grounds(graph, s), s, i, Plain))
+end
+
+"""
+What forming every plan of one graph shares, whatever the planner is given:
+the graph as given and with its results stored, what runs, the results, each
+value's ancestors, the values that read each, and through a gather too
+(`followers`, those that run only), the recurrences, and the seeds of the
+kernels other than the fixed sets', in the order they form (see `Seed`).
+"""
+struct Grounds
+    source::IndexGraph
+    graph::IndexGraph
+    live::BitVector
+    results::Set{Int}
+    up::Vector{BitVector}
+    users::Vector{Vector{Int}}
+    followers::Vector{Vector{Int}}
+    cycles::Vector{Tuple{Vector{Int}, Vector{Int}, Vector{Int}}}
+    seeds::Vector{Seed}
+end
+
+# The grounds of `source`, from what `storing` decided of it.
+function Grounds(source::IndexGraph, s)
+    graph, live = s.graph, s.live
+    values = graph.values
+    n = length(values)
+    # Who reads each value, directly or through a gather: a group grows toward
+    # them, so it never scans the values that cannot reach it.
+    followers = [Int[] for _ in values]
+    for id in 1:n, o in operands(values[id].definition), r in read_values(o)
+        live[id] && push!(followers[r], id)
+    end
+    foreach(unique!, followers)
+    cycles = recurrences(graph)
+    # Scans first, so that a fold along a scan's axes rides its sweep, wherever
+    # it is in the graph; folds by key last, so that they join a group over
+    # their iteration where one forms. Then the maps, constants and inputs
+    # aside, which no kernel computes.
+    folds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n);
+        filter(id -> values[id].definition isa Keyed, 1:n)]
+    maps = filter(id -> !(values[id].definition isa Union{Input, ConstantArray}), 1:n)
+    seeds = [[Seed(:recurrence, k) for k in eachindex(cycles)]; [Seed(:fold, id) for id in folds]; [Seed(:map, id) for id in maps]]
+    Grounds(source, graph, live, s.results, ancestors(graph), readers(graph), followers, cycles, seeds)
+end
+
+"""
+    passes(grounds, s, i::Inputs, context, before = nothing) -> (plan, first, second)
+
+The plan of `i`, given what `storing` decided of it (`s`), its kernels formed
+through a context of type `context` (see `Forming`), near the formations of
+`before` where given (see `replay`); and the formation of each grouping
+pass, nothing where the context does not record, the first where there was
+no second.
+"""
+function passes(grounds::Grounds, s, i::Inputs, context, before = nothing)
+    stored = copy(s.stored)
     # A pointwise value read only by one group over its domain, at the same
     # index, is recomputed by that group: grouped again without it.
-    p = group_values(graph, copy(stored), live, results, fixed, s.riders)
-    users = readers(graph)
-    n = length(graph.values)
-    shared = filter(id -> !any(s -> id in s, fixed) && recomputable(p, users, id, live, results, s.materialized), 1:n)
+    grouped = formation(grounds, context(Kernels(copy(stored), grounds.up)), i.fixed, s.riders, replay(before, 1, stored, i.fixed, s.riders))
+    p = kernels(grounds, grouped.kernels)
+    n = length(grounds.graph.values)
+    shared = filter(id -> !any(set -> id in set, i.fixed) && recomputable(p, grounds.users, id, grounds.live, grounds.results, s.materialized), 1:n)
+    regrouped = grouped
     if !isempty(shared)
         stored[shared] .= false
-        p = group_values(graph, stored, live, results, fixed, s.riders)
+        regrouped = formation(grounds, context(Kernels(stored, grounds.up)), i.fixed, s.riders, replay(before, 2, stored, i.fixed, s.riders))
+        p = kernels(grounds, regrouped.kernels)
     end
     # Within a preparation that verifies, every plan the cover tries.
     VERIFYING[] && verify(p)
-    p
+    p, grouped.formation, regrouped.formation
 end
 
 # What `plan` decides before it forms kernels: the graph with its results
@@ -641,16 +886,18 @@ end
 # Insert into the sorted `frontier` the stored values after `seed` that read
 # any of `from`, directly or through values a term computes in place: the
 # only values whose terms can reach a group grown from `from`. Those `skip`
-# names are passed over.
-function reach!(frontier, followers, stored, from, seed; skip = w -> false)
+# names are passed over, and what reads them: what depends on a value that
+# depends on the group's members does too.
+function reach!(frontier, followers, cx::Forming, from, seed; skip = w -> false)
     pending, seen = collect(from), Set{Int}()
     while !isempty(pending)
         for w in followers[pop!(pending)]
             w in seen && continue
             push!(seen, w)
-            if !stored[w]
+            skip(w) && continue
+            if !isstored(cx, w)
                 push!(pending, w)
-            elseif w > seed && !skip(w)
+            elseif w > seed
                 k = searchsortedfirst(frontier, w)
                 get(frontier, k, 0) == w || insert!(frontier, k, w)
             end
@@ -659,115 +906,186 @@ function reach!(frontier, followers, stored, from, seed; skip = w -> false)
     frontier
 end
 
-# What the planner needs to form kernels, before any is formed.
-Dependencies(graph::IndexGraph) = Dependencies(zeros(Int, length(graph.values)), Group[], ancestors(graph))
+"""
+How one grouping pass formed its kernels, kept where its context records: what
+was stored as it began, the sets fixed and the sums riding each recurrence's
+steps, by the recurrence's state; and each kernel as formed (see `Formed`),
+in order, whether taken as it was from a formation before (`taken`), and its
+place by its seed (`at`).
+"""
+struct Formation
+    stored::Vector{Bool}
+    fixed::Vector{Vector{Int}}
+    riders::Dict{Int, Vector{Int}}
+    formed::Vector{Formed}
+    taken::Vector{Bool}
+    at::Dict{Seed, Int}
+end
 
-# The kernels, given what is stored.
-function group_values(graph, stored, live, results, fixed, riders = Dict{Int, Vector{Int}}())
+Formation(cx::Plain, fixed, riders) = nothing
+Formation(cx::Recording, fixed, riders) = Formation(copy(cx.kernels.stored), fixed, riders, Formed[], Bool[], Dict{Seed, Int}())
+
+kept!(::Nothing, f, taken) = nothing
+function kept!(record::Formation, f::Formed, taken)
+    push!(record.formed, f)
+    push!(record.taken, taken)
+    record.at[f.seed] = length(record.formed)
+    nothing
+end
+
+# Forming with no formation before: none taken, nothing to note of what
+# changed (see `Replay`).
+replay(::Nothing, pass, stored, fixed, riders) = nothing
+taken(::Nothing, seed, cx) = nothing
+grew!(::Nothing, f) = nothing
+passed!(::Nothing, seed) = nothing
+
+"""
+    formation(grounds, cx, fixed, riders, near = nothing) -> (; kernels, formation)
+
+The kernels of one grouping pass, formed through context `cx` from each seed
+in turn (see `Seed`): a kernel of each set in `fixed`, of each recurrence,
+with the sums in `riders` riding its steps, then one grown from each fold and
+each map no kernel holds yet. Where `near` replays the formation of a plan
+before (see `Replay`), a kernel it formed from the same seed is taken as it
+was where nothing its forming read differs; the rest form here. With them,
+how they formed, where `cx` records.
+"""
+function formation(grounds::Grounds, cx::Forming, fixed, riders, near = nothing)
     tally!(:groupings)
-    values = graph.values
-    n = length(values)
-    deps = Dependencies(graph)
-    owner, groups, up = deps.owner, deps.groups, deps.up
-    for set in fixed
-        push!(groups, fixed_group(graph, stored, deps, set))
-        foreach(m -> owner[m] = length(groups), set)
+    record = Formation(cx, fixed, riders)
+    for seed in [[Seed(:fixed, k) for k in eachindex(fixed)]; grounds.seeds]
+        if !starts(grounds, cx, seed)
+            passed!(near, seed)
+            continue
+        end
+        f = taken(near, seed, cx)
+        if f === nothing
+            tally!(:formed)
+            g, f = noted(() -> grown(grounds, cx, seed, fixed, riders), cx, grounds.graph, seed)
+            formed!(cx, g, f === nothing ? nothing : f.reads)
+            f === nothing || grew!(near, f)
+            kept!(record, f, false)
+        else
+            tally!(:reused)
+            formed!(cx, Group(f.group.kind, f.group.domain, f.group.reductions, copy(f.group.outputs), f.group.terms, f.group.phase), f.reads)
+            kept!(record, f, true)
+        end
     end
-    for (cs, fs, cycle) in recurrences(graph)
-        live[first(cs)] || continue
-        g = recurrence_group(graph, stored, cs, fs, cycle, get(riders, first(cs), Int[]))
+    (; kernels = cx.kernels, formation = record)
+end
+
+# Whether a kernel forms from `seed`: from a fixed set always; from a
+# recurrence that runs; from a stored fold or map that runs and no kernel
+# holds yet.
+function starts(grounds::Grounds, cx::Forming, seed::Seed)
+    seed.kind === :fixed && return true
+    seed.kind === :recurrence && return grounds.live[first(grounds.cycles[seed.at][1])]
+    id = seed.at
+    grounds.live[id] && !owned(cx, id) && isstored(cx, id)
+end
+
+# The kernel formed from `seed` (see `formation`).
+function grown(grounds::Grounds, cx::Forming, seed::Seed, fixed, riders)
+    graph = grounds.graph
+    seed.kind === :fixed && return fixed_group(graph, cx, fixed[seed.at])
+    if seed.kind === :recurrence
+        cs, fs, cycle = grounds.cycles[seed.at]
+        g = recurrence_group(graph, cx, cs, fs, cycle, get(riders, first(cs), Int[]))
         # What a recurrence computes at each step is its group's alone: a set
         # fixed apart holding any of it would be a second kernel writing it.
-        any(m -> owner[m] != 0, members(g)) && throw(NotAGroup(filter(m -> owner[m] != 0, members(g))))
-        push!(groups, g)
-        foreach(m -> owner[m] = length(groups), members(g))
+        held = filter(m -> owned(cx, m), members(g))
+        isempty(held) || throw(NotAGroup(held))
+        return g
     end
-    # Who reads each value, directly or through a gather: a group grows toward
-    # them, so it never scans the values that cannot reach it.
-    followers = [Int[] for _ in values]
-    for id in 1:n, o in operands(values[id].definition), r in read_values(o)
-        live[id] && push!(followers[r], id)
-    end
-    foreach(unique!, followers)
-    # Scans first, so that a fold along a scan's axes rides its sweep, wherever
-    # it is in the graph; folds by key last, so that they join a group over
-    # their iteration where one forms.
-    seeds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n);
-        filter(id -> values[id].definition isa Keyed, 1:n)]
-    for id in seeds
-        live[id] && owner[id] == 0 && stored[id] || continue
-        d = values[id].definition
-        g = d isa Scan ? Group(:scan, values[id].dims) : Group(:reduction, d.iteration)
-        after = d isa Scan ? 0 : id
-        try_add!(graph, stored, deps, g, id; fold = true)
-        # A group reaches what reads its members, and what reads what they
-        # read. Of the latter, a value that depends on a member is passed
-        # over: the last value stored on a path to it from the group would be
-        # among its loads and depend on the group, so it joins only where
-        # every such path runs through what the group computes, and then it
-        # is reached from a member. The weights every step of a long program
-        # reads would otherwise bring every later step to every group.
-        apart(w) = any(m -> deps.up[w][m], members(g))
-        frontier = reach!(Int[], followers, stored, members(g), after)
-        reach!(frontier, followers, stored, [r for m in members(g) for r in term_loads(deps, g.terms[m])], after; skip = apart)
-        # A pass visits the frontier in order; what a new member reaches above
-        # the cursor is visited in this pass, the rest in the next.
-        changed = true
-        while changed
-            changed = false
-            k = 1
-            while k <= length(frontier)
-                other = frontier[k]
-                k += 1
-                live[other] && owner[other] == 0 && !(other in members(g)) || continue
-                od = values[other].definition
-                added = if g.kind === :reduction && od isa Reduction
-                    # A fold over other positions widens the domain, if it joins.
-                    domain = joint_domain(graph, g, other)
-                    h = domain === nothing ? nothing : domain == g.domain ? g : with_domain(g, domain)
-                    h !== nothing && try_add!(graph, stored, deps, h, other; fold = true) && (g = h; true)
-                else
-                    od isa Union{Reduction, Scan, Keyed} ? sweeps_with(graph, g, other) && try_add!(graph, stored, deps, g, other; fold = true) :
-                        od isa Pointwise && other > id && !awaits_sweep(graph, deps, g, other) && adds_to(values, g, other) && try_add!(graph, stored, deps, g, other; fold = false)
-                end
-                added || continue
-                changed = true
-                reach!(frontier, followers, stored, [other], after)
-                reach!(frontier, followers, stored, term_loads(deps, g.terms[other]), after; skip = apart)
-                k = searchsortedfirst(frontier, other) + 1
-            end
-        end
-        push!(groups, g)
-        foreach(m -> owner[m] = length(groups), members(g))
-    end
-    # Stored pointwise values left: a group from each, joined by the later
-    # ones over its domain that read it.
-    for id in 1:n
-        live[id] && owner[id] == 0 && stored[id] || continue
-        d = values[id].definition
-        d isa Union{Input, ConstantArray} && continue
-        d isa Pointwise || error("value %$id has no kernel")
-        g = Group(:pointwise, values[id].dims)
-        try_add!(graph, stored, deps, g, id; fold = false)
-        frontier = reach!(Int[], followers, stored, [id], id)
+    seed.kind === :fold ? grown_fold(grounds, cx, seed.at) : grown_map(grounds, cx, seed.at)
+end
+
+# The kernel grown from fold or scan `id`.
+function grown_fold(grounds::Grounds, cx::Forming, id)
+    graph, followers = grounds.graph, grounds.followers
+    values = graph.values
+    d = values[id].definition
+    g = d isa Scan ? Group(:scan, values[id].dims) : Group(:reduction, d.iteration)
+    after = d isa Scan ? 0 : id
+    try_add!(graph, cx, g, id; fold = true)
+    # A group reaches what reads its members, and what reads what they
+    # read. Of the latter, a value that depends on a member is passed
+    # over: the last value stored on a path to it from the group would be
+    # among its loads and depend on the group, so it joins only where
+    # every such path runs through what the group computes, and then it
+    # is reached from a member. The weights every step of a long program
+    # reads would otherwise bring every later step to every group.
+    apart(w) = any(m -> grounds.up[w][m], members(g))
+    frontier = reach!(Int[], followers, cx, members(g), after)
+    reach!(frontier, followers, cx, [r for m in members(g) for r in term_loads(cx, g.terms[m])], after; skip = apart)
+    # A pass visits the frontier in order; what a new member reaches above
+    # the cursor is visited in this pass, the rest in the next.
+    changed = true
+    while changed
+        changed = false
         k = 1
         while k <= length(frontier)
             other = frontier[k]
             k += 1
-            live[other] && owner[other] == 0 && values[other].definition isa Pointwise && values[other].dims == g.domain || continue
-            any(m -> up[other][m], members(g)) && adds_to(values, g, other) && try_add!(graph, stored, deps, g, other; fold = false) || continue
-            reach!(frontier, followers, stored, [other], id)
+            grounds.live[other] && !owned(cx, other) && !(other in members(g)) || continue
+            od = values[other].definition
+            added = if g.kind === :reduction && od isa Reduction
+                # A fold over other positions widens the domain, if it joins.
+                domain = joint_domain(graph, g, other)
+                h = domain === nothing ? nothing : domain == g.domain ? g : with_domain(g, domain)
+                h !== nothing && try_add!(graph, cx, h, other; fold = true) && (g = h; true)
+            else
+                od isa Union{Reduction, Scan, Keyed} ? sweeps_with(graph, g, other) && try_add!(graph, cx, g, other; fold = true) :
+                    od isa Pointwise && other > id && !awaits_sweep(grounds, cx, g, other) && adds_to(values, g, other) &&
+                        try_add!(graph, cx, g, other; fold = false)
+            end
+            added || continue
+            changed = true
+            reach!(frontier, followers, cx, [other], after)
+            reach!(frontier, followers, cx, term_loads(cx, g.terms[other]), after; skip = apart)
+            k = searchsortedfirst(frontier, other) + 1
         end
-        push!(groups, g)
-        foreach(m -> owner[m] = length(groups), members(g))
     end
+    g
+end
+
+# The kernel grown from stored map `id`, joined by the later ones over its
+# domain that read it.
+function grown_map(grounds::Grounds, cx::Forming, id)
+    graph = grounds.graph
+    values = graph.values
+    values[id].definition isa Pointwise || error("value %$id has no kernel")
+    g = Group(:pointwise, values[id].dims)
+    try_add!(graph, cx, g, id; fold = false)
+    frontier = reach!(Int[], grounds.followers, cx, [id], id)
+    k = 1
+    while k <= length(frontier)
+        other = frontier[k]
+        k += 1
+        grounds.live[other] && !owned(cx, other) && values[other].definition isa Pointwise && values[other].dims == g.domain || continue
+        any(m -> grounds.up[other][m], members(g)) && adds_to(values, g, other) && try_add!(graph, cx, g, other; fold = false) || continue
+        reach!(frontier, grounds.followers, cx, [other], id)
+    end
+    g
+end
+
+"""
+    kernels(grounds, k::Kernels) -> Plan
+
+The plan of the kernels a pass formed, in an order where each runs after
+what it reads, each value only its own kernel reads left unwritten.
+"""
+function kernels(grounds::Grounds, k::Kernels)
+    graph, stored, groups, owner = grounds.graph, k.stored, k.groups, k.owner
+    n = length(graph.values)
     # A value only its own kernel reads need not be written.
     external = falses(n)
     for o in graph.results, r in read_values(o)
         external[r] = true
     end
-    for (k, g) in enumerate(groups), r in group_reads(graph, g)
-        owner[r] != k && (external[r] = true)
+    for (j, g) in enumerate(groups), r in get!(() -> group_reads(graph, g), k.reads, j)
+        owner[r] != j && (external[r] = true)
     end
     # The folds a fold over other than the primary axes reads stay stored: a
     # realization that completes it in a launch of its own loads them.
@@ -867,8 +1185,8 @@ end
 # Whether map `v` waits for another sweep: it reads a scan of another
 # sweep that has no kernel yet. That scan's group reads this one's values
 # from storage, so a map that reads both can join it, and not this one.
-awaits_sweep(graph, deps, g::Group, v) = g.kind === :scan &&
-    any(s -> deps.owner[s] == 0 && graph.values[s].definition isa Scan && !(s in g.reductions), findall(deps.up[v]))
+awaits_sweep(grounds::Grounds, cx::Forming, g::Group, v) = g.kind === :scan &&
+    any(s -> grounds.graph.values[s].definition isa Scan && !(s in g.reductions) && !owned(cx, s), findall(grounds.up[v]))
 
 # Recurrences: their carried states, the value each is carried from, and the
 # cycle between, the values that read a state and that a value a state is
@@ -1114,7 +1432,7 @@ end
 # riding its steps are its folds, each over its own iteration: as a fold
 # along a scan's axes rides its sweep, each is complete only after the
 # steps, and nothing in the group reads it.
-function recurrence_group(graph, stored, cs, fs, cycle, riders = Int[])
+function recurrence_group(graph, cx::Forming, cs, fs, cycle, riders = Int[])
     values = graph.values
     c = first(cs)
     d = values[c].definition
@@ -1125,11 +1443,10 @@ function recurrence_group(graph, stored, cs, fs, cycle, riders = Int[])
     allunique([cs; fs]) || throw(ArgumentError("a recurrence's state carried from another state is not supported yet"))
     # The states, then the rest in the graph's order, which a step computes
     # them in: an LSTM's hidden state one step on reads its cell's.
-    members = [cs; sort!([[w for w in cycle if !(w in cs) && !(w in fs) && stored[w]]; fs])]
+    members = [cs; sort!([[w for w in cycle if !(w in cs) && !(w in fs) && isstored(cx, w)]; fs])]
     (; domain, places) = recurrence_places(graph, members)
     g = Group(:recurrence, domain)
-    inside = copy(stored)
-    foreach(w -> w in members || (inside[w] = false), cycle)
+    inside = Stepping(cx, Set(w for w in cycle if !(w in members)))
     append!(g.outputs, members)
     whole = Domain(domain)
     memo = Dict{Any, Term}()
@@ -1167,9 +1484,9 @@ Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%
 # a pointwise group over the first value's domain. A candidate spanning
 # several domains waits for groups that span them: a kernel is maps and folds
 # over one domain, each fold at its own positions within it.
-function fixed_group(graph, stored, deps, set)
+function fixed_group(graph, cx::Forming, set)
     values = graph.values
-    all(v -> deps.owner[v] == 0, set) || throw(NotAGroup(set))
+    all(v -> !owned(cx, v), set) || throw(NotAGroup(set))
     folds = filter(v -> values[v].definition isa Reduction, set)
     # Folds over other extents along axes they keep share the box that holds
     # them (see `joint_domain`).
@@ -1181,8 +1498,8 @@ function fixed_group(graph, stored, deps, set)
     g = isempty(folds) ? Group(:pointwise, domain) : Group(:reduction, domain)
     for v in set
         dv = values[v].definition
-        added = dv isa Reduction ? joint_domain(graph, g, v) == g.domain && try_add!(graph, stored, deps, g, v; fold = true, recomputing = false) :
-            dv isa Pointwise && stored[v] && try_add!(graph, stored, deps, g, v; fold = false)
+        added = dv isa Reduction ? joint_domain(graph, g, v) == g.domain && try_add!(graph, cx, g, v; fold = true, recomputing = false) :
+            dv isa Pointwise && isstored(cx, v) && try_add!(graph, cx, g, v; fold = false)
         added || throw(NotAGroup(set))
     end
     g
