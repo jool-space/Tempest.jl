@@ -496,24 +496,31 @@ end
 
 # Every sum relative to a frame becomes a relative fold. The frame stays as
 # it is when something else reads it: a fold over the same axes, in the same
-# phase as the folds that were relative to it.
+# phase as the folds that were relative to it. A pass finds every frame's
+# sums in the graph as it is, the first frame taking a sum two could, and
+# rebuilds the graph once. A sum made relative observes a sum, not a
+# statistic, and a mean of it is no frame: the pass passes over a frame that
+# is the mean of a sum it takes. Sums a frame reaches only through another
+# frame's rewrite are found in the next pass (see `rewrite`). Rebuilt after
+# each frame's sums, the graph was rebuilt as many times as a program has
+# softmaxes and norms.
 function relative_sums(graph::IndexGraph)
     users = readers(graph)
-    F = 1
-    while F <= length(graph.values)
+    taken = Dict{Int, Tuple{Int, Frame, Any}}()
+    for F in eachindex(graph.values)
         fr = frame(graph, F)
-        seen = fr === nothing ? nothing : through_observe(fr.law, fr.observe)
-        rs = seen === nothing ? Int[] : filter!(r -> admissible(graph, r, F, fr), mapped_sums(graph, users, F))
-        if !isempty(rs)
-            graph = first(rebuild(graph) do b, r
-                r in rs || return nothing
-                relative!(b, graph, r, F, fr, seen)
-            end)
-            users = readers(graph)
+        (fr === nothing || haskey(taken, fr.fold)) && continue
+        seen = through_observe(fr.law, fr.observe)
+        seen === nothing && continue
+        for r in mapped_sums(graph, users, F)
+            haskey(taken, r) || !admissible(graph, r, F, fr) || (taken[r] = (F, fr, seen))
         end
-        F += 1
     end
-    graph
+    isempty(taken) && return graph
+    first(rebuild(graph) do b, r
+        haskey(taken, r) || return nothing
+        relative!(b, graph, r, taken[r]...)
+    end)
 end
 
 # The sums that read value `F` through maps alone, in order: the only sums a
