@@ -46,7 +46,7 @@
         (Symbol(:b, k) => data(3; scale = 0.1) for k in "ifgo")...)
     lstm_args = (weights, data(2, 5; scale = 0.5), data(3; scale = 0.1))
     lstm_grad = (p, xs, h0) -> T.withgradient((q, x) -> sum(h -> sum(abs2, h), lstm(q, x, h0)), p, xs)
-    states(p) = [length(C.recurrence_states(p.graph, g.outputs)) for g in p.groups if g.kind === :recurrence]
+    states(p) = [length(C.recurrence_states(p.graph, g.outputs)) for g in p.groups if g.kind isa C.RecurrenceKind]
     for (f, loops) in ((lstm, [2]), (lstm_grad, [2, 2]))
         p = trace(f, lstm_args...)
         eager = C.leaves(f(lstm_args...))
@@ -94,7 +94,7 @@
     sums = C.riding_sums(planned)
     @test !isempty(sums)
     ridden = C.plan(planned.graph; ride = sums)
-    @test any(g -> g.kind === :recurrence && sort(g.reductions) == sort(sums), ridden.groups)
+    @test any(g -> g.kind isa C.RecurrenceKind && sort(g.reductions) == sort(sums), ridden.groups)
     @test agree(C.execute(ridden, args...), C.leaves(interpret(trace(grad(cell), args...), args...)); rtol = 1.0e-12)
     # The product each step returns is of its cycle: the group stores it at
     # each step, along the state's columns and steps, its rows an axis of
@@ -102,14 +102,14 @@
     products(xs...) = last(chunks(xs...))
     for (f, stores) in ((chunks, true), (products, false))
         p = C.plan(C.lower(trace(f, inputs(5)...)))
-        g = only(g for g in p.groups if g.kind === :recurrence)
+        g = only(g for g in p.groups if g.kind isa C.RecurrenceKind)
         @test C.recurrence_axes(p.graph, g) == (axis = 3, parallel = [2], inner = [1, 4])
         @test g.domain == (3, 2, 5, 4) && length(g.outputs) == 3 && p.stored[last(g.outputs)] == stores
     end
     # The reversed loop's group keeps the forward's axes: a map of what it
     # stores, read outside it, it leaves to that reader to recompute.
     p = C.plan(C.lower(trace(grad(chunks), inputs(5)...)))
-    @test [g.domain for g in p.groups if g.kind === :recurrence] == [(3, 2, 5, 4), (3, 2, 5, 4)]
+    @test [g.domain for g in p.groups if g.kind isa C.RecurrenceKind] == [(3, 2, 5, 4), (3, 2, 5, 4)]
     kernels(f, n) = length(prepare(trace(f, inputs(n)...), inputs(n)...).kernels)
     @test kernels(chunks, 5) == kernels(chunks, 9) && kernels(grad(chunks), 5) == kernels(grad(chunks), 9)
     if CUDA_FUNCTIONAL

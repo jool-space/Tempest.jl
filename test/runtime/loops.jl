@@ -87,18 +87,18 @@
     planned = prepare(p, params, u0, y; build = false).plan
     sums = C.riding_sums(planned)
     @test length(sums) == 4
-    backward(q) = only(g for g in q.groups if g.kind === :recurrence && !isempty(g.reductions))
+    backward(q) = only(g for g in q.groups if g.kind isa C.RecurrenceKind && !isempty(g.reductions))
     ridden = C.plan(planned.graph; ride = sums)
     @test sort(backward(ridden).reductions) == sort(sums)
     # What the backward's steps compute stays its group's: no join takes a
     # value of it into a kernel that reads it, which would write it again,
     # and a set fixed apart that holds one forms no plan.
-    recurrent(v) = planned.owner[v] > 0 && planned.groups[planned.owner[v]].kind === :recurrence
+    recurrent(v) = planned.owner[v] > 0 && planned.groups[planned.owner[v]].kind isa C.RecurrenceKind
     @test !any(q -> recurrent(q.value), C.joins(planned))
-    reader = findfirst(g -> g.kind === :reduction && any(recurrent, C.group_reads(planned.graph, g)), planned.groups)
+    reader = findfirst(g -> g.kind isa C.ReductionKind && any(recurrent, C.group_reads(planned.graph, g)), planned.groups)
     member = first(filter(recurrent, collect(C.group_reads(planned.graph, planned.groups[reader]))))
     @test_throws C.NotAGroup C.plan(planned.graph; fixed = [[C.members(planned.groups[reader]); member]])
-    @test count(m -> ridden.stored[m], backward(ridden).outputs) < maximum(g -> g.kind === :recurrence ? length(g.outputs) : 0, planned.groups)
+    @test count(m -> ridden.stored[m], backward(ridden).outputs) < maximum(g -> g.kind isa C.RecurrenceKind ? length(g.outputs) : 0, planned.groups)
     ex = prepare(p, params, u0, y; ride = sums)
     @test sort(only(k.sums for k in ex.kernels if k isa C.SteppedKernels && !isempty(k.sums))) == sort(sums)
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(eager); rtol = 1.0e-5)
@@ -169,7 +169,7 @@ end
     evolve(u, q) = (inside = interior(u); last(accumulate((v, s) -> diffuse(v, inside) .+ s, eachslice(q; dims = 3); init = u)))
     heat(u, q) = T.withgradient(v -> sum(abs2, evolve(v, q)), u)
     args = (data(8, 8), data(8, 8, 5; scale = 0.01))
-    stepped(ex) = [k isa C.SteppedKernels for (k, g) in zip(ex.kernels, ex.plan.groups) if g.kind === :recurrence]
+    stepped(ex) = [k isa C.SteppedKernels for (k, g) in zip(ex.kernels, ex.plan.groups) if g.kind isa C.RecurrenceKind]
     ex = prepare(trace(heat, args...), args...)
     @test stepped(ex) == [true, true]
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(heat(args...)); rtol = 1.0e-10)

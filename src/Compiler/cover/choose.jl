@@ -207,7 +207,7 @@ end
 Base.:(==)(a::GroupIdentity, b::GroupIdentity) = all(f -> getfield(a, f) == getfield(b, f), fieldnames(GroupIdentity))
 Base.hash(i::GroupIdentity, h::UInt) = foldl((h, f) -> hash(getfield(i, f), h), fieldnames(GroupIdentity); init = h)
 
-group_identity(p::Plan, g::Group) = GroupIdentity(g.kind, g.domain, copy(g.reductions), copy(g.outputs),
+group_identity(p::Plan, g::Group) = GroupIdentity(kind_name(g.kind), g.domain, copy(g.reductions), copy(g.outputs),
     Any[get(g.terms, m, nothing) for m in members(g)], Bool[p.stored[m] for m in members(g)])
 
 # A fold in a group's key: its fold and axes, and a scan's direction.
@@ -247,7 +247,7 @@ end
 # record name and the group's canonical form.
 function choice_key(d::Decider, p::Plan, g::Group, implementation, claim)
     # A recurrence on the floor runs a step at a time where it can.
-    floor = g.kind === :recurrence && stepped_plan(d, p, g) !== nothing ? "stepped" : "floor"
+    floor = g.kind isa RecurrenceKind && stepped_plan(d, p, g) !== nothing ? "stepped" : "floor"
     name = implementation === nothing ? floor : Base.invokelatest(record_name, implementation, claim)
     replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
 end
@@ -265,7 +265,7 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     price(w) = (regime, @nospecialize(f)) -> price!(d, regime, product_class(d.target, w.factor), f)
     # A recurrence on the floor runs a step at a time where it can (see
     # `build_group`), at its step's price.
-    stepped = implementation === nothing && g.kind === :recurrence ? stepped_seconds(d, p, g) : nothing
+    stepped = implementation === nothing && g.kind isa RecurrenceKind ? stepped_seconds(d, p, g) : nothing
     seconds_of = stepped === nothing ? sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0) : stepped
     Choice(implementation, claim, seconds_of, key,
         any(l -> l !== nothing && l.borrowed, lines), order,
@@ -290,10 +290,10 @@ function options(d::Decider, p::Plan, g::Group)
     # while it precompiled, the cover's code that package cached would be
     # void in every session where another package loaded too.
     # A recurrence with sums riding its steps runs them only a step at a time.
-    riders = g.kind === :recurrence && !isempty(g.reductions)
+    riders = g.kind isa RecurrenceKind && !isempty(g.reductions)
     os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) if !riders for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
     filter!(o -> !haskey(d.failed, o.key), os)
-    (isempty(os) || d.steps > 1 && g.kind === :pointwise) && push!(os, choice(d, p, g, view, nothing, nothing))
+    (isempty(os) || d.steps > 1 && g.kind isa PointwiseKind) && push!(os, choice(d, p, g, view, nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
 
@@ -615,7 +615,7 @@ build_choice(target, p::Plan, g::Group, o::Choice, buffers, r::Resources) =
 # recurrence on the floor is measured as it runs, a step at a time where it can.
 build_choice!(d::Decider, p::Plan, g::Group, o::Choice) = get!(d.built, o.key) do
     buffers = buffers!(d, p, g)
-    stepped = o.implementation === nothing && g.kind === :recurrence ? build_stepped(d, p, g, buffers, d.resources) : nothing
+    stepped = o.implementation === nothing && g.kind isa RecurrenceKind ? build_stepped(d, p, g, buffers, d.resources) : nothing
     stepped === nothing ? build_choice(d.target, p, g, o, buffers, d.resources) : stepped
 end
 
@@ -629,7 +629,7 @@ plans the program again without it (see `prepare`).
 function build_group(d::Decider, p::Plan, g::Group, x, buffers, r::Resources)
     # A recurrence no claim takes runs a step at a time where its step is a
     # program of its own, rather than on the floor (see `build_stepped`).
-    if g.kind === :recurrence && (x === nothing || x.choice.implementation === nothing)
+    if g.kind isa RecurrenceKind && (x === nothing || x.choice.implementation === nothing)
         built = build_stepped(d, p, g, buffers, r)
         built === nothing || return (built..., x)
         isempty(g.reductions) || error("a recurrence with sums riding its steps runs only a step at a time")

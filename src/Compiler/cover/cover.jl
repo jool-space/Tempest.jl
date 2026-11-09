@@ -52,8 +52,8 @@ function Around(p::Plan, sets)
         g = p.groups[j]
         i = findfirst(s -> p.owner[first(s)] == j, sets)
         i === nothing || return (:fixed, i)
-        g.kind === :reduction ? (:fold, first(g.reductions)) : g.kind === :pointwise ? (:pointwise, minimum(owned[j])) :
-            g.kind === :recurrence ? (:recurrence, first(g.outputs)) : (:scan, first(g.reductions))
+        g.kind isa ReductionKind ? (:fold, first(g.reductions)) : g.kind isa PointwiseKind ? (:pointwise, minimum(owned[j])) :
+            g.kind isa RecurrenceKind ? (:recurrence, first(g.outputs)) : (:scan, first(g.reductions))
     end
     reading = [Int[] for _ in p.graph.values]
     for (j, g) in enumerate(p.groups), r in group_reads(p.graph, g)
@@ -181,10 +181,10 @@ function joins(p::Plan)
     a = Around(p, Vector{Int}[])
     found = Join[]
     for (k, g) in enumerate(p.groups)
-        g.kind in (:reduction, :pointwise) || continue
+        g.kind isa Union{ReductionKind, PointwiseKind} || continue
         for v in sort!(collect(group_reads(p.graph, g)))
             j = p.owner[v]
-            j == 0 || j == k || p.groups[j].kind === :recurrence || push!(found, Join(v, sort!([a.owned[k]; v])))
+            j == 0 || j == k || p.groups[j].kind isa RecurrenceKind || push!(found, Join(v, sort!([a.owned[k]; v])))
         end
     end
     found
@@ -198,7 +198,7 @@ function shifted_maps(p::Plan)
     a = Around(p, Vector{Int}[])
     found = RecomputeMaps[]
     for (k, g) in enumerate(p.groups)
-        g.kind === :pointwise || continue
+        g.kind isa PointwiseKind || continue
         stored = [m for m in a.owned[k] if p.stored[m]]
         all(m -> p.graph.values[m].definition isa Pointwise, stored) || continue
         readers = unique(j for m in stored for j in a.reading[m] if j != k)

@@ -18,7 +18,7 @@ include("../fixtures/programs.jl")
     for (f, args) in ((fused, (x,)), (x -> cumsum(cumprod(x; dims = 2); dims = 2) .+ x, (x,)),
             (recurrence, (0.9 .+ 0.1 .* data(30; scale = 0.3), data(30; scale = 0.7))))
         p = planned(f, args...)
-        @test C.structure(p).kernels == 1 && only(p.groups).kind === :scan
+        @test C.structure(p).kernels == 1 && only(p.groups).kind isa C.ScanKind
         @test length(C.structure(p).stored) == 1
         @test agree(C.execute(p, args...), [f(args...)])
         args = map(single, args)

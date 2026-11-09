@@ -120,7 +120,7 @@ end
     # The alternative, as a proposal would fix it: the map and the fold in one group.
     alternative = C.plan(graph; fixed = [[y, s]])
     @test C.structure(alternative).kernels == 2
-    @test first(alternative.groups).kind === :reduction
+    @test first(alternative.groups).kind isa C.ReductionKind
     @test agree(C.execute(alternative, x, w), C.leaves(map_fold_product(x, w)))
     # At this size the fold's 32 items leave the fused kernel little parallelism.
     @test estimated(p, T.CPUTarget()) <= estimated(alternative, T.CPUTarget())

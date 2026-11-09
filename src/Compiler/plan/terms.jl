@@ -32,9 +32,9 @@ function built_term(graph, cx::Forming, g::Group, v, index, domain, memo)
     val = graph.values[v]
     d = val.definition
     # A recurrence's group reads what it computes wherever this step stored it.
-    g.kind === :recurrence && v in g.outputs && return Load(v, index)
+    g.kind isa RecurrenceKind && v in g.outputs && return Load(v, index)
     if v in g.reductions
-        g.kind === :scan && d isa Reduction && throw(OutsideGroup())
+        g.kind isa ScanKind && d isa Reduction && throw(OutsideGroup())
         # A fold over fewer positions than the domain has no value elsewhere.
         restricted(graph, g, v) && throw(OutsideGroup())
         primary(graph, g, v) && kept_at(graph, g, v, index) || throw(OutsideGroup())
@@ -76,7 +76,7 @@ function value_reads!(reads, seen, graph, cx::Forming, g::Group, v)
     v in seen && return reads
     push!(seen, v)
     d = graph.values[v].definition
-    g.kind === :recurrence && v in g.outputs && return push!(reads, v)
+    g.kind isa RecurrenceKind && v in g.outputs && return push!(reads, v)
     v in g.reductions && return reads
     v in g.outputs && return foreach(o -> operand_reads!(reads, seen, graph, cx, g, o), operands(d))
     isstored(cx, v) && return push!(reads, v)

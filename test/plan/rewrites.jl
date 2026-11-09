@@ -243,7 +243,7 @@ end
         by_sums(x) = (m = sum(x; dims = 1) ./ size(x, 1); sum(sum(abs2, x .- m; dims = 1) ./ size(x, 1)))
         @test isapprox(last(T.gradient(loss, x)), last(T.gradient(by_sums, x)); rtol = 1.0e-12)
         p = C.plan(C.rewrite(C.lower(differentiate(trace(loss, x)))))
-        @test C.structure(p).kernels == 3 && count(g -> g.kind === :scan, p.groups) == 2
+        @test C.structure(p).kernels == 3 && count(g -> g.kind isa C.ScanKind, p.groups) == 2
         @test C.structure(C.plan(C.rewrite(C.lower(differentiate(trace(by_sums, x)))))).kernels == 2
     end
 end

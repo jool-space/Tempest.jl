@@ -218,7 +218,7 @@ function reached(d::Decider, key, p::Plan, considered, ds)
     steps = Pair{String, Reached}[]
     for g in p.groups
         key === nothing && break
-        g.kind === :recurrence || continue
+        g.kind isa RecurrenceKind || continue
         sp = get(d.stepped, group_identity(p, g), nothing)
         sp === nothing || any(s -> first(s) == sp.reached.key, steps) || push!(steps, sp.reached.key => sp.reached)
     end
@@ -292,7 +292,7 @@ function replay(d::Decider, r::Reached)
     # side by side.
     try
         Base.ScopedValues.with(REPLAYING => r) do
-            foreach(g -> g.kind === :recurrence && stepped_plan(d, p, g), p.groups)
+            foreach(g -> g.kind isa RecurrenceKind && stepped_plan(d, p, g), p.groups)
         end
     catch err
         err isa NotReplayed || rethrow()

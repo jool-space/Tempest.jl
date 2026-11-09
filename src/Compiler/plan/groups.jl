@@ -30,8 +30,31 @@
 # with dK and dQ, over 96 (see `joint_domain`): it is computed over its own
 # positions, and nothing in the group reads it.
 
+"A reduction's group: folds over one domain, and the maps that read them or that they read."
+struct ReductionKind end
+
+"A scan's group: scans along the same axes in one direction, the maps over its domain, and the folds riding its sweep."
+struct ScanKind end
+
+"A group of maps over one domain."
+struct PointwiseKind end
+
+"A recurrence's group: the values of its cycle, computed a step at a time, and the sums riding its steps."
+struct RecurrenceKind end
+
+"The kind of a group: what its kernel does over its domain."
+const GroupKind = Union{ReductionKind, ScanKind, PointwiseKind, RecurrenceKind}
+
+"A kind's name, as a group's view has it and as it is written out."
+kind_name(::ReductionKind) = :reduction
+kind_name(::ScanKind) = :scan
+kind_name(::PointwiseKind) = :pointwise
+kind_name(::RecurrenceKind) = :recurrence
+
+Base.show(io::IO, k::GroupKind) = print(io, kind_name(k))
+
 struct Group
-    kind::Symbol # :reduction, :scan or :pointwise
+    kind::GroupKind
     domain::Tuple{Vararg{Int}}
     reductions::Vector{Int}
     outputs::Vector{Int}
@@ -95,11 +118,11 @@ end
 # keeps each element at its key. A fold over fewer positions than the domain
 # (see `restricted`) keeps its own.
 function placement(graph, g::Group, v)
-    g.kind === :recurrence && return v in g.outputs ? recurrence_places(graph, g.outputs).places[v] : nothing
+    g.kind isa RecurrenceKind && return v in g.outputs ? recurrence_places(graph, g.outputs).places[v] : nothing
     val = graph.values[v]
     d = val.definition
     d isa Keyed && return v in g.reductions ? d.key : nothing
-    g.kind === :scan && !(d isa Reduction) && return val.dims == g.domain ? identity_index(g.domain) : nothing
+    g.kind isa ScanKind && !(d isa Reduction) && return val.dims == g.domain ? identity_index(g.domain) : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
     extents = v in g.reductions && d isa Reduction ? d.iteration : g.domain
@@ -113,7 +136,7 @@ group's domain: its iteration lies within the domain, shorter along axes it
 keeps (see `joint_domain`).
 """
 restricted(graph, g::Group, r) =
-    g.kind === :reduction && r in g.reductions && (d = graph.values[r].definition) isa Reduction && d.iteration != g.domain
+    g.kind isa ReductionKind && r in g.reductions && (d = graph.values[r].definition) isa Reduction && d.iteration != g.domain
 
 # A slice of a fold of the group: the fold read at a variable of the slice
 # along some of its axes and at constants along the others, kept where the

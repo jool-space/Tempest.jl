@@ -210,7 +210,7 @@ function grown_fold(grounds::Grounds, cx::Forming, id)
     graph, followers = grounds.graph, grounds.followers
     values = graph.values
     d = values[id].definition
-    g = d isa Scan ? Group(:scan, values[id].dims) : Group(:reduction, d.iteration)
+    g = d isa Scan ? Group(ScanKind(), values[id].dims) : Group(ReductionKind(), d.iteration)
     after = d isa Scan ? 0 : id
     try_add!(graph, cx, g, id; fold = true)
     # A group reaches what reads its members, and what reads what they
@@ -234,7 +234,7 @@ function grown_fold(grounds::Grounds, cx::Forming, id)
             k += 1
             grounds.live[other] && !owned(cx, other) && !(other in members(g)) || continue
             od = values[other].definition
-            added = if g.kind === :reduction && od isa Reduction
+            added = if g.kind isa ReductionKind && od isa Reduction
                 # A fold over other positions widens the domain, if it joins.
                 domain = joint_domain(graph, g, other)
                 h = domain === nothing ? nothing : domain == g.domain ? g : with_domain(g, domain)
@@ -260,7 +260,7 @@ function grown_map(grounds::Grounds, cx::Forming, id)
     graph = grounds.graph
     values = graph.values
     values[id].definition isa Pointwise || error("value %$id has no kernel")
-    g = Group(:pointwise, values[id].dims)
+    g = Group(PointwiseKind(), values[id].dims)
     try_add!(graph, cx, g, id; fold = false)
     frontier = reach!(Int[], grounds.followers, cx, [id], id)
     k = 1
@@ -345,7 +345,7 @@ over its domain, the scan in the group's direction.
 """
 function sweeps_with(graph, g::Group, v)
     d = graph.values[v].definition
-    g.kind === :reduction && return d isa Union{Reduction, Keyed} && d.iteration == g.domain
+    g.kind isa ReductionKind && return d isa Union{Reduction, Keyed} && d.iteration == g.domain
     d isa Keyed && return false
     e = graph.values[first(g.reductions)].definition
     d isa Reduction && return d.iteration == g.domain && d.reduced == e.axes
@@ -363,7 +363,7 @@ recomputing the scores: one kernel recomputes them once.
 """
 function joint_domain(graph, g::Group, v)
     d = graph.values[v].definition
-    g.kind === :reduction && d isa Union{Reduction, Keyed} || return nothing
+    g.kind isa ReductionKind && d isa Union{Reduction, Keyed} || return nothing
     d.iteration == g.domain && return g.domain
     d isa Reduction && length(d.iteration) == length(g.domain) && all(k -> d.iteration[k] == g.domain[k], d.reduced) ||
         return nothing
@@ -418,7 +418,7 @@ end
 # Whether map `v` waits for another sweep: it reads a scan of another
 # sweep that has no kernel yet. That scan's group reads this one's values
 # from storage, so a map that reads both can join it, and not this one.
-awaits_sweep(grounds::Grounds, cx::Forming, g::Group, v) = g.kind === :scan &&
+awaits_sweep(grounds::Grounds, cx::Forming, g::Group, v) = g.kind isa ScanKind &&
     any(s -> grounds.graph.values[s].definition isa Scan && !(s in g.reductions) && !owned(cx, s), findall(grounds.up[v]))
 
 # Whether group `g` may take value `v`: anything but a step of an
@@ -450,7 +450,7 @@ function fixed_group(graph, cx::Forming, set)
         extents = values[v].definition.iteration
         length(extents) == length(domain) && (domain = map(max, domain, extents))
     end
-    g = isempty(folds) ? Group(:pointwise, domain) : Group(:reduction, domain)
+    g = isempty(folds) ? Group(PointwiseKind(), domain) : Group(ReductionKind(), domain)
     for v in set
         dv = values[v].definition
         added = dv isa Reduction ? joint_domain(graph, g, v) == g.domain && try_add!(graph, cx, g, v; fold = true, recomputing = false) :
@@ -483,7 +483,7 @@ function kernels(grounds::Grounds, k::Kernels)
         primary(graph, g, r) || (external[s] = true)
     end
     for g in groups
-        g.kind in (:reduction, :scan, :pointwise) || continue
+        g.kind isa Union{ReductionKind, ScanKind, PointwiseKind} || continue
         for m in members(g)
             external[m] && continue
             stored[m] = false

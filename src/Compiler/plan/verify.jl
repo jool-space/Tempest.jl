@@ -121,7 +121,7 @@ function verify_recurrences(p::Plan)
     values = graph.values
     live = nothing
     for (k, g) in enumerate(p.groups)
-        g.kind === :recurrence || continue
+        g.kind isa RecurrenceKind || continue
         cs = recurrence_states(graph, g.outputs)
         isempty(cs) && invalid(3, kernel_name(p, k), " carries no state")
         g.outputs[1:length(cs)] == cs || invalid(3, "the states of ", kernel_name(p, k), " are not its first members")
@@ -174,7 +174,7 @@ function verify_terms(p::Plan)
     graph = p.graph
     for (k, g) in enumerate(p.groups)
         own = Set(members(g))
-        places = g.kind === :recurrence ? recurrence_places(graph, g.outputs).places : nothing
+        places = g.kind isa RecurrenceKind ? recurrence_places(graph, g.outputs).places : nothing
         for m in members(g)
             haskey(g.terms, m) || invalid(4, value_name(p, m), " has no term in ", kernel_name(p, k))
             t = g.terms[m]
@@ -183,18 +183,18 @@ function verify_terms(p::Plan)
                     length(x.index) == length(graph.values[x.value].dims) ||
                         invalid(4, "the term of ", value_name(p, m), " in ", kernel_name(p, k), " loads ", value_name(p, x.value), " at ", length(x.index), " indices")
                     # A recurrence's step reads what it computes where the last step stored it.
-                    x.value in own && g.kind !== :recurrence &&
+                    x.value in own && !(g.kind isa RecurrenceKind) &&
                         invalid(4, "the term of ", value_name(p, m), " in ", kernel_name(p, k), " loads ", value_name(p, x.value), ", which the kernel computes")
                 elseif x isa Stat
                     stat_read(p, g, k, m, x.value)
                 elseif x isa Recomputed
                     # A recurrence's fold is its own term, recomputed at each step.
-                    x.value in own && !(g.kind === :recurrence && x === t && x.value == m) &&
+                    x.value in own && !(g.kind isa RecurrenceKind && x === t && x.value == m) &&
                         invalid(4, "the term of ", value_name(p, m), " in ", kernel_name(p, k), " recomputes ", value_name(p, x.value), ", which the kernel computes")
                 end
             end
             # A sum riding a recurrence's steps lies over its own iteration.
-            g.kind === :recurrence && m in g.reductions && continue
+            g.kind isa RecurrenceKind && m in g.reductions && continue
             at = places === nothing ? placement(graph, g, m) : places[m]
             at === nothing && invalid(4, value_name(p, m), " has no place in ", kernel_name(p, k))
             within(graph, g, m, at) || invalid(4, value_name(p, m), " is placed at ", at, ", outside the domain of ", kernel_name(p, k))
@@ -288,7 +288,7 @@ function verify_storage(p::Plan, s::Storage, in_place, reads)
     for (v, b) in s.reused
         k = p.owner[v]
         g = p.groups[k]
-        reusable = g.kind in (:reduction, :pointwise) && in_place(k) && final[b] == k && p.owner[b] != k && !(b in results) &&
+        reusable = g.kind isa Union{ReductionKind, PointwiseKind} && in_place(k) && final[b] == k && p.owner[b] != k && !(b in results) &&
             value_bytes(values[v]) == value_bytes(values[b]) && values[v].eltype == values[b].eltype && writes_over(graph, g, v, b)
         reusable && s.slots[v] == s.slots[b] > 0 ||
             invalid(2, value_name(p, v), " takes the slot of ", value_name(p, b), ", which ", kernel_name(p, k), " does not read last where it writes")

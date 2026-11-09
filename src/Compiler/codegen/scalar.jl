@@ -180,14 +180,14 @@ function fold_steps!(statements, graph, g::Group, rs, terms, states, c; options.
 end
 
 function scalar_kernel(graph, stored, g::Group, slots)
-    g.kind === :scan && return scan_kernel(graph, stored, g, slots)
-    g.kind === :recurrence && return recurrence_kernel(graph, stored, g, slots)
+    g.kind isa ScanKind && return scan_kernel(graph, stored, g, slots)
+    g.kind isa RecurrenceKind && return recurrence_kernel(graph, stored, g, slots)
     D = g.domain
     vars = index_vars(length(D))
     c = EmitContext(graph, slots, vars, Domain(D))
     body = Expr(:block)
     s = body.args
-    if g.kind === :pointwise
+    if g.kind isa PointwiseKind
         delinearize_expr(s, :lin, 1:length(D), D, vars)
         names = emit_terms!(s, [g.terms[m] for m in g.outputs], c)
         for m in g.outputs
@@ -548,7 +548,7 @@ when `split(items, positions, adjacent)` asks for it: nothing when it has
 none, or a fold must combine in sequence.
 """
 function group_split(graph, g::Group, split)
-    g.kind === :reduction || return nothing
+    g.kind isa ReductionKind || return nothing
     folds = [r for r in g.reductions if primary(graph, g, r)]
     !isempty(folds) && all(r -> interleaves(graph.values[r].definition.fold), folds) || return nothing
     split_fold(split, g.domain, primary_axes(graph, g))

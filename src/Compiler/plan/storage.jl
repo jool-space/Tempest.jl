@@ -141,7 +141,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         k = p.owner[v]
         g = p.groups[k]
         # A scan's or a recurrence's kernel writes a step before it reads the next.
-        g.kind in (:reduction, :pointwise) && in_place(order[k]) || return nothing
+        g.kind isa Union{ReductionKind, PointwiseKind} && in_place(order[k]) || return nothing
         for b in reading[k]
             slots[b] > 0 && busy[slots[b]] == k && !((slots[b], k) in taken) && last[b] == k && p.owner[b] != k && !(b in results) || continue
             value_bytes(graph.values[b]) == value_bytes(graph.values[v]) && graph.values[b].eltype == graph.values[v].eltype || continue

@@ -236,7 +236,7 @@ function recurrence_group(graph, cx::Forming, recurrence::Cycle, riders = Int[])
     # them in: an LSTM's hidden state one step on reads its cell's.
     members = [cs; sort!([[w for w in cycle if !(w in cs) && !(w in fs) && isstored(cx, w)]; fs])]
     (; domain, places) = recurrence_places(graph, members)
-    g = Group(:recurrence, domain)
+    g = Group(RecurrenceKind(), domain)
     inside = Stepping(cx, Set(w for w in cycle if !(w in members)))
     append!(g.outputs, members)
     whole = Domain(domain)

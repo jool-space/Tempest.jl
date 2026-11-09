@@ -34,9 +34,9 @@ function evaluate_term(t::Recomputed, x, k, buffers, stats, graph)
 end
 
 function run_group!(g::Group, buffers, graph)
-    g.kind === :reduction && return run_reduction!(g, buffers, graph)
-    g.kind === :scan && return run_scan!(g, buffers, graph)
-    g.kind === :recurrence && return run_recurrence!(g, buffers, graph)
+    g.kind isa ReductionKind && return run_reduction!(g, buffers, graph)
+    g.kind isa ScanKind && return run_scan!(g, buffers, graph)
+    g.kind isa RecurrenceKind && return run_recurrence!(g, buffers, graph)
     run_pointwise!(g, buffers, graph)
 end
 

@@ -107,7 +107,7 @@ end
 
 @testset "invariant 3: a recurrence owns its cycle" begin
     p = planned(two_states, two_args...)
-    k = findfirst(g -> g.kind === :recurrence, p.groups)
+    k = findfirst(g -> g.kind isa C.RecurrenceKind, p.groups)
     g = p.groups[k]
     states = C.recurrence_states(p.graph, g.outputs)
     @test length(states) == 2
@@ -123,7 +123,7 @@ end
     # A value of the cycle, the one a state is carried from, written by a
     # kernel that runs before the recurrence's.
     from = C.carried_from(p.graph, second_state)
-    apart = C.Group(:pointwise, p.graph.values[from].dims)
+    apart = C.Group(C.PointwiseKind(), p.graph.values[from].dims)
     push!(apart.outputs, from)
     apart.terms[from] = IR.Lit(0.0)
     apart.phase[from] = 0
