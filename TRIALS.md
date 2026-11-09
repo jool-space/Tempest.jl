@@ -499,6 +499,83 @@ workload's. Pricing by the table's functions, 132, bounded. A system image
 holding these programs' own warm runs leaves 132 instances on the LSTM and
 242 on the GPT.
 
+Taken next, a warm preparation replays the decisions a cover reached
+(`src/Compiler/cover/reached.jl`), as tinygrad keeps its search's results
+beside its kernels and JAX and torch.compile keep a whole program's
+compilation. A preparation keeps the proposals its cover took, in order,
+and each group's decision, under a key that writes out everything a
+decision reads before deciding: the graph with every function and constant
+it holds, the arguments' types and extents, the folds pinned and kept, the
+steps of a recurrence, the target with its device and rates, the
+implementations loaded and their packages, the TEMPEST_ settings but those
+no decision reads, how the decider measures, and Julia's and Tempest's
+identities. Beside them it keeps the record's and the rates file's entries
+the cover read, each with the value it held or its absence. A preparation
+of the same program whose files still hold those values plans the taken
+proposals once, checks each group's text against the kept one, and reads
+each decision back: no trial planned, nothing priced or measured, no kernel
+compiled but the plan's own. An entry read since changed, or a group that
+no longer forms, sends it to the cover; TEMPEST_VERIFY reaches the
+decisions by the cover too and throws where the two differ, and
+TEMPEST_REPLAY=false asks for the cover every time. On the idle GB10, each
+run in a new process, each tree with a kernel cache and record of its own,
+empty before the cold run, which calibrates the device; main at the
+replay's base:
+
+| GPT small | main | replayed |
+|---|---|---|
+| cold preparation | 95.1 s, 346 kernels compiled | 103.3 s, 3 covers, 348 compiled |
+| warm preparation | 38.4 s | 15.5 s, nothing compiled or measured |
+| warm, TEMPEST_REPLAY=false | | 37.8 s |
+| warm, once Julia has compiled | 10.48 s | 1.04 s |
+| step | 1.103, 1.103 ms | 1.105, 1.098 ms |
+
+Of the replayed warm preparation's 15.5 s, 14.2 are Julia compiling. The
+replayed plan is the one its cover reached: the warm explain is the cold
+one's, and the cover's on the same files, byte for byte.
+
+Decisions are replayed only when settled: reached by a cover that wrote
+nothing to the record or the rates file and whose claims all built, so
+that a cover in a new process would reach them again. A cover that
+measures reads a time absent at first and present after, and on the record
+it leaves a cover could rank its proposals otherwise. So a preparation that
+measured as it decided covers again on what it left, until a cover writes
+nothing, three at most (TEMPEST_SETTLE=false keeps the first). Without
+settling, the GPT step's cold cover measured 303 claims, the second
+process's cover one more and the third's none, and only the fourth process
+would replay, the three plans the same, their explains differing only in
+the times they print. Settling runs those covers in the cold process: 8.2 s
+and 2 kernels more than main's cold preparation, 5 more times recorded, and
+the second process replays. It is the default: its seconds are paid once per
+program, and the warm preparation's saving every time after. Behind a first
+result given before the search, settling's covers would run after the
+result.
+
+Kept decisions rest on their evidence compared exactly, which holds only
+where a table in memory holds what its file reads back. It did not: the
+first launch the device timed in a session was a Float32 (the replay
+overhead was returned as the value of its assignment), kept in memory as a
+Float64 and written at a Float32's digits, and a decision set whose
+evidence held that time never replayed in the next process. One writer now
+keeps and writes the same Float64 for the record and the rates file
+(`keep!`), and the timer returns a Float64 every time.
+
+Measured and left: the LSTM's decisions never replay on the device. Eight
+cuTile product claims (256×256 and 256×32 at batch 100, TF32 tiles) fail
+to build each time they are measured, and the record marks them lost at
+Inf in the process but not in the file, so no cover of the LSTM is settled:
+replayed 0, covered 12, cold 63.9 s against main's 65.7 and warm 24.8
+against 25.5. Its steps, 5.44 and 5.47 ms against main's 5.34 and 5.36,
+run plans that differ from main's in 5 of 33 kernels: each tree measured
+its own record from empty, and the LSTM is covered as on main. What
+removes it is the measuring consolidation, the record holding only
+measured times and a failed claim read from the failures, after which a
+failure is no reason to cover again: a claim that fails to build fails
+under the same key. Also left: the rates the decisions read include the
+applied scalar-function lines, 14 in the GPT step's evidence and 7 in the
+LSTM's, of which 9 and 4 are zero or under 1e-13 s a position, noise a
+recalibration refits; any such refit sends the decisions to the cover.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
