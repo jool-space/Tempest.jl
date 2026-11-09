@@ -2,13 +2,23 @@
 # cycle of values between, the sums that can ride their steps, and the group
 # of the kernel that steps one.
 
-# Recurrences: their carried states, the value each is carried from, and the
-# cycle between, the values that read a state and that a value a state is
-# carried from reads, both through others: what its group computes at each
-# step. States each carried from a value reading the other, through others,
-# are one recurrence's: an LSTM's hidden state and its cell, each step
-# reading both, and two states assigned at once, `s1, s2 = f(s2), g(s1)`,
-# though neither state's value is carried from one that reads it.
+"""
+A recurrence as the index graph has it, a cycle: its carried states, the
+value each is carried from, in the states' order, and the cycle's values,
+those that read a state and that a value a state is carried from reads,
+both through others: what its group computes at each step.
+"""
+struct Cycle
+    states::Vector{Int}
+    from::Vector{Int}
+    values::Vector{Int}
+end
+
+# A graph's recurrences. States each carried from a value reading the other,
+# through others, are one recurrence's: an LSTM's hidden state and its cell,
+# each step reading both, and two states assigned at once,
+# `s1, s2 = f(s2), g(s1)`, though neither state's value is carried from one
+# that reads it.
 function recurrences(graph)
     carried = Tuple{Int, Int}[]
     for (c, v) in enumerate(graph.values)
@@ -19,7 +29,7 @@ function recurrences(graph)
         push!(carried, (c, from.value))
     end
     cycles = [recurrence_cycle(graph, [c], [f]) for (c, f) in carried]
-    length(carried) <= 1 && return [([c], [f], cycle) for ((c, f), cycle) in zip(carried, cycles)]
+    length(carried) <= 1 && return Cycle[Cycle([c], [f], cycle) for ((c, f), cycle) in zip(carried, cycles)]
     up = ancestors(graph)
     # Which states each state's value is carried from reads, through others.
     n = length(carried)
@@ -36,8 +46,9 @@ function recurrences(graph)
         push!(sets, [j for j in 1:n if j == k || reach[k][j] && reach[j][k]])
     end
     map(sort!(sets; by = minimum)) do set
-        cs, fs = [carried[k][1] for k in sort(set)], [carried[k][2] for k in sort(set)]
-        (cs, fs, length(cs) == 1 ? cycles[only(set)] : recurrence_cycle(graph, cs, fs))
+        states = [carried[k][1] for k in sort(set)]
+        from = [carried[k][2] for k in sort(set)]
+        Cycle(states, from, length(states) == 1 ? cycles[only(set)] : recurrence_cycle(graph, states, from))
     end
 end
 
@@ -211,8 +222,9 @@ end
 # riding its steps are its folds, each over its own iteration: as a fold
 # along a scan's axes rides its sweep, each is complete only after the
 # steps, and nothing in the group reads it.
-function recurrence_group(graph, cx::Forming, cs, fs, cycle, riders = Int[])
+function recurrence_group(graph, cx::Forming, recurrence::Cycle, riders = Int[])
     values = graph.values
+    cs, fs, cycle = recurrence.states, recurrence.from, recurrence.values
     c = first(cs)
     d = values[c].definition
     all(k -> values[k].dims == values[c].dims && values[k].definition.axis == d.axis && values[k].definition.reverse == d.reverse, cs) ||

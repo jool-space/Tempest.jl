@@ -35,16 +35,15 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     end
     # Each sum riding a recurrence's steps, by the recurrence's state, and
     # the values between it and the cycle, which its steps compute.
-    cycles = recurrences(graph)
+    recurring = recurrences(graph)
     riders = Dict{Int, Vector{Int}}()
     between = Dict{Int, Set{Int}}()
     for r in ride
-        k = findfirst(((cs, _, cycle),) -> live[first(cs)] && riding(graph, live, cycle, r) !== nothing, cycles)
+        k = findfirst(e -> live[first(e.states)] && riding(graph, live, e.values, r) !== nothing, recurring)
         k === nothing && throw(NotAGroup([r]))
-        cs, _, cycle = cycles[k]
-        c = first(cs)
+        c = first(recurring[k].states)
         push!(get!(() -> Int[], riders, c), r)
-        union!(get!(() -> Set{Int}(), between, c), riding(graph, live, cycle, r))
+        union!(get!(() -> Set{Int}(), between, c), riding(graph, live, recurring[k].values, r))
     end
     foreach(b -> union!(recomputed, b), Base.values(between))
     # Reads of a value, one per running reader and formula: a reader that
@@ -73,8 +72,8 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     # which starts each state from storage: a start recomputed in the
     # recurrence's kernel, as `tanh.(a)` read once, left the steps nothing to
     # start from.
-    for (cs, _, _) in cycles, c in cs
-        haskey(riders, first(cs)) || continue
+    for recurrence in recurring, c in recurrence.states
+        haskey(riders, first(recurrence.states)) || continue
         init = values[c].definition.init
         init isa Read && (materialized[init.value] = true)
     end
@@ -109,9 +108,10 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     # the value it is carried from becoming the state one step on (see
     # `recurrence_group`); so does a map of what is stored, which a reader
     # outside recomputes too.
-    if !isempty(cycles)
+    if !isempty(recurring)
         users = readers(graph)
-        for (cs, fs, cycle) in cycles
+        for recurrence in recurring
+            cs, fs, cycle = recurrence.states, recurrence.from, recurrence.values
             foreach(c -> stored[c] = true, cs)
             # A sum riding the steps, and what it computes there, are read
             # within them.

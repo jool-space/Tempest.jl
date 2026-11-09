@@ -58,7 +58,7 @@ struct Grounds
     up::Vector{BitVector}
     users::Vector{Vector{Int}}
     followers::Vector{Vector{Int}}
-    cycles::Vector{Tuple{Vector{Int}, Vector{Int}, Vector{Int}}}
+    recurrences::Vector{Cycle}
     seeds::Vector{Seed}
 end
 
@@ -74,7 +74,7 @@ function Grounds(source::IndexGraph, s)
         live[id] && push!(followers[r], id)
     end
     foreach(unique!, followers)
-    cycles = recurrences(graph)
+    recurring = recurrences(graph)
     # Scans first, so that a fold along a scan's axes rides its sweep, wherever
     # it is in the graph; folds by key last, so that they join a group over
     # their iteration where one forms. Then the maps, constants and inputs
@@ -82,8 +82,8 @@ function Grounds(source::IndexGraph, s)
     folds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n);
         filter(id -> values[id].definition isa Keyed, 1:n)]
     maps = filter(id -> !(values[id].definition isa Union{Input, ConstantArray}), 1:n)
-    seeds = [[Seed(:recurrence, k) for k in eachindex(cycles)]; [Seed(:fold, id) for id in folds]; [Seed(:map, id) for id in maps]]
-    Grounds(source, graph, live, s.results, ancestors(graph), readers(graph), followers, cycles, seeds)
+    seeds = [[Seed(:recurrence, k) for k in eachindex(recurring)]; [Seed(:fold, id) for id in folds]; [Seed(:map, id) for id in maps]]
+    Grounds(source, graph, live, s.results, ancestors(graph), readers(graph), followers, recurring, seeds)
 end
 
 """
@@ -188,7 +188,7 @@ end
 # holds yet.
 function starts(grounds::Grounds, cx::Forming, seed::Seed)
     seed.kind === :fixed && return true
-    seed.kind === :recurrence && return grounds.live[first(grounds.cycles[seed.at][1])]
+    seed.kind === :recurrence && return grounds.live[first(grounds.recurrences[seed.at].states)]
     id = seed.at
     grounds.live[id] && !owned(cx, id) && isstored(cx, id)
 end
@@ -198,8 +198,8 @@ function grown(grounds::Grounds, cx::Forming, seed::Seed, fixed, riders)
     graph = grounds.graph
     seed.kind === :fixed && return fixed_group(graph, cx, fixed[seed.at])
     if seed.kind === :recurrence
-        cs, fs, cycle = grounds.cycles[seed.at]
-        g = recurrence_group(graph, cx, cs, fs, cycle, get(riders, first(cs), Int[]))
+        recurrence = grounds.recurrences[seed.at]
+        g = recurrence_group(graph, cx, recurrence, get(riders, first(recurrence.states), Int[]))
         # What a recurrence computes at each step is its group's alone: a set
         # fixed apart holding any of it would be a second kernel writing it.
         held = filter(m -> owned(cx, m), members(g))

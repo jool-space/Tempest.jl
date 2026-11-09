@@ -262,14 +262,14 @@ function rides(p::Plan)
         foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(values[id].definition))
     end
     found = Pair{Int, Vector{Int}}[]
-    for (cs, fs, cycle) in recurrences(graph)
-        c = first(cs)
+    for recurrence in recurrences(graph)
+        c = first(recurrence.states)
         live[c] || continue
         k = p.owner[c]
         for (r, v) in enumerate(values)
             d = v.definition
-            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(fs) && !any(x -> first(x) == r, found) || continue
-            within = riding(graph, live, cycle, r)
+            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(recurrence.from) && !any(x -> first(x) == r, found) || continue
+            within = riding(graph, live, recurrence.values, r)
             within === nothing || push!(found, r => within)
         end
     end
