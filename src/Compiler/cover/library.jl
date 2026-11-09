@@ -312,8 +312,8 @@ function axis_bindings(t::Template, k, tg, g::GroupView, u::Unifier)
     foreach((v, n) -> names[v] = n, tg.inputs, keys(t.inputs))
     foreach((v, n) -> names[v] = n, tg.outputs, t.outputs)
     image = Dict(y => x for (x, y) in u.values)
-    treads = unique((x, i) for (x, i, _, _) in u.reads)
-    greads = unique((y, j) for (_, _, y, j) in u.reads)
+    treads = unique(Tuple{Int, Tuple{Vararg{Affine}}}[(x, i) for (x, i, _, _) in u.reads])
+    greads = unique(Tuple{Int, Tuple{Vararg{Affine}}}[(y, j) for (_, _, y, j) in u.reads])
     allunique(first.(treads)) && allunique(first.(greads)) || return Binding[]
     tuses = axis_uses(u, 1, treads, v -> names[v], identity)
     guses = axis_uses(u, 2, greads, v -> names[image[v]], m -> image[m])
@@ -501,8 +501,8 @@ end
 
 # Fold `m` of a group as a group of its own over its own positions (see
 # `own_domain`).
-member_view(g, m) = GroupView(g.kind, own_domain(g, m), [m], Int[], Dict(m => g.terms[m]), Dict(m => get(g.phase, m, 1)),
-    g.primary_axes, g.values, Dict(m => g.placement[m]), g.bytes, g.reference)
+member_view(g, m) = GroupView(g.kind, own_domain(g, m), [m], Int[], Dict{Int, Term}(m => g.terms[m]), Dict{Int, Int}(m => get(g.phase, m, 1)),
+    g.primary_axes, g.values, Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}(m => g.placement[m]), g.bytes, g.reference)
 
 # A group's binding to each of the library's templates it computes. Matched
 # once per group's terms and arrays: alike layers are one match. A group of

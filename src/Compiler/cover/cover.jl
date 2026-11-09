@@ -279,7 +279,7 @@ function shifted_maps(p::Plan)
         readers = unique(j for m in stored for j in a.reading[m] if j != k)
         length(readers) == 1 || continue
         reader = p.groups[only(readers)]
-        positions(v) = unique(l.index for m in members(reader) if haskey(reader.terms, m) for l in loads(reader.terms[m]) if l.value == v)
+        positions(v) = unique(Tuple{Vararg{Affine}}[l.index for m in members(reader) if haskey(reader.terms, m) for l in loads(reader.terms[m]) if l.value == v])
         any(v -> length(positions(v)) > 1, stored) && push!(found, RecomputeMaps(stored))
     end
     found
