@@ -845,7 +845,7 @@ In traced code it differentiates `f` where it is called, so a training step
 is a function like any other, traced and prepared as one program (see
 `withgradient`). What `f` closes over is a constant to the gradient.
 """
-gradient(f, args...) = withgradient(f, args...).grad
+gradient(@nospecialize(f), @nospecialize(args...)) = withgradient(f, args...).grad
 
 """
     Tempest.withgradient(f, args...) -> (val = value, grad = gradients)
@@ -865,7 +865,7 @@ is a function like any other, traced and prepared as one program:
 
 What `f` closes over is a constant to the gradient.
 """
-function withgradient(f, args...)
+function withgradient(@nospecialize(f), @nospecialize(args...))
     # The program being traced: an argument's, or, when no argument is traced,
     # as for a layer without weights, the one of the values `f` closes over.
     traced = filter(x -> x isa Union{Traced, TracedArray}, leaves((args, fields(f))))

@@ -1130,7 +1130,7 @@ Program with 3 nodes: Float64(3,) → Float64
   %3 = reduce sum over (1,) %2 :: Float64  [result]
 ```
 """
-trace(f, args...) = first(trace_meeting(f, args...))
+trace(@nospecialize(f), @nospecialize(args...)) = first(trace_meeting(f, args...))
 
 const GLOBAL_DRAW = "the traced function drew from Julia's global random number generator: the numbers were drawn \
     when the program was traced and are constants in it, the same each time it runs. Draw them outside the traced \
@@ -1141,7 +1141,7 @@ const BRANCH = "the traced function branches on a value known only when the prog
     `any`, `all` or `count`"
 
 # `trace`, and the arrays it met as constants, as they were.
-function trace_meeting(f, args...)
+function trace_meeting(@nospecialize(f), @nospecialize(args...))
     tape = Tape()
     arguments = Int[]
     inputs = TracedArray[]

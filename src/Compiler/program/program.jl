@@ -275,7 +275,7 @@ constant_leaf(::Nothing) = nothing
 # input's. A closure is a struct whose fields are what it captures, a variable
 # assigned again held in a `Core.Box`, a mutable struct; a function without
 # fields is a leaf, and so are Tempest's own structs.
-function nested(x)
+function nested(@nospecialize(x))
     T = typeof(x)
     !(x isa Union{AbstractArray, Number, Type, Module, AbstractString, Symbol, AbstractDict, Tuple, NamedTuple}) &&
         isstructtype(T) && fieldcount(T) > 0 && Base.moduleroot(parentmodule(T)) !== Base.moduleroot(@__MODULE__)
@@ -309,33 +309,42 @@ end
 
 # The leaves of `x` in order, gathered into one vector: a model's hundreds of
 # arrays walked at each call in time linear in them.
-leaves(x) = leaves!(Any[], x)
-leaves!(out, x::Union{Tuple, NamedTuple}) = (foreach(y -> leaves!(out, y), values(x)); out)
-leaves!(out, x::Fields) = leaves!(out, x.fields)
-leaves!(out, x) = nested(x) ? leaves!(out, fields(x)) : push!(out, x)
+#
+# The walkers take the structure unspecialized and walk tuples by their
+# fields: the structure is the program's, and Base's `map` and `foreach` on
+# it would compile again for every model's (see `map_elements`).
+leaves(@nospecialize(x)) = leaves!(Any[], x)
+function leaves!(out, @nospecialize(x::Union{Tuple, NamedTuple}))
+    for k in 1:nfields(x)
+        leaves!(out, getfield(x, k))
+    end
+    out
+end
+leaves!(out, @nospecialize(x::Fields)) = leaves!(out, x.fields)
+leaves!(out, @nospecialize(x)) = nested(x) ? leaves!(out, fields(x)) : push!(out, x)
 
 # `g` on each element of a tuple or named tuple, its names kept.
-each(g, x::Tuple) = map(g, x)
-each(g, x::NamedTuple) = NamedTuple{keys(x)}(map(g, values(x)))
+each(g, @nospecialize(x::Tuple)) = map_elements(g, x)
+each(g, @nospecialize(x::NamedTuple)) = NamedTuple{keys(x)}(map_elements(g, values(x)))
 
 # `x` with `f` applied to each leaf, structs built anew from their fields.
-rebuild(f, x::Union{Tuple, NamedTuple}) = each(y -> rebuild(f, y), x)
-rebuild(f, x::Fields{T}) where {T} = construct(T, rebuild(f, x.fields))
-rebuild(f, x) = nested(x) ? construct(typeof(x), rebuild(f, fields(x))) : f(x)
+rebuild(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> rebuild(f, y), x)
+rebuild(f, @nospecialize(x::Fields)) = construct(typeof(x).parameters[1], rebuild(f, x.fields))
+rebuild(f, @nospecialize(x)) = nested(x) ? construct(typeof(x), rebuild(f, fields(x))) : f(x)
 
 # The structure of `x`, `f` applied to each leaf: as `rebuild`, with structs as `Fields`.
-structure_of(f, x::Union{Tuple, NamedTuple}) = each(y -> structure_of(f, y), x)
-structure_of(f, x::Fields{T}) where {T} = Fields{T}(structure_of(f, x.fields))
-structure_of(f, x) = nested(x) ? Fields{typeof(x)}(structure_of(f, fields(x))) : f(x)
+structure_of(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> structure_of(f, y), x)
+structure_of(f, @nospecialize(x::Fields)) = Fields{typeof(x).parameters[1]}(structure_of(f, x.fields))
+structure_of(f, @nospecialize(x)) = nested(x) ? Fields{typeof(x)}(structure_of(f, fields(x))) : f(x)
 
 # As `structure_of`, with each struct a named tuple of its fields: the structure
 # of a gradient, which has no value for a struct's other fields.
-tangent(f, x::Union{Tuple, NamedTuple}) = each(y -> tangent(f, y), x)
-tangent(f, x::Fields) = tangent(f, x.fields)
-tangent(f, x) = nested(x) ? tangent(f, fields(x)) : f(x)
+tangent(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> tangent(f, y), x)
+tangent(f, @nospecialize(x::Fields)) = tangent(f, x.fields)
+tangent(f, @nospecialize(x)) = nested(x) ? tangent(f, fields(x)) : f(x)
 
 # Each of the program's arguments among `inputs`, given in the structure it was traced with.
-function argument_leaves(p, inputs)
+function argument_leaves(p, @nospecialize(inputs))
     positions = leaves(p.input_structure)
     xs = leaves(inputs)
     length(positions) == length(xs) || throw(ArgumentError("the program takes $(length(positions)) leaves, got $(length(xs))"))

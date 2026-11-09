@@ -35,7 +35,7 @@ include("Implement/Implement.jl")
 
 # The vocabulary, and the arithmetic that builds expressions in it.
 @republic republic=false inherit=:public using .IR
-using .IR: constant, var, add, scale, mul, normalize, fdiv, fmod, evaluate_index, affine_key, isconstant, commutative, Key,
+using .IR: constant, var, add, scale, mul, normalize, fdiv, fmod, evaluate_index, affine_key, isconstant, commutative, Key, map_elements,
     wide_axes, dense_strides, fold_array, scan_array, fold_name, fold_eltype, law_function, statistic_name, stats, stored_reads
 import .IR: mentions
 

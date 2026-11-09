@@ -44,3 +44,16 @@ Base.@nospecializeinfer function parts_isequal(@nospecialize(a), @nospecialize(b
     true
 end
 
+"""
+    map_elements(f, t::Tuple) -> Tuple
+
+`map(f, t)`, by code compiled once for every length of `t`: the walkers of a
+program's nested arguments meet tuples as long as the user makes them.
+"""
+Base.@nospecializeinfer function map_elements(f, @nospecialize(t::Tuple))
+    out = Vector{Any}(undef, nfields(t))
+    for i in eachindex(out)
+        out[i] = f(getfield(t, i))
+    end
+    Tuple(out)
+end
