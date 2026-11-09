@@ -45,6 +45,20 @@ Tempest.Compiler.toolchain(::CUDATarget) =
 
 Tempest.Compiler.measurable(::CUDATarget) = true
 
+# Every stream's work done, so that a claim is timed after what was launched
+# before it. CUDA.jl refuses to wait for the device while any task captures
+# a graph, before it waits: a timing waits for the capture to end.
+function Tempest.Compiler.quiesce(::CUDATarget)
+    while true
+        try
+            return CUDACore.device_synchronize()
+        catch err
+            err isa CUDACore.CaptureError || rethrow()
+            sleep(0.001)
+        end
+    end
+end
+
 # A captured graph. The driver crashes destroying a graph whose kernels'
 # modules were unloaded first, and objects that die in one collection are
 # finalized in no order we choose: so what a graph launches stays alive in
@@ -379,7 +393,9 @@ __init__() = atexit(() -> foreach(finalize, keys(GRAPHS)))
 # Replayed back to back instead, as it was, a launch whose data fit the
 # cache was timed from it: on GB10, a decoding step's output projection, 21
 # MB of weights, at 25 μs where reading them from memory takes 93, and its
-# tiles were ranked at the cache's rate.
+# tiles were ranked at the cache's rate. Timings run one at a time (see
+# `time_launch`), so the cache's clearing and the replay's overhead below are
+# made and read by one timing at a time.
 function Tempest.Compiler.time_launch(target::CUDATarget, launch)
     launch()
     CUDACore.synchronize()
@@ -421,7 +437,8 @@ function read_through((a, sink), n)
     return
 end
 
-# The launch that clears the cache and its buffers, made on first need.
+# The launch that clears the cache and its buffers, made on first need,
+# within a timing.
 const CLEARING = Ref{Any}(nothing)
 
 # Clear the cache, reading a buffer twice its size through it. Nvbench and
@@ -440,8 +457,9 @@ end
 # What timing one replay alone adds to the seconds of its launch among a
 # graph's: an empty kernel's replay timed so, 2.5 μs on GB10, less its
 # seconds in a graph of a millisecond of them, 0.43. Measured once a
-# session, and the Float64 kept returned the first time as every time after,
-# so that each launch timed less it is a Float64, the first too.
+# session, within the first timing, and the Float64 kept returned the first
+# time as every time after, so that each launch timed less it is a Float64,
+# the first too.
 const OVERHEAD = Ref(NaN)
 
 function replay_overhead(target)

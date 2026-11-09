@@ -8,7 +8,7 @@
 # target defines them for its type (see CUDAExt).
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
-    toolchain, measurable, time_launch, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
+    toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
@@ -325,9 +325,29 @@ measurable(::Target) = false
 The seconds one call of `launch()` takes on the device among the launches of
 a captured graph, its data in memory rather than in the cache, as the cover
 times claims: a step reads its weights once, and finds them in memory. Only
-a `measurable` target defines it.
+a `measurable` target defines it. Tempest calls it one timing at a time,
+once the device's work is done, so what it keeps between timings needs no
+lock.
 """
 function time_launch end
+
+"""
+    quiesce(target)
+
+Wait until the device has run everything launched on it, by any task.
+Every timing waits so before it times a claim (see `timed`).
+"""
+quiesce(::Target) = nothing
+
+# Timings run one at a time in the process: two at once, two preparations'
+# on two tasks, would time each other. Nothing else is held off while a
+# claim is timed: a compiled program's search has its timings taken between
+# the program's own calls (see `compile`'s `search`), and other work in the
+# process runs beside a timing as it does beside any preparation.
+const TIMINGS = ReentrantLock()
+
+# `time_launch`, one timing at a time, once the device's work is done.
+timed(target, launch) = @lock TIMINGS (quiesce(target); time_launch(target, launch))
 
 """
     device_rates(target) -> rates

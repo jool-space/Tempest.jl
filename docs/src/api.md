@@ -105,6 +105,7 @@ Tempest.Compiler.device_name
 Tempest.Compiler.toolchain
 Tempest.Compiler.measurable
 Tempest.Compiler.time_launch
+Tempest.Compiler.quiesce
 Tempest.Compiler.device_rates
 ```
 

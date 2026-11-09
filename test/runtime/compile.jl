@@ -556,6 +556,24 @@ end
     @test r(W, u) ≈ settled(W, u) && r(2 .* W, u) ≈ settled(2 .* W, u)
 end
 
+# A target whose timings take a millisecond, noting how many ran at once.
+struct Clock <: C.Target end
+const TIMING_NOW, TIMING_MOST = Threads.Atomic{Int}(0), Threads.Atomic{Int}(0)
+function C.time_launch(::Clock, launch)
+    Threads.atomic_max!(TIMING_MOST, Threads.atomic_add!(TIMING_NOW, 1) + 1)
+    sleep(0.005)
+    launch()
+    Threads.atomic_sub!(TIMING_NOW, 1)
+    1.0e-3
+end
+
+@testset "timings one at a time" begin
+    # From several tasks at once, each timing waits for the one before.
+    ran = Threads.Atomic{Int}(0)
+    foreach(wait, [Threads.@spawn(C.timed(Clock(), () -> Threads.atomic_add!(ran, 1))) for _ in 1:8])
+    @test ran[] == 8 && TIMING_MOST[] == 1
+end
+
 if CUDA_FUNCTIONAL
     @testset "compiled on CUDA" begin
         m, x = Dense(single(data(64, 32; scale = 0.3)), single(data(64)), tanh), single(data(32, 16; scale = 0.5))
@@ -596,6 +614,24 @@ if CUDA_FUNCTIONAL
         before = copy(b)
         expected = 0.5f0 .* before[1:2:8] .+ x
         @test c(view(b, 1:2:8), x) ≈ sum(expected) && b[1:2:8] ≈ expected && b[2:2:8] == before[2:2:8]
+    end
+
+    @testset "timings one at a time, on CUDA" begin
+        # A preparation's timings, of claims no record here holds, wait while
+        # another holds the timings' lock, recording nothing.
+        record = C.record_path(T.CUDATarget())
+        lines() = isfile(record) ? countlines(record) : 0
+        waiting() = !isempty(C.TIMINGS.cond_wait.waitq)
+        z = CuArray(single(data(48, 80; scale = 0.1)))
+        before = lines()
+        t = lock(C.TIMINGS) do
+            t = Threads.@spawn prepare(trace(x -> sum(abs2, 1.5f0 .* x; dims = 1), z), z; measure = :all)
+            @test timedwait(waiting, 300) === :ok
+            @test lines() == before
+            t
+        end
+        @test isapprox(Array(outputs(execute!(fetch(t)))[1]), sum(abs2, 1.5f0 .* Array(z); dims = 1); rtol = 1.0e-4)
+        @test lines() > before
     end
 
     @testset "arguments read where the caller has them, on CUDA" begin

@@ -917,7 +917,7 @@ function measure!(d::Decider, p::Plan, g::Group, o::Choice)
     haskey(d.record, o.key) && return
     launch = build_option!(d, p, g, o)
     launch === nothing && return
-    t = phase(() -> time_launch(d.target, launch), :timing)
+    t = phase(() -> timed(d.target, launch), :timing)
     keep!(d.record, d.record_path, o.key, t)
     nothing
 end

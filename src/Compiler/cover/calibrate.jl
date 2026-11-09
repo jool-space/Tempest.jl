@@ -230,7 +230,7 @@ end
 function time_reference(d::Decider, r::Reference)
     fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()
     for (package, launch, work) in r.launches
-        t = time_launch(d.target, launch)
+        t = timed(d.target, launch)
         t < first(get(fastest, package, (Inf,))) && (fastest[package] = (t, work))
     end
     fastest
