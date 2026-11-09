@@ -945,9 +945,10 @@ differed in any of: `test/bench/scaling.jl`, dry, at 16 and 32 GPT layers
 taken); the corpus's four programs at their small shapes and its GPT at
 GPT-2 124M's geometry, each prepared cold and warm on the GB10; and the
 fuzzer's seeds 20001 to 20400 on the CPU and 20401 to 20460 on the device.
-Open: a test in the repository that forms a large instance under the
-comparison, where one count in `test/work.jl` and the sizes of the suite's
-fixtures stand now.
+`test/work.jl` holds the comparison at 8 RK4 steps, where each of 715
+trials takes about 170 kernels as formed before; larger is the bench's, run
+by hand. Open: a test that a read made outside the context is caught, which
+needs a context a test can break.
 
 On grizzle, idle, 12 threads, dry on the CPU target, one run each, 772f16b
 against 4a311a3, the change as it was measured before it was rebased onto

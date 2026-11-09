@@ -118,6 +118,21 @@ end
     @test eight[:tries] < 3.5 * four[:tries]
 end
 
+@testset "at eight steps, each trial formed near a plan is the plan formed whole" begin
+    # Crosschecked, each trial is formed near the plan it changes and formed
+    # whole, and the two compared kernel by kernel: a preparation that returns
+    # found none differing (see `C.replanned`). The suite's other programs
+    # are compared so too, at their sizes, where a trial takes few kernels as
+    # they were. Here each takes over a hundred (120,521 over 715 trials),
+    # where a kernel taken that should have formed again would be one of
+    # many. Larger, by test/bench/scaling.jl under TEMPEST_CROSSCHECK.
+    q, args = rk4(8)
+    _, counts, _ = withenv("TEMPEST_REPLAY" => "false", "TEMPEST_CROSSCHECK" => "true") do
+        C.tallied(() -> prepare(q, args...; target = T.CUDATarget(precision = :tf32), build = false))
+    end
+    @test counts[:reused] > 100 * counts[:trials] > 0
+end
+
 @testset "from several tasks, nothing is lost" begin
     heard = Dict{Tuple{Symbol, Any}, Int}()
     lock = ReentrantLock()
