@@ -287,16 +287,20 @@ end
 # measures: every option under `:all`; otherwise those within the estimate's
 # error of the best, every option when the best rests on a borrowed line,
 # which bounds a time only from below, and every claim of the best's
-# implementation when it made several: alternatives it offers for
-# measurement, which the estimate cannot rank. None when the best stands
-# alone, unless it has variants: then it is measured to seed their search.
-# Where the kernels run once per step, the floor and the best claim are
-# measured beside each other (see `options`).
+# implementation once the record refutes the best's estimate (see
+# `refuted`). An implementation's alternatives the estimate cannot rank, its
+# output tiles at one depth, are estimated alike and so within its error;
+# one estimated past it is ranked by it until a time shows the estimate
+# wrong: the GPT step's products split four ways, estimated 3.0 to 4.4 times
+# the best tile, measured 14 times and never fastest. None when the best
+# stands alone, unless it has variants: then it is measured to seed their
+# search. Where the kernels run once per step, the floor and the best claim
+# are measured beside each other (see `options`).
 function measured_ranks(d::Decider, os)
     best = first(os)
     alone = isempty(best.variants)
     length(os) == 1 && return d.measure === :all || !alone ? [1] : Int[]
-    searched(o) = o.implementation !== nothing && o.implementation === best.implementation
+    searched(o) = o.implementation !== nothing && o.implementation === best.implementation && refuted(d, best)
     claimed = findfirst(o -> o.implementation !== nothing, os)
     floor = d.steps > 1 && any(o -> o.implementation === nothing, os)
     beside(k, o) = floor && (o.implementation === nothing || k == claimed)

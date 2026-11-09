@@ -190,3 +190,18 @@ C.build_claim(::FailingVariant, claim, target, g, buffers) = claim === :variant 
         @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, x); rtol = 1.0e-12)
     end
 end
+
+# An implementation's own claims are measured where the estimate cannot rank
+# them, within its error of the best; one estimated past the error only once
+# the record refutes the best's estimate, a time past its error.
+@testset "claims measured by the estimate's error" begin
+    graph = C.lower(trace(x -> sum(x; dims = 1), data(4, 3)))
+    d = C.Decider(T.CPUTarget(), graph; measure = :dry)
+    option(estimate, key) = C.Choice(HostProducts(), :host, estimate, key, false, 1, Any[])
+    os = [option(1.0e-5, "best"), option(1.4e-5, "near"), option(4.0e-5, "split")]
+    @test C.measured_ranks(d, os) == [1, 2]
+    d.record["best"] = 1.3e-5
+    @test C.measured_ranks(d, os) == [1, 2]
+    d.record["best"] = 2.0e-5
+    @test C.measured_ranks(d, os) == [1, 2, 3]
+end
