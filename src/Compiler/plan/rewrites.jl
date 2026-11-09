@@ -512,7 +512,7 @@ function relative_sums(graph::IndexGraph)
         (fr === nothing || haskey(taken, fr.fold)) && continue
         seen = through_observe(fr.law, fr.observe)
         seen === nothing && continue
-        for r in mapped_sums(graph, users, F)
+        for r in mapped_sums(graph, users, F, fr.law)
             haskey(taken, r) || !admissible(graph, r, F, fr) || (taken[r] = (F, fr, seen))
         end
     end
@@ -523,19 +523,25 @@ function relative_sums(graph::IndexGraph)
     end)
 end
 
-# The sums that read value `F` through maps alone, in order: the only sums a
-# sum relative to `F` can be, since it reads `F` through a difference, the
-# law's function of it and products (see `dependent`). Asked of every sum,
-# each frame cost a walk of the graph, as many as a program has softmaxes and
-# norms: the 32-layer GPT step's rewrites took 10.9 s.
-function mapped_sums(graph, users, F)
-    found, pending, seen = Int[], [F], Set{Int}()
+# The sums that read value `F` through a difference, then the law's function,
+# products, quotients and casts alone, in order: the only sums relative to
+# `F` under `law` there can be, whose factors through products, quotients and
+# casts hold the law's function of `y - F` (see `dependent`). Asked of every
+# sum, each frame cost a walk of the graph, as many as a program has
+# softmaxes and norms: the 32-layer GPT step's rewrites took 10.9 s. Through
+# every map, a frame's walk went on through maps no sum relative to it reads
+# it through.
+function mapped_sums(graph, users, F, law)
+    φ = law_function(law)
+    map_f(u) = (d = graph.values[u].definition; d isa Pointwise ? d.f : nothing)
+    pending = filter(u -> map_f(u) === (-), users[F])
+    found, seen = Int[], Set{Int}(pending)
     while !isempty(pending)
         for u in users[pop!(pending)]
             u in seen && continue
             push!(seen, u)
-            d = graph.values[u].definition
-            d isa Pointwise && push!(pending, u)
+            f, d = map_f(u), graph.values[u].definition
+            (f === φ || f === (*) || f === (/) || f isa Cast) && push!(pending, u)
             d isa Reduction && d.fold isa SumFold && push!(found, u)
         end
     end
