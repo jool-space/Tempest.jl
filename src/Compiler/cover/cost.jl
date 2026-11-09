@@ -118,20 +118,29 @@ function group_bytes(p::Plan, g::Group)
         loaded(a) || delete!(reads, a)
     end
     written(v) = !p.stored[v] ? 0 : starts_from_storage(graph, v) ? combined_bytes(graph.values[v]) : value_bytes(graph.values[v])
-    found = group_loads(graph, g)
-    Float64(sum(v -> read_bytes(p, g, v, found), reads; init = 0) + sum(written, members(g); init = 0))
+    found = GroupLoads(graph, g)
+    Float64(sum(v -> read_bytes(p, g, found, v), reads; init = 0) + sum(written, members(g); init = 0))
 end
 
-# What `read_bytes` asks of a group's terms, found once for every value it
-# reads: whether every member has a term, the values a fold by key's key
-# reads, those an index gathers from, and each value's loads. Asked of each
-# value afresh, a sum of many values, as a gradient of an input many
-# branches read, walked its whole term once for each.
-function group_loads(graph, g::Group)
+"""
+What `read_bytes` asks of a group's terms, found once for every value the
+group reads: whether every member has a term, the values a fold by key's
+key reads, those an index gathers from, and each value's loads. Asked of
+each value afresh, a sum of many values, as a gradient of an input many
+branches read, walked its whole term once for each.
+"""
+struct GroupLoads
+    termed::Bool
+    keys::Set{Int}
+    gathered::Set{Int}
+    loading::Dict{Int, Vector{Load}}
+end
+
+function GroupLoads(graph, g::Group)
     termed = all(m -> haskey(g.terms, m), members(g))
     keys = Set{Int}(v for m in members(g) for v in key_reads(graph, m))
     gathered, loading = Set{Int}(), Dict{Int, Vector{Load}}()
-    termed || return (; termed, keys, gathered, loading)
+    termed || return GroupLoads(termed, keys, gathered, loading)
     terms = [g.terms[m] for m in members(g)]
     for s in subterms(terms; nested = true)
         s isa Load && foreach(e -> union!(gathered, indirect_values(e)), s.index)
@@ -140,13 +149,14 @@ function group_loads(graph, g::Group)
     for t in terms, l in loads(t)
         push!(get!(() -> Load[], loading, l.value), l)
     end
-    (; termed, keys, gathered, loading)
+    GroupLoads(termed, keys, gathered, loading)
 end
 
-# The bytes of value `v` group `g` reads: where its loads reach, a step's
-# slice of a value along the steps say, when the group only loads it; whole
-# when the group gathers from it or reads it otherwise.
-function read_bytes(p::Plan, g::Group, v, found = group_loads(p.graph, g))
+# The bytes of value `v` group `g` reads, by what it loads (`found`): where
+# its loads reach, a step's slice of a value along the steps say, when the
+# group only loads it; whole when the group gathers from it or reads it
+# otherwise.
+function read_bytes(p::Plan, g::Group, found::GroupLoads, v)
     val = p.graph.values[v]
     found.termed && !(v in found.keys) || return value_bytes(val)
     v in found.gathered && return value_bytes(val)
