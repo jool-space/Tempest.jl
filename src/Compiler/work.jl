@@ -6,9 +6,12 @@
 # a count, a mark or an event is a load and a branch.
 #
 # The phases a preparation marks: lower, rewrite, partition, decider and
-# planned, and bind after it; within planned, cover, then the sections search,
-# decisions, storage, verify, build and executable (what the build leaves to
-# assemble); within cover, the sections cover_start (the generator's plan),
+# planned, and bind after it; within planned, its decisions, replay where
+# kept decisions hold (see `reach!`) or else cover, then the sections search
+# and decisions, and after them the sections storage, verify, build and
+# executable (what the build leaves to assemble); a recurrence's step,
+# planned within the cover, marks its own cover, search and decisions within
+# it; within cover, the sections cover_start (the generator's plan),
 # cover_search, cover_proposals, cover_keys, cover_trials, cover_search_ahead,
 # cover_pricing, cover_edits and cover_loop. Wherever they run: calibration,
 # burst (claims built side by side to be timed), timing, and compile, on the
@@ -145,8 +148,9 @@ garbage, in the order each first ended. Each is inclusive: a phase's seconds
 hold those of the phases of other names within it, and of what other tasks
 did meanwhile, whose bytes it counts too; so phases nested, as calibration
 in search, or run on other tasks, as compile, add to more than the whole.
-A phase nested in one of its own name counts once, as the outer one: the
-inner one and its sections spend nothing. One tally at a time.
+A phase nested in one of its own name counts once, as the outer one, as a
+recurrence's step's cover in the cover: the inner one and its sections
+spend nothing. One tally at a time.
 """
 function tallied(f)
     TALLYING[] && throw(ArgumentError("the compiler's work is tallied already"))

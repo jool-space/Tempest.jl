@@ -85,11 +85,12 @@ include("runtime/runtime.jl")
 include("cover/view.jl")
 include("cover/library.jl")
 include("cover/cost.jl")
+include("cover/record.jl")
 include("cover/choose.jl")
 include("cover/proposals.jl")
 include("cover/cover.jl")
 include("cover/calibrate.jl")
-include("cover/record.jl")
+include("cover/reached.jl")
 include("runtime/stepped.jl")
 
 # The kernel cache, and the front door.

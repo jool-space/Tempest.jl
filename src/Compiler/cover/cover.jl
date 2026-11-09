@@ -294,16 +294,11 @@ function cover(d::Decider)
     function trial(current, taken, qs)
         tally!(:trials)
         all = Proposal[taken; qs]
-        i = inputs(d, all)
-        # A value belongs to one proposal.
-        allunique(Iterators.flatten(fixes(x) for x in all)) || return nothing
-        isempty(taken) && length(i.fixed) == 1 && !forms(only(i.fixed)) && return nothing
-        try
-            plan(d.graph; fixed = i.fixed, i.recompute, i.store, i.ride)
-        catch e
-            e isa NotAGroup || rethrow()
-            nothing
+        if isempty(taken)
+            sets = inputs(d, all).fixed
+            length(sets) == 1 && !forms(only(sets)) && return nothing
         end
+        plan_taking(d, all)
     end
     # A proposal's comparison with the plan it is priced in, and the
     # implementation that claims its group: by key, once, where its kind
@@ -444,6 +439,28 @@ function cover(d::Decider)
     foreach(t -> try wait(t) catch end, spawned)
     lap!(:cover_loop, clock)
     current, considered
+end
+
+"""
+    plan_taking(d, proposals; near, formed) -> Plan or nothing
+
+The plan with `proposals` taken, in order (see `inputs`): the cover's trial
+of them, and the plan it reached when they are those it took. Nothing where two share a
+value or a set does not form one group. `near` and `formed`, where given,
+pass to `plan`: the kernels of a plan of the same graph to form only what
+the proposals change, and where to note how this one formed its own.
+"""
+function plan_taking(d::Decider, proposals; near = nothing, formed = nothing)
+    # A value belongs to one proposal.
+    allunique(Iterators.flatten(fixes(x) for x in proposals)) || return nothing
+    i = inputs(d, proposals)
+    try
+        forming = near === nothing && formed === nothing ? (;) : (; near, formed)
+        plan(d.graph; fixed = i.fixed, i.recompute, i.store, i.ride, forming...)
+    catch e
+        e isa NotAGroup || rethrow()
+        nothing
+    end
 end
 
 function explain(io::IO, p::Plan, c::Considered)

@@ -63,7 +63,7 @@ mutable struct Decider
     graph::IndexGraph
     measure::Symbol
     rates::Rates
-    calibration::Dict{String, Float64}
+    calibration::Noted
     calibration_path::Union{Nothing, String}
     lines::Dict{Tuple{Symbol, Symbol}, Line}
     memories::Dict{Symbol, Memory}
@@ -71,7 +71,7 @@ mutable struct Decider
     # once, in each regime: streamed, swept in a product of a class, swept in
     # a product of a class that recomputes a fold.
     applied::Dict{Tuple{Symbol, Symbol, Any}, Float64}
-    record::Dict{String, Float64}
+    record::Noted
     record_path::Union{Nothing, String}
     # Folds pinned to be recomputed where they are read, in every plan, and
     # folds the cover keeps stored.
@@ -96,15 +96,29 @@ mutable struct Decider
     steps::Int
 end
 
+# A decider reads the rates file and the record as they are when it is made.
 function Decider(target, graph; measure = measuring(), recompute = (), keep = (), ride = (), steps = 1)
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
-    calibration = load_record(calibration_path)
     r = dry ? rates(target) : target_rates(target)
-    Decider(target, measurable(target), graph, dry ? :dry : measurable(target) ? level(measure) : :none, r, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), load_record(path), path,
+    how = dry ? :dry : measurable(target) ? level(measure) : :none
+    decider(target, measurable(target), graph, how, r, Noted(load_record(calibration_path)), calibration_path, Noted(load_record(path)), path;
+        recompute, keep, ride, steps)
+end
+
+"""
+A decider of a recurrence's step, planned within a preparation that decider
+`parent` decides: of its target, measuring as it does, on its rates, and
+reading its record and rates file, so that the step's decisions rest on what
+the preparation's do.
+"""
+Decider(parent::Decider, graph::IndexGraph; steps) =
+    decider(parent.target, parent.measurable, graph, parent.measure, parent.rates, parent.calibration, parent.calibration_path, parent.record, parent.record_path; steps)
+
+decider(target, measurable, graph, measure, rates, calibration, calibration_path, record, record_path; recompute = (), keep = (), ride = (), steps = 1) =
+    Decider(target, measurable, graph, measure, rates, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), record, record_path,
         Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
         Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}(), steps)
-end
 
 # Forget every decision and option, so that the cover plans again from what
 # the decider knows now: the claims that failed to build, and the times it
@@ -629,6 +643,6 @@ function measure!(d::Decider, p::Plan, g::Group, o::Choice)
     launch = build_option!(d, p, g, o)
     launch === nothing && return
     t = phase(() -> time_launch(d.target, launch), :timing)
-    d.record[o.key] = t
-    save_record(d.record_path, o.key, t)
+    keep!(d.record, d.record_path, o.key, t)
+    nothing
 end

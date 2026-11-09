@@ -296,8 +296,9 @@ end
 
 """
 A recurrence's step planned: its graph, the decider that planned it, the
-plan with its kernels in order, their decisions and its storage, and the
-number of steps.
+plan with its kernels in order, their decisions and its storage, the
+number of steps, and what its decider reached, kept with the preparation's
+(see `Reached`).
 """
 struct SteppedPlan
     step::StepGraph
@@ -306,6 +307,7 @@ struct SteppedPlan
     decisions::Vector{Any}
     storage::Storage
     steps::Int
+    reached::Reached
 end
 
 """
@@ -325,17 +327,15 @@ function plan_step(d::Decider, p::Plan, g::Group)
     c = first(g.outputs)
     cd = values[c].definition::Carried
     cd.axis == length(values[c].dims) || return nothing
-    bd = Decider(d.target, s.graph; measure = d.measure === :dry ? :dry : d.measure, steps = values[c].dims[cd.axis])
-    bp, _ = cover(bd)
-    search!(bd, bp)
-    ds = decisions(bd, bp)
+    bd = Decider(d, s.graph; steps = values[c].dims[cd.axis])
+    bp, _, ds, reached = reach!(bd)
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     first_sum = length(s.leaves) - length(s.sums)
     replaces = [bp.graph.results[length(s.stored) + j].value => first_sum + j for j in eachindex(s.sums)]
     bp, order, st = storage(bp, replaces; in_place = k -> writes_in_place(ds[k]))
     ds = ds[order]
     VERIFYING[] && verify(bp, st; in_place = k -> writes_in_place(ds[k]))
-    SteppedPlan(s, bd, bp, ds, st, values[c].dims[cd.axis])
+    SteppedPlan(s, bd, bp, ds, st, values[c].dims[cd.axis], reached)
 end
 
 """

@@ -81,6 +81,15 @@ group and both sides of every comparison. `true` and `false` mean `:close` and
 the default, as the tests set it to `none`: on a device other jobs share, a
 close call timed is decided by chance.
 
+What the cover decided, the proposals it took and the claim that runs each
+kernel, is kept beside the tuning record (see `Tempest.Compiler.reach!`),
+and a preparation of the same program, on the same target and device, with
+the record and the rates file holding what those decisions read, replays it:
+it plans the program once, and plans no trial, prices and measures nothing.
+Anything else a decision reads that differs, the program's extents, element
+types or captured constants, the target's numerics, Tempest's own code or a
+time recorded since, makes them the cover's to reach again.
+
 A claim that fails to build is no option once it has: the program is planned
 again without it, each map of the group it claimed proposed to be stored
 apart, so that a scalar function a kernel package cannot lower runs on the
@@ -121,7 +130,8 @@ device. No claim is timed, and claims are priced on nominal rates.
 
 `verify = true` checks every plan the preparation forms, the cover's trials
 among them, and the storage of the one it runs, throwing where one breaks an
-invariant the kernels rely on (see `Tempest.Compiler.verify`). It is the
+invariant the kernels rely on (see `Tempest.Compiler.verify`); and decisions
+it replays, against the cover's, which it reaches too. It is the
 default where the environment sets `TEMPEST_VERIFY=true`, as the tests do.
 
 A training loop, where the step returns the loss and the new parameters and
@@ -185,12 +195,15 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     # `build_group`). The last plan's buffers are let go first. Without
     # `build`, implementations compile nothing as they claim (`compiling`).
     ex = Base.ScopedValues.with(Implement.COMPILING => build, VERIFYING => verify) do
-        ex = phase(() -> planned(program, d, inputs, pairs, input, by_reference, build), :planned)
+        ex, reached = phase(() -> planned(program, d, inputs, pairs, input, by_reference, build), :planned)
         for _ in 2:PLANS
             any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
             ex = nothing
-            ex = phase(() -> planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build), :planned)
+            ex, reached = phase(() -> planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build), :planned)
         end
+        # Decisions the cover reached are kept, for a preparation of the
+        # same program to replay (see `reach!`); those replayed are kept already.
+        reached.key === nothing || reached.settled || store_reached(settled(reached, d))
         ex
     end
     ex.built && phase(() -> bind!(ex, inputs...), :bind)
@@ -201,16 +214,13 @@ end
 const PLANS = 4
 
 # The program planned by decider `d` and, with `build`, built on buffers of
-# its own, its inputs not yet bound: `prepare` once its graph is lowered.
+# its own, its inputs not yet bound, and what its decider reached (see
+# `reach!`): `prepare` once its graph is lowered.
 function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, build)
     target = d.target
-    p, considered = phase(() -> cover(d), :cover)
-    # The sections of `planned` after the cover (see `lap!`).
+    p, considered, ds, reached = reach!(d)
+    # The sections of `planned` after its decisions (see `lap!`).
     clock = mark()
-    search!(d, p)
-    clock = lap!(:search, clock)
-    ds = decisions(d, p)
-    clock = lap!(:decisions, clock)
     values = p.graph.values
     result_value(k) = p.graph.results[k].value
     # A result that is an argument's storage would change as another result
@@ -235,7 +245,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
             none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
             Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Any[], nothing,
             Vector{Union{Nothing, Readers}}(nothing, length(program.arguments)), none(length(program.arguments)),
-            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)), 1, false)
+            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)), 1, false), reached
     end
     slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
     referenced = Vector{Any}(nothing, length(program.arguments))
@@ -297,7 +307,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
         launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, pointable, pointed, at, zeros(UInt, length(program.arguments)),
-        fill(false, length(program.arguments)), 1, true)
+        fill(false, length(program.arguments)), 1, true), reached
 end
 
 runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
