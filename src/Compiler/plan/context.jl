@@ -130,18 +130,37 @@ end
 
 Note(n::Int) = Note(Int[], Int[], Int[], Walk[], falses(n), falses(n))
 
-"""
-Where forming starts a kernel, in the order it forms them: each set fixed as
-a group (`:fixed`, at its place among them), each recurrence (`:recurrence`,
-at its place among the graph's), then each fold and each map no kernel holds
-yet, grown from it (`:fold` and `:map`, at the value).
-"""
-struct Seed
-    kind::Symbol
+"A set fixed as a group, at its place among those fixed."
+struct FixedSeed
     at::Int
 end
 
-Base.show(io::IO, s::Seed) = print(io, s.kind === :fixed ? "set fixed $(s.at)" : s.kind === :recurrence ? "recurrence $(s.at)" : "$(s.kind) %$(s.at)")
+"A recurrence, at its place among the graph's."
+struct RecurrenceSeed
+    at::Int
+end
+
+"A fold or a scan no kernel holds yet, at its value: a kernel grows from it."
+struct FoldSeed
+    at::Int
+end
+
+"A map no kernel holds yet, at its value: a kernel grows from it."
+struct MapSeed
+    at::Int
+end
+
+"""
+Where forming starts a kernel, in the order it forms them: each set fixed as
+a group, each recurrence, then each fold and each map no kernel holds yet.
+A seed answers whether a kernel forms from it (`starts`) and which (`grown`).
+"""
+const Seed = Union{FixedSeed, RecurrenceSeed, FoldSeed, MapSeed}
+
+Base.show(io::IO, s::FixedSeed) = print(io, "set fixed ", s.at)
+Base.show(io::IO, s::RecurrenceSeed) = print(io, "recurrence ", s.at)
+Base.show(io::IO, s::FoldSeed) = print(io, "fold %", s.at)
+Base.show(io::IO, s::MapSeed) = print(io, "map %", s.at)
 
 """
 A kernel as formed, from its seed (see `Seed`), before what no other kernel

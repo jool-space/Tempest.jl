@@ -85,7 +85,7 @@ function replay(p::Planned, pass, stored, fixed, riders)
         Tuple{Vector{Int}, Set{Int}}[])
     # A set fixed there and not here takes its kernel away.
     for k in (length(fixed) + 1):length(before.fixed)
-        j = get(before.at, Seed(:fixed, k), 0)
+        j = get(before.at, FixedSeed(k), 0)
         j == 0 || lose!(r, before.formed[j].group)
     end
     r
@@ -105,12 +105,17 @@ function formed_before(r::Replay, seed::Seed)
     j = get(r.before.at, seed, 0)
     j == 0 && return nothing
     f = r.before.formed[j]
-    seed.kind === :fixed && r.before.fixed[seed.at] != r.fixed[seed.at] && return nothing
-    if seed.kind === :recurrence
-        c = first(f.group.outputs)
-        get(r.riders, c, Int[]) == get(r.before.riders, c, Int[]) || return nothing
-    end
-    f
+    same_seed(r, seed, f) ? f : nothing
+end
+
+# Whether `seed` is here what it was there, where kernel `f` formed from it:
+# a fixed seed the same set, a recurrence's the same sums riding it.
+same_seed(r::Replay, seed::FixedSeed, f::Formed) = r.before.fixed[seed.at] == r.fixed[seed.at]
+same_seed(r::Replay, seed::Union{FoldSeed, MapSeed}, f::Formed) = true
+
+function same_seed(r::Replay, seed::RecurrenceSeed, f::Formed)
+    c = first(f.group.outputs)
+    get(r.riders, c, Int[]) == get(r.before.riders, c, Int[])
 end
 
 """

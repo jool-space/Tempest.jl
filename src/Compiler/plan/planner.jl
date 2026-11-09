@@ -82,7 +82,7 @@ function Grounds(source::IndexGraph, s)
     folds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n);
         filter(id -> values[id].definition isa Keyed, 1:n)]
     maps = filter(id -> !(values[id].definition isa Union{Input, ConstantArray}), 1:n)
-    seeds = [[Seed(:recurrence, k) for k in eachindex(recurring)]; [Seed(:fold, id) for id in folds]; [Seed(:map, id) for id in maps]]
+    seeds = Seed[[RecurrenceSeed(k) for k in eachindex(recurring)]; [FoldSeed(id) for id in folds]; [MapSeed(id) for id in maps]]
     Grounds(source, graph, live, s.results, ancestors(graph), readers(graph), followers, recurring, seeds)
 end
 
@@ -162,7 +162,7 @@ how they formed, where `cx` records.
 function formation(grounds::Grounds, cx::Forming, fixed, riders, near = nothing)
     tally!(:groupings)
     record = Formation(cx, fixed, riders)
-    for seed in [[Seed(:fixed, k) for k in eachindex(fixed)]; grounds.seeds]
+    for seed in Seed[[FixedSeed(k) for k in eachindex(fixed)]; grounds.seeds]
         if !starts(grounds, cx, seed)
             passed!(near, seed)
             continue
@@ -186,27 +186,23 @@ end
 # Whether a kernel forms from `seed`: from a fixed set always; from a
 # recurrence that runs; from a stored fold or map that runs and no kernel
 # holds yet.
-function starts(grounds::Grounds, cx::Forming, seed::Seed)
-    seed.kind === :fixed && return true
-    seed.kind === :recurrence && return grounds.live[first(grounds.recurrences[seed.at].states)]
-    id = seed.at
-    grounds.live[id] && !owned(cx, id) && isstored(cx, id)
-end
+starts(grounds::Grounds, cx::Forming, seed::FixedSeed) = true
+starts(grounds::Grounds, cx::Forming, seed::RecurrenceSeed) = grounds.live[first(grounds.recurrences[seed.at].states)]
+starts(grounds::Grounds, cx::Forming, seed::Union{FoldSeed, MapSeed}) = grounds.live[seed.at] && !owned(cx, seed.at) && isstored(cx, seed.at)
 
 # The kernel formed from `seed` (see `formation`).
-function grown(grounds::Grounds, cx::Forming, seed::Seed, fixed, riders)
-    graph = grounds.graph
-    seed.kind === :fixed && return fixed_group(graph, cx, fixed[seed.at])
-    if seed.kind === :recurrence
-        recurrence = grounds.recurrences[seed.at]
-        g = recurrence_group(graph, cx, recurrence, get(riders, first(recurrence.states), Int[]))
-        # What a recurrence computes at each step is its group's alone: a set
-        # fixed apart holding any of it would be a second kernel writing it.
-        held = filter(m -> owned(cx, m), members(g))
-        isempty(held) || throw(NotAGroup(held))
-        return g
-    end
-    seed.kind === :fold ? grown_fold(grounds, cx, seed.at) : grown_map(grounds, cx, seed.at)
+grown(grounds::Grounds, cx::Forming, seed::FixedSeed, fixed, riders) = fixed_group(grounds.graph, cx, fixed[seed.at])
+grown(grounds::Grounds, cx::Forming, seed::FoldSeed, fixed, riders) = grown_fold(grounds, cx, seed.at)
+grown(grounds::Grounds, cx::Forming, seed::MapSeed, fixed, riders) = grown_map(grounds, cx, seed.at)
+
+function grown(grounds::Grounds, cx::Forming, seed::RecurrenceSeed, fixed, riders)
+    recurrence = grounds.recurrences[seed.at]
+    g = recurrence_group(grounds.graph, cx, recurrence, get(riders, first(recurrence.states), Int[]))
+    # What a recurrence computes at each step is its group's alone: a set
+    # fixed apart holding any of it would be a second kernel writing it.
+    held = filter(m -> owned(cx, m), members(g))
+    isempty(held) || throw(NotAGroup(held))
+    g
 end
 
 # The kernel grown from fold or scan `id`.
