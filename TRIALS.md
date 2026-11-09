@@ -240,6 +240,134 @@ only a workload with a device would hold; the cover's planning. The
 LSTM's 58 to 63 s: bursts 24 to 31 s, most of it waiting on each
 stage's slowest kernel, which cuTile compiles; calibration 9 s; warm 22 s.
 
+The floor, by a system image (PackageCompiler 2.4.5, Julia 1.13.3) holding
+Tempest, its extensions, CUDACore, cuTile, cuBLAS, cuDNN and the array
+packages, compiled with the precompile statements of the GPT step's and the
+LSTM's sessions, cold and warm. Each in a new process, on the shared machine
+under its GPU lock, against the base in the same sitting (instances: those
+Julia compiled in the session, from `--trace-compile`):
+
+| program | base warm, s | image warm, s | instances | Julia's compilation, s |
+|---|---|---|---|---|
+| GPT step | 47.0 | 15.9, 20.2 | 1993 to 242, 227 | 35.0 to 3.8, 4.7 |
+| LSTM | 34.1 | 4.7, 5.6 | 1680 to 132 | 29.9 to 1.6, 1.4 |
+| node, not recorded | 34.5, 31.4 | 9.3, 13.0 | 2161 to 544 | 34.1 to 7.2, 9.3 |
+| heat, not recorded | 20.2, 16.6 | 8.3, 9.0 | 1263 to 452 | 19.6 to 7.6, 8.4 |
+| prepare.jl's programs, not recorded | 39.9, 29.2 | 20.1, 20.6 | 1551 to 831 | 32.2 to 15.0, 15.3 |
+
+`using` falls from 2.7 to 3.5 s to 0.01 s; cold, the GPT step prepares in
+79.7 s and the LSTM in 48.7. On the programs it recorded the image leaves
+the programs' own closures and types; on the others, their shapes, 450 to
+830 instances. The image is not offered, nor a recipe for one: it takes 8.5
+to 11 minutes and 30 GB of memory to build (1530 CPU seconds, a 1.14 GB
+library), again after any change to any package in it, and it does not load
+as built, since KernelAbstractions' OpenCL backend leaves three device
+intrinsics (`julia.opencl.random_keys`, `julia.opencl.random_counters`,
+`julia.gpu.state_getter`) as undefined symbols in the host code; a preloaded
+library defining them stands in, and KernelAbstractions'
+`precompile_workload = false` does not prevent them.
+
+What a warm session compiles, split by what reaches it without a device: the
+same program prepared again in a new process for CUDA without building
+(`build = false`, as cuTile's workload prepares) or prepared and run on the
+CPU. An instance either of those compiles is one a workload without a device
+could hold, missing from the images because no workload's program has this
+program's shapes; the rest are the device paths, the building, binding,
+launching and measuring no workload runs without a device. Seconds of
+Julia's compilation in one warm session, as `--trace-compile` times each
+instance, on the idle twin machine, at 1c3627d and on the branch that
+compiles the compiler's methods once whatever a program's shapes
+(prep-latency at cedaf8e); instances for node and heat, counted on the
+shared machine at 33ebd32 and on the same branch:
+
+| program | tree | all | reached without a device | device paths | of which on device arrays |
+|---|---|---|---|---|---|
+| GPT step | main | 33.0 s | 23.4 s | 9.6 s | 2.8 s |
+| GPT step | branch | 18.0 s | 10.6 s | 7.4 s | 2.1 s |
+| LSTM | main | 22.9 s | 15.7 s | 7.2 s | 2.3 s |
+| LSTM | branch | 17.8 s | 11.0 s | 6.9 s | 2.3 s |
+| node | main | 2114 | 1385 | 729 | 197 |
+| node | branch | 1758 | 1067 | 691 | 185 |
+| heat | main | 1263 | 980 | 283 | 89 |
+| heat | branch | 1119 | 846 | 273 | 87 |
+
+The branch takes 55% of the GPT's seconds reached without a device and 30%
+of the LSTM's, and 23% and 4% of their device paths. The warm sessions
+themselves, there: the GPT step 42.1 s to 25.9 (2053 instances to 1457,
+31.3 s of compilation to 16.5), the LSTM 24.6 to 19.4 (1675 to 1402, 22.3
+to 17.1).
+
+Of the instances compiled again after the images held them, rejected as they
+loaded: 55 (GPT) and 52 (LSTM), counted at 33ebd32; of the 51 and 47 whose
+roots the log names, none has them in Tempest alone, each calling into
+AcceleratedKernels' `mapreduce`, CUDACore's allocation, or Base through
+cuTile's overlays. Loading rejects 3571 instances, 854 of them Tempest's and
+its extensions', with the kernel packages loaded first, as the corpus loads
+them, and 4225, 117 of them Tempest's, with Tempest first, whose code the
+kernel packages then invalidate as they load (a second count, by another
+method: 1436 of Tempest's rejected with the kernel packages first; 420
+rejected and 1478 invalidated with Tempest first). Which a user gets is the
+order of their `using` lines. Measured and left: Tempest's call sites the
+log names typed (`all`, `prod` and `findmin` with `dims`, `findfirst`,
+`convert(String, ...)`, seven files), which took their roots out and raised
+Tempest's rejected instances 885 to 996 (with the statement lists below
+compiled in), since a narrower type routes a value's conversion through
+Base's integer conversions, which cuTile's overlays void. That is Julia's
+doing, in 1.12 and 1.13: a method added to a method table of one's own
+(`Base.Experimental.@overlay`) invalidates compiled code that calls the
+function it overlays on an abstract type, which the overlay never serves.
+Reproduced alone: compile `h(r) = Int64(r[]) + 1` and
+`k(r) = convert(Int32, r[])` for a `Ref{Integer}`, then overlay
+`Int64(x::Bool)` and `Int32(x::Bool)` in a method table of one's own; on
+1.11.9 both stay valid, on 1.12.7 and 1.13.3 both are invalidated. With
+cuTile's integer overlays removed, in a copy outside the checkout, loading
+rejects 2465 rather than 3571, Tempest's 576 rather than 854.
+
+Precompile statements recorded from the sessions, compiled by the extensions
+as they precompile, measured and not adopted. From the GPT's and the LSTM's
+sessions at 33ebd32, the statements naming nothing numbered by a module's
+count and nothing of the program's own: 3753, which cover of the GPT's
+seconds above 8.4 of device paths and 19.1 of its shapes, of the LSTM's 6.5
+and 12.7, and of node's and heat's instances, which they did not record, 571
+and 227 on device paths and 942 and 557 of shapes, for 54 CPU seconds more
+of precompiling the extensions. Kept only where both programs compiled it:
+1180, the GPT's 5.2 and 3.8, the LSTM's 4.1 and 3.6, node's 393 and 323,
+heat's 176 and 168, for 15 CPU seconds. The statements that took the most
+time, to 80% of it: 1283, for 41 CPU seconds, mostly the programs' shapes.
+Closures numbered by their function (`#price!##0#price!##1`) are renamed as
+the function changes; without them the lists cover 5.5 and 3.0 of the GPT's
+device paths, not 8.4 and 5.2. Not adopted, since a list stands in for an
+interface. The device paths dispatch at run time below every entry point (an
+`Executable`'s fields are untyped, its buffers a `Vector{Any}`), so
+precompiling 33 entry points by construction, `execute!`, `replay!`,
+`capture!`, `bind!`, `build_claim` for cuTile's generator and cuBLAS's
+products, `time_launch` for each run, `build_choice`, `prepare`, and
+`upload`, `allocate` and `point_at!` for seven element types, gives the GPT
+step 0.8 s and the LSTM 0.6 (on the branch 0.8 and 0.6; node 23 instances,
+heat 16): a list reaches more only by naming every dispatch it recorded. The
+clean form is a refactor of the runtime: every device operation of a
+prepared program through the Target interface, the kernel packages' building
+and launching written against it (cuTile's module load and `cuLaunchKernel`
+are calls to CUDACore today), buffers taken unspecialized, and a stand-in
+device under the CUDA target, host memory, launches that do nothing, timings
+fixed, for a workload to run every path a session runs. It would reach at
+most the device paths not on device arrays, 6.8 s (GPT) and 4.9 (LSTM), 5.3
+and 4.6 on the branch, node's 532 instances and heat's 194; no workload
+without a device reaches the rest.
+
+Julia keeps ten compiled images of a package
+(`JULIA_MAX_NUM_PRECOMPILE_FILES`), and each environment, each Tempest
+checkout and each set of flags (`--check-bounds`, coverage) needs its own:
+past ten, the one evicted pays a precompile, a minute or more, in its next
+`using`. `using` is 2.7 to 3.5 s on the shared machine: Tempest 0.46, cuBLAS
+0.45, cuTile's extension 0.39, cuBLAS's 0.22, SparseArrays 0.22,
+CUDA_Driver_jll 0.19 (91% of it compiling), GPUArrays 0.18, Pkg 0.15,
+CUDA_Runtime_jll 0.13, CUDACore 0.12, REPL 0.11; Pkg loads for the CUDA
+libraries' lazy artifacts, REPL for GPUCompiler and cuTile. The workloads'
+price at install, on a shared machine: Tempest precompiles in 49 to 101 s
+with its workload and 2.9 s without it, cuDNN's extension in 15 to 28 s and
+2.6.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
