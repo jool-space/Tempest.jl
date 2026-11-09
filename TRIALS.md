@@ -672,11 +672,40 @@ after the other: none wrong. cuDNN's attention shared one handle per
 context the same way, 33 of 1,000 results wrong in 26 of 50 rounds,
 silently; its workspace being each launch's own already, it now executes
 on its task's handle, CUDA.jl's, and none of 1,000 are wrong in 50 rounds.
-What closes cuBLAS's
-is a handle per task and a workspace per executable, which its graphs
-record as they record its buffers; a product is built without knowing
-whose it is, so it waits on implementations being given per-executable
-state as they build, and the tests hold it as a gap until then.
+The test runner's workers have one thread, on which two tasks never call at
+once, so these run in a child process with three
+(`test/fixtures/at_once.jl`); a two-task test inside a worker passes on the
+shared handles. What closes cuBLAS's is a handle per task and a workspace
+per executable, landed together, which the tests held as two gaps until
+then and now pass. An implementation is given what one executable's
+launches share as they build (`Tempest.Compiler.Implement.resources`), made
+through the target as the buffers are, once per executable and once per
+decider for the claims it times; cuBLAS's is the workspace and the
+constants one and zero, and a call sets its task's handle to the task's
+stream and then to its executable's workspace. Two programs' products at
+once from three threads, 100 rounds of 20 calls each, 64 by 64 summing
+16,384 (1.4 MB of the workspace written) and 131,072 (1.6 MB), uncaptured
+and captured: none of 4,000 wrong in any of the four, on GB10 and on the
+RTX 6000 Ada; the graphs of two programs lease no memory in common, and 64
+programs prepared and let go, and a decider, hold no workspace once
+collected. The host's side of a product's launch is unchanged within the
+noise (on GB10, alternating, 6.42 and 6.50 μs before and 6.57 and 6.46
+after; the task's handle 23 ns). The cost is memory: 32 MiB per executable
+with a cuBLAS product where there was one per context, and 32 MiB for a
+preparing decider. A cold GPT preparation (the corpus's small shape)
+measured on the device's pool: its decider holds 125.1 MiB once it has
+decided, as on main, where the context's workspace is made while deciding
+and here the decider's; with the executable built beside it, 203.3 MiB
+against 171.3, the executable's own workspace. Letting go of the decider
+found what held it past its end: a graph captured to time a claim and
+released was kept in CUDAExt's table of what graphs launch until the graph
+was collected and the table next cleaned, which the release had already
+used up the occasion for. A program that never captures again kept its last
+timed claims' launches, and with them the decider's trial buffers, 3 of 3
+in a probe on main, cleaning the table freeing none; a released graph is
+now dropped from the table, and none are held. A captured executable let go
+still keeps its buffers until the next graph is captured, on main and here:
+the table is cleaned only as it is written.
 
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
