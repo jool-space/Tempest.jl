@@ -284,10 +284,26 @@ function ancestors(graph)
 end
 
 """
+What `depends` walks with: the values pending, those covered and those a
+value brings, a mask over the graph's values each, and the kernels looked
+at. One is kept from one walk to the next: allocated at each, they were
+most of the planner's garbage, a graph's worth of bits for each value
+tried.
+"""
+struct DependsWalk
+    pending::BitVector
+    covered::BitVector
+    fresh::BitVector
+    kernels::Set{Int}
+end
+
+DependsWalk(n::Int) = DependsWalk(falses(n), falses(n), falses(n), Set{Int}())
+
+"""
 The kernels formed so far, the kernel that owns each value (zero for none
 yet), each value's ancestors, what each kernel reads, once asked, and what
 each member's term loads, once asked: a group tries many candidates against
-the same members.
+the same members. With them, the walk `depends` reuses.
 """
 struct Dependencies
     owner::Vector{Int}
@@ -297,17 +313,11 @@ struct Dependencies
     # By the term's own hash: an identity dictionary hashes an immutable term
     # by its contents, all of it, at every lookup.
     loads::Dict{Term, Vector{Int}}
-    # What `depends` walks with, a mask over the values each, kept from one
-    # walk to the next: allocated at each, they were most of the planner's
-    # garbage, a graph's worth of bits for each of its values tried.
-    pending::BitVector
-    covered::BitVector
-    fresh::BitVector
-    kernels::Set{Int}
+    walk::DependsWalk
 end
 
-Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}(),
-    falses(length(owner)), falses(length(owner)), falses(length(owner)), Set{Int}())
+Dependencies(owner, groups, up) =
+    Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}(), DependsWalk(length(owner)))
 
 term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads, t)
 
@@ -321,7 +331,7 @@ term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads
 # their operands, so its ancestors cover most of the others.
 function depends(graph, deps::Dependencies, reads, group)
     tally!(:walked)
-    pending, covered, fresh, kernels = deps.pending, deps.covered, deps.fresh, deps.kernels
+    (; pending, covered, fresh, kernels) = deps.walk
     fill!(pending, false)
     fill!(covered, false)
     empty!(kernels)
