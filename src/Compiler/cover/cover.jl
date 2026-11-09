@@ -335,13 +335,12 @@ function cover(d::Decider)
             push!(proposals, (Recompute(v), nothing))
         end
     end
-    stores = Set{Int}()
     for g in base.groups
         isempty(failures(d, base, g)) && !unlowered(d, base, g) && continue
         for v in recomputed_maps(base, g)
-            v in stores && continue
+            Store(v) in proposed && continue
             push!(proposals, (Store(v), nothing))
-            push!(stores, v)
+            push!(proposed, Store(v))
         end
     end
     measures(d) && foreach(v -> push!(proposals, (Ride(v), nothing)), riding_sums(base))
