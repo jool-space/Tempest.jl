@@ -146,9 +146,6 @@ stack_layer(x, (w, b)) = tanh.(w * x .+ b)
 stack_loss(x, layers) = sum(abs2, foldl(stack_layer, layers; init = x))
 stack(L, dev; width = 64) =
     (Tuple((dev(single(data(width, width; scale = 0.1k))), dev(single(data(width; scale = 0.2k)))) for k in 1:L), dev(single(data(width, 16))))
-# The fastest of three runs after one that compiles the Julia side: the
-# tests run in parallel, and a timing shares the host.
-seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
 
 @testset "identical layers cost the same each" begin
     distinct(p) = length(unique(C.canonical(p, g) for g in p.groups))
@@ -206,11 +203,15 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
     function per_layer_plan(L)
         layers, x = stack(L, identity)
         g = C.lower(differentiate(trace(stack_loss, x, layers)))
-        seconds(() -> C.plan(g; recompute = C.recomputable_folds(g))) / L
+        _, counts, _ = C.tallied(() -> C.plan(g; recompute = C.recomputable_folds(g)))
+        Dict(k => counts[k] / L for k in (:tries, :walked, :terms))
     end
     # The planner grows each group from the values that read it, so a layer
-    # costs the same however many precede it.
-    @test per_layer_plan(32) < 2 * per_layer_plan(8)
+    # costs the same however many precede it: the values it tries into
+    # groups, its dependency walks and the terms it builds come to about as
+    # many a layer for 32 layers as for 8 (8.7 tries a layer against 7.9).
+    few, many = per_layer_plan(8), per_layer_plan(32)
+    @test all(k -> many[k] < 2 * few[k], keys(few))
     # Groups alike are decided once, however many layers repeat them.
     function decided(L)
         layers, x = stack(L, identity)
@@ -241,15 +242,18 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
     end
     if CUDA_FUNCTIONAL
         # Proposals alike in the generator's plan are priced once and taken
-        # together: the cover's trials do not grow with the layers. Each trial
-        # plans the whole program, and the planner's dependency check
-        # (`ancestors`, `depends`) still grows faster than the layers.
-        function per_layer_prepare(L)
-            layers, x = stack(L, CuArray)
+        # together: the cover's trials and comparisons do not grow with the
+        # layers, 37 trials for 4 layers and 35 for 16. Each trial plans the
+        # whole program, and the planner's dependency check (`ancestors`,
+        # `depends`) still grows faster than the layers.
+        function cover_work(L)
+            layers, x = stack(L, identity)
             p = differentiate(trace(stack_loss, x, layers))
-            seconds(() -> prepare(p, x, layers; target = T.CUDATarget(), measure = false)) / L
+            _, counts, _ = C.tallied(() -> prepare(p, x, layers; target = T.CUDATarget(), build = false))
+            counts
         end
-        @test per_layer_prepare(16) < 2 * per_layer_prepare(4)
+        shallow, deep = cover_work(4), cover_work(16)
+        @test deep[:trials] <= shallow[:trials] && deep[:compared] <= shallow[:compared]
     end
 end
 
