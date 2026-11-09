@@ -82,8 +82,8 @@ struct NotReplayed <: Exception end
 # The environment's settings that the cover does not read, or reads into
 # the decider's `measure`, which the key holds: every other `TEMPEST_`
 # setting is part of the key, as the generator's product tiles are.
-const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_MEASURE", "TEMPEST_SETTLE", "TEMPEST_REPLAY", "TEMPEST_RATES",
-    "TEMPEST_CALIBRATE", "TEMPEST_GPU_LOCK")
+const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_CROSSCHECK", "TEMPEST_MEASURE", "TEMPEST_SETTLE", "TEMPEST_REPLAY",
+    "TEMPEST_RATES", "TEMPEST_CALIBRATE", "TEMPEST_GPU_LOCK")
 
 read_settings() = sort!([k => v for (k, v) in ENV if startswith(k, "TEMPEST_") && !(k in UNREAD_SETTINGS) && !startswith(k, "TEMPEST_CORPUS")])
 
@@ -328,11 +328,11 @@ function reach!(d::Decider; settle = false)
     stored = key === nothing ? nothing : replayable(d, key)
     stored === nothing && return covered!(d, key; settle = settle && key !== nothing)
     replayed = phase(() -> replay(d, stored), :replay)
-    replayed === nothing || VERIFYING[] || return replayed
+    replayed === nothing || crosschecking() || return replayed
     # The steps replayed are the cover's to plan again.
     empty!(d.stepped)
     found = covered!(d, key; settle)
-    if VERIFYING[]
+    if crosschecking()
         difference = replayed === nothing ? "the plan of the proposals taken" : differs(stored, found.reached)
         difference === nothing || error("decisions replayed differ from the cover's: ", difference)
     end

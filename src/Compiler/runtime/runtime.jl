@@ -140,9 +140,11 @@ device. No claim is timed, and claims are priced on nominal rates.
 
 `verify = true` checks every plan the preparation forms, the cover's trials
 among them, and the storage of the one it runs, throwing where one breaks an
-invariant the kernels rely on (see `Tempest.Compiler.verify`); and decisions
-it replays, against the cover's, which it reaches too. It is the
+invariant the kernels rely on (see `Tempest.Compiler.verify`). It is the
 default where the environment sets `TEMPEST_VERIFY=true`, as the tests do.
+Where it sets `TEMPEST_CROSSCHECK=true`, as the tests do too, decisions a
+preparation replays are checked against those its cover reaches, which it
+reaches as well, at a cover's cost.
 
 A training loop, where the step returns the loss and the new parameters and
 optimizer state:

@@ -5,10 +5,11 @@
 # directory of its own.
 
 # `f()` with the tuning directory a new one, holding the device's rates file
-# where there is a device, and the preparations verifying or not.
-function kept(f; verify = false)
+# where there is a device, and the preparations crosschecking what they
+# replay or not.
+function kept(f; crosscheck = false)
     rates = CUDA_FUNCTIONAL ? C.rates_path(T.CUDATarget()) : nothing
-    withenv("TEMPEST_CACHE" => mktempdir(), "TEMPEST_VERIFY" => string(verify)) do
+    withenv("TEMPEST_CACHE" => mktempdir(), "TEMPEST_CROSSCHECK" => string(crosscheck)) do
         if rates !== nothing && isfile(rates)
             mkpath(C.tuning_directory())
             cp(rates, C.rates_path(T.CUDATarget()))
@@ -48,9 +49,9 @@ mlp(x, w) = sum(abs2, tanh.(w * x) .+ 1)
         r = C.load_reached(basename(only(decisions_files())))
         @test r.settled && r.how === :none && length(r.groups) == length(b.plan.groups)
     end
-    # Verifying, a preparation replays and reaches them by the cover too,
-    # and throws where the two differ.
-    kept(verify = true) do
+    # Crosschecking, a preparation replays and reaches them by the cover
+    # too, and throws where the two differ.
+    kept(crosscheck = true) do
         prepare(trace(mlp, x, w), x, w)
         _, replayed, covered = counted(() -> prepare(trace(mlp, x, w), x, w))
         @test (replayed, covered) == (1, 1)
@@ -379,8 +380,8 @@ if CUDA_FUNCTIONAL
             @test isapprox(only(Array(only(C.leaves(outputs(execute!(b)))))), mlp(x, w); rtol = 1.0e-4)
         end
         # What a preparation measuring close calls settled, one measuring
-        # nothing replays, and verifying, its cover reaches it too.
-        kept(verify = true) do
+        # nothing replays, and crosschecking, its cover reaches it too.
+        kept(crosscheck = true) do
             prepare(trace(mlp, x, w), xs...; measure = :close)
             _, replayed, covered = counted(() -> prepare(trace(mlp, x, w), xs...; measure = :none))
             @test (replayed, covered) == (1, 1)

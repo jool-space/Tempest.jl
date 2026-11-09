@@ -15,8 +15,11 @@ end
 const CUDA_FUNCTIONAL = CUDACore.functional()
 
 # Every plan a preparation forms is verified (see `Tempest.Compiler.verify`),
-# unless the environment says otherwise.
+# and every result reached by a shorter way checked against the whole
+# computation (`Tempest.Compiler.crosschecking`), unless the environment says
+# otherwise.
 get!(ENV, "TEMPEST_VERIFY", "true")
+get!(ENV, "TEMPEST_CROSSCHECK", "true")
 
 # Nothing is measured unless a test asks: the tests share the device with each
 # other and, in CI, with another job, so a close call timed is decided by chance.
