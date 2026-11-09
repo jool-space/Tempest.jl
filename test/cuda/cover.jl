@@ -90,10 +90,16 @@ end
 # Attention's scores and their gradient, each the size of every pair of
 # positions, are recomputed in a training step whose update replaces the
 # projections' weights in place: the projections stay stored, and the cover
-# proposes the folds that read them and takes both, the forward one kernel
-# and the backward of the three gradients another. Decided by estimate,
-# the record measuring nothing; at TF32, where each pays by three halves or
-# more.
+# proposes the folds that read them. By estimate alone, the record measuring
+# nothing, the proposals are made, but whether they are taken rests on the
+# device's calibration, measured in each process, which tips the call either
+# way: one GB10 stored both scores, in 15 kernels, where another recomputed
+# them, in 10, and a smaller fold there by 247 μs against 249. So by
+# estimate only the proposals and agreement are asserted. Measured, at TF32, recomputing pays by three times or so,
+# and both are taken, nothing the size of the scores stored: every
+# comparison measured, since measuring close calls alone keeps an estimate
+# that is no close call, as the forward's 337 μs against 1020 was here, and
+# a calibration that tips it the other way would keep that too.
 @testset "attention's scores are recomputed in a step that replaces its weights" begin
     function step(x, wq, wk, wv)
         heads(w) = reshape(w * x, 64, 4, 1024, 2)
@@ -104,15 +110,17 @@ end
     args = (single(data(256, 2048)), (single(data(256, 256; scale = 0.1)) for _ in 1:3)...)
     p = trace(step, args...)
     target = T.CUDATarget(; precision = :tf32)
-    ex = prepare(p, map(CuArray, args)...; target, measure = :none, replaces = (2 => 2, 3 => 3, 4 => 4))
-    pairs(v) = ex.plan.graph.values[v].dims == (1024, 4, 1024, 2)
-    taken = [c.proposal.value for c in ex.considered if c.proposal isa C.Recompute && c.accepted]
-    @test count(pairs, taken) == 2
-    @test !any(v -> ex.plan.stored[v] && pairs(v), eachindex(ex.plan.graph.values))
-    @test count(g -> length(g.domain) == 5 && g.domain[1:4] == (64, 4, 1024, 2), ex.plan.groups) == 2
-    @test length(ex.kernels) == 10
     reference = filter(!isnothing, C.leaves(interpret(p, args...)))
-    @test agree(filter(!isnothing, C.leaves(outputs(execute!(ex)))), reference; rtol = 1.0e-2)
+    prepared(measure) = prepare(p, map(CuArray, args)...; target, measure, replaces = (2 => 2, 3 => 3, 4 => 4))
+    pairs(ex, v) = ex.plan.graph.values[v].dims == (1024, 4, 1024, 2)
+    recomputes(ex) = [c for c in ex.considered if c.proposal isa C.Recompute && pairs(ex, c.proposal.value)]
+    estimated = prepared(:none)
+    @test length(unique(c.proposal.value for c in recomputes(estimated))) == 2
+    @test agree(filter(!isnothing, C.leaves(outputs(execute!(estimated)))), reference; rtol = 1.0e-2)
+    measured = prepared(:all)
+    @test length(unique(c.proposal.value for c in recomputes(measured) if c.accepted)) == 2
+    @test !any(v -> measured.plan.stored[v] && pairs(measured, v), eachindex(measured.plan.graph.values))
+    @test agree(filter(!isnothing, C.leaves(outputs(execute!(measured)))), reference; rtol = 1.0e-2)
 end
 
 @testset "the search is staged" begin
