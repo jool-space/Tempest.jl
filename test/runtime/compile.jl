@@ -819,11 +819,14 @@ if CUDA_FUNCTIONAL
         # measured close calls replays the decisions it settled: its first
         # result is the measured plan, and there is nothing to search behind
         # it. (A preparation measuring nothing replays those of one measuring
-        # close calls, not every option.)
-        s = compile(f, dw, dx; search = :after, measure = :close)
-        @test s isa T.Searching && wait(s) === s
-        again = compile(f, dw, dx; search = :after, measure = :close)
-        @test again isa T.Compiled && C.same_choices(again.executable, s.compiled.executable) && agrees(again(dw, dx))
+        # close calls, not every option; one that verifies returns the
+        # cover's decisions, which it holds the replayed to.)
+        withenv("TEMPEST_VERIFY" => "false") do
+            s = compile(f, dw, dx; search = :after, measure = :close)
+            @test s isa T.Searching && wait(s) === s
+            again = compile(f, dw, dx; search = :after, measure = :close)
+            @test again isa T.Compiled && C.same_choices(again.executable, s.compiled.executable) && agrees(again(dw, dx))
+        end
         # The first result times nothing, and the search times only in the
         # calls' time, a claim each, and in `wait`, which takes what is left
         # and ends it: a program no other here prepares, its options in no
