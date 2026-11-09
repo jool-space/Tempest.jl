@@ -873,6 +873,59 @@ decisions grow with the program, about 5.5 ms for each of 1,408 options at
 (normalizing affine indices a quarter, its views a tenth); deciding once
 for every kernel alike stands open.
 
+**A trial planned near the plan it changes.** The cover's trials each plan
+the graph with a few of what the planner is given changed, and each formed
+every kernel again: the unrolled RK4 at 32 steps tried 1,734,161 values in
+groups over 248 plans. Forming now reads what is stored and the kernels
+formed so far through a context alone, of five functions (whether a value
+is stored, whether a kernel owns it, whether values depend on a group's
+members, a kernel formed, and the forming of one kernel bracketed); a
+recording context notes what each kernel's forming read, and a plan kept
+with how it formed (`Planned`) is formed again with a change
+(`replanned`), taking each kernel whose noted reads are as they were, asking
+again a dependency walk that what differs leaves in doubt, and forming the
+rest. The cover keeps its starting plan and each plan it takes so, and each
+trial is formed near the plan it changes (65dfd07 to 38538a7). Counted
+before timed: a trial forms again a median of 4 or 5 kernels, of 126 to
+514 in the instances counted; with the test suite's packages loaded, a trial that recomputes a fold
+formed again 107 kernels of 254 at 8 RK4 steps, the kernels after it that
+noted its storage or walked through a kernel formed again, until a walk
+noted the question it was asked and the frontier a kernel grows toward
+passed over what depends on its members (36 on average now). The explanations of the
+fuzzer's first 1,000 seeds (forward and gradient, on both targets), the
+corpus, the families and the twelve large instances are identical, every
+trial of them and of the suite compared with the plan formed whole.
+
+On grizzle, idle, 12 threads, dry on the CPU target, one run each, 772f16b
+against 4a311a3, in seconds (exponent over the last doubling):
+
+| | 4 | 8 | 16 | 32 | |
+|---|---|---|---|---|---|
+| RK4 unrolled steps, 772f16b | | 1.98 | 6.46 | 25.9 | 2.00 |
+| RK4 unrolled steps, 4a311a3 | | 1.20 | 2.84 | 7.16 | 1.33 |
+| its cover's trials, 772f16b | | 0.218 | 1.10 | 5.45 | 2.31 |
+| its cover's trials, 4a311a3 | | 0.060 | 0.173 | 0.852 | 2.30 |
+| its cover's loop, 772f16b | | 0.602 | 3.00 | 15.1 | 2.33 |
+| its cover's loop, 4a311a3 | | 0.160 | 0.613 | 1.96 | 1.68 |
+| GPT layers, 772f16b | 2.76 | 5.20 | 10.3 | 23.3 | 1.17 |
+| GPT layers, 4a311a3 | 1.96 | 3.45 | 6.82 | 13.6 | 0.99 |
+| its cover's trials, 772f16b | 0.228 | 0.505 | 1.09 | 2.94 | 1.43 |
+| its cover's trials, 4a311a3 | 0.062 | 0.203 | 0.275 | 0.449 | 0.71 |
+| its cover's loop, 772f16b | 0.871 | 1.60 | 3.62 | 8.72 | 1.27 |
+| its cover's loop, 4a311a3 | 0.195 | 0.414 | 0.848 | 2.01 | 1.24 |
+
+At 32 RK4 steps the values tried are 18,893 (exponent 0.78, where it was
+1.70), and a kept plan of the GPT step at 32 layers holds 26 MB, 7.4 of
+them how it formed. What grows now is what each trial does whole: it takes
+every kernel it does not form again (503,570 kernels taken at 32 steps,
+exponent 1.72) and orders every kernel of its plan (508,217, exponent
+1.71). Of the replanned trials' 18.3 CPU seconds at 32 RK4 steps, deciding
+what is stored takes 6.9, building the plan from its kernels (what each
+writes, their order) 5.4, the passes' forming and taking 4.1, and the maps
+recomputed where read 1.2; the RK4's trials recompute no fold, and at 32
+GPT layers the 5 of 57 that do take 1.0 of 9.3. Deciding storage and
+building the plan only where a trial changes them is what stands.
+
 Two compiled programs called at once from two tasks, which a search behind
 a program's first result makes the ordinary case, shared the cuBLAS
 extension's one handle and one 32 MiB workspace per context. A product's
