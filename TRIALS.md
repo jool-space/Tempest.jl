@@ -368,6 +368,137 @@ price at install, on a shared machine: Tempest precompiles in 49 to 101 s
 with its workload and 2.9 s without it, cuDNN's extension in 15 to 28 s and
 2.6.
 
+Julia's compilation in a warm preparation, by whose code it is. Two
+programs are prepared one after the other in one process, without the
+device; what the second compiles after the first is what the compiler
+compiles because the program differs, with the second's own code and any
+operation the first never met. Most of it was Base's generic methods
+compiled for the shapes of the compiler's values: `map`, `get!`, `hash`,
+`isequal`, `sort` and comprehensions over a node's inputs (`NTuple{21,
+Int}` in the LSTM), a definition's operands, a term's arguments, an index's
+`Affine`s and the nested tuples of the structural keys; the closures
+capturing them; and the planner's methods for each function and fold,
+through `Pointwise{F}` and `Reduction{F}`.
+
+Taken, in two kinds. Principles at their place: a `Key` that hashes once
+and compares element by element, for the library's tables and lowering's
+alike nodes; definitions without type parameters, the index interpreter
+taking the function and fold through a barrier; pricing by the rates
+table's own function objects; the walkers of the user's nested arguments
+walking tuples by their fields; `phase` taking its work unspecialized.
+Annotations: `@nospecialize` with `@nospecializeinfer` on the functions
+that take an index, a domain's extents or a selection's indices, and on the
+constructors of a node, a term, a definition and the views; operations
+compared by identity; and the reads, positions and member tables collected
+into the element types the code declares. Held back, on branch
+prep-latency as the measured reference: the parallel structures, `elements`
+and `map_elements` where passes walk operands, arguments and inputs, and
+`key_cmp` beside Base's `cmp`; and cuTile's gathered atoms in typed vectors,
+three lines for the emitter's refactor. Instances newly inferred by the
+second program, and Julia's compilation in the GPT's first preparation
+without the device (loaded machine):
+
+| | GPT after LSTM | LSTM after GPT | node after heat | heat after node | GPT compile, s |
+|---|---|---|---|---|---|
+| main | 14,362 | 8,488 | 8,619 | 3,872 | 26.1, 23.9 |
+| principles | 10,421 | 6,352 | 6,040 | 3,454 | 15.7, 17.2 |
+| and annotations | 10,196 | 6,337 | 5,937 | 3,289 | 13.0, 13.4, 12.6 |
+| and element types (taken) | 8,431 | 6,250 | 5,883 | 3,123 | 11.3 |
+| and parallel structures | 6,923 | 5,600 | 5,169 | 2,677 | 10.1, 9.9, 9.5 |
+
+On the idle twin machine, in one sitting at 1c3627d, trace to first
+result, each in a new process (the configuration with the annotations
+without the element types; Julia's compilation in thread-seconds; the
+instances it compiled):
+
+| | main | with the annotations | with the parallel structures |
+|---|---|---|---|
+| GPT step, warm | 40.4, 41.3 s | 30.3, 31.3 s | 28.6, 26.6 s |
+| its compilation | 29.8, 30.8 s; 1917, 1861 | 20.8, 21.2 s; 1555, 1555 | 18.8, 17.0 s; 1397, 1318 |
+| GPT step, cold | 94.1 s | | 78.3 s |
+| LSTM, warm | 23.9, 25.3 s | 19.4, 20.3 s | 21.9, 19.1 s |
+| its compilation | 21.7, 22.9 s | 17.4, 18.2 s | 20.7, 16.9 s |
+| LSTM, cold | 63.2 s | | 70.8 s |
+
+The cold runs differ in what the cover measured and built besides (367
+kernels against 335 for the GPT, 205 against 223 for the LSTM), and the
+first warm run with the parallel structures compiled 5 of the LSTM's. The
+second preparation in the same process, the work once compiled: 10.7 and
+10.3 s on main, 9.0 and 9.0 with the annotations, 8.8 and 8.6 with the
+parallel structures (GPT), 1.8 to 1.9 in all (LSTM). The steps are the
+same: the GPT's 1.087 ms in all three, the LSTM's 5.27, 5.29 and 5.26.
+
+The plans are the same: `explain` is identical to main's on the four
+corpus programs and on 300 fuzzer seeds, program and gradient, on the CPU
+and planned for CUDA.
+
+`test/specialization.jl` asks that a program of three inputs on 5×6,
+traced, differentiated, prepared and run on the CPU after one of two
+inputs on 3×4 with the same functions and ranks, compile no new instance
+of a method defined under src/Compiler/ that had one after the first;
+program/tracing.jl and runtime/, which meet the user's function and
+arrays, are exempt, as are methods the second program meets first. On main
+it finds 13 (the walkers, `phase`, `alike_ops`, `value_term`); on the
+principles alone 3; with the annotations none. It cannot tell the taken
+configuration from one with the parallel structures: their difference is
+Base's methods on larger programs. It covers no extension, no CUDA planning
+and no operation the pair lacks. It needs Julia 1.12, where every method's
+instances are in one table (`Core.methodtable`); on 1.11 each function has
+its own and none lists them all. It counts what a session compiles, not
+what loading rejects.
+
+The clean form of what remains on program-sized tuples, 2,385 of the
+GPT's 8,431, is one type in IR for a sequence the program sizes,
+immutable, its elements in a field typed `Tuple`, so `===` stays
+structural and its hash and text are the tuple's, compiled once per element
+type whatever the length. It is specified and not built: it fits as a
+refactor of the existing types, in nine steps each gated on byte-identical
+plans and keys, and would take about 2,000 of those instances and about 2 s
+of the GPT's first preparation, for every shape including those no
+workload has run. The stand-in Target specified above takes the
+device paths, 4.6 to 6.8 s a warm session, which the type does not; the
+type makes what a workload holds hold for every shape, so the two compose.
+
+Measured and left. Per-module compiler options on the compiler's modules
+and extensions, warm LSTM on the device, trace to prepared: `@optlevel 1`
+25.2 s, `@optlevel 0` 22.2, `@max_methods 1` 28.7, against 24.0 and 25.5
+without; instances rose to 1,144 to 1,182 against 1,015 to 1,027, the
+step and the work once compiled unchanged. A module's options reach only
+the methods it defines, and most of what is compiled is Base's,
+specialized on Tempest's types. `infer=false`: precompilation fails,
+because a fold's state type is inferred (`fold_types`, `Base.promote_op`).
+`compile=min` on the compiler's modules, dry, one sitting: the GPT's first
+preparation 28.4 s against 31.1, 21.1 s of compilation against 24.9; the
+LSTM's 13.5 against 15.4; the second preparation, Tempest's code now
+interpreted, 10.2 s against 9.7 (GPT) and 0.69 against 0.52 (LSTM). It
+saves 2 to 4 s of compilation at 0.2 to 0.5 s of work. It is an option for
+the user, not taken: Julia lets no submodule turn it off, and the module
+the generated kernels are evaluated into is under the compiler's, so
+CPU-target kernels would run interpreted. It needs the planner in a module
+apart from the one kernels are generated into. The tracer's broadcast
+walkers with `@nospecializeinfer`, tried and reverted: the result of
+`copy` on a traced broadcast stops being concrete, the user's function is
+inferred with the branch that materializes the broadcast live, and
+inference under the user's call grew from 103 instances to 179 in the CPU
+pair. The tracer meets the user's types by design, and the precision of the
+user's inference is worth more than the walkers' instances.
+
+What remains of the GPT's 8,431 after the LSTM. The user's own code under
+tracing, the model's functions on traced arrays and the corpus's harness:
+about 2,900 instances, 1.5 to 2 s. Tracing must compile it, the trace being
+the user's function run on Tempest's types; only an interpreter for the
+traced call would not. An estimate, not built: the GPT step's trace runs
+about a thousand traced operations, each a few dozen statements of the
+user's, at microseconds a statement interpreted, well under a second
+against 1.5 to 2 s, though the Base broadcast and indexing calls it reaches
+are compiled at their dynamic dispatch all the same. The compiler's code on
+program-sized tuples, 2,385, the sequence type's. The compiler's code
+compiled once whatever the shape, 1,610, and cuTile's emitters, 1,401 (565
+by a tile's rank, bounded, so a workload over ranks 1 to 4 holds them): a
+workload's. Pricing by the table's functions, 132, bounded. A system image
+holding these programs' own warm runs leaves 132 instances on the LSTM and
+242 on the GPT.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
