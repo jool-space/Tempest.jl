@@ -27,13 +27,11 @@ end
 
 decisions_files() = (dir = joinpath(C.tuning_directory(), "decisions"); isdir(dir) ? readdir(dir; join = true) : String[])
 
-# Decisions as kept, changed by `change(fields)`, a named tuple of a
-# `Reached`'s fields, and kept again.
-function rekeep(change, path)
-    r = C.load_reached(basename(path))
-    fields = change(NamedTuple{fieldnames(C.Reached)}(map(n -> getfield(r, n), fieldnames(C.Reached))))
-    C.store_reached(C.Reached(fields...))
-end
+# Decisions as a named tuple of their fields.
+fields(r) = NamedTuple{fieldnames(C.Reached)}(map(n -> getfield(r, n), fieldnames(C.Reached)))
+
+# Decisions as kept, changed by `change(fields)`, and kept again.
+rekeep(change, path) = C.store_reached(C.Reached(change(fields(C.load_reached(basename(path))))...))
 
 mlp(x, w) = sum(abs2, tanh.(w * x) .+ 1)
 
@@ -205,6 +203,27 @@ end
     end
 end
 
+@testset "a preparation measuring nothing replays the settled decisions of one measuring close calls" begin
+    x, w = data(8, 4), data(8, 8)
+    kept() do
+        prepare(trace(mlp, x, w), x, w)
+        path = only(decisions_files())
+        d = C.Decider(T.CPUTarget(), C.rewrite(C.lower(trace(mlp, x, w)); rounded = C.rounded_backward(T.CPUTarget())))
+        @test C.decisions_key(d) == basename(path)
+        whole = fields(C.load_reached(basename(path)))
+        # Its own unsettled, it replays only those kept as a decider
+        # measuring close calls would keep them, not every option.
+        rekeep(r -> merge(r, (; settled = false)), path)
+        for (level, replays) in ((:close, true), (:all, false))
+            key = C.decisions_key(d; measure = level)
+            C.store_reached(C.Reached(merge(whole, (; key, how = level))...))
+            _, replayed, covered = counted(() -> prepare(trace(mlp, x, w), x, w))
+            @test (replayed, covered) == (replays ? (1, 0) : (0, 1))
+            rm(joinpath(dirname(path), key))
+        end
+    end
+end
+
 @testset "a table in memory holds what its file reads back" begin
     # The record and the rates file have one writer, `keep!`: what it keeps,
     # whatever a target's timer returned, a decider in another process reads
@@ -279,6 +298,13 @@ if CUDA_FUNCTIONAL
             @test (isfile(record) ? countlines(record) : 0) == lines
             @test sprint(explain, a) == sprint(explain, b)
             @test isapprox(only(Array(only(C.leaves(outputs(execute!(b)))))), mlp(x, w); rtol = 1.0e-4)
+        end
+        # What a preparation measuring close calls settled, one measuring
+        # nothing replays, and verifying, its cover reaches it too.
+        kept(verify = true) do
+            prepare(trace(mlp, x, w), xs...; measure = :close)
+            _, replayed, covered = counted(() -> prepare(trace(mlp, x, w), xs...; measure = :none))
+            @test (replayed, covered) == (1, 1)
         end
     end
 end

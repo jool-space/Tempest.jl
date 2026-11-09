@@ -102,13 +102,15 @@ precompiles, whose workload is to compile the cover, with nowhere to keep
 them, or for an implementation outside any package, whose claims are
 methods the key cannot name.
 """
-function decisions_key(d::Decider)
-    parts = key_parts(d)
+function decisions_key(d::Decider; measure = d.measure)
+    parts = key_parts(d; measure)
     parts === nothing ? nothing : content_key(parts...)
 end
 
-# What `decisions_key` hashes, or nothing.
-function key_parts(d::Decider)
+# What `decisions_key` hashes, or nothing: the decider's, at measure level
+# `measure`, as a decider measuring nothing looks up those of one that
+# measured close calls (see `replayable`).
+function key_parts(d::Decider; measure = d.measure)
     dir = tuning_directory()
     (dir === nothing || ccall(:jl_generating_output, Cint, ()) == 1) && return nothing
     implemented = Implementation[implementations(d.target)..., loaded_implementations()...]
@@ -117,9 +119,9 @@ function key_parts(d::Decider)
     packages = sort!(unique(filter(!isnothing, [package_module(package_name(i)) for i in implemented])); by = string)
     # Tempest's extensions loaded, whose methods are part of what claims and lowers.
     extensions = sort!([string(nameof(m)) for m in Base.loaded_modules_array() if m !== ROOT && own_root(m)])
-    device = d.measure === :dry ? nothing : device_name(d.target)
+    device = measure === :dry ? nothing : device_name(d.target)
     ("decisions", REACHED_SCHEMA, g.values, g.arguments, g.results, g.result_dims, g.result_scalar, g.result_eltype,
-        collect(g.backward), sort!(collect(d.pinned)), sort!(collect(d.kept)), sort!(collect(d.rides)), d.steps, d.measure,
+        collect(g.backward), sort!(collect(d.pinned)), sort!(collect(d.kept)), sort!(collect(d.rides)), d.steps, measure,
         d.measurable, d.target, device, d.rates, loaded_implementations(), packages, extensions, read_settings())
 end
 
@@ -214,14 +216,27 @@ settled(r::Reached, d::Decider) = Reached(r.key, r.how, !written(d.record) && !w
 """
     replayable(d, key) -> Reached or nothing
 
-The decisions kept under `key` that decider `d` may replay: settled, and the
-record and the rates file it reads holding what they rested on, no claim
-having failed to build in this preparation.
+The decisions decider `d` may replay, kept under its `key` or, for a
+decider that measures nothing, under the key it would have measuring close
+calls, which it prefers: settled, and the record and the rates file it reads
+holding what they rested on, no claim having failed to build in this
+preparation.
+
+A cover that measures nothing reaches what a settled cover measuring close
+calls reached, on the record that cover left: the two read the record alike
+(`measured_ranks`, `refuted`, `choose`, `expand!`, `compare`), and differ in
+the measuring alone, which wrote nothing, and in the searches ahead of the
+decisions, whose groups the cover measuring nothing decides too. One
+measuring every option is not so replayed: it measured options a decision
+stands by the estimate against.
 """
 function replayable(d::Decider, key)
     isempty(d.failed) || return nothing
-    r = load_reached(key)
-    r !== nothing && r.settled && r.how === d.measure && holds(d.record, r.record) && holds(d.calibration, r.calibration) ? r : nothing
+    for level in (d.measure === :none ? (:close, :none) : (d.measure,))
+        r = load_reached(level === d.measure ? key : decisions_key(d; measure = level))
+        r !== nothing && r.settled && r.how === level && holds(d.record, r.record) && holds(d.calibration, r.calibration) && return r
+    end
+    nothing
 end
 
 """
@@ -263,9 +278,10 @@ verifies reaches its decisions by the cover too, and throws where the two
 differ.
 """
 function reach!(d::Decider; settle = false)
-    key = decisions_key(d)
     within = REPLAYING[]
     if within !== nothing
+        # A step's decisions, keyed as the decisions replayed were reached.
+        key = decisions_key(d; measure = within.how)
         i = findfirst(s -> first(s) == key, within.steps)
         i === nothing && throw(NotReplayed())
         step = last(within.steps[i])
@@ -273,6 +289,7 @@ function reach!(d::Decider; settle = false)
         replayed === nothing && throw(NotReplayed())
         return (replayed..., step)
     end
+    key = decisions_key(d)
     stored = key === nothing ? nothing : replayable(d, key)
     stored === nothing && return covered!(d, key; settle = settle && key !== nothing)
     replayed = phase(() -> replay(d, stored), :replay)
