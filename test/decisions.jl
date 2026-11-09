@@ -169,18 +169,23 @@ seconds(f) = (f(); minimum(_ -> (t = time(); f(); time() - t), 1:3))
     @test all(gs -> floor_keys(gs[1]) == floor_keys(gs[2]), repeated)
     if CUDA_FUNCTIONAL
         # A kernel is loaded or compiled once per key, however many groups
-        # share it: a cold prepare builds at most one per distinct group.
-        # The generator's trials of the functions it lowers (`lowers`) are
-        # kernels of their own, one a function, and not the program's.
+        # share it: a cold prepare builds at most the kernels its distinct
+        # groups launch, whichever claim each takes, one kernel or several,
+        # as a product whose sum is split launches its partial states and
+        # their merge. On the generator alone each group is its or the
+        # floor's, and lists its kernels. The generator's trials of the
+        # functions it lowers (`lowers`) are kernels of their own, one a
+        # function, and not the program's.
         layers, x = stack(8, CuArray)
         p = differentiate(trace(stack_loss, x, layers))
         trials() = length(Base.get_extension(Tempest, :cuTileExt).LOWERED)
         before, tried = C.cache_counts(), trials()
-        ex = prepare(p, x, layers; target = T.CUDATarget(), measure = false)
+        ex = prepare(p, x, layers; target = T.CUDATarget(T.cuTileGenerator()), measure = false)
         after = C.cache_counts()
         built = (after.compiled - before.compiled) + (after.loaded - before.loaded) - (trials() - tried)
+        launched = Dict(C.canonical(ex.plan, g) => length(k.kernels) for (g, k) in zip(ex.plan.groups, ex.kernels))
         @test built > 0
-        @test built <= distinct(ex.plan)
+        @test built <= sum(values(launched))
         # A fold's state is named by its place in the group, and a
         # commutative function's operands are ordered by where they read
         # before what, so layers alike plan and build alike however their
