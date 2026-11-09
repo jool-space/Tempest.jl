@@ -96,14 +96,16 @@ function rk4(n)
 end
 
 @testset "a trial forms again only the kernels its proposals reach" begin
-    # Twice the steps, twice the trials. Each trial formed every kernel when
-    # it planned the whole graph, and the values tried grew four times:
-    # 127,841 at 4 steps and 521,467 at 8, with the test's packages loaded.
-    # Formed near the plan it changes, a trial forms again a median of 5
-    # kernels of 126 and of 255, and the values tried are 9,780 and 28,602:
-    # a trial that recomputes a fold forms again the kernels after it that
-    # looked at whether it was stored. Not verified, which plans each trial
-    # whole as well.
+    # A trial formed near the plan it changes takes as they were the kernels
+    # its proposals do not reach: of the kernels its passes hold, about 20
+    # taken for each formed again, at 4 steps as at 8, with the test's
+    # packages loaded; planning each trial whole took none. This is the
+    # guard. Twice the steps, twice the trials: the values tried, which grew
+    # four times planned whole (127,841 at 4 steps, 521,467 at 8), grow 2.9
+    # times (9,780 and 28,602), a trial that recomputes a fold forming again
+    # the kernels after it that looked at whether it was stored. The ratio is
+    # the weaker check of the two, its margin to planning whole thin. Not
+    # verified, which plans each trial whole as well.
     function tried(n)
         q, args = rk4(n)
         _, counts, _ = withenv("TEMPEST_REPLAY" => "false") do
@@ -112,9 +114,8 @@ end
         counts
     end
     four, eight = tried(4), tried(8)
-    @test eight[:tries] < 3.5 * four[:tries]
-    # Of the kernels the passes hold, all but one in ten taken as formed.
     @test four[:reused] > 9 * four[:formed] && eight[:reused] > 9 * eight[:formed]
+    @test eight[:tries] < 3.5 * four[:tries]
 end
 
 @testset "from several tasks, nothing is lost" begin
