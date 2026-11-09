@@ -105,6 +105,10 @@ struct Node
     eltype::DataType
     # A Julia number rather than an array, as `sum(x)` returns one.
     scalar::Bool
+    # Compiled once, whatever the operation, its function and the node's
+    # numbers of inputs and axes.
+    Base.@nospecializeinfer Node(@nospecialize(op), @nospecialize(inputs), @nospecialize(dims), eltype, scalar) =
+        new(op, inputs, dims, eltype, scalar)
 end
 
 mutable struct Tape
@@ -313,38 +317,40 @@ end
 # The walkers take the structure unspecialized and walk tuples by their
 # fields: the structure is the program's, and Base's `map` and `foreach` on
 # it would compile again for every model's (see `map_elements`).
-leaves(@nospecialize(x)) = leaves!(Any[], x)
-function leaves!(out, @nospecialize(x::Union{Tuple, NamedTuple}))
+Base.@nospecializeinfer leaves(@nospecialize(x)) = leaves!(Any[], x)
+Base.@nospecializeinfer function leaves!(out, @nospecialize(x::Union{Tuple, NamedTuple}))
     for k in 1:nfields(x)
         leaves!(out, getfield(x, k))
     end
     out
 end
-leaves!(out, @nospecialize(x::Fields)) = leaves!(out, x.fields)
-leaves!(out, @nospecialize(x)) = nested(x) ? leaves!(out, fields(x)) : push!(out, x)
+Base.@nospecializeinfer leaves!(out, @nospecialize(x::Fields)) = leaves!(out, x.fields)
+Base.@nospecializeinfer leaves!(out, @nospecialize(x)) = nested(x) ? leaves!(out, fields(x)) : push!(out, x)
 
 # `g` on each element of a tuple or named tuple, its names kept.
-each(g, @nospecialize(x::Tuple)) = map_elements(g, x)
-each(g, @nospecialize(x::NamedTuple)) = NamedTuple{keys(x)}(map_elements(g, values(x)))
+Base.@nospecializeinfer each(g, @nospecialize(x::Tuple)) = map_elements(g, x)
+Base.@nospecializeinfer each(g, @nospecialize(x::NamedTuple)) = NamedTuple{keys(x)}(map_elements(g, values(x)))
 
 # `x` with `f` applied to each leaf, structs built anew from their fields.
-rebuild(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> rebuild(f, y), x)
-rebuild(f, @nospecialize(x::Fields)) = construct(typeof(x).parameters[1], rebuild(f, x.fields))
+Base.@nospecializeinfer rebuild(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> rebuild(f, y), x)
+Base.@nospecializeinfer rebuild(f, @nospecialize(x::Fields)) = construct(typeof(x).parameters[1], rebuild(f, x.fields))
+# A leaf is inferred for the value it is given, so a scalar function written
+# through `rebuild`, as `stopgrad` is, has the result type `promote_op` finds.
 rebuild(f, @nospecialize(x)) = nested(x) ? construct(typeof(x), rebuild(f, fields(x))) : f(x)
 
 # The structure of `x`, `f` applied to each leaf: as `rebuild`, with structs as `Fields`.
-structure_of(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> structure_of(f, y), x)
-structure_of(f, @nospecialize(x::Fields)) = Fields{typeof(x).parameters[1]}(structure_of(f, x.fields))
+Base.@nospecializeinfer structure_of(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> structure_of(f, y), x)
+Base.@nospecializeinfer structure_of(f, @nospecialize(x::Fields)) = Fields{typeof(x).parameters[1]}(structure_of(f, x.fields))
 structure_of(f, @nospecialize(x)) = nested(x) ? Fields{typeof(x)}(structure_of(f, fields(x))) : f(x)
 
 # As `structure_of`, with each struct a named tuple of its fields: the structure
 # of a gradient, which has no value for a struct's other fields.
-tangent(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> tangent(f, y), x)
-tangent(f, @nospecialize(x::Fields)) = tangent(f, x.fields)
+Base.@nospecializeinfer tangent(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> tangent(f, y), x)
+Base.@nospecializeinfer tangent(f, @nospecialize(x::Fields)) = tangent(f, x.fields)
 tangent(f, @nospecialize(x)) = nested(x) ? tangent(f, fields(x)) : f(x)
 
 # Each of the program's arguments among `inputs`, given in the structure it was traced with.
-function argument_leaves(p, @nospecialize(inputs))
+Base.@nospecializeinfer function argument_leaves(p, @nospecialize(inputs))
     positions = leaves(p.input_structure)
     xs = leaves(inputs)
     length(positions) == length(xs) || throw(ArgumentError("the program takes $(length(positions)) leaves, got $(length(xs))"))

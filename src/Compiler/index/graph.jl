@@ -46,7 +46,7 @@ a commutative `f` are kept in one order, so that spelling does not change the va
 struct Pointwise <: Definition
     f::Any
     operands::Tuple{Vararg{Operand}}
-    function Pointwise(f, operands)
+    Base.@nospecializeinfer function Pointwise(@nospecialize(f), @nospecialize(operands))
         commutative(f) && (operands = Tuple(sort(collect(Operand, operands); by = operand_key)))
         new(f, operands)
     end

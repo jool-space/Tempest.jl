@@ -24,11 +24,14 @@ function slid(a::Select, b::Select)
     i, j = a.indices[only(differ)], b.indices[only(differ)]
     i isa Integer && j isa Integer && abs(i - j) == 1 ? only(differ) : nothing
 end
-slid(a, b) = nothing
+Base.@nospecializeinfer slid(@nospecialize(a), @nospecialize(b)) = nothing
 
 # Operations alike in a loop's steps: one, selections one index apart, or
 # constants of one value, as an array the loop captures is copied at each use.
-alike_ops(a, b) = typeof(a) === typeof(b) && (isequal(a, b) || slid(a, b) !== nothing || a isa Constant && isequal(a.value, b.value))
+# Compiled once, whatever the operations' functions: an operation is equal to
+# another when it is the same, as no operation defines its own equality.
+Base.@nospecializeinfer alike_ops(@nospecialize(a), @nospecialize(b)) =
+    typeof(a) === typeof(b) && (a === b || slid(a, b) !== nothing || a isa Constant && isequal(a.value, b.value))
 
 "Whether nodes `m` and `n`, `p` apart, are the same up to renaming, as a loop's are."
 function alike_nodes(m::Node, n::Node, p)

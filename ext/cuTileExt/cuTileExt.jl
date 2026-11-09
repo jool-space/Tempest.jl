@@ -220,7 +220,7 @@ read at its position plus a constant, so that the view ends at the value's
 extent: a load reads padding past it, and a store drops what lies there.
 Nothing when an axis read past the extent is not so.
 """
-function view_limits(g::GroupView, v, index, groups)
+Base.@nospecializeinfer function view_limits(g::GroupView, v, @nospecialize(index), @nospecialize(groups))
     limits = zeros(Int, length(groups))
     val = g.values[v]
     (val.scalar || isempty(val.dims)) && return limits
@@ -245,7 +245,7 @@ end
 # grid, one index per block: the address may depend on them through any
 # formula, which becomes the view's offset per block, as does the part of the
 # address over such a group that does not chain.
-function view_of(g::GroupView, v, index, groups...; scalar = ())
+Base.@nospecializeinfer function view_of(g::GroupView, v, @nospecialize(index), @nospecialize(groups...); scalar = ())
     domain = Domain(g.domain)
     limits = view_limits(g, v, index, groups)
     limits === nothing && return nothing

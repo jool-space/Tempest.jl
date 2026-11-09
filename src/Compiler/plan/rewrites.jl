@@ -298,7 +298,7 @@ end
 # so from the projection they reshape, matched no axis of the features, and
 # its attention's backward summed the probabilities' gradient over the keys,
 # as large as the scores, rather than the output's over the features.
-function matched_axes(gs, fs, iteration, extents)
+Base.@nospecializeinfer function matched_axes(gs, fs, @nospecialize(iteration), @nospecialize(extents))
     function match(i, σ, used)
         if i > length(gs)
             all(!iszero, σ) && allunique(σ) && all(k -> iteration[k] == extents[σ[k]], eachindex(σ)) || return nothing
@@ -354,7 +354,7 @@ end
 
 # Sum `r` exchanged: the factors left outside and the sum read, over the
 # exchanged domain's kept axes, summed over those the inner sum reduced.
-function exchanged!(b::Builder, graph, r, e)
+Base.@nospecializeinfer function exchanged!(b::Builder, graph, r, @nospecialize(e))
     v = graph.values[r]
     dims = map(k -> e.extents[k], e.kept)
     domain = Domain(dims)

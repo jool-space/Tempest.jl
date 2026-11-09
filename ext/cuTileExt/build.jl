@@ -415,7 +415,7 @@ end
 # weigh nothing. Then each sum adds its terms. In its plane, the fold's
 # weights and what lies in it are matrices (see `plane`), and the weights
 # are also a tile over the tiling for what reads them there.
-function sum_step!(k, st, c::Context, f, body, sums, acc, scope, valid, indices, p)
+Base.@nospecializeinfer function sum_step!(k, st, c::Context, f, body, @nospecialize(sums), acc, scope, valid, indices, p)
     # Tiles that cover the swept axis exactly have no lanes past it.
     c.s.tiling[p].extent % c.s.tiling[p].tile == 0 && (valid = nothing)
     P = step_plane(c, f, body, p)

@@ -99,9 +99,9 @@ delinearize(linear, dims, d::Domain) = map((n, stride) -> fmod(fdiv(linear, stri
 # expressions over the node's domain. `held(i, axis, extent)` is the index
 # that index array `i` of a selection holds where its axes are the node's from
 # `axis + 1` on, and how many axes it has.
-layout_index(::Reshape, dims, parentdims, d, held) = delinearize(linear_index(dims, d), parentdims, d)
+Base.@nospecializeinfer layout_index(::Reshape, @nospecialize(dims), @nospecialize(parentdims), d, held) = delinearize(linear_index(dims, d), parentdims, d)
 
-function layout_index(op::Permute, dims, parentdims, d, held)
+Base.@nospecializeinfer function layout_index(op::Permute, @nospecialize(dims), @nospecialize(parentdims), d, held)
     index = Vector{Affine}(undef, length(parentdims))
     for (k, p) in enumerate(op.perm)
         index[p] = var(k)
@@ -109,7 +109,7 @@ function layout_index(op::Permute, dims, parentdims, d, held)
     Tuple(index)
 end
 
-function layout_index(op::Select, dims, parentdims, d, held)
+Base.@nospecializeinfer function layout_index(op::Select, @nospecialize(dims), @nospecialize(parentdims), d, held)
     index = Vector{Affine}(undef, length(op.indices))
     axis = 0
     for (p, i) in enumerate(op.indices)

@@ -152,7 +152,7 @@ varies(graph, g::Group, t::Term, a) = any(subterms((t,); nested = true)) do s
 end
 
 "The iteration index of fold `d` read at `index`, its value's index, with `inner[j]` along its `j`th reduced axis."
-iteration_index(d::Reduction, index, inner) = ntuple(length(d.iteration)) do k
+Base.@nospecializeinfer iteration_index(d::Reduction, @nospecialize(index), @nospecialize(inner)) = ntuple(length(d.iteration)) do k
     j = findfirst(==(k), d.reduced)
     j === nothing ? index[k - count(<(k), d.reduced)] : inner[j]
 end
@@ -167,7 +167,7 @@ so a value read twice is one subterm, and built again at every path to it,
 a chain of maps each reading the last twice would take time doubling with
 each map.
 """
-function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain), memo = Dict{Any, Term}())
+Base.@nospecializeinfer function value_term(graph, stored, g::Group, v, @nospecialize(index), domain = Domain(g.domain), memo = Dict{Any, Term}())
     key = (v, index, domain)
     haskey(memo, key) && return memo[key]
     memo[key] = built_term(graph, stored, g, v, index, domain, memo)

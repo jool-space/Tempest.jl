@@ -44,7 +44,7 @@ functions here of finite arguments, which an overflow could make infinite,
 so that a program whose unmasked positions overflow computes a different
 nothing here.
 """
-function masked_result(f, T, args)
+Base.@nospecializeinfer function masked_result(@nospecialize(f), T, @nospecialize(args))
     any(isnothing, args) && return nothing
     all(a -> a isa Number, args) && return f isa Cast ? convert(T, only(args)) : f === ifelse ? nothing : f(args...)
     known = [a for a in args if a isa Number]

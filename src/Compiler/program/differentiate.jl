@@ -486,7 +486,7 @@ may_repeat(n::Node) = n.op isa Constant ? !allunique(n.op.value) : prod(n.dims; 
 # A selection of whole axes, each by a constant permutation or as it is, has
 # the selection by the inverse permutations as its adjoint: a gather, which
 # fuses, where a scatter would not. Nothing for any other selection.
-function inverse_selection(op, n, g, tape)
+Base.@nospecializeinfer function inverse_selection(@nospecialize(op), n, g, tape)
     x = tape.nodes[first(n.inputs)]
     length(op.indices) == length(x.dims) && n.dims == x.dims || return nothing
     inputs = [g.id]

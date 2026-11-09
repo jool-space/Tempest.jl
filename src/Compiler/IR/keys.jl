@@ -18,7 +18,7 @@ every shape of parts.
 struct Key
     parts::Any
     hash::UInt
-    Key(@nospecialize(parts)) = new(parts, parts_hash(parts, 0x6b43a9b5f2e1d087))
+    Base.@nospecializeinfer Key(@nospecialize(parts)) = new(parts, parts_hash(parts, 0x6b43a9b5f2e1d087))
 end
 
 Base.hash(k::Key, h::UInt) = hash(k.hash, h)

@@ -35,6 +35,11 @@ struct ValueView
     scan::Union{Nothing, @NamedTuple{reverse::Bool, exclusive::Bool}}
     masked::Union{Nothing, Tuple{Vector{Affine}, Any}}
     carried::Union{Nothing, @NamedTuple{axis::Int, from::Term, reverse::Bool}}
+    # Compiled once, whatever the rank of the value and the type of its terms.
+    Base.@nospecializeinfer function ValueView(eltype, @nospecialize(dims), scalar, stored, @nospecialize(fold), @nospecialize(reduced), keyed,
+            @nospecialize(into), @nospecialize(scan), @nospecialize(masked), @nospecialize(carried))
+        new(eltype, dims, scalar, stored, fold, reduced, keyed, into, scan, masked, carried)
+    end
 end
 
 """
@@ -69,10 +74,15 @@ struct GroupView
     placement::Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}
     bytes::Float64
     reference::Any
+    # Compiled once, whatever the rank of the group's domain.
+    Base.@nospecializeinfer function GroupView(kind, @nospecialize(domain), reductions, outputs, terms, phase, @nospecialize(primary_axes),
+            values, placement, bytes, @nospecialize(reference))
+        new(kind, domain, reductions, outputs, terms, phase, primary_axes, values, placement, bytes, reference)
+    end
 end
 
 "A group of no members over `domain`, reading `values`: where a recomputed fold's body runs."
-GroupView(kind::Symbol, domain, values) = GroupView(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}(),
+Base.@nospecializeinfer GroupView(kind::Symbol, @nospecialize(domain), values) = GroupView(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}(),
     (), values, Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}(), 0.0, nothing)
 
 "The values a group computes, its folds first."
