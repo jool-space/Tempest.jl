@@ -428,7 +428,8 @@ capturing its graph, an internal cuBLAS error, twice). The LSTM at batch 64,
 optimizer step). test/bench/gpt.jl's step, 1.19 ms and 70 s cold, against
 the same model under `torch.compile` captured as a graph, 1.31 ms; at GPT-2
 124M's geometry, batch 4, 878 ms and 224 s cold, against 264 ms, and since
-the GPT-2 step's entry 190.7 ms and 188 s cold, against 264.6. The heat
+the GPT-2 step's entry 190.7 ms and 188 s cold, against 264.6, then 189.9 ms
+and 186 s, against 264.1. The heat
 equation on a 256×256 grid, its steps `accumulate`d so that they roll: 1.89
 s at 100 steps and 18.9 s at 1000, against 0.34 and 3.6 ms for a kernel a
 step in CUDA.jl, both recurrences of the gradient on the floor; written as a
@@ -528,12 +529,77 @@ the same weight's sign. The small shape, whose update replaces its weights
 too, recomputes its scores as well: 1.18 to 1.10 ms a step, 178 to 158
 kernels, and cold preparation 78 to 100 s, its agreement unchanged.
 
+Then the parts left were taken in turn. By the corpus in one session, SM
+clocks 2463 to 2483 MHz, each kernel timed alone and summed by part as
+above, the roofline fraction the after's:
+
+| part | ms, before | ms, after | roofline fraction | implementation |
+|---|---|---|---|---|
+| head's softmax, the cross-entropy and its gradient | 12.4 | 9.5 | 0.75 | cuTile online softmax, steps of 8192 rows |
+| head's three products | 28.3 | 28.0 | 0.79 | cuBLAS |
+| FFN products and SwiGLU, backward | 49.6 | 49.4 | 0.66 | cuBLAS, cuTile with the SwiGLU's gradient |
+| FFN products, forward | 20.9 | 20.8 | 0.78 | cuTile (gate and up as one), cuBLAS |
+| attention, backward | 13.7 | 13.6 | 0.37 fused | cuTile |
+| attention, forward | 3.8 | 3.7 | 0.81 | cuTile |
+| QKV and output products, backward | 15.3 | 14.4 | 0.89 | cuBLAS, cuTile |
+| QKV and output products, forward | 6.3 | 6.2 | 1.03 | cuBLAS |
+| Adam, 111 kernels | 19.1 | 19.2 | 1.00 | cuTile |
+| RMSNorm, rotary, embedding's scatter | 15.2 | 15.4 | 1.0 to 1.7 | cuTile |
+| step, kernels summed / captured graph | 185.0 / 194.8 | 180.4 / 189.9 | | |
+
+Taken: a streamed column whose kernel sweeps it again after its folds, as
+the cross-entropy's gradient sweeps the logits after their log-sum-exp,
+offers steps of 4096, 8192 and 16384 rows beside its 1024 for measurement
+(`column_variants`, `ext/cuTileExt/cuTileExt.jl`): blocks holding longer
+steps are fewer at once, and the second sweep finds in L2 what the first
+read. Over GPT-2's 50257 logits and 4096 columns, alone: 12.4 ms stepping
+1024 rows, 11.7 stepping 4096, 9.1 stepping 8192, 9.0 stepping 16384 and
+10.3 stepping 32768, against 7.2 for one read and one write; tileiras's
+occupancy of one or two, and blocks taking 22 to 86 columns in turn, moved
+it by less than a millisecond. The cover takes 8192, 8.8 ms (9.5 timed
+alone in the step, written over the logits it reads; see below). The step
+takes 189.9 ms against 194.8, `torch.compile`'s 264.1 captured as a graph,
+265.1 without and eager 356.5, so 0.72 of its time; 490 kernels against
+466, the count moving between preparations where the cover's measured
+comparisons fall within the noise, as the attention step at 2048 positions
+does too (four kernels on fresh records, once three); cold preparation 186
+s, warm 69. Checked by its layer at batch 1 against Float64, the loss to
+1.5e-6 and the worst output 6.0e-2, the same weight's sign. The attention
+benches beside it on fresh records (BFloat16, causal, 64 features, 8 heads,
+batch 2), before and after: the forward 41.3 and 41.2 μs at 1024 positions
+and 124.5 and 123.7 at 2048, the step at 2048 596.4 and 601.9; the small
+shape 1.09 and 1.11 ms a step, 158 and 162 kernels, its agreement
+unchanged.
+
+Measured and not taken. The FFN's backward product fused with the SwiGLU's
+gradient (the down projection's gradient, 3072 by 4096 summing 768) takes
+1.47 ms on the cover's trial buffers and 1.54 in a layer's step, against
+1.65 for cuBLAS's product, 0.54, and the gradient's maps in one pointwise
+kernel, 1.11: the estimate's choice, 1.30 against 1.56, stands. The 1.83 the
+profile times it at in the full step is the kernel written over the
+matrices it reads, timed alone with the cache cleared: a product adding a
+stored matrix, 768 by 4096 summing 768, takes 233 μs so and 187 written
+apart, and 198 against 206 replayed in a captured graph, so the profile
+overstates a kernel written in place and the step does not pay it. The
+cover's own trial of cuBLAS's product there leaves the maps as two kernels,
+2.0 ms, which as one would still lose. Attention's backward at GPT-2's shape
+keeps 128 keys by 64 features, 32 queries a step, its transposed folds
+added, 1.13 ms a layer: the search measured 17 options of it (occupancy
+two, eight worker warps, products 64 deep inside, 16 queries a step), and
+64 keys a block, forced, take 1.46 to 2.58 ms.
+
 What remains open, named. The attention backward is a third of its fused
-roofline, 13.6 ms against 5.1. The head's softmax over 50257 sweeps the
-logits twice and writes their gradient, 12 ms against 7 for one read and one
-write, and its three products run at 31 to 38 TFLOP/s; with the FFN's
-products, 110 ms of the 183 the kernels sum to are products cuBLAS or the
-generator's product kernels run at 0.5 to 0.8 of their roofline. Adam's 111
+roofline, 13.6 ms against 5.1, under every tile, depth, occupancy and worker
+count the generator offers. The head's three products take 28.0 ms against
+21.1 for the same products with the logits' leading dimension padded from
+50257 to 50304, measured on cuBLAS alone (10.0, 9.7 and 8.3 ms against 8.1,
+6.6 and 6.4): a column of 50257 Float32 is no multiple of 16 bytes, which
+cuBLAS's aligned kernels ask of a leading dimension, and Tempest stores
+every value densely (`src/Compiler/IR/layout.jl`), so a value stored with a
+padded leading dimension is a layout it does not have. The head's softmax
+is 9.5 ms against 7.2 for one read and one write. With the FFN's and the
+projections', 119 ms of the 180 the kernels sum to are products cuBLAS or
+the generator's product kernels run at 0.66 to 0.9 of their roofline. Adam's 111
 kernels are at the memory's rate already. A product that recomputes a fold
 from a stored array in its steps runs hundreds of times its flops' time:
 the value gradient's product reading the probabilities through the
@@ -546,7 +612,7 @@ permuted, by hand, 419 ms, so the load's order is not the cause. The cover
 measured it in a layer's step (12.8 ms there, against 1.5 estimated) and
 refused it. A fold over the keys reading the probabilities so runs at the
 memory's rate under each tile tried, 1.65 to 1.90 ms, kept tiles of 1 and 64
-alike. Cold preparation is 188 s,
+alike. Cold preparation is 186 s,
 past the gate of a minute; that is the trial of the time to first execution.
 
 **The laws are hand-written matchers.** Every algorithm Tempest knows as a
