@@ -26,6 +26,19 @@ explain(grad)            # each kernel: what it computes and stores, and what ru
 
 Without a GPU, the same code runs on the CPU with plain arrays.
 
+## Loading
+
+Tempest and its extensions compile their own code into package images as
+they precompile, so that a session compiles little of it again. Julia keeps
+ten images of a package (`JULIA_MAX_NUM_PRECOMPILE_FILES`), and each
+environment, each checkout of Tempest and each set of flags such as
+`--check-bounds` needs its own: past ten, the image evicted is compiled
+again, a minute or more, at its next `using`, so raise the cap where you
+keep several. `precompile_workload = false` under `[Tempest]` in an
+environment's `LocalPreferences.toml` skips the work Tempest and its
+extensions do while they precompile, for an environment whose Tempest
+changes often, at the cost of compiling that code in each session.
+
 ## What holds
 
 Tempest owns coverage and kernel packages own speed. A program written with
