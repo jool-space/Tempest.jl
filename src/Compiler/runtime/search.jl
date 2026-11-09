@@ -40,9 +40,12 @@ function Search(work; enter = () -> nothing)
     Search(task, asked)
 end
 
-# A search's timer: each timing asked of the calls, and waited for.
+# A search's timer: each timing asked of the calls, and waited for. What the
+# timing runs is compiled first, on the search's task, so that the call that
+# takes it times the claim and does not compile it.
 function asking(asked::Channel{Any})
     function (target, launch)
+        precompile(time_launch, (typeof(target), typeof(launch)))
         answer = Channel{Any}(1)
         put!(asked, (target, launch, answer))
         seconds = take!(answer)
