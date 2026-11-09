@@ -655,7 +655,10 @@ end
     @test wait(s).compiled === c
     # A search that fails leaves the program its plan, with a warning.
     c = compile(adam!, p, m, v, xs, h0)
-    @test_logs (:warn, r"search behind the first result failed") wait(s = searching(c, timer -> error("no plan")))
+    @test_logs (:warn, r"search behind the first result failed") begin
+        s = searching(c, timer -> error("no plan"))
+        wait(s)
+    end
     @test s.compiled === c
     @test isapprox(s(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
 end
