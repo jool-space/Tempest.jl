@@ -62,7 +62,19 @@ function is applied to. A function priced where other work hides it measures
 as nothing, which is what it costs there. A function the table does not name
 costs what addition does.
 """
-function price!(d::Decider, regime, class, f)
+Base.@nospecializeinfer price!(d::Decider, regime, class, @nospecialize(f)) = price_applied!(d, regime, class, applied_function(f))
+
+# The table's function `f` is, or addition where the table does not name it:
+# what `f` is priced as. Compiled once, as `price!` is, whatever function a
+# program applies; what prices it is compiled for the table's functions alone.
+Base.@nospecializeinfer function applied_function(@nospecialize(f))
+    for (_, g) in APPLIED
+        g === f && return g
+    end
+    +
+end
+
+function price_applied!(d::Decider, regime, class, f)
     regime === :streamed && (class = :any)
     get!(d.applied, (regime, class, f)) do
         i = findfirst(((_, g),) -> g == f, APPLIED)

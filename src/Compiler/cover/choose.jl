@@ -222,7 +222,7 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     key = choice_key(d, p, g, implementation, claim)
     memory = memory!(d, implementation === nothing ? :floor : package_name(implementation))
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_name(implementation), w.factor) for w in work]
-    price(w) = (regime, f) -> price!(d, regime, product_class(d.target, w.factor), f)
+    price(w) = (regime, @nospecialize(f)) -> price!(d, regime, product_class(d.target, w.factor), f)
     # A recurrence on the floor runs a step at a time where it can (see
     # `build_group`), at its step's price.
     stepped = implementation === nothing && g.kind === :recurrence ? stepped_seconds(d, p, g) : nothing
@@ -386,7 +386,7 @@ end
 function price_all!(d::Decider, p::Plan)
     measures(d) || return nothing
     needs = Set{Tuple{Symbol, Symbol, Any}}()
-    named(f) = findfirst(((_, g),) -> g == f, APPLIED) === nothing ? (+) : f
+    named(@nospecialize(f)) = applied_function(f)
     for g in p.groups
         view = group_view(p, g)
         for i in implementations(d.target), c in Base.invokelatest(claims, i, d.target, view), w in Base.invokelatest(estimate, i, c, d.target, view)
