@@ -235,7 +235,7 @@ end
     # and the estimates call it either way within twice the device's
     # bandwidth.
     plan, considered = C.cover(d)
-    @test count(k -> k.proposal isa AbstractVector && length(k.proposal) == 4 && k.proposal ⊆ g.reductions, considered) == 1
+    @test count(k -> k.proposal isa C.Candidate && length(k.proposal.sets) == 1 && length(C.fixes(k.proposal)) == 4 && C.fixes(k.proposal) ⊆ g.reductions, considered) == 1
     ex = prepare(p, CuArray(q), map(CuArray, states)...; target)
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, states...)); rtol = 1.0e-5)
     # Products of parts of one value, which the generator groups by that

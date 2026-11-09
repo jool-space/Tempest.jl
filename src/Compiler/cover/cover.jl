@@ -24,7 +24,7 @@ end
 
 "A proposal the cover compared with its plan at the time, and whether it took it."
 struct Considered
-    proposal::Any # a set of values, or a `Join`
+    proposal::Proposal
     implementation::Union{Nothing, Implementation} # nothing for the planner's own
     comparison::Comparison
     accepted::Bool
@@ -102,70 +102,6 @@ end
 neighbours(p::Plan, a::Around, v) =
     v > length(p.owner) ? Int[] : [reached(p, a, v); (a.reading[r] for r in loaded(p, v))...]
 
-"A stored value joined into the group of a kernel that reads it: a proposal of the planner's own."
-struct Join
-    value::Int
-    group::Vector{Int}
-end
-
-"A fold recomputed where it is read instead of stored: a proposal of the planner's own."
-struct Recompute
-    value::Int
-end
-
-"""
-The maps a kernel stores, recomputed in the one kernel that reads them: a
-proposal of the planner's own, for a kernel of maps another reads at shifted
-positions, as a stencil reads its neighbours. A map read once at each
-position is recomputed by its reader already (see `recomputable`); read at
-several, it is stored, and the kernel that stores it costs a launch and a
-round trip through memory where recomputing it costs a few operations at
-each position read.
-"""
-struct RecomputeMaps
-    values::Vector{Int}
-end
-
-"""
-A map stored apart rather than recomputed in the kernels that read it: a
-proposal of the planner's own, for each map of a kernel that applies a scalar
-function an implementation cannot lower (see `lowers`), or that a claim
-failed to build. Stored apart, the map runs in a kernel of its own, and the
-rest of the kernel may be claimed.
-"""
-struct Store
-    value::Int
-end
-
-"""
-A sum over a recurrence's steps of what they compute, added as they run
-rather than after them from what they store (see `riding`): a proposal of
-the planner's own. The steps compute each part where its operands are fresh,
-and store only what else reads them; the sum after the steps reads every
-step's, as a neural ODE's weight gradients read every evaluation's
-activations. Small steps run fastest summed after, in a few kernels; large
-ones, read once.
-"""
-struct Ride
-    value::Int
-end
-
-"""
-The values a proposal is about: those it fixes as one group, or as groups
-apart (a candidate that is several sets), or the fold it recomputes, or the
-map it stores, or the sum riding steps.
-"""
-fixes(q::Vector{Int}) = q
-fixes(q::Vector{Vector{Int}}) = reduce(vcat, q)
-fixes(q::Join) = q.group
-fixes(q::Union{Recompute, Store, Ride}) = [q.value]
-fixes(q::RecomputeMaps) = q.values
-
-# Whether a proposal fixes sets of values as groups, and the sets.
-forms_group(q) = !(q isa Union{Recompute, RecomputeMaps, Store, Ride})
-group_sets(q::Vector{Vector{Int}}) = q
-group_sets(q) = [fixes(q)]
-
 # The groups of `p` that hold value `v`: its own, and those owning what it
 # loads; a map no group owns is computed inside the groups that read it,
 # directly or through values not stored, and is held by them. Without them a
@@ -192,25 +128,14 @@ its own, and no two layers would be alike. The groups that recompute a map
 no group owns are, being where it is computed. Each group's text is written
 once into `texts`, which the keys of one plan's proposals share.
 """
-function proposal_key(p::Plan, a::Around, q, texts = Dict{Int, String}())
+function proposal_key(p::Plan, a::Around, q::Proposal, texts = Dict{Int, String}())
     around = Set{Int}()
     foreach(v -> union!(around, held(p, a, v)), fixes(q))
     io = IOBuffer()
     for j in sort!(collect(around); by = j -> a.places[j])
         print(io, get!(() -> group_text(p, p.groups[j]), texts, j))
     end
-    q isa Join && print(io, " || join %", q.value)
-    q isa Vector{Vector{Int}} && print(io, " || apart ", join((join(map(v -> "%$v", set), " ") for set in q), " | "))
-    q isa Recompute && print(io, " || recompute")
-    q isa RecomputeMaps && print(io, " || recompute maps")
-    q isa Ride && print(io, " || ride")
-    # A stored map is inlined in the terms of the groups it reaches: its
-    # definition tells it from the group's other maps.
-    if q isa Store
-        d = p.graph.values[q.value].definition
-        print(io, " || store ", describe(d), " ")
-        join(io, (sprint(show_operand, o) for o in operands(d)), ", ")
-    end
+    key_text(io, p, q)
     print(io, " || ", join(map(v -> "%$v", fixes(q)), " "))
     numbers = Dict{String, Int}()
     text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
@@ -313,12 +238,13 @@ function cover(d::Decider)
     clock = lap!(:cover_start, clock)
     search!(d, base)
     clock = lap!(:cover_search, clock)
-    proposals = Tuple{Any, Union{Nothing, Implementation}}[]
+    proposals = Tuple{Proposal, Union{Nothing, Implementation}}[]
     # Each proposal once, by what it is and by the values it fixes, found by
     # a lookup rather than by a pass over the proposals before it, as many as
     # a program has layers.
-    proposed, fixing = Set{Any}(), Set{Vector{Int}}()
-    for i in implementations(d.target), q in Base.invokelatest(candidates, i, d.target, base)
+    proposed, fixing = Set{Proposal}(), Set{Vector{Int}}()
+    for i in implementations(d.target), x in Base.invokelatest(candidates, i, d.target, base)
+        q = proposal(x)
         q in proposed && continue
         push!(proposals, (q, i))
         push!(proposed, q)
@@ -364,43 +290,36 @@ function cover(d::Decider)
         end
     end
     arounds = IdDict{Plan, Around}()
-    around(p, taken) = get!(() -> Around(p, Vector{Int}[s for x in taken if forms_group(x) for s in group_sets(x)]), arounds, p)
+    around(p, taken) = get!(() -> Around(p, inputs(d, taken).fixed), arounds, p)
     function trial(current, taken, qs)
         tally!(:trials)
-        all = Any[taken; qs]
-        sets = Vector{Int}[s for x in all if forms_group(x) for s in group_sets(x)]
-        recompute = Set{Int}(d.pinned)
-        foreach(x -> x isa Recompute && push!(recompute, x.value), all)
-        foreach(x -> x isa RecomputeMaps && union!(recompute, x.values), all)
-        store = Set{Int}(x.value for x in all if x isa Store)
-        ride = [collect(d.rides); [x.value for x in all if x isa Ride]]
+        all = Proposal[taken; qs]
+        i = inputs(d, all)
         # A value belongs to one proposal.
         allunique(Iterators.flatten(fixes(x) for x in all)) || return nothing
-        isempty(taken) && length(sets) == 1 && !forms(only(sets)) && return nothing
+        isempty(taken) && length(i.fixed) == 1 && !forms(only(i.fixed)) && return nothing
         try
-            plan(d.graph; fixed = sets, recompute, store, ride)
+            plan(d.graph; fixed = i.fixed, i.recompute, i.store, i.ride)
         catch e
             e isa NotAGroup || rethrow()
             nothing
         end
     end
     # A proposal's comparison with the plan it is priced in, and the
-    # implementation that claims its group: by key, once. A fold recomputed
-    # is priced when every kernel that recomputes it is claimed by an
-    # implementation that recomputes folds.
+    # implementation that claims its group: by key, once, where its kind
+    # can be priced (`priceable`).
     priced = Dict{String, Any}()
     known = IdDict{Plan, Any}()
-    function priceable(p, q, i)
+    function can_price(p, q, i)
         p === nothing && return false
         i === nothing || claimant(d, p, q, i) !== nothing || return false
-        q isa Ride && return stepped_plan(d, p, p.groups[p.owner[q.value]]) !== nothing
-        !(q isa Recompute) || recomputed_claimed(d, p, q.value)
+        priceable(d, p, q)
     end
     function priced_plan(p, current, q, i)
-        priceable(p, q, i) || return nothing
+        can_price(p, q, i) || return nothing
         (compare(d, p, current, known), i === nothing ? nothing : claimant(d, p, q, i))
     end
-    a = around(base, Any[])
+    a = around(base, Proposal[])
     # Every proposal's trial against the starting plan, planned side by side
     # on the threads there are: a trial is pure, and planning is most of the
     # cover's time. Priced in order, once per key, as before.
@@ -409,7 +328,7 @@ function cover(d::Decider)
     firsts = Dict{String, Any}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
     clock = lap!(:cover_keys, clock)
-    planned = Dict(k => Threads.@spawn(trial(base, Any[], Any[q])) for (k, q) in firsts)
+    planned = Dict(k => Threads.@spawn(trial(base, Proposal[], Proposal[q])) for (k, q) in firsts)
     trials = Dict(k => fetch_result(t) for (k, t) in planned)
     clock = lap!(:cover_trials, clock)
     # The groups by which the trials priced below differ from the starting
@@ -423,7 +342,7 @@ function cover(d::Decider)
             k in searched && continue
             push!(searched, k)
             p = trials[k]
-            priceable(p, q, i) || continue
+            can_price(p, q, i) || continue
             for g in p.groups
                 id = group_identity(p, g)
                 (id in shared || id in seen || haskey(d.decided, canonical(p, g))) && continue
@@ -446,7 +365,7 @@ function cover(d::Decider)
     edit = [get!(() -> edit_key(known, base, trials[r[4]]), edits, r[4]) for r in ranked]
     clock = lap!(:cover_edits, clock)
     near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
-    current, considered, taken, done = base, Considered[], Any[], Set{Int}()
+    current, considered, taken, done = base, Considered[], Proposal[], Set{Int}()
     kept = Set(group_identity(base, g) for g in base.groups)
     # Those around which an edit taken already changed a group are priced
     # again in the current plan, by the first of them; the rest keep their
@@ -473,7 +392,7 @@ function cover(d::Decider)
             key = proposal_key(current, around(current, taken), q)
             (haskey(priced, key) || haskey(ahead, key)) && continue
             t = let p = current, before = copy(taken)
-                Threads.@spawn trial(p, before, Any[q])
+                Threads.@spawn trial(p, before, Proposal[q])
             end
             ahead[key] = t
             push!(spawned, t)
@@ -481,7 +400,7 @@ function cover(d::Decider)
     end
     price_ahead(q, i, key) = get!(priced, key) do
         t = pop!(ahead, key, nothing)
-        priced_plan(t === nothing ? trial(current, taken, Any[q]) : fetch_result(t), current, q, i)
+        priced_plan(t === nothing ? trial(current, taken, Proposal[q]) : fetch_result(t), current, q, i)
     end
     for n in eachindex(ranked)
         n in done && continue
@@ -500,13 +419,13 @@ function cover(d::Decider)
             cheaper(c) ? append!(taking, cs) : append!(considered, cs)
         end
         isempty(taking) && continue
-        p = trial(current, taken, Any[c.proposal for c in taking])
+        p = trial(current, taken, Proposal[c.proposal for c in taking])
         if p === nothing
             # Proposals alike that share values are taken one at a time, each
             # compared with the plan as it then is; one that no longer forms
             # a group is not compared.
             for t in taking
-                p = trial(current, taken, Any[t.proposal])
+                p = trial(current, taken, Proposal[t.proposal])
                 p === nothing && continue
                 c = compare(d, p, current, known)
                 push!(considered, Considered(t.proposal, t.implementation, c, cheaper(c)))
@@ -528,30 +447,12 @@ function cover(d::Decider)
 end
 
 function explain(io::IO, p::Plan, c::Considered)
-    q, t = c.proposal, c.comparison
+    t = c.comparison
     μs(x) = string(round(1.0e6 * x; sigdigits = 3), " μs")
     times = c.accepted ? (t.new, t.old) : (t.old, t.new)
     why = string(" (the kernels that differ: ", μs(times[1]), " against ", μs(times[2]), ", ", t.how, ")")
-    if q isa Join
-        c.accepted && println(io, "%", q.value, " joins the kernel of %", first(v for v in q.group if v != q.value), ", which reads it", why)
-        return
-    elseif q isa Recompute
-        c.accepted && println(io, "%", q.value, " is recomputed where it is read", why)
-        return
-    elseif q isa RecomputeMaps
-        c.accepted && println(io, join(map(v -> "%$v", q.values), " "), " are recomputed in the kernel that reads them", why)
-        return
-    elseif q isa Store
-        c.accepted && println(io, "%", q.value, " is stored apart, in a kernel of its own", why)
-        return
-    elseif q isa Ride
-        println(io, "%", q.value, c.accepted ? " is summed as the steps of the recurrence it reads run" :
-            " is summed after the steps of the recurrence it reads", why)
-        return
-    end
-    sets = join((join(map(v -> "%$v", set), " ") for set in group_sets(q)), ", ")
-    what = q isa Vector{Vector{Int}} ? "candidates " * sets * ", one kernel each," : "candidate " * sets
-    c.accepted && println(io, what, " from ", label(c.implementation), " replaces the generator's grouping", why)
+    explain(io, c.proposal, c, why)
+    nothing
 end
 
 # The maps a group recomputes where it reads them: the unstored maps its
@@ -600,7 +501,7 @@ end
 
 # The implementation that claims the groups a proposal of `i` forms: `i`, or nothing.
 function claimant(d::Decider, p::Plan, q, i)
-    for set in group_sets(q)
+    for set in change(q).fixed
         v = first(set)
         p.owner[v] == 0 && return nothing
         isempty(Base.invokelatest(claims, i, d.target, group_view(p, p.groups[p.owner[v]]))) && return nothing

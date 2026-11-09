@@ -22,7 +22,7 @@ C.build_claim(::HostProducts, claim, target, g, buffers) = g.reference(target, b
     p = trace((a, b) -> tanh.(a * b), a, b)
     @test length(C.plan(C.lower(p)).groups) == 1 # the generator fuses the tanh
     ex = prepare(p, a, b; target = T.CPUTarget(HostProducts()))
-    @test length(only(taken(ex))) == 1
+    @test length(C.fixes(only(taken(ex)))) == 1
     @test length(ex.plan.groups) == 2
     @test isapprox(only(C.leaves(outputs(execute!(ex)))), interpret(p, a, b); rtol = 1.0e-12)
     @test occursin("from HostProducts replaces", sprint(explain, ex))
