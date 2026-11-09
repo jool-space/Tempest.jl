@@ -220,7 +220,7 @@ end
 repoints(::HostLaunch) = true
 
 function repoint!(l::HostLaunch, value, buffer)
-    buffers = foldl((b, j) -> Base.setindex(b, buffer, j), findall(==(value), l.values); init = first(l.arguments))
+    buffers = foldl((b, j) -> Base.setindex(b, buffer, j), findall(==(value), l.values); init = first(l.arguments)::Tuple)
     l.arguments = (buffers, Base.tail(l.arguments)...)
     l
 end

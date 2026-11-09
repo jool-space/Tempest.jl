@@ -428,7 +428,7 @@ cheaper(c::Comparison) = c.new < c.old
 identities!(known, p::Plan) = get!(known, p) do
     ids = [group_identity(p, g) for g in p.groups]
     (ids, Set(ids))
-end
+end::Tuple{Vector{GroupIdentity}, Set{GroupIdentity}}
 
 # Compare plan `b` with plan `a`. Close calls are measured, and so is a
 # comparison where the record already refutes an estimate on either side, a

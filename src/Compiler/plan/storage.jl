@@ -201,7 +201,7 @@ function writes_over(graph, g::Group, r, a)
     for m in members(g), t in subterms((g.terms[m],))
         t isa Recomputed && a in stored_reads(t) && return false
         t isa Union{Load, Ix} && a in stored_reads(t) || continue
-        t isa Load && t.value == a && !(a in reduce(vcat, map(indirect_values, t.index); init = Int[])) || return false
+        t isa Load && t.value == a && !(a in indirect_values(t.index)) || return false
         dense_address(graph.values[a].dims, t.index, D) == at || return false
         (m in g.reductions ? primary(graph, g, m) : graph.values[m].dims == graph.values[r].dims) || return false
     end

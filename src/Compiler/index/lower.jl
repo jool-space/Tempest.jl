@@ -238,7 +238,7 @@ function covering(values, def::Pointwise, d::Domain, T)
         (a, b)
     end
     any(isnothing, blocks) && return nothing
-    order = sortperm(blocks)
+    order = sortperm(blocks::Vector)
     width = blocks[order[1]][2] - blocks[order[1]][1] + 1
     width >= 1 || return nothing
     for (j, k) in enumerate(order)
@@ -529,7 +529,7 @@ function splice_step!(nodes, body::LoopBody, inputs)
         elseif k <= nstate + nscanned
             axis = body.sliced[k - nstate]
             m = length(outer.dims)
-            axis == m ? inputs[k] : emit!(Permute(Tuple([1:(axis - 1); (axis + 1):m; axis])), (inputs[k],), over(n), n.eltype)
+            axis == m ? inputs[k] : emit!(Permute((1:(axis - 1)..., ((axis + 1):m)..., axis)), (inputs[k],), over(n), n.eltype)
         else
             # A capture, the same at each step.
             shaped = emit!(Reshape(), (inputs[k],), outer.scalar ? (1,) : (outer.dims..., 1), outer.eltype)

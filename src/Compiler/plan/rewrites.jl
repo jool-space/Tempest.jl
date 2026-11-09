@@ -238,7 +238,7 @@ end
 # the sum read, that domain and its axes the outer sum keeps. Or nothing.
 function exchange(graph, r, sums)
     v = graph.values[r]
-    d = v.definition
+    d = v.definition::Reduction
     n, domain = length(d.iteration), Domain(d.iteration)
     x, negated = d.operand, false
     if applies(graph, x, -) && length(graph.values[x.value].definition.operands) == 1

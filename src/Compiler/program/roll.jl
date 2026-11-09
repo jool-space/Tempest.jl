@@ -150,9 +150,10 @@ function roll!(tape::Tape, range, required)
         j = slid(n.op, nodes[id + p].op)
         j === nothing && continue
         length(n.inputs) == 1 && only(n.inputs) < w0 || return 0
-        i = n.op.indices[j]
-        d == 0 && (d = nodes[id + p].op.indices[j] - i)
-        all(k -> isequal(nodes[id + k * p].op.indices, Base.setindex(n.op.indices, i + k * d, j)), 1:(periods - 1)) || return 0
+        selection = (n.op::Select).indices
+        i = selection[j]
+        d == 0 && (d = (nodes[id + p].op::Select).indices[j] - i)
+        all(k -> isequal((nodes[id + k * p].op::Select).indices, Base.setindex(selection, i + k * d, j)), 1:(periods - 1)) || return 0
         scans[o] = (j, i)
     end
     # What the first step reads from before the window: a state where the
@@ -204,8 +205,9 @@ function roll!(tape::Tape, range, required)
         (j, i) = scans[o]
         x = only(n.inputs)
         low = d > 0 ? i : i - periods + 1
-        indices = Base.setindex(n.op.indices, low:(low + periods - 1), j)
-        axis = 1 + count(k -> !(k isa Integer), n.op.indices[1:(j - 1)])
+        selection = (n.op::Select).indices
+        indices = Base.setindex(selection, low:(low + periods - 1), j)
+        axis = 1 + count(k -> !(k isa Integer), selection[1:(j - 1)])
         push!(sliced, axis)
         whole = length(indices) == length(nodes[x].dims) && all(k -> indices[k] isa AbstractUnitRange && indices[k] == 1:nodes[x].dims[k], eachindex(indices))
         if whole
@@ -219,7 +221,7 @@ function roll!(tape::Tape, range, required)
     any(r -> r < w0 + hoisted + loops, wanted) && return 0
     # The step's program: the states, the scanned slices, then the captures,
     # as arguments.
-    captured = sort!(unique([captures; [place[id] for id in invariant]]))
+    captured = sort!(unique(append!(copy(captures), [place[id] for id in invariant])))
     arguments = Int[]
     body = Node[]
     # The step's nodes by their places before the window, or in the step;
@@ -251,7 +253,7 @@ function roll!(tape::Tape, range, required)
         renumbered[id] = length(body)
     end
     results = [renumbered[w0 + o - 1] for o in offsets]
-    program = Program(body, arguments, [results; 1:length(states)], Tuple(eachindex(arguments)), Tuple(eachindex(results)))
+    program = Program(body, arguments, append!(copy(results), 1:length(states)), Tuple(eachindex(arguments)), Tuple(eachindex(results)))
     loop = LoopBody(program, periods, collect(1:length(states)), sliced, d < 0)
     inputs = (first.(states)..., scanned..., captured...)
     stacked = map(enumerate(offsets)) do (k, o)

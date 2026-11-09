@@ -105,7 +105,7 @@ function fit_applied_all!(d::Decider, needs)
     end
     keys_ = collect(keys(specs))
     built = concurrently(k -> build_reference(d, implementations(d.target), specs[k][1], specs[k][2]...; recomputing = specs[k][3]), keys_, d.target)
-    timed = Dict(k => time_reference(d, r) for (k, r) in zip(keys_, built))
+    timed = Dict(k => time_reference(d, r::Reference) for (k, r) in zip(keys_, built))
     for (regime, class, f) in needs
         name = APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]
         keep!(d.calibration, d.calibration_path, join(("applied", regime, class, name), " "),
@@ -141,7 +141,7 @@ end
 # the function adds to the product of the package that computes it, against
 # that package's product without it, for the package it costs least.
 function applied_seconds(regime, f, plain, applied)
-    fastest(r) = minimum(first.(values(r)); init = Inf)
+    fastest(r) = minimum(first, values(r); init = Inf)
     regime === :streamed && return max(0.0, fastest(applied) - fastest(plain)) / (APPLIED_TIMES * prod(APPLIED_SHAPE))
     both = [p for p in keys(applied) if haskey(plain, p)]
     isempty(both) && return 0.0

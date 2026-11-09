@@ -62,7 +62,7 @@ kept_dims(domain, axes) = ntuple(k -> k in axes ? 1 : domain[k], length(domain))
 primary(graph, g::Group, r) = !keyed(graph, r) && fold_axes(graph, r) == primary_axes(graph, g)
 
 "The values the key of fold by key `v` gathers from; none for any other value."
-key_reads(graph, v) = keyed(graph, v) ? reduce(vcat, map(indirect_values, graph.values[v].definition.key); init = Int[]) : Int[]
+key_reads(graph, v) = keyed(graph, v) ? indirect_values((graph.values[v].definition::Keyed).key) : Int[]
 
 """
 The values fold by key `v` reads besides its elements: those its key gathers
@@ -70,8 +70,8 @@ from, and those of the contents it starts from; none for any other value.
 """
 function keyed_reads(graph, v)
     keyed(graph, v) || return Int[]
-    into = graph.values[v].definition.into
-    [key_reads(graph, v); into === nothing ? Int[] : read_values(into)]
+    into = (graph.values[v].definition::Keyed).into
+    append!(key_reads(graph, v), into === nothing ? Int[] : read_values(into))
 end
 
 """
@@ -122,7 +122,7 @@ restricted(graph, g::Group, r) =
 function slice_placement(graph, g::Group, v)
     d = graph.values[v].definition
     d isa Pointwise && d.f === identity && only(d.operands) isa Read || return nothing
-    o = only(d.operands)
+    o = only(d.operands)::Read
     o.value in g.reductions || return nothing
     at = placement(graph, g, o.value)
     at === nothing && return nothing
@@ -249,10 +249,10 @@ stored_term(o::Literal) = Lit(o.value)
 stored_term(o::IndexOperand{T}) where {T} = Ix{T}(o.expr)
 
 # The values an operand reads: its own, and those its formulas gather from.
-gathered_values(o::Read) = reduce(vcat, map(indirect_values, o.index); init = Int[])
+gathered_values(o::Read) = indirect_values(o.index)
 gathered_values(o::IndexOperand) = indirect_values(o.expr)
 gathered_values(o::Literal) = Int[]
-read_values(o::Read) = [o.value; gathered_values(o)]
+read_values(o::Read) = pushfirst!(gathered_values(o), o.value)
 read_values(o::Operand) = gathered_values(o)
 
 # The values each value reads, directly or through others, as a mask over
@@ -264,7 +264,7 @@ read_values(o::Operand) = gathered_values(o)
 function ancestors(graph)
     n = length(graph.values)
     up = [falses(n) for _ in 1:n]
-    carried = [(c, v.definition.from.value) for (c, v) in enumerate(graph.values) if v.definition isa Carried && v.definition.from isa Read]
+    carried = Tuple{Int, Int}[(c, v.definition.from.value) for (c, v) in enumerate(graph.values) if v.definition isa Carried && v.definition.from isa Read]
     grown = true
     while grown
         grown = false
@@ -350,13 +350,13 @@ function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomput
     index === nothing && return false
     any(m -> v in term_loads(deps, g.terms[m]) || v in keyed_reads(graph, m), members(g)) && return false
     any(in(members(g)), keyed_reads(graph, v)) && return false
-    candidate = fold ? g : Group(g.kind, g.domain, g.reductions, [g.outputs; v], g.terms, g.phase)
+    candidate = fold ? g : Group(g.kind, g.domain, g.reductions, push!(copy(g.outputs), v), g.terms, g.phase)
     # What the term would load, from the graph before the term is built: most
     # candidates fail here, and a term inlines every value recomputed in it.
     loads = Set{Int}()
     fold ? operand_reads!(loads, Set{Int}(), graph, stored, candidate, val.definition.operand) :
         value_reads!(loads, Set{Int}(), graph, stored, candidate, v)
-    reads = [collect(loads); keyed_reads(graph, v)]
+    reads = append!(collect(loads), keyed_reads(graph, v))
     group = Set(members(g))
     depends(graph, deps, reads, group) && return false
     t = try
@@ -825,7 +825,7 @@ function mixes(graph, g::Group, v, t; recomputing)
     all(m -> isdisjoint(stats(terms[m]), narrowed), keys(terms)) || return false
     all(m -> placement(graph, g, m) !== nothing, g.outputs) || return false
     recomputing || return true
-    folds = [g.reductions; v]
+    folds = push!(copy(g.reductions), v)
     narrower(r) = (e = graph.values[r].definition.iteration; [k for k in eachindex(e) if e[k] != g.domain[k]])
     function recomputed(r, axes)
         Set(s.value for s in subterms((terms[r],); nested = true) if s isa Recomputed && !any(k -> mentions(s, k), axes))
@@ -923,7 +923,7 @@ function riding(graph, live, cycle, r)
     end
     between = [u for u in 1:(r - 1) if read[u] && reaches[u] && !(u in inside)]
     all(u -> values[u].definition isa Union{Pointwise, Reduction}, between) || return nothing
-    set = Set([between; r])
+    set = Set(push!(copy(between), r))
     users = readers(graph)
     all(u -> all(w -> !live[w] || w in set, users[u]), between) || return nothing
     # A state reads the value it is carried from, which no reader counts.

@@ -291,7 +291,14 @@ is_affine(e::Affine) = all(t -> t.first isa Var, e.terms)
 indirect_values(e::Affine) = is_affine(e) ? Int[] : reduce(vcat, (indirect_values(a) for (a, _) in e.terms); init = Int[])
 indirect_values(::Var) = Int[]
 indirect_values(a::Union{Div, Mod}) = indirect_values(a.e)
-indirect_values(a::Indirect) = [a.value; reduce(vcat, map(indirect_values, a.index); init = Int[])]
+indirect_values(a::Indirect) = pushfirst!(indirect_values(a.index), a.value)
+function indirect_values(index::Tuple{Vararg{Affine}})
+    found = Int[]
+    for e in index
+        append!(found, indirect_values(e))
+    end
+    found
+end
 
 function Base.show(io::IO, a::Affine)
     parts = String[]

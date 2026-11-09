@@ -89,7 +89,7 @@ starts_from_storage(graph, v) = keyed(graph, v) && graph.values[v].definition.in
 
 function combined_bytes(val::Value)
     d = val.definition
-    (d.fold isa Overwrite ? 1 : 2) * sizeof(val.eltype) * prod(d.iteration; init = 1)
+    (d.fold isa Overwrite ? 1 : 2) * sizeof(val.eltype) * prod(d.iteration::Tuple{Vararg{Int}}; init = 1)
 end
 
 # A recurrence's floor kernel: an item per position of its parallel axes,

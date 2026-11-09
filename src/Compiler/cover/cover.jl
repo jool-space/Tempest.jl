@@ -83,7 +83,7 @@ end
 # what it loads, and those reading it, directly or through values not stored.
 function reached(p::Plan, a::Around, v)
     v > length(p.owner) && return Int[]
-    found = [p.owner[v]; [p.owner[r] for r in loaded(p, v)]]
+    found = pushfirst!([p.owner[r] for r in loaded(p, v)], p.owner[v])
     pending, seen = [v], Set{Int}()
     while !isempty(pending)
         for w in a.followers[pop!(pending)]

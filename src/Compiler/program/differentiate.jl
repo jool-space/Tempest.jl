@@ -481,7 +481,7 @@ end
 
 # Whether an index array may name one position twice: one traced with more
 # than one element, or a constant with a repeated entry.
-may_repeat(n) = n.op isa Constant ? !allunique(n.op.value) : prod(n.dims; init = 1) > 1
+may_repeat(n::Node) = n.op isa Constant ? !allunique(n.op.value) : prod(n.dims; init = 1) > 1
 
 # A selection of whole axes, each by a constant permutation or as it is, has
 # the selection by the inverse permutations as its adjoint: a gather, which

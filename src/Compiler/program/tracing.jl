@@ -633,7 +633,7 @@ cartesian(i::TracedArray, dims) = TracedArray(i.tape, cartesian(handle(i), dims)
 function Base.getindex(c::Traced{CartesianIndex{N}}, d::Integer) where {N}
     op = node(c).op
     op isa Map{<:CartesianAt} || return record_map(Component{d}(), c)
-    dims = typeof(op.f).parameters[1]
+    dims = typeof(op.f).parameters[1]::Dims
     i = Traced(c.tape, only(node(c).inputs)) - 1
     stride = prod(dims[1:(d - 1)]; init = 1)
     i = stride == 1 ? i : fld(i, stride)
