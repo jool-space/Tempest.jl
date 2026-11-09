@@ -288,7 +288,7 @@ device_name(::CPUTarget) = "cpu"
 measurable(::Target) = false
 
 """
-    time_launch(target, launch) -> seconds
+    time_launch(target, launch) -> seconds::Float64
 
 The seconds one call of `launch()` takes on the device among the launches of
 a captured graph, its data in memory rather than in the cache, as the cover

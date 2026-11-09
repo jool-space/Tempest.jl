@@ -398,7 +398,8 @@ end
 # What timing one replay alone adds to the seconds of its launch among a
 # graph's: an empty kernel's replay timed so, 2.5 μs on GB10, less its
 # seconds in a graph of a millisecond of them, 0.43. Measured once a
-# session.
+# session, and the Float64 kept returned the first time as every time after,
+# so that each launch timed less it is a Float64, the first too.
 const OVERHEAD = Ref(NaN)
 
 function replay_overhead(target)
@@ -408,6 +409,7 @@ function replay_overhead(target)
     alone = cleared(target, g)
     Tempest.Compiler.release(target, g)
     OVERHEAD[] = alone - batched(target, empty)
+    OVERHEAD[]
 end
 
 # Device seconds of one launch in a captured graph of about a millisecond of
