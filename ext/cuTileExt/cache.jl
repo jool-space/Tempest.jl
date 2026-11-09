@@ -23,7 +23,7 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     key = Any[CUDACore.context(), f, tt, occupancy, groups]
     fun = get(FUNCTIONS, key, nothing)
     fun === nothing || return fun
-    FUNCTIONS[key] = compiled_function(f, tt, occupancy, groups)
+    get!(FUNCTIONS, key, compiled_function(f, tt, occupancy, groups))
 end
 
 function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, groups)
@@ -90,7 +90,7 @@ end
 # A kernel's function, loaded once per context for the kernel, its argument
 # types, its occupancy and the aliasing among its arguments: a body launches
 # the same kernel at every execution, and identical groups share theirs.
-const FUNCTIONS = Dict{Vector{Any}, CuFunction}()
+const FUNCTIONS = Tempest.Compiler.SessionTable{Vector{Any}, CuFunction}()
 
 # The groups of arrays among `args` whose memory overlaps, as cuTile's
 # `alias_groups` finds them, without compiling a generated function for each

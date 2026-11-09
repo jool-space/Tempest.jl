@@ -62,32 +62,31 @@ function template_group(t::Template, rewrites::Symbol, types, extents)
     (; group = g, inputs, outputs)
 end
 
-const TEMPLATE_GROUPS = Dict{Key, Any}()
-const PROBE_GROUPS = Dict{Tuple{UInt, Symbol}, Any}()
-const MATCHES = Dict{Key, Vector{Binding}}()
-const LIBRARY_LOCK = ReentrantLock()
+const TEMPLATE_GROUPS = SessionTable{Key, Any}()
+const PROBE_GROUPS = SessionTable{Tuple{UInt, Symbol}, Any}()
 
 # Matches are keyed by a group's terms, which one preparation shares: equal
 # terms of another are other objects, compared whole.
-forget_matches!() = @lock LIBRARY_LOCK empty!(MATCHES)
+const MATCHES = Dict{Key, Vector{Binding}}()
+const MATCHES_LOCK = ReentrantLock()
+
+forget_matches!() = @lock MATCHES_LOCK empty!(MATCHES)
 
 # The template traced in Float32 at the probe's extents: what tells groups
 # apart before any is matched.
 function probe_group(t::Template, rewrites)
     key = (objectid(t), rewrites)
-    found = @lock LIBRARY_LOCK get(PROBE_GROUPS, key, missing)
+    found = get(PROBE_GROUPS, key, missing)
     found === missing || return found
     probe = NamedTuple{axis_names(t)}(PROBE_EXTENTS[1:length(axis_names(t))])
-    tg = cached_template_group(t, rewrites, ntuple(_ -> Float32, length(t.inputs)), probe)
-    @lock LIBRARY_LOCK PROBE_GROUPS[key] = tg
+    get!(PROBE_GROUPS, key, cached_template_group(t, rewrites, ntuple(_ -> Float32, length(t.inputs)), probe))
 end
 
 function cached_template_group(t::Template, rewrites, types, extents)
     key = Key((objectid(t), rewrites, types, extents))
-    found = @lock LIBRARY_LOCK get(TEMPLATE_GROUPS, key, missing)
+    found = get(TEMPLATE_GROUPS, key, missing)
     found === missing || return found
-    tg = template_group(t, rewrites, types, extents)
-    @lock LIBRARY_LOCK TEMPLATE_GROUPS[key] = tg
+    get!(TEMPLATE_GROUPS, key, template_group(t, rewrites, types, extents))
 end
 
 # What the terms of a template's group (`a`) and a group (`b`) unify to: the
@@ -520,10 +519,10 @@ function bindings(l::Library, target, g)
         valued = sort!(Tuple{Int, DataType, Tuple{Vararg{Int}}, Bool}[(v, x.eltype, x.dims, x.stored) for (v, x) in g.values]; by = first)
         key = Key((objectid(t), k, rewrite_policy(target), g.kind, g.domain, Tuple(members(g)),
             Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(g.placement[m] for m in members(g)), Tuple(valued)))
-        bs = @lock LIBRARY_LOCK get(MATCHES, key, missing)
+        bs = @lock MATCHES_LOCK get(MATCHES, key, missing)
         if bs === missing
             bs = match_template(t, k, target, g)
-            @lock LIBRARY_LOCK MATCHES[key] = bs
+            @lock MATCHES_LOCK MATCHES[key] = bs
         end
         append!(found, bs)
     end

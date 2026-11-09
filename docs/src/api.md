@@ -65,6 +65,7 @@ Tempest.Compiler.execute!
 Tempest.Compiler.capture!
 Tempest.Compiler.replay!
 Tempest.Compiler.outputs
+Tempest.Compiler.forget_session!
 Tempest.Compiler.Plan
 Tempest.Compiler.group_views
 Tempest.Compiler.verify

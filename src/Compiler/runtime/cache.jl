@@ -119,9 +119,10 @@ end
 # Within a session a key is resolved once. Programs stack identical layers, whose
 # groups build their kernels at the same time and so have the same key in flight
 # together: the first caller loads or compiles it, and the others wait for that
-# task, or get its result after, instead of loading or compiling again.
-const RESOLVED_KERNELS = Dict{String, Task}()
-const RESOLVED_LOCK = ReentrantLock()
+# task, or get its result after, instead of loading or compiling again. The
+# task is made under the table's lock, as `get!` on a session table would not:
+# a kernel compiled twice is more than waste.
+const RESOLVED_KERNELS = SessionTable{String, Task}()
 
 """
     cached_kernel(compile, key) -> (entry, binary)
@@ -133,7 +134,7 @@ first. The compilation runs `elsewhere`, and a failure fails every caller.
 """
 function cached_kernel(@nospecialize(compile), key)
     observe(:kernel, key)
-    task = @lock RESOLVED_LOCK get!(RESOLVED_KERNELS, key) do
+    task = @lock RESOLVED_KERNELS.lock get!(RESOLVED_KERNELS.table, key) do
         @async begin
             found = load_kernel(key)
             found === nothing ? phase(() -> elsewhere(compile), :compile) : found
@@ -350,8 +351,7 @@ end
 # standard library, and installed or developed packages.
 identified(m::Module) = (r = Base.moduleroot(m); r === Core || r === Base || pkgdir(r) !== nothing)
 
-const IDENTITIES = Dict{Module, String}()
-const IDENTITIES_LOCK = ReentrantLock()
+const IDENTITIES = SessionTable{Module, String}()
 
 """
     package_identity(m) -> String
@@ -362,7 +362,7 @@ for an installed package, and a hash of its sources for a developed one: the
 .jl files under src/ and ext/, not the .cov files a run with coverage writes
 beside them as its processes exit.
 """
-package_identity(m::Module) = @lock IDENTITIES_LOCK get!(() -> find_identity(m), IDENTITIES, m)
+package_identity(m::Module) = get!(() -> find_identity(m), IDENTITIES, m)
 
 function find_identity(m::Module)
     julia = string("julia ", VERSION, " ", Base.GIT_VERSION_INFO.commit)
@@ -391,10 +391,9 @@ end
 # side by side waited.
 own_code(m::Module) = m !== Generated && (r = Base.moduleroot(m); r === ROOT || own_root(r))
 
-const OWN = IdDict{Module, Bool}()
-const OWN_LOCK = ReentrantLock()
+const OWN = SessionTable{Module, Bool}()
 
-own_root(r::Module) = @lock OWN_LOCK get!(() -> pkgdir(r) == pkgdir(ROOT), OWN, r)
+own_root(r::Module) = get!(() -> pkgdir(r) == pkgdir(ROOT), OWN, r)
 
 const ROOT = Base.moduleroot(@__MODULE__)
 
@@ -451,8 +450,7 @@ function own_types!(records, @nospecialize(T))
     end
 end
 
-const CHECKED = Dict{Tuple, Bool}()
-const CHECKED_LOCK = ReentrantLock()
+const CHECKED = SessionTable{Tuple, Bool}()
 
 """
     current(bytes) -> Bool
@@ -469,7 +467,7 @@ function current(bytes)
     catch
         return false
     end
-    @lock CHECKED_LOCK all(r -> get!(() -> unchanged(r), CHECKED, r), records)
+    all(r -> get!(() -> unchanged(r), CHECKED, r), records)
 end
 
 function unchanged(r)

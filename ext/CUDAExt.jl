@@ -506,9 +506,12 @@ const MAXIMUM_PARTS = 1024
 const SIDE = 32
 
 # The multiprocessors of each device, asked once.
-const MULTIPROCESSORS = Dict{CUDACore.CuDevice, Int}()
+const MULTIPROCESSORS = Tempest.Compiler.SessionTable{CUDACore.CuDevice, Int}()
 
-multiprocessors() = get!(() -> CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT), MULTIPROCESSORS, CUDACore.device())
+function multiprocessors()
+    d = CUDACore.device()
+    get!(() -> CUDACore.attribute(d, CUDACore.DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT), MULTIPROCESSORS, d)
+end
 
 # Items too few to keep the device busy, one thread each, have their positions
 # dealt among the lanes that would: as many as they have positions to fold

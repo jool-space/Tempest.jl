@@ -23,7 +23,7 @@ programs = [
 ]
 @testset "$name" for (name, p, args, target) in programs
     results = map(1:3) do pass
-        pass == 3 && @lock C.RESOLVED_LOCK empty!(C.RESOLVED_KERNELS)
+        pass == 3 && empty!(C.RESOLVED_KERNELS)
         before = C.cache_counts()
         ex = prepare(p, map(CuArray, args)...; target)
         after = C.cache_counts()
