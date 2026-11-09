@@ -61,8 +61,10 @@ function main(name, shape, before, besides, waiting)
     executable(c) = c isa Tempest.Searching ? c.compiled.executable : c.executable
     search = c isa Tempest.Searching ? c.search : nothing
     first_plan = executable(c)
+    reached = C.reached_counts()
     println(name, " ", shape, before ? ", searched before" : ", searched after", ": first result ", round(first_s; digits = 1),
-        " s, ", now.compiled - counts.compiled, " kernels compiled, ", length(first_plan.kernels), " in the plan")
+        " s, ", now.compiled - counts.compiled, " kernels compiled, ", length(first_plan.kernels), " in the plan; deciders covered ",
+        reached.covered, ", replayed ", reached.replayed, search === nothing ? "; nothing to search" : "")
     if waiting
         t = time()
         wait(c)
@@ -90,7 +92,8 @@ function main(name, shape, before, besides, waiting)
     before_change = calls[1:(something(changed, length(calls) + 1) - 1)]
     after_change = changed === nothing ? Float64[] : calls[(changed + 1):end]
     ended === nothing || println("  search ended, its settled decisions kept, by call ", ended[1], ", ", round(ended[2]; digits = 1),
-        " s after the first result")
+        " s after the first result; deciders covered ", C.reached_counts().covered - reached.covered, " and replayed ",
+        C.reached_counts().replayed - reached.replayed, " in the search")
     if changed === nothing
         println("  no change of plan in ", length(calls), " calls")
     else
