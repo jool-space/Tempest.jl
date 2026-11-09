@@ -53,24 +53,46 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
     graph = p.graph
     reads = [group_reads(graph, g) for g in p.groups]
     needs = [Set(p.owner[r] for r in rs if p.owner[r] > 0 && p.owner[r] != k) for (k, rs) in enumerate(reads)]
+    # The kernels that read each value, and those that need each kernel.
+    readers = Dict{Int, Vector{Int}}()
+    for (j, rs) in enumerate(reads), r in rs
+        push!(get!(() -> Int[], readers, r), j)
+    end
+    after = [Int[] for _ in p.groups]
+    foreach(k -> foreach(j -> push!(after[j], k), needs[k]), eachindex(needs))
     results = Set(o.value for o in graph.results if o isa Read)
     base(v) = p.owner[v] > 0 ? overwritable(graph, p.groups[p.owner[v]], v) : nothing
-    overwrites = Pair{Int, Int}[]
+    overwrites, overwritten, bases = Pair{Int, Int}[], Set{Int}(), Set{Int}()
+    # Kernel `k` made to run after every other kernel that reads value `a`,
+    # unless one of them runs after it already, which would make kernels need
+    # each other in a cycle: whether it was. Each kernel it now needs is in
+    # `added`, for `undo!`. The needs are acyclic, so a cycle would pass
+    # through `k`, and only what runs after `k` is walked, once per result
+    # an argument's storage takes, where ordering every kernel again took
+    # each a pass over every kernel for each kernel.
+    function follow!(added, k, a)
+        js = [j for j in get(readers, a, Int[]) if j != k && !(j in needs[k])]
+        isempty(js) && return true
+        runs_after(after, k, js) && return false
+        foreach(j -> (push!(needs[k], j); push!(after[j], k); push!(added, k => j)), js)
+        true
+    end
+    undo!(added) = foreach(((k, j),) -> (delete!(needs[k], j); pop!(after[j])), Iterators.reverse(added))
     # Each fold by key of `pairs` writes over its value, if the kernels can run
     # in an order where it does so after every other kernel reading the value.
     function overwrite!(pairs)
-        any(((v, b),) -> any(((w, c),) -> w == v || c == b, overwrites), pairs) && return false
-        trial = copy(needs)
+        any(((v, b),) -> v in overwritten || b in bases, pairs) && return false
+        added = Pair{Int, Int}[]
         for (v, b) in pairs
-            k = p.owner[v]
-            trial[k] = union(trial[k], (j for j in eachindex(reads) if j != k && b in reads[j]))
+            follow!(added, p.owner[v], b) && continue
+            undo!(added)
+            return false
         end
-        kernel_order(trial) === nothing && return false
-        needs = trial
         append!(overwrites, pairs)
+        foreach(((v, b),) -> (push!(overwritten, v); push!(bases, b)), pairs)
         true
     end
-    donated, staged = Pair{Int, Int}[], Pair{Int, Int}[]
+    donated, staged, taking = Pair{Int, Int}[], Pair{Int, Int}[], Set{Int}()
     for (r, a) in replaces
         r == a && continue
         # Folds by key from the argument to the result, each over the last.
@@ -81,17 +103,14 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         end
         if b == a && overwrite!([chain; v => a])
             push!(donated, r => a)
+            push!(taking, r)
             continue
         end
         k = p.owner[r]
-        if k > 0 && !(r in first.(donated)) && in_place(k) && writes_over(graph, p.groups[k], r, a)
-            trial = copy(needs)
-            trial[k] = union(needs[k], (j for j in eachindex(reads) if j != k && a in reads[j]))
-            if kernel_order(trial) !== nothing
-                needs = trial
-                push!(donated, r => a)
-                continue
-            end
+        if k > 0 && !(r in taking) && in_place(k) && writes_over(graph, p.groups[k], r, a) && follow!(Pair{Int, Int}[], k, a)
+            push!(donated, r => a)
+            push!(taking, r)
+            continue
         end
         push!(staged, r => a)
     end
@@ -157,16 +176,65 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
 end
 
 # Kernels in an order where each runs after those it needs, otherwise in their
-# own order; nothing for a cycle.
+# own order: each time the first kernel whose needs have run, the kernels
+# ready kept in a heap. Nothing for a cycle.
 function kernel_order(needs)
-    order, placed = Int[], falses(length(needs))
-    while length(order) < length(needs)
-        k = findfirst(j -> !placed[j] && all(i -> placed[i], needs[j]), eachindex(needs))
-        k === nothing && return nothing
+    waiting = map(length, needs)
+    after = [Int[] for _ in needs]
+    foreach(k -> foreach(j -> push!(after[j], k), needs[k]), eachindex(needs))
+    ready = Int[]
+    foreach(k -> waiting[k] == 0 && heap_push!(ready, k), eachindex(needs))
+    order = Int[]
+    while !isempty(ready)
+        k = heap_pop!(ready)
         push!(order, k)
-        placed[k] = true
+        for j in after[k]
+            waiting[j] -= 1
+            waiting[j] == 0 && heap_push!(ready, j)
+        end
     end
-    order
+    length(order) == length(needs) ? order : nothing
+end
+
+# Whether any kernel of `js` runs after kernel `k`, by the kernels that need
+# each (`after`): what runs after `k` walked once.
+function runs_after(after, k, js)
+    targets = Set(js)
+    seen, pending = Set(k), [k]
+    while !isempty(pending)
+        for j in after[pop!(pending)]
+            j in targets && return true
+            j in seen && continue
+            push!(seen, j)
+            push!(pending, j)
+        end
+    end
+    false
+end
+
+# A heap of integers, the least on top.
+function heap_push!(h, x)
+    push!(h, x)
+    i = length(h)
+    while i > 1 && h[i >> 1] > h[i]
+        h[i], h[i >> 1] = h[i >> 1], h[i]
+        i >>= 1
+    end
+    h
+end
+
+function heap_pop!(h)
+    top, last = h[1], pop!(h)
+    isempty(h) && return top
+    h[1] = last
+    i, n = 1, length(h)
+    while 2i <= n
+        c = 2i < n && h[2i + 1] < h[2i] ? 2i + 1 : 2i
+        h[c] < h[i] || break
+        h[i], h[c] = h[c], h[i]
+        i = c
+    end
+    top
 end
 
 """
