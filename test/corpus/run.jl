@@ -29,7 +29,8 @@
 # Every job runs under `flock` of TEMPEST_GPU_LOCK when it is set, as every
 # job on a shared GPU must, and is stopped after TEMPEST_CORPUS_TIMEOUT
 # seconds (1800). The SM clock recorded is the median of the clocks seen
-# while the GPU was busy (challengers/clocked.sh). TEMPEST_CORPUS_CHECK=0
+# while the GPU was busy (challengers/clocked.sh), in Tempest's run whose step
+# is the one kept, the faster of the cold and the warm. TEMPEST_CORPUS_CHECK=0
 # skips the Float64 reference: its gradient is the interpreter's on the CPU,
 # which holds every value it computes, and a program whose reference is past
 # the host's memory is checked by a smaller instance its `check` names.
@@ -131,9 +132,11 @@ function tempest(program, shape, directory)
     haskey(warm, :failed) && return (; side = "tempest", precision = cold.precision, cold_prep_s = cold.prep_s,
         step_ms = cold.step_ms, kernels = cold.kernels, sm_mhz = cold.clock, note = "warm: " * warm.failed)
     note = cold.kernels == warm.kernels ? "" : "cold run $(cold.kernels) kernels"
+    # The step kept is the faster run's, and the clock recorded the one it ran at.
+    kept = cold.step_ms < warm.step_ms ? cold : warm
     (; side = "tempest", precision = warm.precision, cold_prep_s = cold.prep_s, warm_prep_s = warm.prep_s,
-        step_ms = min(cold.step_ms, warm.step_ms), kernels = warm.kernels, agreement = warm.agreement,
-        sm_mhz = warm.clock, note = join(filter(!isempty, [note, warm.note]), "; "))
+        step_ms = kept.step_ms, kernels = warm.kernels, agreement = warm.agreement,
+        sm_mhz = kept.clock, note = join(filter(!isempty, [note, warm.note]), "; "))
 end
 
 function challengers(program, shape, directory)
