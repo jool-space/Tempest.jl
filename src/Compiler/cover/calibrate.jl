@@ -58,9 +58,9 @@ rates file. Streamed: the time of a fold over eight applications of the
 function beyond that of the fold alone, per application, the same for every
 class. Swept: the time a product's factor computed by the function adds to
 the product. Inner: the same for a product that recomputes the fold the
-function is applied to. A function priced where other work hides it measures
-as nothing, which is what it costs there. A function the table does not name
-costs what addition does.
+function is applied to. A function priced where other work hides it, or that
+adds less than a timing can tell, measures as nothing, which is what it
+costs there. A function the table does not name costs what addition does.
 """
 Base.@nospecializeinfer price!(d::Decider, regime, class, @nospecialize(f)) = price_applied!(d, regime, class, applied_function(f))
 
@@ -156,13 +156,23 @@ end
 # that package's product without it, for the package it costs least.
 function applied_seconds(regime, f, plain, applied)
     fastest(r) = minimum(first, values(r); init = Inf)
-    regime === :streamed && return max(0.0, fastest(applied) - fastest(plain)) / (APPLIED_TIMES * prod(APPLIED_SHAPE))
+    regime === :streamed && return added_seconds(fastest(applied), fastest(plain)) / (APPLIED_TIMES * prod(APPLIED_SHAPE))
     both = [p for p in keys(applied) if haskey(plain, p)]
     isempty(both) && return 0.0
     package = argmin(p -> first(applied[p]) - first(plain[p]), both)
     n = sum(n for w in last(applied[package]) for (g, n) in getfield(w, regime) if g == f; init = 0.0)
-    n > 0 ? max(0.0, first(applied[package]) - first(plain[package])) / n : 0.0
+    n > 0 ? added_seconds(first(applied[package]), first(plain[package])) / n : 0.0
 end
+
+# The seconds a function adds to a reference that takes `plain` without it:
+# none where the two tie, within the margin two measurements tie by
+# (`NOISE`), so that a function no timing tells from nothing is priced at
+# nothing, and a fit again writes the same. Two timings of one plain
+# reference, eighteen timed ten times each on the GB10, differed by at most
+# 5.1% of the faster (1.4% at the 90th percentile); what the functions that
+# cost something add is 13% (exp) to 4.3 times (inv) of the reference at
+# the median.
+added_seconds(applied, plain) = applied - plain <= NOISE * plain ? 0.0 : applied - plain
 
 # One application of `f` to an array, with a literal second operand where it
 # takes one, so that the chain stays one term of one kernel.
