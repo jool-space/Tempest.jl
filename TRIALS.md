@@ -654,6 +654,30 @@ decisions grow with the program, about 5.5 ms for each of 1,408 options at
 (normalizing affine indices a quarter, its views a tenth); deciding once
 for every kernel alike stands open.
 
+Two compiled programs called at once from two tasks, which a search behind
+a program's first result makes the ordinary case, shared the cuBLAS
+extension's one handle and one 32 MiB workspace per context. A product's
+call sets the handle's stream and workspace and then multiplies: with the
+tasks on two threads, the first of 100 rounds failed on GB10 and on RTX
+6000 Ada in every run, cuBLAS's internal error on that call and on every
+call after it on the handle, each program called alone included (on one
+thread, none). A handle per task alone turns those loud errors into
+silently wrong results: 780 of 4,000 results wrong, in 99 of 100 rounds
+(GB10, 64 by 64 products summing 131,072, which write 1.5 MB of the
+workspace), the products then running beside each other on the one
+workspace; with a workspace per product, none. So the handle per task must
+not land without the workspace. Graphs recorded of products lease the
+shared workspace and constants, and CUDA.jl orders their launches one
+after the other: none wrong. cuDNN's attention shared one handle per
+context the same way, 33 of 1,000 results wrong in 26 of 50 rounds,
+silently; its workspace being each launch's own already, it now executes
+on its task's handle, CUDA.jl's, and none of 1,000 are wrong in 50 rounds.
+What closes cuBLAS's
+is a handle per task and a workspace per executable, which its graphs
+record as they record its buffers; a product is built without knowing
+whose it is, so it waits on implementations being given per-executable
+state as they build, and the tests hold it as a gap until then.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
