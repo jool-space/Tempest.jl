@@ -67,20 +67,41 @@ signature(n::Node) = hash((typeof(n.op), n.dims, n.eltype, n.scalar, length(n.in
 rollable(n::Node) = !(n.op isa Union{Loop, Placeholder, Argument, Carry})
 
 """
-    periodic_window(nodes, lo, last[, alike_at, runs]) -> (; first, period, periods) or nothing
+What `roll!` seeks windows with, among `nodes[lo:hi]`, from each node down
+from the last: the nodes of each signature in order, the only ones alike
+each other, and the runs found so far (see `run_start`), which each search
+from a node further down reuses.
+"""
+struct WindowSearch
+    nodes::Vector{Node}
+    lo::Int
+    alike::Dict{UInt, Vector{Int}}
+    runs::Dict{Int, Tuple{Int, Int}}
+end
+
+function WindowSearch(nodes, lo, hi)
+    alike = Dict{UInt, Vector{Int}}()
+    for k in lo:hi
+        push!(get!(() -> Int[], alike, signature(nodes[k])), k)
+    end
+    WindowSearch(nodes, lo, alike, Dict{Int, Tuple{Int, Int}}())
+end
+
+"""
+    periodic_window(search, last) -> (; first, period, periods) or nothing
 
 The window of `nodes[lo:last]` ending at `last` that repeats with a period,
 over the most nodes, the shortest period among those: each node of it after
-the first period alike its node a period back. `alike_at` holds the nodes
-that may be alike `last`, in order; `runs` what earlier calls with the same
-`lo` found of each period (see `run_start`).
+the first period alike its node a period back. Sought from each node down
+from the last of a search, in turn.
 """
-function periodic_window(nodes, lo, last, alike_at = nothing, runs = Dict{Int, Tuple{Int, Int}}())
+function periodic_window(search::WindowSearch, last)
+    (; nodes, lo) = search
     best = nothing
     accepted = Int[]
     n = nodes[last]
-    candidates = alike_at === nothing ? ((last - 1):-1:lo) :
-        view(alike_at, (searchsortedfirst(alike_at, last) - 1):-1:searchsortedfirst(alike_at, lo))
+    alike_at = search.alike[signature(n)]
+    candidates = view(alike_at, (searchsortedfirst(alike_at, last) - 1):-1:searchsortedfirst(alike_at, lo))
     for j in candidates
         p = last - j
         (last - lo + 1) ÷ p < ROLLED_PERIODS && break
@@ -88,7 +109,7 @@ function periodic_window(nodes, lo, last, alike_at = nothing, runs = Dict{Int, T
         1 in accepted && break
         any(q -> p % q == 0, accepted) && continue
         alike_nodes(n, nodes[j], p) || continue
-        i = run_start(runs, nodes, lo, last, p)
+        i = run_start(search, last, p)
         matched = last - i
         periods = matched ÷ p + 1
         periods >= 2 || continue
@@ -112,12 +133,14 @@ end
 
 """
 The node before the run of nodes up to `last`, each alike its node `p`
-back: walked down from `last` once per stretch, and kept in `runs` as the
-stretch's ends by period. A window is sought from every node down from the
-last, and walked afresh each time, a run was walked again from each of its
-nodes: a heat equation's 800 slices of its source took 0.9 s to trace.
+back: walked down from `last` once per stretch, and kept in the search's
+runs as the stretch's ends by period. A window is sought from every node
+down from the last, and walked afresh each time, a run was walked again from
+each of its nodes: a heat equation's 800 slices of its source took 0.9 s to
+trace.
 """
-function run_start(runs, nodes, lo, last, p)
+function run_start(search::WindowSearch, last, p)
+    (; nodes, lo, runs) = search
     start, stop = get(runs, p, (0, 0))
     start < last <= stop && return start
     last == start && return last
@@ -144,15 +167,10 @@ function roll!(tape::Tape, range, required)
     hi - lo + 1 >= 2 * ROLLED_PERIODS || return 0
     # The window ends at the last node alike one a period back.
     window = nothing
-    # Each node's earlier ones of its signature, the only ones alike it.
-    alike = Dict{UInt, Vector{Int}}()
-    for k in lo:hi
-        push!(get!(() -> Int[], alike, signature(nodes[k])), k)
-    end
-    runs = Dict{Int, Tuple{Int, Int}}()
+    search = WindowSearch(nodes, lo, hi)
     for at in hi:-1:lo
         rollable(nodes[at]) || continue
-        window = periodic_window(nodes, lo, at, alike[signature(nodes[at])], runs)
+        window = periodic_window(search, at)
         window === nothing || break
     end
     window === nothing && return 0
