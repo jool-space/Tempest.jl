@@ -885,7 +885,7 @@ with how it formed (`Planned`) is formed again with a change
 (`replanned`), taking each kernel whose noted reads are as they were, asking
 again a dependency walk that what differs leaves in doubt, and forming the
 rest. The cover keeps its starting plan and each plan it takes so, and each
-trial is formed near the plan it changes (65dfd07 to 38538a7). Counted
+trial is formed near the plan it changes. Counted
 before timed: a trial forms again a median of 4 or 5 kernels, of 126 to
 514 in the instances counted; with the test suite's packages loaded, a trial that recomputes a fold
 formed again 107 kernels of 254 at 8 RK4 steps, the kernels after it that
@@ -897,7 +897,8 @@ corpus, the families and the twelve large instances are identical, every
 trial of them and of the suite compared with the plan formed whole.
 
 On grizzle, idle, 12 threads, dry on the CPU target, one run each, 772f16b
-against 4a311a3, in seconds (exponent over the last doubling):
+against 4a311a3, the change as it was measured before it was rebased onto
+main, in seconds (exponent over the last doubling):
 
 | | 4 | 8 | 16 | 32 | |
 |---|---|---|---|---|---|
@@ -924,7 +925,13 @@ what is stored takes 6.9, building the plan from its kernels (what each
 writes, their order) 5.4, the passes' forming and taking 4.1, and the maps
 recomputed where read 1.2; the RK4's trials recompute no fold, and at 32
 GPT layers the 5 of 57 that do take 1.0 of 9.3. Deciding storage and
-building the plan only where a trial changes them is what stands.
+building the plan only where a trial changes them is what stands, and so
+does deciding, now the largest phase: 7.6 of the 13.6 s at 32 GPT layers
+and 2.15 of 7.16 at 32 RK4 steps, linear in the layers, 99% of it each
+kernel finding its options (claims, estimates, variants) though kernels
+alike already share one decision. Finding them once for each kernel alike,
+its view numbered by first appearance so that no implementation can tell
+two alike kernels apart, is specified and not built.
 
 Two compiled programs called at once from two tasks, which a search behind
 a program's first result makes the ordinary case, shared the cuBLAS
