@@ -18,6 +18,10 @@ const CUDA_FUNCTIONAL = CUDACore.functional()
 # unless the environment says otherwise.
 get!(ENV, "TEMPEST_VERIFY", "true")
 
+# Nothing is measured unless a test asks: the tests share the device with each
+# other and, in CI, with another job, so a close call timed is decided by chance.
+get!(ENV, "TEMPEST_MEASURE", "none")
+
 # Measurements the tests take stay out of the user's tuning record.
 ENV["TEMPEST_CACHE"] = mktempdir()
 CUDA_FUNCTIONAL && haskey(ENV, "TEMPEST_RATES") && (mkpath(C.tuning_directory()); cp(ENV["TEMPEST_RATES"], C.rates_path(T.CUDATarget())))

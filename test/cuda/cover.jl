@@ -74,7 +74,7 @@ end
     end
     graph = C.lower(trace(f, x, w))
     q = only(C.recomputable_folds(graph))
-    d = C.Decider(T.CUDATarget(), graph)
+    d = C.Decider(T.CUDATarget(), graph; measure = :close)
     base = C.generator_plan(d)
     trial = C.plan(graph; recompute = [q])
     recomputing = [g for g in trial.groups if q in C.recomputed_in(g)]
@@ -179,7 +179,7 @@ end
     ext = Base.get_extension(Tempest, :cuTileExt)
     step(o) = (s = o.claim.schedule; s.tiling[ext.sweep_axis(s)].tile)
     withenv("TEMPEST_CACHE" => dir) do
-        ex = prepare(p, CuArray(w), CuArray(x); target)
+        ex = prepare(p, CuArray(w), CuArray(x); target, measure = :close)
         d = only(d for d in ex.decisions if d !== nothing && d.choice.implementation isa ext.cuTileGenerator)
         @test sort([step(o) for o in d.options if o.implementation isa ext.cuTileGenerator]) == [32, 64, 128]
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, x)]; rtol = 1.0e-4)
@@ -201,7 +201,7 @@ end
     withenv("TEMPEST_CACHE" => dir) do
         for (f, steps) in ((softmax_columns, [1024, 4096, 8192]), (x -> sum(x; dims = 1), [1024]))
             p = trace(f, x)
-            ex = prepare(p, CuArray(x); target)
+            ex = prepare(p, CuArray(x); target, measure = :close)
             d = only(d for d in ex.decisions if d !== nothing && d.choice.claim.schedule.sketch === :streamed)
             @test sort([step(o) for o in d.options if o.implementation isa ext.cuTileGenerator]) == steps
             @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, x)]; rtol = 1.0e-4)

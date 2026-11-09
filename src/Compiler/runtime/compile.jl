@@ -13,7 +13,8 @@ and what `f` writes into an argument's arrays it leaves there, as `f` would.
 
 `measure` says which claims are timed when preparing, as for `prepare`:
 `:none` none, `:close` the options whose estimates are close, `:all` every
-option; `true` and `false` mean `:close` and `:none`.
+option; `true` and `false` mean `:close` and `:none`. The default is
+`TEMPEST_MEASURE`'s where the environment sets it.
 
 Which leaves of the arguments are inputs follows `trace`: arrays, also inside
 tuples, named tuples and structs, mutable ones too. Numbers are constants; a
@@ -59,7 +60,7 @@ use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
 `execute!` or `replay!`. `c.executable` is the prepared program, and
 `explain(c)` shows it.
 """
-function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = :close, capture::Bool = true)
+function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), capture::Bool = true)
     passed = argument_arrays((f, args...))
     globals = read_globals(f, args, passed)
     program, met = trace_meeting(call, f, args...)

@@ -77,7 +77,9 @@ tuning record. `measure = :none` times no claim but still uses the times in
 the record; `:close`, the default, times the options whose estimates are
 within the close-call factor of the best; `:all` times every option of every
 group and both sides of every comparison. `true` and `false` mean `:close` and
-`:none`.
+`:none`. The environment's `TEMPEST_MEASURE` (`none`, `close` or `all`) sets
+the default, as the tests set it to `none`: on a device other jobs share, a
+close call timed is decided by chance.
 
 A claim that fails to build is no option once it has: the program is planned
 again without it, each map of the group it claimed proposed to be stored
@@ -139,7 +141,7 @@ end
 For a function called on new arguments each time, `compile` does the binding
 and copying.
 """
-function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = :close,
+function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = measuring(),
         replaces = (), by_reference = (), recompute = (), ride = (), partition::Bool = true, build::Bool = true, verify::Bool = verifying())
     # The terms an earlier preparation interned are of its program.
     IR.forget_terms!()

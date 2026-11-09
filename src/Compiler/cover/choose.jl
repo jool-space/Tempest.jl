@@ -96,7 +96,7 @@ mutable struct Decider
     steps::Int
 end
 
-function Decider(target, graph; measure = :close, recompute = (), keep = (), ride = (), steps = 1)
+function Decider(target, graph; measure = measuring(), recompute = (), keep = (), ride = (), steps = 1)
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     calibration = load_record(calibration_path)
@@ -140,6 +140,15 @@ end
 # rates and reading no record, for a preparation that builds nothing.
 level(measure::Bool) = measure ? :close : :none
 level(measure::Symbol) = measure
+
+# `prepare`'s default, from the environment: the tests measure nothing unless
+# a test asks, since a time taken beside other jobs on one device decides a
+# close call by chance, and a test of the plan would then pass by chance.
+function measuring()
+    m = Symbol(get(ENV, "TEMPEST_MEASURE", "close"))
+    m in (:none, :close, :all) || throw(ArgumentError("TEMPEST_MEASURE is none, close or all, not $m"))
+    m
+end
 
 "Whether the decider may time claims and fit rates on its target: not when dry."
 measures(d::Decider) = d.measure !== :dry && d.measurable
