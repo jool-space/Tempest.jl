@@ -97,21 +97,23 @@ const SWEEP_SHAPES = ((256, 512), (512, 2048))
 # are. Each regime's plain reference (the fold, or the product, without the
 # function) is one program for every function of a class.
 function fit_applied_all!(d::Decider, needs)
-    specs = Dict{Any, Tuple}()
-    for (regime, class, f) in needs
-        plain, applied = applied_references(regime, class, f)
-        get!(specs, (regime, class), plain)
-        specs[(regime, class, f)] = applied
+    phase(:calibration) do
+        specs = Dict{Any, Tuple}()
+        for (regime, class, f) in needs
+            plain, applied = applied_references(regime, class, f)
+            get!(specs, (regime, class), plain)
+            specs[(regime, class, f)] = applied
+        end
+        keys_ = collect(keys(specs))
+        built = concurrently(k -> build_reference(d, implementations(d.target), specs[k][1], specs[k][2]...; recomputing = specs[k][3]), keys_, d.target)
+        timed = Dict(k => time_reference(d, r::Reference) for (k, r) in zip(keys_, built))
+        for (regime, class, f) in needs
+            name = APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]
+            keep!(d.calibration, d.calibration_path, join(("applied", regime, class, name), " "),
+                applied_seconds(regime, f, timed[(regime, class)], timed[(regime, class, f)]))
+        end
+        nothing
     end
-    keys_ = collect(keys(specs))
-    built = concurrently(k -> build_reference(d, implementations(d.target), specs[k][1], specs[k][2]...; recomputing = specs[k][3]), keys_, d.target)
-    timed = Dict(k => time_reference(d, r::Reference) for (k, r) in zip(keys_, built))
-    for (regime, class, f) in needs
-        name = APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]
-        keep!(d.calibration, d.calibration_path, join(("applied", regime, class, name), " "),
-            applied_seconds(regime, f, timed[(regime, class)], timed[(regime, class, f)]))
-    end
-    nothing
 end
 
 function fit_applied!(d::Decider, regime, class, f)
@@ -229,33 +231,35 @@ the sums, and the rate at which the package's claim on `(a * b) * c`, with
 either that does not split.
 """
 function fit!(d::Decider, T, among = implementations(d.target))
-    class = product_class(d.target, T)
-    key(p, what) = string(p, " ", class, " ", what)
-    unfitted = [i for i in among if !fitted_line(d, package_name(i), class)]
-    isempty(unfitted) && return nothing
-    # The references built side by side, their kernels compiling at once,
-    # then timed one at a time, as `fit_applied_all!` builds its own.
-    products = [map(dims -> zeros(T, dims), shapes) for shapes in REFERENCE_SHAPES]
-    recomputed = map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)
-    built = concurrently(1:(length(products) + 1), d.target) do k
-        k <= length(products) ? build_reference(d, unfitted, *, products[k]...) :
-            build_reference(d, unfitted, (a, b, c) -> (a * b) * c, recomputed...; recomputing = true)
-    end
-    timed = [time_reference(d, r::Reference) for r in built]
-    times, recomputing = timed[1:(end - 1)], timed[end]
-    # A reference's first launch: its time less those of the launches after
-    # it, which merge split sums, and its flops over its share of the device.
-    first_launch(t, work, package) = (t - sum(w -> seconds(w, d.rates, memory!(d, package), nothing), work[2:end]; init = 0.0),
-        first(work).flops / min(1.0, first(work).blocks / d.rates.blocks), first(work))
-    for (package, _) in times[1]
-        (t1, f1, _), (t2, f2, middle), (t3, f3, _) = map(fastest -> first_launch(fastest[package]..., package), times)
-        rate = (f3 - f1) / (t3 - t1)
-        latency = t1 - f1 / rate
-        split = middle.split ? f2 / (t2 - latency) : rate
-        t, f, w = haskey(recomputing, package) ? first_launch(recomputing[package]..., package) : (0.0, 0.0, Work(0.0))
-        recompute = w.split ? w.recomputed / (t - latency - f / split) : rate
-        foreach(((what, value),) -> keep!(d.calibration, d.calibration_path, key(package, what), value),
-            (("latency", latency), ("rate", rate), ("split", split), ("recompute", recompute)))
+    phase(:calibration) do
+        class = product_class(d.target, T)
+        key(p, what) = string(p, " ", class, " ", what)
+        unfitted = [i for i in among if !fitted_line(d, package_name(i), class)]
+        isempty(unfitted) && return nothing
+        # The references built side by side, their kernels compiling at once,
+        # then timed one at a time, as `fit_applied_all!` builds its own.
+        products = [map(dims -> zeros(T, dims), shapes) for shapes in REFERENCE_SHAPES]
+        recomputed = map(dims -> zeros(T, dims), RECOMPUTED_SHAPES)
+        built = concurrently(1:(length(products) + 1), d.target) do k
+            k <= length(products) ? build_reference(d, unfitted, *, products[k]...) :
+                build_reference(d, unfitted, (a, b, c) -> (a * b) * c, recomputed...; recomputing = true)
+        end
+        timed = [time_reference(d, r::Reference) for r in built]
+        times, recomputing = timed[1:(end - 1)], timed[end]
+        # A reference's first launch: its time less those of the launches after
+        # it, which merge split sums, and its flops over its share of the device.
+        first_launch(t, work, package) = (t - sum(w -> seconds(w, d.rates, memory!(d, package), nothing), work[2:end]; init = 0.0),
+            first(work).flops / min(1.0, first(work).blocks / d.rates.blocks), first(work))
+        for (package, _) in times[1]
+            (t1, f1, _), (t2, f2, middle), (t3, f3, _) = map(fastest -> first_launch(fastest[package]..., package), times)
+            rate = (f3 - f1) / (t3 - t1)
+            latency = t1 - f1 / rate
+            split = middle.split ? f2 / (t2 - latency) : rate
+            t, f, w = haskey(recomputing, package) ? first_launch(recomputing[package]..., package) : (0.0, 0.0, Work(0.0))
+            recompute = w.split ? w.recomputed / (t - latency - f / split) : rate
+            foreach(((what, value),) -> keep!(d.calibration, d.calibration_path, key(package, what), value),
+                (("latency", latency), ("rate", rate), ("split", split), ("recompute", recompute)))
+        end
     end
 end
 
@@ -278,23 +282,25 @@ launches. A package that claims no such fold moves bytes at the device's
 rates.
 """
 function fit_memory!(d::Decider, among = implementations(d.target))
-    key(p, what) = string(p, " memory ", what)
-    unfitted = [i for i in among if !haskey(d.calibration, key(package_name(i), "bandwidth"))]
-    floor = !haskey(d.calibration, key(:floor, "bandwidth"))
-    built = concurrently(n -> build_reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n); floor), collect(MEMORY_COLUMNS), d.target)
-    folds = [time_reference(d, r::Reference) for r in built]
-    for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
-        latency, bandwidth = if all(fold -> haskey(fold, package), folds)
-            bytes = [sum(w -> w.bytes, last(fold[package])) for fold in folds]
-            seconds = [first(fold[package]) for fold in folds]
-            b, s = sum(bytes) / length(bytes), sum(seconds) / length(seconds)
-            per_byte = sum((bytes .- b) .* (seconds .- s)) / sum((bytes .- b) .^ 2)
-            (first(seconds) - first(bytes) * per_byte) / length(last(first(folds)[package])), 1 / per_byte
-        else
-            d.rates.launch, d.rates.cached
+    phase(:calibration) do
+        key(p, what) = string(p, " memory ", what)
+        unfitted = [i for i in among if !haskey(d.calibration, key(package_name(i), "bandwidth"))]
+        floor = !haskey(d.calibration, key(:floor, "bandwidth"))
+        built = concurrently(n -> build_reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n); floor), collect(MEMORY_COLUMNS), d.target)
+        folds = [time_reference(d, r::Reference) for r in built]
+        for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
+            latency, bandwidth = if all(fold -> haskey(fold, package), folds)
+                bytes = [sum(w -> w.bytes, last(fold[package])) for fold in folds]
+                seconds = [first(fold[package]) for fold in folds]
+                b, s = sum(bytes) / length(bytes), sum(seconds) / length(seconds)
+                per_byte = sum((bytes .- b) .* (seconds .- s)) / sum((bytes .- b) .^ 2)
+                (first(seconds) - first(bytes) * per_byte) / length(last(first(folds)[package])), 1 / per_byte
+            else
+                d.rates.launch, d.rates.cached
+            end
+            keep!(d.calibration, d.calibration_path, key(package, "latency"), latency)
+            keep!(d.calibration, d.calibration_path, key(package, "bandwidth"), bandwidth)
         end
-        keep!(d.calibration, d.calibration_path, key(package, "latency"), latency)
-        keep!(d.calibration, d.calibration_path, key(package, "bandwidth"), bandwidth)
     end
 end
 

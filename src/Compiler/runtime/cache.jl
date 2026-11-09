@@ -132,10 +132,11 @@ once per key in a session, so that callers in flight together wait for the
 first. The compilation runs `elsewhere`, and a failure fails every caller.
 """
 function cached_kernel(@nospecialize(compile), key)
+    observe(:kernel, key)
     task = @lock RESOLVED_LOCK get!(RESOLVED_KERNELS, key) do
         @async begin
             found = load_kernel(key)
-            found === nothing ? elsewhere(compile) : found
+            found === nothing ? phase(() -> elsewhere(compile), :compile) : found
         end
     end
     fetch_result(task)

@@ -5,7 +5,7 @@
 # it exercises: program/, index/, plan/, cover/, codegen/ and runtime/.
 # extensions/ holds NNlib's, Einops's and SpecialFunctions' functions on traced
 # arrays and numbers; cuda/ what runs only on CUDA; decisions.jl,
-# interfaces.jl and show.jl span the parts. setup.jl is evaluated in every test's module; fixtures/ holds
+# interfaces.jl, show.jl and work.jl span the parts. setup.jl is evaluated in every test's module; fixtures/ holds
 # programs that several tests include, bench/ the scripts that time Tempest,
 # fuzz/ the randomized program checker (fuzz/run.jl) with the faults it
 # found open, and corpus/ whole programs run against their challengers

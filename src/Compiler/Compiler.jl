@@ -50,6 +50,9 @@ public trace, prepare, bind!, point!, execute!, capture!, replay!, outputs
 # views of its groups; and how kernels are built side by side.
 public Plan, group_views, concurrently
 
+# The compiler's own work, tallied.
+include("work.jl")
+
 # The program level.
 include("program/program.jl")
 include("program/tracing.jl")

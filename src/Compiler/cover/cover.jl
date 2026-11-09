@@ -308,8 +308,11 @@ returned, taken or not. Folds the decider pins are recomputed in every plan,
 and those it keeps are not proposed.
 """
 function cover(d::Decider)
+    clock = mark()
     base = generator_plan(d)
+    clock = lap!(:cover_start, clock)
     search!(d, base)
+    clock = lap!(:cover_search, clock)
     proposals = Tuple{Any, Union{Nothing, Implementation}}[]
     for i in implementations(d.target), q in Base.invokelatest(candidates, i, d.target, base)
         any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
@@ -330,6 +333,7 @@ function cover(d::Decider)
         end
     end
     measures(d) && foreach(v -> push!(proposals, (Ride(v), nothing)), riding_sums(base))
+    clock = lap!(:cover_proposals, clock)
     # What the starting plan stores: a set that does not form one group
     # there, where a trial would first form it, is not tried. A set holding a
     # pinned fold changes what is stored.
@@ -351,6 +355,7 @@ function cover(d::Decider)
     arounds = IdDict{Plan, Around}()
     around(p, taken) = get!(() -> Around(p, Vector{Int}[s for x in taken if forms_group(x) for s in group_sets(x)]), arounds, p)
     function trial(current, taken, qs)
+        tally!(:trials)
         all = Any[taken; qs]
         sets = Vector{Int}[s for x in all if forms_group(x) for s in group_sets(x)]
         recompute = Set{Int}(d.pinned)
@@ -392,8 +397,10 @@ function cover(d::Decider)
     keyed = [(q, i, proposal_key(base, a, q, texts)) for (q, i) in proposals]
     firsts = Dict{String, Any}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
+    clock = lap!(:cover_keys, clock)
     planned = Dict(k => Threads.@spawn(trial(base, Any[], Any[q])) for (k, q) in firsts)
     trials = Dict(k => fetch_result(t) for (k, t) in planned)
+    clock = lap!(:cover_trials, clock)
     # The groups by which the trials priced below differ from the starting
     # plan, searched together as the starting plan's are: each stage's kernels
     # compile side by side for every trial, rather than group by group as
@@ -415,15 +422,18 @@ function cover(d::Decider)
         end
         search!(d, ahead)
     end
+    clock = lap!(:cover_search_ahead, clock)
     ranked = Tuple{Float64, Any, Union{Nothing, Implementation}, String}[]
     for (q, i, k) in keyed
         x = get!(() -> priced_plan(trials[k], base, q, i), priced, k)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
     end
     sort!(ranked; by = r -> (-r[1], fixes(r[2])))
+    clock = lap!(:cover_pricing, clock)
     # Each ranked proposal's edit, by which proposals alike are one class.
     edits = Dict{String, String}()
     edit = [get!(() -> edit_key(known, base, trials[r[4]]), edits, r[4]) for r in ranked]
+    clock = lap!(:cover_edits, clock)
     near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
     current, considered, taken, done = base, Considered[], Any[], Set{Int}()
     kept = Set(group_identity(base, g) for g in base.groups)
@@ -502,6 +512,7 @@ function cover(d::Decider)
     # A trial planned ahead and not used is waited for, so none outlives the
     # cover; one that failed was of a plan the cover did not price.
     foreach(t -> try wait(t) catch end, spawned)
+    lap!(:cover_loop, clock)
     current, considered
 end
 

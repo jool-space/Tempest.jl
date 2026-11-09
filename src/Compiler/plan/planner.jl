@@ -174,6 +174,7 @@ function value_term(graph, stored, g::Group, v, index, domain = Domain(g.domain)
 end
 
 function built_term(graph, stored, g::Group, v, index, domain, memo)
+    tally!(:terms)
     val = graph.values[v]
     d = val.definition
     # A recurrence's group reads what it computes wherever this step stored it.
@@ -311,6 +312,7 @@ term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads
 # The latest value pending is looked at first: values are numbered after
 # their operands, so its ancestors cover most of the others.
 function depends(graph, deps::Dependencies, reads, group)
+    tally!(:walked)
     n = length(deps.owner)
     pending, covered, kernels = falses(n), falses(n), Set{Int}()
     top = 0
@@ -344,6 +346,7 @@ end
 # `recomputing`, a fold joins a group whose folds would then cover different
 # positions only where it shares what they recompute (see `mixes`).
 function try_add!(graph, stored, deps::Dependencies, g::Group, v; fold, recomputing = true)
+    tally!(:tries)
     val = graph.values[v]
     # An output covers the domain, or the positions of the primary folds.
     index = fold ? identity_index(g.domain) : placement(graph, g, v)
@@ -390,6 +393,7 @@ steps of the recurrence whose cycle it reads (see `riding`): a fold of its
 group, the values between computed at each step and not stored.
 """
 function plan(graph::IndexGraph; fixed = Vector{Int}[], recompute = (), store = (), ride = ())
+    tally!(:plans)
     s = storing(graph; recompute, store, ride)
     graph, stored, live, results = s.graph, s.stored, s.live, s.results
     # A pointwise value read only by one group over its domain, at the same
@@ -635,6 +639,7 @@ Dependencies(graph::IndexGraph) = Dependencies(zeros(Int, length(graph.values)),
 
 # The kernels, given what is stored.
 function group_values(graph, stored, live, results, fixed, riders = Dict{Int, Vector{Int}}())
+    tally!(:groupings)
     values = graph.values
     n = length(values)
     deps = Dependencies(graph)
@@ -1324,6 +1329,7 @@ function order_groups(graph, groups, owner)
     placed = falses(length(groups))
     while length(order) < length(groups)
         progress = false
+        tally!(:ordered, length(groups))
         for k in eachindex(groups)
             placed[k] && continue
             all(d -> placed[d], needs[k]) || continue

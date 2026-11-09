@@ -146,8 +146,9 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     # The terms an earlier preparation interned are of its program.
     IR.forget_terms!()
     forget_matches!()
-    graph = lower(program)
-    permits_rewrites(target) && (graph = rewrite(graph; rounded = rounded_backward(target)))
+    # Each phase marked (see `phase`).
+    lowered = phase(() -> lower(program), :lower)
+    graph = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
     pairs = replacements(program, replaces)
     input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
     pinned = Set{Int}(recompute)
@@ -173,26 +174,26 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
     if partition
         # The forward's maps the backward recomputes rather than reads (see
         # `partition`).
-        saved, recomputed = Compiler.partition(graph)
+        saved, recomputed = phase(() -> Compiler.partition(graph), :partition)
         filter!(!reads_replaced, recomputed)
         foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
         union!(pinned, recomputed)
     end
-    d = Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride)
+    d = phase(() -> Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride), :decider)
     # Planned again while the last plan's builds failed, a few times at most;
     # then what fails runs on the next option, the floor last (see
     # `build_group`). The last plan's buffers are let go first. Without
     # `build`, implementations compile nothing as they claim (`compiling`).
     ex = Base.ScopedValues.with(Implement.COMPILING => build, VERIFYING => verify) do
-        ex = planned(program, d, inputs, pairs, input, by_reference, build)
+        ex = phase(() -> planned(program, d, inputs, pairs, input, by_reference, build), :planned)
         for _ in 2:PLANS
             any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
             ex = nothing
-            ex = planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build)
+            ex = phase(() -> planned(program, forget_decisions!(d), inputs, pairs, input, by_reference, build), :planned)
         end
         ex
     end
-    ex.built && bind!(ex, inputs...)
+    ex.built && phase(() -> bind!(ex, inputs...), :bind)
     ex
 end
 
@@ -203,9 +204,13 @@ const PLANS = 4
 # its own, its inputs not yet bound: `prepare` once its graph is lowered.
 function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, build)
     target = d.target
-    p, considered = cover(d)
+    p, considered = phase(() -> cover(d), :cover)
+    # The sections of `planned` after the cover (see `lap!`).
+    clock = mark()
     search!(d, p)
+    clock = lap!(:search, clock)
     ds = decisions(d, p)
+    clock = lap!(:decisions, clock)
     values = p.graph.values
     result_value(k) = p.graph.results[k].value
     # A result that is an argument's storage would change as another result
@@ -220,8 +225,10 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     end
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
+    clock = lap!(:storage, clock)
     ds = ds[order]
     VERIFYING[] && verify(p, s; in_place = k -> writes_in_place(ds[k]))
+    clock = lap!(:verify, clock)
     if !build
         none(n) = Vector{Any}(nothing, n)
         return Executable(program, p, target, s, Any[], none(length(values)),
@@ -267,6 +274,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     stored(k) = haskey(replaced, k) ? arguments[replaced[k]] : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
     results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
+    clock = lap!(:build, clock)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
     outs = rebuild(k -> k isa Int ? results[k] : constant_leaf(k), program.output_structure)
     launches = Any[b[1] for b in built]
@@ -286,6 +294,7 @@ function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, 
     end
     pointed = Any[x === nothing ? nothing : arguments[a] for (a, x) in enumerate(pointable)]
     at = UInt[x === nothing ? 0 : reinterpret(UInt, pointer(x)) for x in pointed]
+    lap!(:executable, clock)
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outs,
         launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, pointable, pointed, at, zeros(UInt, length(program.arguments)),
         fill(false, length(program.arguments)), 1, true)

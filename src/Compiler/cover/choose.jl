@@ -242,6 +242,7 @@ through a gather at each shifted position, took 4.5 μs in cuTile and 2.2 on
 the floor.
 """
 function options(d::Decider, p::Plan, g::Group)
+    tally!(:options)
     view = group_view(p, g)
     # The protocol is called in the latest world here and wherever the
     # compiler calls it, as a callback is: kernel packages add methods to it
@@ -451,6 +452,7 @@ end::Tuple{Vector{GroupIdentity}, Set{GroupIdentity}}
 # for the kernels of the plan that stores it, when those two had been
 # measured at 40 and 13 ms.
 function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
+    tally!(:compared)
     ids_a, ia = identities!(known, a)
     ids_b, ib = identities!(known, b)
     only_a = [(a, g) for (g, id) in zip(a.groups, ids_a) if !(id in ib)]
@@ -619,14 +621,14 @@ end
 # timed one at a time, alone on the device.
 function build_unmeasured!(d::Decider, options)
     unmeasured = unique(x -> x[3].key, filter(x -> !haskey(d.record, x[3].key), options))
-    concurrently(((p, g, o),) -> build_option!(d, p, g, o), unmeasured, d.target)
+    phase(() -> concurrently(((p, g, o),) -> build_option!(d, p, g, o), unmeasured, d.target), :burst)
 end
 
 function measure!(d::Decider, p::Plan, g::Group, o::Choice)
     haskey(d.record, o.key) && return
     launch = build_option!(d, p, g, o)
     launch === nothing && return
-    t = time_launch(d.target, launch)
+    t = phase(() -> time_launch(d.target, launch), :timing)
     d.record[o.key] = t
     save_record(d.record_path, o.key, t)
 end
