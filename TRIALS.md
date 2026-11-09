@@ -576,6 +576,16 @@ applied scalar-function lines, 14 in the GPT step's evidence and 7 in the
 LSTM's, of which 9 and 4 are zero or under 1e-13 s a position, noise a
 recalibration refits; any such refit sends the decisions to the cover.
 
+Also left: the decisions kept are never removed. The store of compiled
+kernels beside them is bounded (`JULIA_OBJCACHE_CAPACITY`, 512 MiB by
+default, the entries used least recently removed); the `decisions`
+directory beside the record is not. A key holds Tempest's own identity, so
+every edit of its source keeps a program's decisions again beside the old,
+which nothing reads after. One tuning directory after two days of this
+trial held 18 files in 2.2 MB, from under 1 KB to 1.9 MB a file. What
+removes them is the kernel store's bound applied to them, by when each was
+last read.
+
 Taken next, the kernels' part of a cold preparation, each kernel's
 compile, each burst and each timing logged by a build that wraps them (a
 patch with the session, not kept), one cold run each of the GPT step and
@@ -922,6 +932,22 @@ passed over what depends on its members (36 on average now). The explanations of
 fuzzer's first 1,000 seeds (forward and gradient, on both targets), the
 corpus, the families and the twelve large instances are identical, every
 trial of them and of the suite compared with the plan formed whole.
+
+What holds a plan formed near another to the plan formed whole is that
+comparison, made where TEMPEST_CROSSCHECK asks, as the suite does of every
+trial its tests form; a preparation that does not ask takes the plan formed
+near as it is. The comparison above was made by a script outside the
+repository, its large instances 8 GPT layers and 16 unrolled RK4 steps at
+most. At 1c24f8f, under TEMPEST_VERIFY and TEMPEST_CROSSCHECK, no trial
+differed in any of: `test/bench/scaling.jl`, dry, at 16 and 32 GPT layers
+(228 trials each, 90,129 and 179,409 kernels taken as formed before) and at
+16 and 32 unrolled RK4 steps (1,100 and 2,140 trials, 153,170 and 503,570
+taken); the corpus's four programs at their small shapes and its GPT at
+GPT-2 124M's geometry, each prepared cold and warm on the GB10; and the
+fuzzer's seeds 20001 to 20400 on the CPU and 20401 to 20460 on the device.
+Open: a test in the repository that forms a large instance under the
+comparison, where one count in `test/work.jl` and the sizes of the suite's
+fixtures stand now.
 
 On grizzle, idle, 12 threads, dry on the CPU target, one run each, 772f16b
 against 4a311a3, the change as it was measured before it was rebased onto
