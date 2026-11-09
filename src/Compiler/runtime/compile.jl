@@ -4,7 +4,7 @@
 public compile, Compiled
 
 """
-    compile(f, args...; target, measure = :close, capture = true) -> Compiled
+    compile(f, args...; target, measure = :close, capture = true, search = :before) -> Compiled
 
 `f` traced on `args` and prepared, to be called like `f`: `compile(f, x)(y)`
 computes `f(y)` for any `y` alike `x` in structure, shapes and element types.
@@ -15,6 +15,28 @@ and what `f` writes into an argument's arrays it leaves there, as `f` would.
 `:none` none, `:close` the options whose estimates are close, `:all` every
 option; `true` and `false` mean `:close` and `:none`. The default is
 `TEMPEST_MEASURE`'s where the environment sets it.
+
+`search` says when they are timed. `:before`, the default: while preparing,
+so that the first call runs the plan measurement picks. `:after`: behind the
+first result. `compile` returns with the plan the estimates pick, prepared
+timing nothing, while a task prepares the program again, measuring as
+`measure` says. It compiles and builds on a thread of its own where Julia
+has more than one, and the calls take its timings, one each after its own
+work, on the calling task: so a claim is timed with none of the program's
+own work beside it, as when preparing, and the search never captures a
+graph beside the caller's work, which CUDA forbids the device's
+synchronization during. Other programs' work in the process is not held off
+while a claim is timed, as it is not while preparing. The first call
+after the search ends runs its plan, captured then, as `compile` captures
+the first, where it differs. A program not called searches no further than
+its next timing; `wait(c)` takes the search's timings until it ends, and
+changes the plan. The record keeps every time taken, so a search cut short
+loses none, and once the record holds a program's times the plan the
+estimates pick is the measured one. A search that fails leaves the program
+its plan, with a warning. Two plans of a program round alike to the
+program's precision but not to the bit: a step's results may change in
+their last bits from the call that runs the new plan, as between two
+preparations.
 
 Which leaves of the arguments are inputs follows `trace`: arrays, also inside
 tuples, named tuples, structs, mutable ones too, and vectors of other things
@@ -87,14 +109,19 @@ The level beneath is in `Tempest.Compiler`: `prepare`, `bind!`, and
 `execute!` or `replay!`, with `point!` binding a call's arrays as `compile`
 does. `c.executable` is the prepared program, and `explain(c)` shows it.
 """
-function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), capture::Bool = true)
+function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), capture::Bool = true,
+        search::Symbol = :before)
+    search in (:before, :after) || throw(ArgumentError("search is :before or :after, not :$search"))
     passed = argument_arrays((f, args...))
     globals = read_globals(f, args, passed)
     program, met = trace_meeting(call, f, args...)
     refuse_held(met, (f, args...), passed)
-    ex = prepare(program, f, args...; target, measure, point = true)
+    behind = search === :after && level(measure) !== :none && measurable(target)
+    ex = prepare(program, f, args...; target, measure = behind ? :none : measure, point = true)
     capture && capture!(ex)
-    Compiled(f, ex, signature((f, args...), leaves(program.input_structure)), globals)
+    c = Compiled(f, ex, signature((f, args...), leaves(program.input_structure)), globals)
+    behind && search_behind!(c, () -> prepare(program, f, args...; target, measure, point = true))
+    c
 end
 
 # The call `f(args...)`, traced with `f` among its arguments, so that the arrays
@@ -289,18 +316,41 @@ function holder(arrays, x)
     end
 end
 
-"A function traced and prepared by `compile`."
-struct Compiled{F}
-    f::F
+"""
+A function traced and prepared by `compile`. Calls run one at a time, from
+any task. `c.executable` is the prepared program the calls run; a search
+behind the first result (see `compile`'s `search`) gives them another.
+"""
+mutable struct Compiled{F}
+    const f::F
     executable::Executable
-    signature::Tuple
-    globals::Vector{Pair{GlobalRef, Any}}
+    const signature::Tuple
+    const globals::Vector{Pair{GlobalRef, Any}}
+    # Held by each call, and by the change of plan.
+    const lock::ReentrantLock
+    # The search behind the first result, once started; the executable it
+    # built, until a call takes it; and the timings it asks of the calls.
+    search::Union{Nothing, Task}
+    built::Union{Nothing, Executable}
+    const asked::Channel{Any}
 end
+
+Compiled(f, ex::Executable, signature, globals) =
+    Compiled(f, ex, signature, globals, ReentrantLock(), nothing, nothing, Channel{Any}(Inf))
 
 function (c::Compiled)(@nospecialize(args...))
     call = (c.f, args...)
-    b = bound(c, call)
-    ex = c.executable
+    @lock c.lock begin
+        c.built === nothing || adopt!(c)
+        results = called(c.executable, bound(c, call), call)
+        c.search === nothing || time_asked!(c)
+        results
+    end
+end
+
+# A call of the compiled function, its arrays `b` as `bound` finds them, run
+# by executable `ex`.
+function called(ex::Executable, b::Passed, @nospecialize(call))
     isempty(ex.program.writes) || refuse_shared(ex, b, call)
     point_each!(ex, b)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
@@ -322,6 +372,105 @@ function (c::Compiled)(@nospecialize(args...))
 end
 
 """
+    search_behind!(c, next) -> c
+
+Prepare `c`'s program again in a task of its own, in the calling task's
+state on the target (see `task_state`), by `next()`, which returns the
+executable, or nothing where the plan the calls run stands; the first call
+after takes that executable (see `adopt!`). Its timings are asked of the
+calls (see `time_asked!`), so that each is timed where the calls run and
+with none of the program's own work beside it. A search that throws leaves
+`c` its plan, with a warning.
+"""
+function search_behind!(c::Compiled, next)
+    enter = task_state(c.executable.target)
+    timer = asking(c)
+    c.search = Threads.@spawn try
+        enter()
+        ex = Base.ScopedValues.with(next, TIMER => timer)
+        ex === nothing || @lock c.lock c.built = ex
+    catch err
+        @warn "the search behind the first result failed: the program keeps the plan the estimates picked" exception = (err, catch_backtrace())
+        nothing
+    finally
+        close(c.asked)
+    end
+    c
+end
+
+# A search's timer: each timing asked of `c`'s calls, and waited for.
+function asking(c::Compiled)
+    function (target, launch)
+        answer = Channel{Any}(1)
+        put!(c.asked, (target, launch, answer))
+        seconds = take!(answer)
+        seconds isa Exception && throw(seconds)
+        seconds
+    end
+end
+
+# A timing the search asked for taken by a call after its own work, if one
+# waits: one a call, so that a call costs at most one timing's slice more.
+function time_asked!(c::Compiled)
+    ask = @lock c.asked isready(c.asked) ? take!(c.asked) : nothing
+    ask === nothing || answer!(ask)
+    nothing
+end
+
+# A timing asked for, taken on the calling task, its seconds or what it
+# threw handed back: the search, not the call, fails by it.
+function answer!((target, launch, answer))
+    seconds = try
+        timed(target, launch)
+    catch err
+        CapturedException(err, catch_backtrace())
+    end
+    put!(answer, seconds)
+end
+
+# The search's executable taken by a call, unless its plan is the one the
+# calls run: captured in the calling task where the calls replay a graph,
+# as `compile` captures the first. The old plan's graph is destroyed once
+# the device has run its last launches; its buffers go with the executable.
+# A capture that fails leaves the calls their plan, with a warning.
+function adopt!(c::Compiled)
+    ex, old = c.built, c.executable
+    c.built = nothing
+    same_choices(old, ex) && return old
+    try
+        old.captured === nothing || capture!(ex)
+    catch err
+        @warn "the plan the search found could not be captured: the program keeps the plan it runs" exception = (err, catch_backtrace())
+        return old
+    end
+    c.executable = ex
+    quiesce(old.target)
+    old.captured === nothing || release(old.target, old.captured)
+    old.captured = nothing
+    ex
+end
+
+# Whether two executables of one program run the same plan: the same groups,
+# each run by the same choice.
+same_choices(a::Executable, b::Executable) = plan_choices(a) == plan_choices(b)
+plan_choices(ex::Executable) = [(canonical(ex.plan, g), x === nothing ? "" : x.choice.key) for (g, x) in zip(ex.plan.groups, ex.decisions)]
+
+"""
+    wait(c::Compiled) -> c
+
+Take the timings the search behind `c`'s first result asks for (see
+`compile`'s `search`) until it ends, and give the calls its plan where it
+differs; at once where there is no search.
+"""
+function Base.wait(c::Compiled)
+    task = c.search
+    task === nothing && return c
+    foreach(answer!, c.asked)
+    wait(task)
+    @lock c.lock c.built === nothing || adopt!(c)
+    c
+end
+
 An input as a call must match it, its element type and its size, and the
 argument of the program it is.
 """
@@ -500,7 +649,9 @@ describe(x) = string("the constant ", sprint(show, x; context = :limit => true))
 
 function Base.show(io::IO, c::Compiled)
     ex = c.executable
-    print(io, "Compiled(", c.f, ": ", flow(ex.program), "; ", ex.target, ", ", counted(length(ex.kernels), "kernel"), ")")
+    task = c.search
+    searching = task === nothing || istaskdone(task) ? "" : ", searching"
+    print(io, "Compiled(", c.f, ": ", flow(ex.program), "; ", ex.target, ", ", counted(length(ex.kernels), "kernel"), searching, ")")
 end
 
 explain(io::IO, c::Compiled) = explain(io, c.executable)

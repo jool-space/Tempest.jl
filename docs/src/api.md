@@ -9,6 +9,7 @@ Tempest
 ```@docs
 compile
 Tempest.Compiled
+wait(::Tempest.Compiled)
 Tempest.gradient
 Tempest.withgradient
 explain

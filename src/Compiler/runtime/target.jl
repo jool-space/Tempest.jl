@@ -346,8 +346,17 @@ quiesce(::Target) = nothing
 # process runs beside a timing as it does beside any preparation.
 const TIMINGS = ReentrantLock()
 
+# Where the timings of the task, and the tasks it starts, run: nothing, in
+# the task, or a function `(target, launch) -> seconds` that has another
+# task time it, as a search behind a compiled program has its calls.
+const TIMER = Base.ScopedValues.ScopedValue{Any}(nothing)
+
 # `time_launch`, one timing at a time, once the device's work is done.
-timed(target, launch) = @lock TIMINGS (quiesce(target); time_launch(target, launch))
+function timed(target, launch)
+    timer = TIMER[]
+    timer === nothing || return timer(target, launch)
+    @lock TIMINGS (quiesce(target); time_launch(target, launch))
+end
 
 """
     device_rates(target) -> rates
