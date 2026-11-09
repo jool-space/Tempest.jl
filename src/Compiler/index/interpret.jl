@@ -29,8 +29,13 @@ shaped(x, v::Value) = v.scalar ? x : reshape(x, v.dims)
 evaluate_value(d::Input, v, arrays, graph, arguments) = shaped(arguments[d.argument], v)
 evaluate_value(d::ConstantArray, v, arrays, graph, arguments) = d.data
 
-function evaluate_value(d::Pointwise, v, arrays, graph, arguments)
-    apply(x) = convert(v.eltype, d.f(map(o -> read_operand(o, x, arrays, graph), d.operands)...))
+# A definition holds its function and fold untyped (see `Pointwise`): each is
+# passed on as an argument, so that the loop over the value's elements is
+# compiled for it.
+evaluate_value(d::Pointwise, v, arrays, graph, arguments) = evaluate_pointwise(d.f, d, v, arrays, graph)
+
+function evaluate_pointwise(f::F, d, v, arrays, graph) where {F}
+    apply(x) = convert(v.eltype, f(map(o -> read_operand(o, x, arrays, graph), d.operands)...))
     v.scalar && return apply(())
     out = Array{v.eltype}(undef, v.dims)
     for I in CartesianIndices(v.dims)
@@ -67,16 +72,18 @@ end
 
 # The elements in the iteration's order, each combined into the position its
 # key names, from the contents the fold starts from.
-function evaluate_value(d::Keyed, v, arrays, graph, arguments)
+evaluate_value(d::Keyed, v, arrays, graph, arguments) = evaluate_keyed(d.fold, d, v, arrays, graph)
+
+function evaluate_keyed(fold::F, d, v, arrays, graph) where {F}
     x = materialize(d.operand, d.iteration, arrays, graph)
     gather = (w, i) -> arrays[w][(i .+ 1)...]
-    states = d.into === nothing ? fill(fold_init(d.fold, v.eltype), v.dims) :
-        map(e -> fold_lift(d.fold, convert(v.eltype, e)), materialize(d.into, v.dims, arrays, graph))
+    states = d.into === nothing ? fill(fold_init(fold, v.eltype), v.dims) :
+        map(e -> fold_lift(fold, convert(v.eltype, e)), materialize(d.into, v.dims, arrays, graph))
     for I in CartesianIndices(d.iteration)
         at = map(e -> evaluate_index(e, Tuple(I) .- 1, gather) + 1, d.key)
-        states[at...] = fold_combine(d.fold, states[at...], fold_lift(d.fold, convert(v.eltype, x[I])))
+        states[at...] = fold_combine(fold, states[at...], fold_lift(fold, convert(v.eltype, x[I])))
     end
-    y = map(s -> fold_observe(d.fold, s), states)
+    y = map(s -> fold_observe(fold, s), states)
     v.scalar ? only(y) : y
 end
 
