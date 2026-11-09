@@ -297,9 +297,17 @@ struct Dependencies
     # By the term's own hash: an identity dictionary hashes an immutable term
     # by its contents, all of it, at every lookup.
     loads::Dict{Term, Vector{Int}}
+    # What `depends` walks with, a mask over the values each, kept from one
+    # walk to the next: allocated at each, they were most of the planner's
+    # garbage, a graph's worth of bits for each of its values tried.
+    pending::BitVector
+    covered::BitVector
+    fresh::BitVector
+    kernels::Set{Int}
 end
 
-Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}())
+Dependencies(owner, groups, up) = Dependencies(owner, groups, up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}(),
+    falses(length(owner)), falses(length(owner)), falses(length(owner)), Set{Int}())
 
 term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads, t)
 
@@ -313,8 +321,10 @@ term_loads(deps::Dependencies, t::Term) = get!(() -> stored_reads(t), deps.loads
 # their operands, so its ancestors cover most of the others.
 function depends(graph, deps::Dependencies, reads, group)
     tally!(:walked)
-    n = length(deps.owner)
-    pending, covered, kernels = falses(n), falses(n), Set{Int}()
+    pending, covered, fresh, kernels = deps.pending, deps.covered, deps.fresh, deps.kernels
+    fill!(pending, false)
+    fill!(covered, false)
+    empty!(kernels)
     top = 0
     for r in reads
         pending[r] = true
@@ -325,9 +335,14 @@ function depends(graph, deps::Dependencies, reads, group)
         top = r
         covered[r] && continue
         any(m -> m == r || deps.up[r][m], group) && return true
-        fresh = deps.up[r] .& .!covered
+        # What `r` brings that is not covered yet, `r` among it.
+        up, f, c = deps.up[r].chunks, fresh.chunks, covered.chunks
+        for w in eachindex(c)
+            f[w] = up[w] & ~c[w]
+            c[w] |= f[w]
+        end
         fresh[r] = true
-        covered .|= fresh
+        covered[r] = true
         for u in findall(fresh)
             k = deps.owner[u]
             (k == 0 || k in kernels) && continue
