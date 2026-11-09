@@ -12,5 +12,6 @@ include("layout.jl")
 include("folds.jl")
 include("terms.jl")
 include("masks.jl")
+include("keys.jl")
 
 end

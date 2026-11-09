@@ -62,9 +62,9 @@ function template_group(t::Template, rewrites::Symbol, types, extents)
     (; group = g, inputs, outputs)
 end
 
-const TEMPLATE_GROUPS = Dict{Any, Any}()
+const TEMPLATE_GROUPS = Dict{Key, Any}()
 const PROBE_GROUPS = Dict{Tuple{UInt, Symbol}, Any}()
-const MATCHES = Dict{Any, Vector{Binding}}()
+const MATCHES = Dict{Key, Vector{Binding}}()
 const LIBRARY_LOCK = ReentrantLock()
 
 # Matches are keyed by a group's terms, which one preparation shares: equal
@@ -83,7 +83,7 @@ function probe_group(t::Template, rewrites)
 end
 
 function cached_template_group(t::Template, rewrites, types, extents)
-    key = (objectid(t), rewrites, types, extents)
+    key = Key((objectid(t), rewrites, types, extents))
     found = @lock LIBRARY_LOCK get(TEMPLATE_GROUPS, key, missing)
     found === missing || return found
     tg = template_group(t, rewrites, types, extents)
@@ -517,9 +517,9 @@ function bindings(l::Library, target, g)
         shape = probe_group(t, rewrite_policy(target))
         shape === nothing || shape.group.kind === g.kind && length(shape.group.reductions) == length(g.reductions) &&
             length(shape.group.outputs) == length(g.outputs) || continue
-        key = (objectid(t), k, rewrite_policy(target), g.kind, g.domain, Tuple(members(g)),
-            Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(g.placement[m] for m in members(g)),
-            Tuple(sort!([(v, x.eltype, x.dims, x.stored) for (v, x) in g.values])))
+        valued = sort!(Tuple{Int, DataType, Tuple{Vararg{Int}}, Bool}[(v, x.eltype, x.dims, x.stored) for (v, x) in g.values]; by = first)
+        key = Key((objectid(t), k, rewrite_policy(target), g.kind, g.domain, Tuple(members(g)),
+            Tuple(get(g.terms, m, nothing) for m in members(g)), Tuple(g.placement[m] for m in members(g)), Tuple(valued)))
         bs = @lock LIBRARY_LOCK get(MATCHES, key, missing)
         if bs === missing
             bs = match_template(t, k, target, g)
