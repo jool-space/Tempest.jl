@@ -741,33 +741,37 @@ if CUDA_FUNCTIONAL
             @test lines() == before
             t
         end
-        @test isapprox(Array(outputs(execute!(fetch(t)))[1]), sum(abs2, 1.5f0 .* Array(z); dims = 1); rtol = 1.0e-4)
+        @test isapprox(Array(outputs(execute!(fetch(t)))), sum(abs2, 1.5f0 .* Array(z); dims = 1); rtol = 1.0e-4)
         @test lines() > before
     end
 
     @testset "a search behind the first result, on CUDA" begin
-        m, x = Dense(single(data(64, 32; scale = 0.3)), single(data(64)), tanh), single(data(32, 16; scale = 0.5))
-        dm, dx = Dense(CuArray(m.w), CuArray(m.b), tanh), CuArray(x)
-        f = (m, x) -> (loss(m, x), m(x))
-        agrees((value, y)) = isapprox(value, loss(m, x); rtol = 1.0e-4) && isapprox(Array(y), m(x); rtol = 1.0e-4)
-        c = compile(f, dm, dx; search = :after, measure = :close)
-        @test agrees(c(dm, dx))
+        # A program with no matrix product, whose plans share no library
+        # handle between the search's task and the calls': cuBLAS keeps one
+        # handle and one workspace per context, which two tasks' products race on.
+        w, x = single(data(64, 32; scale = 0.3)), single(data(64, 32; scale = 0.5))
+        dw, dx = CuArray(w), CuArray(x)
+        f = (w, x) -> (sum(abs2, tanh.(w .* x .+ 1.0f0); dims = 1), tanh.(w .* x .+ 1.0f0))
+        agrees((value, y)) = isapprox(Array(value), f(w, x)[1]; rtol = 1.0e-4) && isapprox(Array(y), f(w, x)[2]; rtol = 1.0e-4)
+        c = compile(f, dw, dx; search = :after, measure = :all)
+        @test agrees(c(dw, dx))
         # A task calling, and synchronizing the device after each call, until
         # the search ends: the calls take its timings, and nothing the search
         # does beside them forbids the synchronization, as a capture would.
         calls = Threads.@spawn begin
             results = Bool[]
             while !istaskdone(c.search) || isempty(results)
-                push!(results, agrees(c(dm, dx)))
+                push!(results, agrees(c(dw, dx)))
                 CUDACore.device_synchronize()
             end
             results
         end
         @test all(fetch(calls)) && istaskdone(c.search) && !istaskfailed(c.search)
-        @test wait(c) === c && agrees(c(dm, dx)) && c.executable.captured !== nothing
+        @test wait(c) === c && agrees(c(dw, dx)) && c.executable.captured !== nothing
         # The first result times nothing, and the search times only in the
-        # calls' time, a claim each: a program no other here prepares, its
-        # options in no record yet.
+        # calls' time, a claim each, and in `wait`, which takes what is left
+        # and ends it: a program no other here prepares, its options in no
+        # record yet.
         record = C.record_path(T.CUDATarget())
         lines() = isfile(record) ? countlines(record) : 0
         z = CuArray(single(data(48, 80; scale = 0.1)))
@@ -777,7 +781,8 @@ if CUDA_FUNCTIONAL
         expected = sum(abs2, 2.5f0 .* Array(z); dims = 2)
         @test isapprox(Array(c(z)), expected; rtol = 1.0e-4)
         @test timedwait(() -> lines() > before, 60) === :ok && lines() == before + 1
-        @test isapprox(Array(wait(c)(z)), expected; rtol = 1.0e-4) && lines() > before + 1
+        @test isapprox(Array(wait(c)(z)), expected; rtol = 1.0e-4)
+        @test istaskdone(c.search) && !istaskfailed(c.search) && !isready(c.asked)
     end
 
     @testset "arguments read where the caller has them, on CUDA" begin
