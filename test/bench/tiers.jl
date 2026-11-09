@@ -11,8 +11,10 @@
 # Tempest ships none):
 #   TEMPEST_CACHE=dir JULIA_OBJCACHE_PATH=dir/objcache julia --threads=4 --project=test test/bench/tiers.jl PROGRAM [SHAPE] [--before] [--beside]
 # `--before` compiles with `search = :before`, today's default, and calls as
-# many times. The calls are the step on the inputs as given, its results
-# discarded: the plan, not the training, is what is measured.
+# many times. `--wait` calls `wait(c)` after the first result, which takes
+# the search's timings until it ends, and prints its seconds. The calls are
+# the step on the inputs as given, its results discarded: the plan, not the
+# training, is what is measured.
 import cuBLAS, cuTile
 using Tempest, CUDACore, Statistics
 const C = Tempest.Compiler
@@ -49,7 +51,7 @@ function beside(done)
     end
 end
 
-function main(name, shape, before, besides)
+function main(name, shape, before, besides, waiting)
     case = Base.invokelatest(m.instance, shape)
     args = map(m.device, case.args)
     counts, started = C.cache_counts(), time()
@@ -61,6 +63,11 @@ function main(name, shape, before, besides)
     first_plan = executable(c)
     println(name, " ", shape, before ? ", searched before" : ", searched after", ": first result ", round(first_s; digits = 1),
         " s, ", now.compiled - counts.compiled, " kernels compiled, ", length(first_plan.kernels), " in the plan")
+    if waiting
+        t = time()
+        wait(c)
+        println("  wait(c) ", round(time() - t; digits = 1), " s, ", C.cache_counts().compiled - now.compiled, " kernels compiled")
+    end
     done = Ref(false)
     other = besides ? beside(done) : nothing
     # Calls until the plan changes, or the search ends on the same plan, and
@@ -104,4 +111,4 @@ function main(name, shape, before, besides)
     println("  step ", round(step_first; sigdigits = 3), " ms on the first plan, ", round(step_last; sigdigits = 3), " ms on the last")
 end
 
-main(ARGS[1], Symbol(get(filter(a -> !startswith(a, "--"), ARGS), 2, "small")), "--before" in ARGS, "--beside" in ARGS)
+main(ARGS[1], Symbol(get(filter(a -> !startswith(a, "--"), ARGS), 2, "small")), "--before" in ARGS, "--beside" in ARGS, "--wait" in ARGS)
