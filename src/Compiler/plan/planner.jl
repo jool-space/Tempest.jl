@@ -233,18 +233,9 @@ function grown_fold(grounds::Grounds, cx::Forming, id)
             other = frontier[k]
             k += 1
             grounds.live[other] && !owned(cx, other) && !(other in members(g)) || continue
-            od = values[other].definition
-            added = if g.kind isa ReductionKind && od isa Reduction
-                # A fold over other positions widens the domain, if it joins.
-                domain = joint_domain(graph, g, other)
-                h = domain === nothing ? nothing : domain == g.domain ? g : with_domain(g, domain)
-                h !== nothing && try_add!(graph, cx, h, other; fold = true) && (g = h; true)
-            else
-                od isa Union{Reduction, Scan, Keyed} ? sweeps_with(graph, g, other) && try_add!(graph, cx, g, other; fold = true) :
-                    od isa Pointwise && other > id && !awaits_sweep(grounds, cx, g, other) && adds_to(values, g, other) &&
-                        try_add!(graph, cx, g, other; fold = false)
-            end
-            added || continue
+            taken = taking(g.kind, grounds, cx, g, other, id)
+            taken === nothing && continue
+            g = taken
             changed = true
             reach!(frontier, followers, cx, [other], after)
             reach!(frontier, followers, cx, term_loads(cx, g.terms[other]), after; skip = apart)
@@ -267,8 +258,8 @@ function grown_map(grounds::Grounds, cx::Forming, id)
     while k <= length(frontier)
         other = frontier[k]
         k += 1
-        grounds.live[other] && !owned(cx, other) && values[other].definition isa Pointwise && values[other].dims == g.domain || continue
-        any(m -> grounds.up[other][m], members(g)) && adds_to(values, g, other) && try_add!(graph, cx, g, other; fold = false) || continue
+        grounds.live[other] && !owned(cx, other) || continue
+        taking(g.kind, grounds, cx, g, other, id) === nothing && continue
         reach!(frontier, grounds.followers, cx, [other], id)
     end
     g
@@ -339,14 +330,53 @@ function try_add!(graph, cx::Forming, g::Group, v; fold, recomputing = true)
 end
 
 """
-Whether fold or scan `v` joins the sweep of group `g`: a fold a reduction's
-group over its iteration; a scan, or a fold along its axes, a scan's group
-over its domain, the scan in the group's direction.
+    taking(kind, grounds, cx, g, other, seed) -> group or nothing
+
+Group `g`, of `kind` and grown from the value `seed`, with value `other`
+taken among its members: `g` itself, or a group over a wider domain in its
+place; nothing where `other` may not join. What a kind's group may take is
+the kind's rule; whether a value it may take fits is `try_add!`'s, the same
+for every kind.
+"""
+function taking end
+
+# A reduction's group takes a fold over its domain, or over positions a wider
+# domain holds with its own, which the group is then over (see
+# `joint_domain`); and a map after its seed.
+function taking(::ReductionKind, grounds::Grounds, cx::Forming, g::Group, other, seed)
+    graph = grounds.graph
+    d = graph.values[other].definition
+    d isa Pointwise && return other > seed && adds_to(graph.values, g, other) && try_add!(graph, cx, g, other; fold = false) ? g : nothing
+    d isa Union{Reduction, Keyed} || return nothing
+    domain = joint_domain(graph, g, other)
+    domain === nothing && return nothing
+    wider = domain == g.domain ? g : with_domain(g, domain)
+    try_add!(graph, cx, wider, other; fold = true) ? wider : nothing
+end
+
+# A scan's group takes a scan of its sweep or a fold riding it (see
+# `sweeps_with`), and a map after its seed that waits for no other sweep.
+function taking(::ScanKind, grounds::Grounds, cx::Forming, g::Group, other, seed)
+    graph = grounds.graph
+    d = graph.values[other].definition
+    d isa Pointwise && return other > seed && !awaits_sweep(grounds, cx, g, other) && adds_to(graph.values, g, other) &&
+        try_add!(graph, cx, g, other; fold = false) ? g : nothing
+    d isa Union{Reduction, Scan} && sweeps_with(graph, g, other) && try_add!(graph, cx, g, other; fold = true) ? g : nothing
+end
+
+# A group of maps takes a map over its domain that reads one of its members.
+function taking(::PointwiseKind, grounds::Grounds, cx::Forming, g::Group, other, seed)
+    graph = grounds.graph
+    graph.values[other].definition isa Pointwise && graph.values[other].dims == g.domain || return nothing
+    any(m -> grounds.up[other][m], members(g)) && adds_to(graph.values, g, other) && try_add!(graph, cx, g, other; fold = false) ? g : nothing
+end
+
+"""
+Whether fold or scan `v` joins the sweep of scan group `g`, over its domain:
+a scan along its axes in its direction, or a fold along them.
 """
 function sweeps_with(graph, g::Group, v)
     d = graph.values[v].definition
-    g.kind isa ReductionKind && return d isa Union{Reduction, Keyed} && d.iteration == g.domain
-    d isa Keyed && return false
     e = graph.values[first(g.reductions)].definition
     d isa Reduction && return d.iteration == g.domain && d.reduced == e.axes
     graph.values[v].dims == g.domain && d.axes == e.axes && d.reverse == e.reverse
@@ -363,7 +393,6 @@ recomputing the scores: one kernel recomputes them once.
 """
 function joint_domain(graph, g::Group, v)
     d = graph.values[v].definition
-    g.kind isa ReductionKind && d isa Union{Reduction, Keyed} || return nothing
     d.iteration == g.domain && return g.domain
     d isa Reduction && length(d.iteration) == length(g.domain) && all(k -> d.iteration[k] == g.domain[k], d.reduced) ||
         return nothing
@@ -418,7 +447,7 @@ end
 # Whether map `v` waits for another sweep: it reads a scan of another
 # sweep that has no kernel yet. That scan's group reads this one's values
 # from storage, so a map that reads both can join it, and not this one.
-awaits_sweep(grounds::Grounds, cx::Forming, g::Group, v) = g.kind isa ScanKind &&
+awaits_sweep(grounds::Grounds, cx::Forming, g::Group, v) =
     any(s -> grounds.graph.values[s].definition isa Scan && !(s in g.reductions) && !owned(cx, s), findall(grounds.up[v]))
 
 # Whether group `g` may take value `v`: anything but a step of an
@@ -483,7 +512,7 @@ function kernels(grounds::Grounds, k::Kernels)
         primary(graph, g, r) || (external[s] = true)
     end
     for g in groups
-        g.kind isa Union{ReductionKind, ScanKind, PointwiseKind} || continue
+        stepwise(g.kind) && continue
         for m in members(g)
             external[m] && continue
             stored[m] = false

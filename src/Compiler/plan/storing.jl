@@ -196,7 +196,7 @@ function recomputable(p::Plan, users, id, live, results, materialized)
     end
     length(groups) == 1 || return false
     k = only(groups)
-    k != 0 && k != p.owner[id] && p.groups[k].kind isa Union{ReductionKind, ScanKind, PointwiseKind} && p.groups[k].domain == v.dims
+    k != 0 && k != p.owner[id] && !stepwise(p.groups[k].kind) && p.groups[k].domain == v.dims
 end
 
 # Every result becomes a value read whole, so results are buffers: a result

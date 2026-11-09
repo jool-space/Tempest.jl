@@ -27,27 +27,41 @@ Base.@nospecializeinfer function value_term(graph, cx::Forming, g::Group, v, @no
     memo[key] = built_term(graph, cx, g, v, index, domain, memo)
 end
 
+"""
+How a term of a group reads a value: a fold of the group, where the group
+keeps it (`as_fold`); another value the group computes, as that value's term
+(`as_output`); from storage (`as_load`); a fold recomputed where it is read
+(`as_recomputed`); or a map computed in place (`as_inlined`). See `reading`.
+"""
+@enum Reading as_fold as_output as_load as_recomputed as_inlined
+
+"""
+How a term of group `g` reads value `v`, formed through context `cx` (see
+`Reading`): what a term is built by (`built_term`) and what it loads is
+found by (`value_reads!`), so that the two cannot differ.
+"""
+function reading(graph, cx::Forming, g::Group, v)
+    v in g.reductions && return as_fold
+    v in g.outputs && return stepwise(g.kind) ? as_load : as_output
+    isstored(cx, v) && return as_load
+    d = graph.values[v].definition
+    d isa Reduction && return as_recomputed
+    d isa Pointwise ? as_inlined : as_load
+end
+
 function built_term(graph, cx::Forming, g::Group, v, index, domain, memo)
     tally!(:terms)
-    val = graph.values[v]
-    d = val.definition
-    # A recurrence's group reads what it computes wherever this step stored it.
-    g.kind isa RecurrenceKind && v in g.outputs && return Load(v, index)
-    if v in g.reductions
-        g.kind isa ScanKind && d isa Reduction && throw(OutsideGroup())
-        # A fold over fewer positions than the domain has no value elsewhere.
-        restricted(graph, g, v) && throw(OutsideGroup())
-        primary(graph, g, v) && kept_at(graph, g, v, index) || throw(OutsideGroup())
+    how = reading(graph, cx, g, v)
+    how === as_load && return Load(v, index)
+    if how === as_fold
+        reads_fold(g.kind, graph, g, v, index) || throw(OutsideGroup())
         return Stat(v)
     end
-    if v in g.outputs
-        index == placement(graph, g, v) || throw(OutsideGroup())
-        return definition_term(graph, cx, g, d, val, index, domain, memo)
-    end
-    isstored(cx, v) && return Load(v, index)
-    d isa Reduction && return fold_term(graph, cx, g, v, index, domain, memo)
-    d isa Pointwise || return Load(v, index)
-    definition_term(graph, cx, g, d, val, index, domain, memo)
+    how === as_recomputed && return fold_term(graph, cx, g, v, index, domain, memo)
+    # A value the group computes is its term where the group keeps it.
+    how === as_output && index != placement(graph, g, v) && throw(OutsideGroup())
+    val = graph.values[v]
+    definition_term(graph, cx, g, val.definition, val, index, domain, memo)
 end
 
 function definition_term(graph, cx::Forming, g, d::Pointwise, val, index, domain, memo = Dict{Any, Term}())
@@ -75,14 +89,13 @@ end
 function value_reads!(reads, seen, graph, cx::Forming, g::Group, v)
     v in seen && return reads
     push!(seen, v)
+    how = reading(graph, cx, g, v)
+    how === as_fold && return reads
+    how === as_load && return push!(reads, v)
     d = graph.values[v].definition
-    g.kind isa RecurrenceKind && v in g.outputs && return push!(reads, v)
-    v in g.reductions && return reads
-    v in g.outputs && return foreach(o -> operand_reads!(reads, seen, graph, cx, g, o), operands(d))
-    isstored(cx, v) && return push!(reads, v)
-    d isa Reduction && return operand_reads!(reads, seen, graph, cx, g, d.operand)
-    d isa Pointwise || return push!(reads, v)
+    how === as_recomputed && return operand_reads!(reads, seen, graph, cx, g, d.operand)
     foreach(o -> operand_reads!(reads, seen, graph, cx, g, o), operands(d))
+    reads
 end
 
 function operand_reads!(reads, seen, graph, cx::Forming, g, o)

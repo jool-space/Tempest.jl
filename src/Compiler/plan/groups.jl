@@ -4,42 +4,57 @@
 #
 # A kernel computes a group: maps and folds over one shared index domain. Each
 # fold reduces its own set of the domain's axes; a fold's value sits at the
-# domain's index with its reduced axes at zero. Folds over the group's first
-# set of axes (its primary axes) can be read by later members at that
-# position: a schedule completes them before what follows (phases). A fold
-# over other axes is completed by merging partial states, so within the group
-# nothing reads it; its operand, often a value the group already computes, is
-# never written. Which axes a schedule sweeps, and which folds it completes in
-# a block and which by merging partial states, is the schedule's choice.
-#
-# A scan's group sweeps the axes it scans along, in its direction: its scans
-# alike, and the maps over its domain. A map before a scan is its operand's
-# term, as Futhark's `scanomap` fuses one into its scan; a map after reads
-# each scan at the position the sweep has reached. A fold along those axes
-# rides the sweep, in either direction, since it need not take its elements
-# in order; it is complete only after the sweep, so nothing in the group
-# reads it.
-#
-# A fold by key joins a reduction's group over its iteration, as a fold over
-# other than the primary axes does: it combines each element at its key, is
-# complete only when the group's work is, and nothing in the group reads it.
-#
-# A fold over fewer positions along axes it keeps may join a reduction's
-# group over a domain that holds them, where it shares a fold it recomputes
-# with the group's folds, as MLA's dV, over 64 features, shares the scores
-# with dK and dQ, over 96 (see `joint_domain`): it is computed over its own
-# positions, and nothing in the group reads it.
+# domain's index with its reduced axes at zero. What else holds of a group is
+# its kind's to say, and each kind says it by a method. Of a group of its
+# kind: where it keeps a value it computes (`placement`); whether a member
+# may read a fold of the group, and where (`reads_fold`); whether members
+# read the group's other values as terms or where a step stored them
+# (`stepwise`); whether a fold of it covers fewer positions than its domain
+# (`restricted`); and, as it grows, the group with one more value taken
+# (`taking`, with the planner). Nothing else in the planner names a kind.
 
-"A reduction's group: folds over one domain, and the maps that read them or that they read."
+"""
+A reduction's group: folds over one domain, and the maps that read them or
+that they read. Folds over the group's first set of axes (its primary axes)
+can be read by later members at that position: a schedule completes them
+before what follows (phases). A fold over other axes is completed by merging
+partial states, so within the group nothing reads it; its operand, often a
+value the group already computes, is never written. Which axes a schedule
+sweeps, and which folds it completes in a block and which by merging partial
+states, is the schedule's choice.
+
+A fold by key joins a reduction's group over its iteration, as a fold over
+other than the primary axes does: it combines each element at its key, is
+complete only when the group's work is, and nothing in the group reads it.
+
+A fold over fewer positions along axes it keeps may join a reduction's
+group over a domain that holds them, where it shares a fold it recomputes
+with the group's folds, as MLA's dV, over 64 features, shares the scores
+with dK and dQ, over 96 (see `joint_domain`): it is computed over its own
+positions, and nothing in the group reads it.
+"""
 struct ReductionKind end
 
-"A scan's group: scans along the same axes in one direction, the maps over its domain, and the folds riding its sweep."
+"""
+A scan's group, which sweeps the axes it scans along, in its direction: its
+scans alike, and the maps over its domain. A map before a scan is its
+operand's term, as Futhark's `scanomap` fuses one into its scan; a map after
+reads each scan at the position the sweep has reached. A fold along those
+axes rides the sweep, in either direction, since it need not take its
+elements in order; it is complete only after the sweep, so nothing in the
+group reads it.
+"""
 struct ScanKind end
 
-"A group of maps over one domain."
+"A group of maps over one domain: a stored map, and the later ones over its domain that read it."
 struct PointwiseKind end
 
-"A recurrence's group: the values of its cycle, computed a step at a time, and the sums riding its steps."
+"""
+A recurrence's group, which steps along its states' axis: the values of its
+cycle, each step computing in order those it stores and reading them where
+it stored them, and the sums riding its steps, its folds (see
+`recurrence_group`).
+"""
 struct RecurrenceKind end
 
 "The kind of a group: what its kernel does over its domain."
@@ -52,6 +67,16 @@ kind_name(::PointwiseKind) = :pointwise
 kind_name(::RecurrenceKind) = :recurrence
 
 Base.show(io::IO, k::GroupKind) = print(io, kind_name(k))
+
+"""
+Whether a group's members read its other values where a step stored them: a
+recurrence's, whose step computes each value it stores once, in order. A
+group of another kind computes a value's term again in each member that
+reads it: so a value only the group reads is never written, and a stored
+map only it reads is recomputed in it.
+"""
+stepwise(::RecurrenceKind) = true
+stepwise(::GroupKind) = false
 
 struct Group
     kind::GroupKind
@@ -110,19 +135,30 @@ struct Plan
     owner::Vector{Int}
 end
 
-# Where a group keeps a value it computes, as the value's index over the
-# domain: a fold of the group at the variables of the axes it keeps, any other
-# value over the whole domain or at the positions of the primary folds, or a
-# slice of one of its folds where the fold keeps it; or nothing. A scan's
-# group keeps everything but its folds over its whole domain. A fold by key
-# keeps each element at its key. A fold over fewer positions than the domain
-# (see `restricted`) keeps its own.
-function placement(graph, g::Group, v)
-    g.kind isa RecurrenceKind && return v in g.outputs ? recurrence_places(graph, g.outputs).places[v] : nothing
+"Where group `g` keeps value `v`, which it computes, as the value's index over the domain; or nothing."
+placement(graph, g::Group, v) = placement(g.kind, graph, g, v)
+
+placement(::Union{ReductionKind, PointwiseKind}, graph, g::Group, v) = kept_placement(graph, g, v)
+
+# A scan's group keeps everything but its folds over its whole domain.
+function placement(::ScanKind, graph, g::Group, v)
+    val = graph.values[v]
+    val.definition isa Union{Reduction, Keyed} && return kept_placement(graph, g, v)
+    val.dims == g.domain ? identity_index(g.domain) : nothing
+end
+
+# A recurrence's group keeps each value it stores along its states' axes (see `recurrence_places`).
+placement(::RecurrenceKind, graph, g::Group, v) = v in g.outputs ? recurrence_places(graph, g.outputs).places[v] : nothing
+
+# A fold of the group at the variables of the axes it keeps, any other value
+# over the whole domain or at the positions of the primary folds, or a slice
+# of one of its folds where the fold keeps it; or nothing. A fold by key keeps
+# each element at its key. A fold over fewer positions than the domain (see
+# `restricted`) keeps its own.
+function kept_placement(graph, g::Group, v)
     val = graph.values[v]
     d = val.definition
     d isa Keyed && return v in g.reductions ? d.key : nothing
-    g.kind isa ScanKind && !(d isa Reduction) && return val.dims == g.domain ? identity_index(g.domain) : nothing
     axes = v in g.reductions ? fold_axes(graph, v) : val.dims == g.domain ? () : primary_axes(graph, g)
     kept = Tuple(k for k in eachindex(g.domain) if !(k in axes))
     extents = v in g.reductions && d isa Reduction ? d.iteration : g.domain
@@ -135,8 +171,9 @@ Whether fold `r` of reduction group `g` covers fewer positions than the
 group's domain: its iteration lies within the domain, shorter along axes it
 keeps (see `joint_domain`).
 """
-restricted(graph, g::Group, r) =
-    g.kind isa ReductionKind && r in g.reductions && (d = graph.values[r].definition) isa Reduction && d.iteration != g.domain
+restricted(graph, g::Group, r) = restricted(g.kind, graph, g, r)
+restricted(::ReductionKind, graph, g::Group, r) = r in g.reductions && (d = graph.values[r].definition) isa Reduction && d.iteration != g.domain
+restricted(::GroupKind, graph, g::Group, r) = false
 
 # A slice of a fold of the group: the fold read at a variable of the slice
 # along some of its axes and at constants along the others, kept where the
@@ -167,6 +204,18 @@ function kept_at(graph, g::Group, v, index)
         a !== nothing && isempty(e.terms) && 0 <= e.constant < g.domain[a] && !varies(graph, g, g.terms[v], a)
     end
 end
+
+"""
+Whether a member of group `g` may read its fold `r` at `index`: a fold over
+the primary axes, where the group keeps it. A reduction's group reads no
+fold over fewer positions than its domain, a scan's the scans of its sweep
+and no fold riding it, and a recurrence's none of the sums riding its steps.
+"""
+function reads_fold end
+
+reads_fold(::ReductionKind, graph, g::Group, r, index) = !restricted(graph, g, r) && primary(graph, g, r) && kept_at(graph, g, r, index)
+reads_fold(::ScanKind, graph, g::Group, r, index) = !(graph.values[r].definition isa Reduction) && primary(graph, g, r) && kept_at(graph, g, r, index)
+reads_fold(::RecurrenceKind, graph, g::Group, r, index) = false
 
 # Whether term `t` of group `g` varies along axis `a` of its domain: through
 # what it reads, and through the folds of the group it reads.
