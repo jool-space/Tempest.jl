@@ -576,6 +576,84 @@ applied scalar-function lines, 14 in the GPT step's evidence and 7 in the
 LSTM's, of which 9 and 4 are zero or under 1e-13 s a position, noise a
 recalibration refits; any such refit sends the decisions to the cover.
 
+**How preparation grows with the program.** `test/bench/scaling.jl`
+prepares fourteen families of programs dry on the CUDA target, each scaled
+by one parameter: the GPT step by layers, length and heads; the neural
+ODE's RK4 rolled, and unrolled with steps of lengths of their own; the LSTM
+and a stencil, each as a plain loop and as `accumulate`; independent
+branches; chains of maps and of normalizations; a step over many leaves;
+and a transformer's decoding step. Each size is prepared twice in one
+process and the second timed whole, with each phase's seconds and bytes,
+the planner's counts (`tallied`), and the exponent of each over the last
+doubling, which a phase linear in the program keeps near 1. Seven passes
+grew with the program squared or faster, each a pass over everything for
+each thing, and each is now an index built once (6ce4025 to 4cff5f4):
+ordering a plan's kernels, which looked at 35,713,676 kernels at 32 GPT
+layers and looks at 184,856 (exponent 1.97 to 0.99); storage, which ordered
+every kernel again for each argument a result could take and scanned every
+slot for each value stored; the rewrites, which scanned the graph for each
+frame, sum and map; rolling a loop, which walked each run of alike nodes
+from each of its nodes; the planner's dependency walks, which allocated
+three masks the size of the graph for each value tried; and the cover's
+proposals and its bytes of a kernel, which passed over every proposal, or
+every term, for each one. No plan changed: the explanations of the fuzzer's
+300 seeds (forward and gradient, both targets), the corpus and the families
+at two sizes, and of twelve family instances at their largest, are
+identical before and after each change, as are the storage pass's slots on
+614 plans under three choices of the kernels that write in place.
+
+On grizzle, idle, 12 threads, dry on the CPU target, one run each, main at
+1c3627d against 4cff5f4, in seconds (exponent from 16 to 32):
+
+| | 4 | 8 | 16 | 32 | |
+|---|---|---|---|---|---|
+| GPT layers, 1c3627d | 2.89 | 5.89 | 13.8 | 37.1 | 1.42 |
+| GPT layers, 4cff5f4 | 2.72 | 5.17 | 10.2 | 24.6 | 1.27 |
+| RK4 unrolled steps, 1c3627d | | 1.97 | 7.05 | 29.7 | 2.08 |
+| RK4 unrolled steps, 4cff5f4 | | 1.76 | 6.16 | 25.4 | 2.05 |
+
+At 32 layers the rewrites take 1.97 s where they took 8.84, storage 0.28
+where it took 2.92, and the whole allocates 41.6 GB where it allocated
+60.6. The worst exponents left at 4cff5f4, from 16 to 32 layers: the
+rewrites 2.15, the trace 1.90 (0.62 s), storage 1.64, the cover's loop 1.39
+(8.8 s) and its trials 1.22 (2.9 s), the decisions 1.13 (7.8 s); from 16 to
+32 unrolled RK4 steps, the cover's trials 2.49 and its loop 2.32 (5.4 and
+15.1 s of 25.4), its edits 2.20, the trace 1.77 and lowering 1.76.
+
+Taken since, on prep-scaling-2: relative sums rebuilt the whole graph
+after each frame's sums, 64 rebuilds of 9,812 values at 32 layers, and
+sought each frame's sums through every map that read it; a pass now
+rebuilds once, and seeks them through a difference from the frame, then
+the law's function, products, quotients and casts, all a relative sum
+reads its frame through. Storage's section found the results that are an
+input as it was by comparing every result with every pair that replaces
+an input, 343 MB at 32 layers, 0.6 MB now. The rewritten graphs are equal
+on 4,038 graphs (the fuzzer's first 1,000 seeds, the corpus and fifteen
+family instances, each rounded and not) and the explanations unchanged.
+
+What stands. The cover plans each trial whole, so trials that grow with
+the program cost its size squared: the unrolled RK4's plans grow with its
+steps, 76 at 8 steps and 248 at 32, and its values tried in groups with
+exponent 1.70. A trial changes a few kernels, and a prototype that formed
+again only those its change reaches, taking the rest from the plan it
+changes where what they read was unchanged and checking each against the
+whole plan under `TEMPEST_VERIFY`, tried 50,000 values in groups instead
+of 414,273 at 32 GPT layers on four threads, every plan as it was. It is
+not taken as built, the change reaching the planner as keywords and every
+trial's record kept in a table no one emptied; its form waits for proposals
+that state their change to the planner's inputs: a planned plan carrying
+what formed it, `replanned(planned, change)`, and formation reading the
+plan's state through a context, the plain one costing nothing. A step over
+many leaves allocates 9.5 GB at 128 leaves where it allocated 76.7, its
+pricing's exponent 2.0 where it was 3.1: one reduction reads every leaf,
+each leaf's trial changes it, and no two edits are alike, so each is
+decided. It needs a kernel's canonical form invariant to the order of its
+members, so that every leaf's trial is one class, priced once. The
+decisions grow with the program, about 5.5 ms for each of 1,408 options at
+32 layers, most of their bytes in the target's estimate of each option
+(normalizing affine indices a quarter, its views a tenth); deciding once
+for every kernel alike stands open.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
