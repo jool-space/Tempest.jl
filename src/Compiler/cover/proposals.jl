@@ -94,6 +94,87 @@ key_text(io, ::Plan, ::Recompute) = print(io, " || recompute")
 priceable(d::Decider, p::Plan, q::Recompute) = recomputed_claimed(d, p, q.value)
 explain(io, q::Recompute, c, why) = c.accepted && println(io, "%", q.value, " is recomputed where it is read", why)
 
+# The folds that can be recomputed where they are read, as proposals for the
+# cover (see `Recompute`): a fold that is not a result, an index of a gather,
+# or in `kept`, whose every reader through maps is a fold over another domain,
+# or over the same extents reading it elsewhere than where its group keeps it,
+# as attention reads its scores when the features are as many as the keys (a
+# fold that reads it there joins its group as a later phase instead). A fold
+# recomputed inside a reader's sweep, at positions that move along its own
+# reduced axes, does not recompute such a fold in turn: nested sweeps multiply
+# the work past what a plan should price. Folds in `pinned`, recomputed
+# already, are not proposed and nest as the selected do; folds in `kept`,
+# stored, are not proposed and nest nothing. Counted as recomputed, the
+# projections a training step's update replaces in place, which stay stored,
+# kept attention's scores and their gradient from the proposals, and GPT-2's
+# layer stored both, 201 MB each: 19.1 ms a layer's step, against 12.4 with
+# both recomputed.
+# Whether recomputing pays is the cover's decision, by cost.
+function recomputable_folds(graph, kept = Set{Int}(); pinned = Set{Int}())
+    s = storing(graph)
+    graph, results, materialized = s.graph, s.results, s.materialized
+    values = graph.values
+    users = readers(graph)
+    selected = Set{Int}()
+    for v in eachindex(values)
+        d = values[v].definition
+        d isa Reduction && !(v in results) && !materialized[v] && !(v in kept) && !(v in pinned) || continue
+        # The folds v reaches through maps, with the index at which each reads v.
+        consumers = Tuple{Int, Tuple{Vararg{Affine}}}[]
+        pending = [(u, v, identity_index(values[v].dims)) for u in unique(users[v])]
+        # Each reader at each index once: maps reading v along many paths,
+        # as a gated update's step reads its state thrice, are as many.
+        seen = Set(pending)
+        ok = true
+        while ok && !isempty(pending)
+            u, w, index = pop!(pending)
+            du = values[u].definition
+            domain = iteration_domain(values[u])
+            for o in reads(du)
+                o.value == w || continue
+                at = map(e -> substitute(e, o.index, domain), index)
+                if du isa Reduction
+                    push!(consumers, (u, at))
+                elseif du isa Pointwise && !(u in results) && !materialized[u]
+                    for x in unique(users[u])
+                        (x, u, at) in seen || (push!(seen, (x, u, at)); push!(pending, (x, u, at)))
+                    end
+                else
+                    ok = false
+                end
+            end
+        end
+        ok && !isempty(consumers) || continue
+        own = Tuple(var(k) for k in eachindex(d.iteration) if !(k in d.reduced))
+        all(((u, at),) -> values[u].definition.iteration != d.iteration || at != own, consumers) || continue
+        hoisted = all(((u, at),) -> !any(k -> any(e -> mentions(e, k), at), values[u].definition.reduced), consumers)
+        hoisted || !recomputes(values, v, union(selected, pinned), results, materialized) || continue
+        push!(selected, v)
+    end
+    selected
+end
+
+# Whether fold `v` reads a fold of `selected` through maps that stay unstored.
+# A map among `selected`, one the partition recomputes in the backward, is
+# walked through like any other, since recomputing it nests no sweep. Taken
+# for a fold, the widening of BFloat16 attention's rounded output, which its
+# output's gradient reads, kept the sum over features of the probabilities'
+# gradient from the proposals, and the training step stored that sum, as
+# large as the scores: 1114 μs at TF32, against 777 proposed.
+function recomputes(values, v, selected, results, materialized)
+    pending, seen = [v], Set([v])
+    while !isempty(pending)
+        for o in reads(values[pop!(pending)].definition)
+            u = o.value
+            u in selected && values[u].definition isa Reduction && return true
+            values[u].definition isa Pointwise && !(u in results) && !materialized[u] && !(u in seen) || continue
+            push!(seen, u)
+            push!(pending, u)
+        end
+    end
+    false
+end
+
 """
 The maps a kernel stores, recomputed in the one kernel that reads them: a
 proposal of the planner's own, for a kernel of maps another reads at shifted
@@ -159,3 +240,38 @@ priceable(d::Decider, p::Plan, q::Ride) = stepped_plan(d, p, p.groups[p.owner[q.
 explain(io, q::Ride, c, why) =
     println(io, "%", q.value, c.accepted ? " is summed as the steps of the recurrence it reads run" :
         " is summed after the steps of the recurrence it reads", why)
+
+"""
+    riding_sums(plan) -> values
+
+The sums of `plan` that could ride the steps of one of its recurrences:
+computed apart from them, over the steps, reading the recurrence's cycle
+through values only they read (see `riding`), each once.
+"""
+riding_sums(p::Plan) = first.(rides(p))
+
+# Each sum of `plan` that could ride the steps of one of its recurrences, with
+# the values the steps would compute for it, which nothing else reads.
+function rides(p::Plan)
+    graph = p.graph
+    values = graph.values
+    live = falses(length(values))
+    foreach(g -> foreach(m -> live[m] = true, members(g)), p.groups)
+    for id in length(values):-1:1
+        live[id] || continue
+        foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(values[id].definition))
+    end
+    found = Pair{Int, Vector{Int}}[]
+    for (cs, fs, cycle) in recurrences(graph)
+        c = first(cs)
+        live[c] || continue
+        k = p.owner[c]
+        for (r, v) in enumerate(values)
+            d = v.definition
+            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(fs) && !any(x -> first(x) == r, found) || continue
+            within = riding(graph, live, cycle, r)
+            within === nothing || push!(found, r => within)
+        end
+    end
+    found
+end

@@ -205,6 +205,13 @@ operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempt
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
 
+# The values an operand reads: its own, and those its formulas gather from.
+gathered_values(o::Read) = indirect_values(o.index)
+gathered_values(o::IndexOperand) = indirect_values(o.expr)
+gathered_values(o::Literal) = Int[]
+read_values(o::Read) = pushfirst!(gathered_values(o), o.value)
+read_values(o::Operand) = gathered_values(o)
+
 # The spans of values computed together, position by position along their
 # recurrence's axis: from each carried state to the last value it is carried
 # from, overlapping spans merged.

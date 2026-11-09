@@ -72,6 +72,11 @@ include("index/lower.jl")
 include("index/interpret.jl")
 
 # Plans: what is stored, and the kernels.
+include("plan/groups.jl")
+include("plan/context.jl")
+include("plan/terms.jl")
+include("plan/storing.jl")
+include("plan/recurrences.jl")
 include("plan/planner.jl")
 include("plan/replan.jl")
 include("plan/rewrites.jl")

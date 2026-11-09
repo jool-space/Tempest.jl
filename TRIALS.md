@@ -1107,7 +1107,7 @@ power; the threads hide part of it in the wall time.
 
 Taken since, 5 November: planning alone 2.1 s at 10 steps, 4.6 s at 20 and
 11.6 s at 40, against 18.4 and 99.2 s. A group's loads are found once per
-plan and its dependencies from the latest value pending (`planner.jl`); the
+plan and its dependencies from the latest value pending (`plan/context.jl`); the
 cover's trials are classed by the groups they change and planned side by
 side (`cover.jl`); and a gradient summed over a value's uses accumulates
 beside each product that adds to it, cuBLAS adding the product to the sum in
@@ -1185,7 +1185,7 @@ gradients, each a sum over the steps of every evaluation's part, read back
 from the 11 GB a step the backward stored, at the device's bandwidth, where
 torch adds each evaluation's part as its backward runs, its operands in the
 cache. Taken, 6 November: a sum over a recurrence's steps of what they
-compute may ride them (`riding`, `src/Compiler/plan/planner.jl`), a fold
+compute may ride them (`riding`, `src/Compiler/plan/recurrences.jl`), a fold
 of the recurrence's group, as a fold along a scan's axes rides its sweep;
 each step's plan adds its part to the sum in the sum's storage, each
 product into it as it writes (`step_graph`, `src/Compiler/runtime/stepped.jl`),
@@ -1206,7 +1206,7 @@ one-kernel recurrences both ways, 0.234 ms against 0.230 at 32 chunks, 1.080
 against 1.078 at 128. An LSTM did not plan on main: its hidden state and
 cell, each step reading both, were recurrences of their own, kernels
 depending on each other in a cycle. Taken: states whose cycles read each
-other's are one recurrence's (`recurrences`, `src/Compiler/plan/planner.jl`),
+other's are one recurrence's (`recurrences`, `src/Compiler/plan/recurrences.jl`),
 their group's step computing its values in the graph's order, a value a
 state is carried from that the step reads stored, and the stepped run, the
 floor and cuTile's one-kernel recurrence each carrying every state. The LSTM
@@ -1421,7 +1421,7 @@ Then attention was planned as the eager form, the scores and the
 probabilities stored by the forward (201 MB a layer each) and the scores'
 gradient by the backward, 97 ms of the step against under 10 for its flops
 at TF32. The cover never proposed recomputing them: `recomputable_folds`
-(`src/Compiler/plan/planner.jl`) counted the folds `prepare` keeps stored,
+(`src/Compiler/cover/proposals.jl`) counted the folds `prepare` keeps stored,
 those reading what a result replaces, among the folds recomputed when it
 asked whether a fold would be recomputed inside another's sweep; the
 projections read the weights Adam replaces in place, so the scores, reading
