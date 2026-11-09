@@ -143,6 +143,103 @@ open: a trial that cannot win, a projection recomputed at every element its
 readers read, is planned whole before it is priced, 3.6 s of the trials'
 wall; and the 4B step's Julia compilation, 20 to 30 s.
 
+Taken next, by the corpus's gate, a cold preparation under 60 s from
+`trace` to the first result. Before, each in a new process, SM clocks 2411
+to 2431 MHz on a machine other jobs shared: node 53.4 s cold and 31.6 warm,
+heat 29.9 and 22.0, the LSTM at batch 64 71.6 and 31.1, the GPT step 78.9
+and 42.3. Where the seconds went, each phase timed with a build that wraps
+them (a patch with the session, not kept), cold and warm, before the three
+changes below and after them, one run each, Julia's compilation summed over
+threads:
+
+| phase | LSTM cold | after | LSTM warm | after | GPT cold | after | GPT warm | after |
+|---|---|---|---|---|---|---|---|---|
+| `using` | 2.8 | 2.8 | 2.8 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 |
+| trace | 4.5 | 4.8 | 4.9 | 4.3 | 3.4 | 3.4 | 3.5 | 3.7 |
+| lower, rewrite, partition | 2.4 | 2.3 | 2.6 | 2.1 | 2.7 | 2.5 | 2.8 | 2.7 |
+| entering the preparation | 2.1 | 1.2 | 2.3 | 1.1 | 2.1 | 1.2 | 2.1 | 1.2 |
+| cover: the device's calibration | 11.4 | 8.9 | 0 | 0 | 12.1 | 10.0 | 0 | 0 |
+| cover: compile bursts | 31.2 | 30.8 | 0.9 | 0.5 | 22.7 | 21.6 | 1.0 | 0.7 |
+| cover: timing claims | 2.0 | 1.8 | 0 | 0 | 1.5 | 1.4 | 0.5 | 0.5 |
+| cover: the rest, planning and Julia's compilation | 18.9 | 13.3 | 18.4 | 10.9 | 38.5 | 27.2 | 31.0 | 20.9 |
+| build, bind | 0.7 | 0.6 | 3.4 | 3.2 | 2.0 | 1.9 | 4.0 | 3.6 |
+| first execution | 0.0 | 0.0 | 0.6 | 0.5 | 0.0 | 0.0 | 0.4 | 0.3 |
+| total | 74.5 | 64.4 | 34.5 | 23.3 | 87.6 | 71.2 | 48.2 | 35.7 |
+| Julia's compilation | 45.7 | 38.3 | 33.5 | 21.6 | 79.5 | 64.5 | 42.9 | 29.4 |
+| kernels compiled: calibration, options, not in the plan | 28, 141, 125 | 28, 141, 125 | 0 | 0 | 31, 244, 205 | 31, 247, 208 | 0 | 0 |
+
+The GPT's `after` column is before the claims' change; with it, 31, 188
+and 149 kernels, its bursts 19.6 s.
+
+Warm was Julia compiling Tempest's code, 33.5 of the LSTM's 34.5 s, and a
+warm run's `--trace-compile` listed 1928 instances (LSTM) and 2252 (GPT)
+compiled in the session, most of them in the package images already and
+rejected as they loaded. Tempest's image is compiled without cuTile,
+GPUArrays or SparseArrays, which add methods to `reduce`, `prod`,
+`minimum`, `count`, `vcat` and `Base.setindex` as they load; an instance
+whose inference called one of them on a type it could not narrow, a
+`reduce(vcat, map(f, index); init)` over a `Tuple{Vararg{Affine}}` or a
+`[v; x]` that SparseArrays' `vcat` of numbers and vectors now takes, failed
+its edges at load, and with it every instance that called it, the
+generator's `estimate` and `claims` among them: 4908 instances rejected, 1454
+of them Tempest's and its extensions', 1491 under two walkers of an index's
+values alone. Taken: those calls on concrete types, a selection's indices
+asserted where the node is one, concatenation by `push!` and `append!`
+(`IR/expressions.jl`, `plan/planner.jl`, `program/roll.jl` and eleven
+more): 1454 to 606, the instances compiled in a warm run 1928 to 1779 and
+2252 to 2080, the warm preparation by the corpus 31.1 to 23.1 s (LSTM) and
+42.3 to 33.1 (GPT). Still rejected: roots in Base that Tempest's code
+reaches, `convert(::Type{Int32}, ::Integer)` under cuTile's `Int32(::Bool)`
+(193), `unsafe_read!` under KernelAbstractions (293), and Tempest's own
+under ten each; and the instances no device-free workload runs, the
+measuring decider's and the build's.
+
+Cold less warm is the device's calibration, the compile bursts, and timing.
+The bursts overlap: 148 thread-seconds of compilation in 34 s of wall for
+the LSTM, 4.4 kernels at once, 266 in 29 s for the GPT, 9.2, up to twelve
+threads in a burst. No lock serializes them: cuTile's `job_results_lock` is
+held to look a result up and to publish it, the cache's `RESOLVED_LOCK` to
+find a key's task. A burst lasts as long as its slowest kernel, the LSTM's
+slowest 4.5 to 4.8 s each, and the stages run in sequence, 19 bursts
+with kernels for the LSTM and 17 for the GPT; the same 166 kernels took 24
+and 31 s of bursts in two LSTM runs. The calibration's lines and memories
+built their references one shape after another. Taken: built side by side
+and timed one at a time, as the scalar functions' were (`fit!`,
+`fit_memory!`), calibration 11.0 to 8.9 s (LSTM) and 11.4 to 10.0 (GPT).
+
+Of the kernels compiled for options, 125 of 141 (LSTM) and 205 of 244
+(GPT) are not in the plan built: candidates the search times and
+discards. The LSTM's are close calls, every one measured within 1.17 of the
+best estimate. The GPT's included 14 claims of products split four ways,
+estimated 3.0 to 4.4 times the best tile and measured 3 to 8 times, never
+fastest, measured because `measured_ranks` took every claim of the best's
+implementation. Taken: an implementation's own claims past the estimate's
+error of its best measured once the record refutes the best's estimate
+(`refuted`), the GPT's cold preparation 281 kernels to 219, its bursts 22.4
+to 19.6 s; the LSTM's measured options unchanged, 166 kernels.
+
+A cold run's plan differs from another's by its measured close calls, with
+or without these changes: the GPT 182, 178, 182 and 182 kernels in four
+runs, a cuBLAS candidate taken at 17.1 against 18.1 μs and joins ordered
+by their measured gains, and of 70 groups two runs share, 2 to 4 take
+another tile within the noise; the LSTM's recurrence step takes its
+product at 64×64×64 split four ways (5.70 ms a step) in six runs and at
+64×64×32 split eight ways (5.90) in two, one of them without the claims'
+change. Standing, by the corpus, cold and warm, two runs each, SM
+clocks 2405 to 2418 MHz: node 44.8 and 45.7 s cold, 22.0 and 24.2 warm;
+heat 22.7 and 21.2, 15.3 and 14.6; the LSTM 57.7 and 62.6, 22.1 and 23.7;
+the GPT 72.0 and 66.6, 33.9 and 35.4. The steps stand within the noise of
+before's: node 6.54 ms against 6.57, heat 1.28 against 1.28, the GPT 1.18
+against 1.19, the LSTM 5.71 against 5.68, or 5.90 where its step takes the
+other tile.
+
+What remains of the GPT's 67 to 72 s cold: compile bursts about 20 s, which
+fewer candidates or concurrent stages would shorten; calibration 10 s, once
+a device; Julia's compilation of the measuring and building paths, which
+only a workload with a device would hold; the cover's planning. The
+LSTM's 58 to 63 s: bursts 24 to 31 s, most of it waiting on each
+stage's slowest kernel, which cuTile compiles; calibration 9 s; warm 22 s.
+
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
 attention (`test/bench/guard_rails.jl`, `test/fixtures/compositions.jl`,
