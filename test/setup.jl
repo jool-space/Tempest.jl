@@ -49,3 +49,14 @@ recomputing(graph) = C.plan(graph; recompute = C.recomputable_folds(graph))
 
 # The proposals the cover took.
 taken(ex) = [c.proposal for c in ex.considered if c.accepted]
+
+# Whether `case` of fixtures/at_once.jl holds, run in a process of its own
+# with threads: a worker of the test runner has one, on which tasks take
+# turns and no two run at once. Its output is printed where it fails.
+function at_once(case)
+    child = `$(Base.julia_cmd()) --threads=3 --project=$(Base.active_project()) $(joinpath(@__DIR__, "fixtures", "at_once.jl")) $case`
+    output = IOBuffer()
+    process = run(pipeline(ignorestatus(child); stdout = output, stderr = output))
+    success(process) || println(stderr, String(take!(output)))
+    success(process)
+end

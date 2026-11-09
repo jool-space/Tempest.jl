@@ -70,9 +70,5 @@ end
 # tasks never call at once and the shared handle passed. It prints its
 # failures.
 @testset "cuDNN attention of two programs at once" begin
-    child = `$(Base.julia_cmd()) --threads=3 --project=$(Base.active_project()) $(joinpath(@__DIR__, "..", "fixtures", "at_once.jl")) cuDNN`
-    output = IOBuffer()
-    process = run(pipeline(ignorestatus(child); stdout = output, stderr = output))
-    success(process) || println(stderr, String(take!(output)))
-    @test success(process)
+    @test at_once("cuDNN")
 end

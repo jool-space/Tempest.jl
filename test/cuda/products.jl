@@ -136,11 +136,7 @@ end
     ex = C.prepared(s, C.decide!(s), CuArray(c), CuArray(d))
     deciders = only(r for r in values(s.decider.resources.made) if r isa Ext.Scratch)
     any(l -> l isa Ext.Product, ex.launches) && @test isdisjoint(map(pointer, arrays(deciders)), map(pointer, arrays(scratch(ex))))
-    child = `$(Base.julia_cmd()) --threads=3 --project=$(Base.active_project()) $(joinpath(@__DIR__, "..", "fixtures", "at_once.jl")) cuBLAS`
-    output = IOBuffer()
-    process = run(pipeline(ignorestatus(child); stdout = output, stderr = output))
-    success(process) || println(stderr, String(take!(output)))
-    @test success(process)
+    @test at_once("cuBLAS")
 end
 
 # An executable's workspace is its own, and goes with it: 64 programs

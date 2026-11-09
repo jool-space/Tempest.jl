@@ -1,6 +1,8 @@
 # `compile`: a function traced and prepared, called like the function, with
 # structs among its arguments and integers as constants.
 
+include("../fixtures/searching.jl")
+
 struct Dense{W, B, F}
     w::W
     b::B
@@ -556,68 +558,17 @@ end
     @test r(W, u) ≈ settled(W, u) && r(2 .* W, u) ≈ settled(2 .* W, u)
 end
 
-# A small LSTM whose training step writes its parameters and Adam's moments
-# in place, for a search behind the first result to give another plan.
-σ(x) = 1 / (1 + exp(-x))
-function lstm_cell(p, (h, c), x)
-    i, f = σ.(p.Wi * x .+ p.Ui * h .+ p.bi), σ.(p.Wf * x .+ p.Uf * h .+ p.bf)
-    g, o = tanh.(p.Wg * x .+ p.Ug * h .+ p.bg), σ.(p.Wo * x .+ p.Uo * h .+ p.bo)
-    c = f .* c .+ i .* g
-    (o .* tanh.(c), c)
-end
-lstm(p, xs, h0) = Tuple(map(first, accumulate((s, x) -> lstm_cell(p, s, x), eachslice(xs; dims = 2); init = (h0, h0))))
-lstm_weights() = (; (Symbol(:W, k) => data(3, 2; scale = 0.3) for k in "ifgo")..., (Symbol(:U, k) => data(3, 3; scale = 0.3) for k in "ifgo")...,
-    (Symbol(:b, k) => data(3; scale = 0.1) for k in "ifgo")...)
-function adam!(p, m, v, xs, h0)
-    l, (g,) = Tempest.withgradient(q -> sum(h -> sum(abs2, h), lstm(q, xs, h0)), p)
-    for (w, mw, vw, d) in zip(values(p), values(m), values(v), values(g))
-        mw .= 0.9 .* mw .+ 0.1 .* d
-        vw .= 0.999 .* vw .+ 0.001 .* d .^ 2
-        w .-= 0.01 .* mw ./ (sqrt.(vw) .+ 1.0e-8)
-    end
-    l
-end
-
-# The plan the search behind a first result gives on the CPU, which times
-# nothing: the program prepared again with every fold that can be recomputed
-# where it is read recomputed, which is another plan of it.
-function other_plan(c, args...)
-    program = c.executable.program
-    folds = C.recomputable_folds(C.rewrite(C.lower(program); rounded = C.rounded_backward(T.CPUTarget())))
-    timer -> prepare(program, c.f, args...; recompute = folds)
-end
-
-# `c` searching behind its calls as `work(timer)` does.
-searching(c, work) = C.Searching(c, C.Search(work))
-
-# A target whose timings take a millisecond, noting how many ran at once.
-struct Clock <: C.Target end
-const TIMING_NOW, TIMING_MOST = Threads.Atomic{Int}(0), Threads.Atomic{Int}(0)
-function C.time_launch(::Clock, launch)
-    Threads.atomic_max!(TIMING_MOST, Threads.atomic_add!(TIMING_NOW, 1) + 1)
-    sleep(0.005)
-    launch()
-    Threads.atomic_sub!(TIMING_NOW, 1)
-    1.0e-3
-end
-
-@testset "timings one at a time" begin
-    # From several tasks at once, each timing waits for the one before.
-    ran = Threads.Atomic{Int}(0)
-    foreach(wait, [Threads.@spawn(C.timed(Clock(), () -> Threads.atomic_add!(ran, 1))) for _ in 1:8])
-    @test ran[] == 8 && TIMING_MOST[] == 1
-end
-
 @testset "a search behind the first result" begin
     # A target that times nothing has nothing to search.
     c = compile(x -> 2 .* x, data(4); search = :after, measure = :close)
     @test c isa T.Compiled && wait(c) === c && c(data(4)) == 2 .* data(4)
     @test_throws ArgumentError compile(x -> 2 .* x, data(4); search = :never)
-    # The calls take the other plan between two of them, from two tasks
-    # calling until the search has ended, each call a step of the LSTM: a
-    # recurrence, its parameters and Adam's moments replaced in place. After
-    # as many steps they are those of the first plan run throughout, and so
-    # are the losses, in whatever order the tasks took them.
+    # The calls take the other plan between two of them, called until the
+    # search has ended, each call a step of the LSTM: a recurrence, its
+    # parameters and Adam's moments replaced in place. After as many steps
+    # they are those of the first plan run throughout, and so are the losses.
+    # (The calls from threads at once, the search changing the plan among
+    # them: fixtures/at_once.jl.)
     xs, h0 = data(2, 5; scale = 0.5), data(3; scale = 0.1)
     p, m, v = lstm_weights(), map(zero, lstm_weights()), map(zero, lstm_weights())
     c = compile(adam!, p, m, v, xs, h0)
@@ -625,16 +576,10 @@ end
     losses = [c(p, m, v, xs, h0) for _ in 1:3]
     s = searching(c, other_plan(c, p, m, v, xs, h0))
     search = s.search
-    function calling()
-        ls = Float64[]
-        while !C.ended(search) || length(ls) < 3
-            push!(ls, s(p, m, v, xs, h0))
-            sleep(0.02)
-        end
-        ls
+    while !C.ended(search) || length(losses) < 6
+        push!(losses, s(p, m, v, xs, h0))
+        sleep(0.02)
     end
-    tasks = [Threads.@spawn(calling()) for _ in 1:2]
-    foreach(t -> append!(losses, fetch(t)), tasks)
     @test wait(s) === s && s.search === nothing
     append!(losses, [s(p, m, v, xs, h0) for _ in 1:3])
     plan = s.compiled.executable
@@ -643,7 +588,7 @@ end
     q, mq, vq = lstm_weights(), map(zero, lstm_weights()), map(zero, lstm_weights())
     one_plan = compile(adam!, q, mq, vq, xs, h0)
     alone = [one_plan(q, mq, vq, xs, h0) for _ in eachindex(losses)]
-    @test isapprox(sort(losses), sort(alone); rtol = 1.0e-10)
+    @test isapprox(losses, alone; rtol = 1.0e-10)
     @test all(map((a, b) -> isapprox(a, b; rtol = 1.0e-10), values(p), values(q)))
     @test all(map((a, b) -> isapprox(a, b; rtol = 1.0e-10), values(m), values(mq)))
     @test all(map((a, b) -> isapprox(a, b; rtol = 1.0e-10), values(v), values(vq)))
@@ -691,44 +636,26 @@ end
     @test s.compiled === c && isapprox(s(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
 end
 
-@testset "preparations on two tasks at once" begin
-    # Each plans as it would alone, though both intern terms and match the
-    # library as they plan, a search's beside a call's: the tables are each
-    # preparation's own. The LSTM's step and a layer's gradient, at once,
-    # three times over.
+@testset "a preparation's own tables" begin
+    # A preparation's interned terms and the library's matches are made as it
+    # is set up and held by it: none outside one, and each filled by its own
+    # preparation alone. (Preparations on threads at once, and one whose
+    # tables are emptied again and again as it plans: fixtures/at_once.jl.)
     xs, h0 = data(2, 5; scale = 0.5), data(3; scale = 0.1)
     p, m, v = lstm_weights(), map(zero, lstm_weights()), map(zero, lstm_weights())
-    layer, x = Dense(data(6, 4; scale = 0.3), data(6), tanh), data(4, 3; scale = 0.5)
     step = trace(adam!, p, m, v, xs, h0)
-    gradient = trace((l, x) -> Tempest.withgradient(loss, l, x), layer, x)
-    alone = (sprint(explain, prepare(step, p, m, v, xs, h0)), sprint(explain, prepare(gradient, layer, x)))
-    for _ in 1:3
-        tasks = (Threads.@spawn(prepare(step, p, m, v, xs, h0)), Threads.@spawn(prepare(gradient, layer, x)))
-        a, b = fetch.(tasks)
-        @test (sprint(explain, a), sprint(explain, b)) == alone
-        @test agree(C.leaves(outputs(execute!(b))), C.leaves(Tempest.withgradient(loss, layer, x)))
-    end
-    # A preparation's tables are made as it is set up and held by it: none
-    # outside one, and each filled by its own preparation alone.
     interned(s) = sum(((_, table),) -> sum(length, values(table); init = 0), s.tables.interned.tables)
     s, t = C.setup(step; target = T.CPUTarget()), C.setup(step; target = T.CPUTarget())
     C.decide!(t)
     @test IR.INTERNED[] === nothing && C.MATCHES[] === nothing
     @test s.tables !== t.tables && interned(t) > 0 && interned(s) == 0
-    # The tables only spare a preparation time: emptied again and again as it
-    # plans, its plan is the same. Were a term's identity to matter, as it
-    # would for a term holding a vector, whose `===` is the vector's
-    # identity rather than its contents', this would plan otherwise or fail.
-    done = Threads.Atomic{Bool}(false)
-    emptying = Threads.@spawn while !done[]
-        foreach(((lock, table),) -> @lock(lock, empty!(table)), s.tables.interned.tables)
-        @lock C.MATCHES_LOCK empty!(s.tables.matches)
-        yield()
-    end
-    emptied = sprint(explain, C.prepared(s, C.decide!(s), p, m, v, xs, h0))
-    done[] = true
-    wait(emptying)
-    @test emptied == alone[1]
+end
+
+@testset "at once, on threads" begin
+    # Timings, a compiled program's calls while its search changes its plan,
+    # and preparations, from tasks on threads of their own: in a process with
+    # threads, since a worker's tasks take turns on one.
+    @test at_once("Tempest")
 end
 
 if CUDA_FUNCTIONAL
@@ -799,22 +726,13 @@ if CUDA_FUNCTIONAL
         dw, dx = CuArray(w), CuArray(x)
         f = (w, x) -> (sum(abs2, tanh.(w .* x .+ 1.0f0); dims = 1), tanh.(w .* x .+ 1.0f0))
         agrees((value, y)) = isapprox(Array(value), f(w, x)[1]; rtol = 1.0e-4) && isapprox(Array(y), f(w, x)[2]; rtol = 1.0e-4)
+        # (Called from a thread of its own, synchronizing the device after each
+        # call, as the search runs on another: fixtures/at_once.jl.)
         s = compile(f, dw, dx; search = :after, measure = :all)
         @test s isa T.Searching && agrees(s(dw, dx))
-        # A task calling, and synchronizing the device after each call, until
-        # the search ends: the calls take its timings, and nothing the search
-        # does beside them forbids the synchronization, as a capture would.
         search = s.search
-        calls = Threads.@spawn begin
-            results = Bool[]
-            while !C.ended(search) || isempty(results)
-                push!(results, agrees(s(dw, dx)))
-                CUDACore.device_synchronize()
-            end
-            results
-        end
-        @test all(fetch(calls)) && C.ended(search) && !istaskfailed(search.task)
         @test wait(s) === s && agrees(s(dw, dx)) && s.compiled.executable.captured !== nothing
+        @test C.ended(search) && !istaskfailed(search.task)
         # Compiled again, in this process or another, a program whose search
         # measured close calls replays the decisions it settled: its first
         # result is the measured plan, and there is nothing to search behind
