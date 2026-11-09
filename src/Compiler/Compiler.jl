@@ -106,6 +106,7 @@ include("runtime/stepped.jl")
 
 # The kernel cache, and the front door.
 include("runtime/cache.jl")
+include("runtime/search.jl")
 include("runtime/compile.jl")
 
 end

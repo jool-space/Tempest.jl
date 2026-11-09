@@ -1,9 +1,10 @@
 # A corpus program compiled with its search behind the first result
 # (`compile`'s `search = :after`), then called until its plan changes and a
 # few calls after: the seconds from `trace` to the first result and the
-# kernels compiled before it; the calls, and the seconds, until the change;
-# each call's seconds before and after it, the call that changes the plan
-# among them; and the step on each plan. A third task, where asked, calls a
+# kernels compiled before it; the calls, and the seconds, until the search
+# ends, its settled decisions kept, and until the change; each call's
+# seconds before and after it, the call that changes the plan among them;
+# and the step on each plan. A third task, where asked, calls a
 # small program of its own meanwhile, and its slowest call says what the
 # timings cost a call beside them. Run it in a new process, cold with an
 # empty cache and warm (with the GB10's rates in TEMPEST_CACHE/tuning where
@@ -55,27 +56,34 @@ function main(name, shape, before, besides)
     c = compile(case.step, args...; target = case.target, measure = :close, search = before ? :before : :after)
     timed_call(c, args)
     first_s, now = time() - started, C.cache_counts()
-    first_plan = c.executable
+    executable(c) = c isa Tempest.Searching ? c.compiled.executable : c.executable
+    search = c isa Tempest.Searching ? c.search : nothing
+    first_plan = executable(c)
     println(name, " ", shape, before ? ", searched before" : ", searched after", ": first result ", round(first_s; digits = 1),
         " s, ", now.compiled - counts.compiled, " kernels compiled, ", length(first_plan.kernels), " in the plan")
     done = Ref(false)
     other = besides ? beside(done) : nothing
     # Calls until the plan changes, or the search ends on the same plan, and
     # twenty more; at most ten minutes.
-    calls, at, changed = Float64[], nothing, nothing
+    calls, at, changed, ended = Float64[], nothing, nothing, nothing
     counts = C.cache_counts()
     while time() - started < 600
         push!(calls, timed_call(c, args))
-        if changed === nothing && c.executable !== first_plan
+        if ended === nothing && search !== nothing && C.ended(search)
+            ended = (length(calls), time() - started - first_s)
+        end
+        if changed === nothing && executable(c) !== first_plan
             changed, at = length(calls), time() - started - first_s
         end
-        searching = c.search !== nothing && (!istaskdone(c.search) || c.built !== nothing)
+        searching = c isa Tempest.Searching && c.search !== nothing
         (changed !== nothing || !searching) && length(calls) >= something(changed, 0) + 20 && break
     end
     done[] = true
     now = C.cache_counts()
     before_change = calls[1:(something(changed, length(calls) + 1) - 1)]
     after_change = changed === nothing ? Float64[] : calls[(changed + 1):end]
+    ended === nothing || println("  search ended, its settled decisions kept, by call ", ended[1], ", ", round(ended[2]; digits = 1),
+        " s after the first result")
     if changed === nothing
         println("  no change of plan in ", length(calls), " calls")
     else
@@ -92,7 +100,7 @@ function main(name, shape, before, besides)
     end
     # The step on each plan, now that the calls are done with them.
     step_first = Base.invokelatest(m.step_milliseconds, first_plan)
-    step_last = c.executable === first_plan ? step_first : Base.invokelatest(m.step_milliseconds, c.executable)
+    step_last = executable(c) === first_plan ? step_first : Base.invokelatest(m.step_milliseconds, executable(c))
     println("  step ", round(step_first; sigdigits = 3), " ms on the first plan, ", round(step_last; sigdigits = 3), " ms on the last")
 end
 

@@ -584,8 +584,11 @@ end
 function other_plan(c, args...)
     program = c.executable.program
     folds = C.recomputable_folds(C.rewrite(C.lower(program); rounded = C.rounded_backward(T.CPUTarget())))
-    () -> prepare(program, c.f, args...; recompute = folds)
+    timer -> prepare(program, c.f, args...; recompute = folds)
 end
+
+# `c` searching behind its calls as `work(timer)` does.
+searching(c, work) = C.Searching(c, C.Search(work))
 
 # A target whose timings take a millisecond, noting how many ran at once.
 struct Clock <: C.Target end
@@ -608,7 +611,7 @@ end
 @testset "a search behind the first result" begin
     # A target that times nothing has nothing to search.
     c = compile(x -> 2 .* x, data(4); search = :after, measure = :close)
-    @test c.search === nothing && wait(c) === c && c(data(4)) == 2 .* data(4)
+    @test c isa T.Compiled && wait(c) === c && c(data(4)) == 2 .* data(4)
     @test_throws ArgumentError compile(x -> 2 .* x, data(4); search = :never)
     # The calls take the other plan between two of them, from two tasks
     # calling until the search has ended, each call a step of the LSTM: a
@@ -620,21 +623,23 @@ end
     c = compile(adam!, p, m, v, xs, h0)
     first_plan = c.executable
     losses = [c(p, m, v, xs, h0) for _ in 1:3]
-    C.search_behind!(c, other_plan(c, p, m, v, xs, h0))
+    s = searching(c, other_plan(c, p, m, v, xs, h0))
+    search = s.search
     function calling()
         ls = Float64[]
-        while !istaskdone(c.search) || length(ls) < 3
-            push!(ls, c(p, m, v, xs, h0))
+        while !C.ended(search) || length(ls) < 3
+            push!(ls, s(p, m, v, xs, h0))
             sleep(0.02)
         end
         ls
     end
     tasks = [Threads.@spawn(calling()) for _ in 1:2]
     foreach(t -> append!(losses, fetch(t)), tasks)
-    @test wait(c) === c && istaskdone(c.search)
-    append!(losses, [c(p, m, v, xs, h0) for _ in 1:3])
-    @test c.executable !== first_plan && length(c.executable.kernels) != length(first_plan.kernels)
-    @test first_plan.captured === nothing
+    @test wait(s) === s && s.search === nothing
+    append!(losses, [s(p, m, v, xs, h0) for _ in 1:3])
+    plan = s.compiled.executable
+    @test plan !== first_plan && length(plan.kernels) != length(first_plan.kernels)
+    @test s.compiled.lock === c.lock && first_plan.captured === nothing
     q, mq, vq = lstm_weights(), map(zero, lstm_weights()), map(zero, lstm_weights())
     one_plan = compile(adam!, q, mq, vq, xs, h0)
     alone = [one_plan(q, mq, vq, xs, h0) for _ in eachindex(losses)]
@@ -646,15 +651,13 @@ end
     @test isapprox(alone[1:3], [adam!(r, mr, vr, xs, h0) for _ in 1:3]; rtol = 1.0e-12)
     # A search that gives the plan the calls run changes nothing.
     c = compile(adam!, p, m, v, xs, h0)
-    first_plan = c.executable
-    C.search_behind!(c, () -> prepare(first_plan.program, adam!, p, m, v, xs, h0))
-    @test wait(c).executable === first_plan
+    s = searching(c, timer -> prepare(c.executable.program, adam!, p, m, v, xs, h0))
+    @test wait(s).compiled === c
     # A search that fails leaves the program its plan, with a warning.
     c = compile(adam!, p, m, v, xs, h0)
-    first_plan = c.executable
-    @test_logs (:warn, r"search behind the first result failed") (C.search_behind!(c, () -> error("no plan")); wait(c))
-    @test c.executable === first_plan
-    @test isapprox(c(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
+    @test_logs (:warn, r"search behind the first result failed") wait(s = searching(c, timer -> error("no plan")))
+    @test s.compiled === c
+    @test isapprox(s(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
 end
 
 @testset "a search's timings, taken by the calls" begin
@@ -666,23 +669,23 @@ end
     # `wait` takes the rest.
     c = compile(adam!, p, m, v, xs, h0)
     timers = Task[]
-    timings() = [C.timed(Clock(), () -> push!(timers, current_task())) for _ in 1:3]
     seconds = Float64[]
-    C.search_behind!(c, () -> (append!(seconds, timings()); nothing))
-    @test timedwait(() -> isready(c.asked), 60) === :ok && isempty(timers)
-    @test isapprox(c(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
+    s = searching(c, timer -> (append!(seconds, [timer(Clock(), () -> push!(timers, current_task())) for _ in 1:3]); nothing))
+    asked = s.search.asked
+    @test timedwait(() -> isready(asked), 60) === :ok && isempty(timers)
+    @test isapprox(s(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
     @test timers == [current_task()]
-    @test wait(c) === c && timers == fill(current_task(), 3) && seconds == fill(1.0e-3, 3)
+    @test wait(s) === s && timers == fill(current_task(), 3) && seconds == fill(1.0e-3, 3)
     # A timing that throws fails the search, not the call that took it.
     c = compile(adam!, p, m, v, xs, h0)
-    first_plan = c.executable
     @test_logs (:warn, r"search behind the first result failed") begin
-        C.search_behind!(c, () -> C.timed(Clock(), () -> error("a claim that throws")))
-        @test timedwait(() -> isready(c.asked), 60) === :ok
-        @test isapprox(c(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
-        wait(c)
+        s = searching(c, timer -> timer(Clock(), () -> error("a claim that throws")))
+        asked = s.search.asked
+        @test timedwait(() -> isready(asked), 60) === :ok
+        @test isapprox(s(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
+        wait(s)
     end
-    @test c.executable === first_plan && isapprox(c(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
+    @test s.compiled === c && isapprox(s(p, m, v, xs, h0), adam!(q, mq, vq, xs, h0); rtol = 1.0e-10)
 end
 
 if CUDA_FUNCTIONAL
@@ -753,21 +756,31 @@ if CUDA_FUNCTIONAL
         dw, dx = CuArray(w), CuArray(x)
         f = (w, x) -> (sum(abs2, tanh.(w .* x .+ 1.0f0); dims = 1), tanh.(w .* x .+ 1.0f0))
         agrees((value, y)) = isapprox(Array(value), f(w, x)[1]; rtol = 1.0e-4) && isapprox(Array(y), f(w, x)[2]; rtol = 1.0e-4)
-        c = compile(f, dw, dx; search = :after, measure = :all)
-        @test agrees(c(dw, dx))
+        s = compile(f, dw, dx; search = :after, measure = :all)
+        @test s isa T.Searching && agrees(s(dw, dx))
         # A task calling, and synchronizing the device after each call, until
         # the search ends: the calls take its timings, and nothing the search
         # does beside them forbids the synchronization, as a capture would.
+        search = s.search
         calls = Threads.@spawn begin
             results = Bool[]
-            while !istaskdone(c.search) || isempty(results)
-                push!(results, agrees(c(dw, dx)))
+            while !C.ended(search) || isempty(results)
+                push!(results, agrees(s(dw, dx)))
                 CUDACore.device_synchronize()
             end
             results
         end
-        @test all(fetch(calls)) && istaskdone(c.search) && !istaskfailed(c.search)
-        @test wait(c) === c && agrees(c(dw, dx)) && c.executable.captured !== nothing
+        @test all(fetch(calls)) && C.ended(search) && !istaskfailed(search.task)
+        @test wait(s) === s && agrees(s(dw, dx)) && s.compiled.executable.captured !== nothing
+        # Compiled again, in this process or another, a program whose search
+        # measured close calls replays the decisions it settled: its first
+        # result is the measured plan, and there is nothing to search behind
+        # it. (A preparation measuring nothing replays those of one measuring
+        # close calls, not every option.)
+        s = compile(f, dw, dx; search = :after, measure = :close)
+        @test s isa T.Searching && wait(s) === s
+        again = compile(f, dw, dx; search = :after, measure = :close)
+        @test again isa T.Compiled && C.same_choices(again.executable, s.compiled.executable) && agrees(again(dw, dx))
         # The first result times nothing, and the search times only in the
         # calls' time, a claim each, and in `wait`, which takes what is left
         # and ends it: a program no other here prepares, its options in no
@@ -776,13 +789,14 @@ if CUDA_FUNCTIONAL
         lines() = isfile(record) ? countlines(record) : 0
         z = CuArray(single(data(48, 80; scale = 0.1)))
         before = lines()
-        c = compile(x -> sum(abs2, 2.5f0 .* x; dims = 2), z; search = :after, measure = :all)
-        @test timedwait(() -> isready(c.asked), 300) === :ok && lines() == before
+        s = compile(x -> sum(abs2, 2.5f0 .* x; dims = 2), z; search = :after, measure = :all)
+        search = s.search
+        @test timedwait(() -> isready(search.asked), 300) === :ok && lines() == before
         expected = sum(abs2, 2.5f0 .* Array(z); dims = 2)
-        @test isapprox(Array(c(z)), expected; rtol = 1.0e-4)
+        @test isapprox(Array(s(z)), expected; rtol = 1.0e-4)
         @test timedwait(() -> lines() > before, 60) === :ok && lines() == before + 1
-        @test isapprox(Array(wait(c)(z)), expected; rtol = 1.0e-4)
-        @test istaskdone(c.search) && !istaskfailed(c.search) && !isready(c.asked)
+        @test isapprox(Array(wait(s)(z)), expected; rtol = 1.0e-4)
+        @test s.search === nothing && C.ended(search) && !istaskfailed(search.task) && !isready(search.asked)
     end
 
     @testset "arguments read where the caller has them, on CUDA" begin

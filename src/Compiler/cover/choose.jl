@@ -151,6 +151,9 @@ mutable struct Decider
     # this one, measuring nothing, decided without a time, by key; shared,
     # as the tables are, with a recurrence's step's decider.
     wanted::Set{String}
+    # What times a launch, `(target, launch) -> seconds`: `timed`, or the
+    # timer `decide!` is given, which a recurrence's step's decider shares.
+    timer::Any
 end
 
 # A decider reads the rates file and the record as they are when it is made,
@@ -174,13 +177,13 @@ and building the claims it times with the preparation's resources.
 """
 Decider(parent::Decider, graph::IndexGraph; steps) =
     decider(parent.target, parent.measurable, graph, parent.measure, parent.rates, parent.calibration, parent.calibration_path, parent.record, parent.record_path;
-        steps, wanted = parent.wanted, resources = parent.resources)
+        steps, wanted = parent.wanted, timer = parent.timer, resources = parent.resources)
 
 decider(target, measurable, graph, measure, rates, calibration, calibration_path, record, record_path; recompute = (), keep = (), ride = (), steps = 1,
-        wanted = Set{String}(), resources = Resources(target)) =
+        wanted = Set{String}(), timer = timed, resources = Resources(target)) =
     Decider(target, measurable, graph, measure, rates, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), record, record_path,
         Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), resources, Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
-        Dict{Any, Vector{Choice}}(), Dict{Any, Offered}(), Dict{String, Failure}(), Dict{Any, Any}(), steps, wanted)
+        Dict{Any, Vector{Choice}}(), Dict{Any, Offered}(), Dict{String, Failure}(), Dict{Any, Any}(), steps, wanted, timer)
 
 # Forget every decision and each group's options as searched, so that the
 # cover plans again from what the decider knows now: the claims that failed
@@ -917,7 +920,7 @@ function measure!(d::Decider, p::Plan, g::Group, o::Choice)
     haskey(d.record, o.key) && return
     launch = build_option!(d, p, g, o)
     launch === nothing && return
-    t = phase(() -> timed(d.target, launch), :timing)
+    t = phase(() -> d.timer(d.target, launch), :timing)
     keep!(d.record, d.record_path, o.key, t)
     nothing
 end

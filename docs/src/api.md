@@ -10,6 +10,8 @@ Tempest
 compile
 Tempest.Compiled
 wait(::Tempest.Compiled)
+Tempest.Searching
+wait(::Tempest.Searching)
 Tempest.gradient
 Tempest.withgradient
 explain

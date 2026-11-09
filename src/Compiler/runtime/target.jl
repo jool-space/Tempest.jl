@@ -342,21 +342,13 @@ quiesce(::Target) = nothing
 # Timings run one at a time in the process: two at once, two preparations'
 # on two tasks, would time each other. Nothing else is held off while a
 # claim is timed: a compiled program's search has its timings taken between
-# the program's own calls (see `compile`'s `search`), and other work in the
-# process runs beside a timing as it does beside any preparation.
+# the program's own calls (see `Search`), and other work in the process runs
+# beside a timing as it does beside any preparation.
 const TIMINGS = ReentrantLock()
 
-# Where the timings of the task, and the tasks it starts, run: nothing, in
-# the task, or a function `(target, launch) -> seconds` that has another
-# task time it, as a search behind a compiled program has its calls.
-const TIMER = Base.ScopedValues.ScopedValue{Any}(nothing)
-
-# `time_launch`, one timing at a time, once the device's work is done.
-function timed(target, launch)
-    timer = TIMER[]
-    timer === nothing || return timer(target, launch)
-    @lock TIMINGS (quiesce(target); time_launch(target, launch))
-end
+# `time_launch`, one timing at a time, once the device's work is done: a
+# decider's timer unless it is given another (see `decide!`).
+timed(target, launch) = @lock TIMINGS (quiesce(target); time_launch(target, launch))
 
 """
     device_rates(target) -> rates

@@ -280,16 +280,23 @@ function setup(program::Program; target, measure = measuring(), replaces = (), r
 end
 
 """
-    decide!(s; verify) -> Decided
+    decide!(s; verify, timer) -> Decided
 
 The decisions of the preparation set up as `s` and the plan they form,
 reached as `prepare` reaches them (see `reach!`): replayed where decisions
-kept for it hold, else by the cover, settled.
+kept for it hold, else by the cover, settled. `timer`, `(target, launch) ->
+seconds`, times each claim and calibration reference measured: `timed` by
+default, one timing at a time in the process, on the task deciding; a
+search behind a compiled program's first result has the program's calls
+time them (see `Search`). The preparation keeps it, deciding again where
+claims fail to build.
 """
-decide!(s::Setup; verify::Bool = verifying()) =
+function decide!(s::Setup; verify::Bool = verifying(), timer = s.decider.timer)
+    s.decider.timer = timer
     Base.ScopedValues.with(Implement.COMPILING => s.build, VERIFYING => verify) do
         reach!(s.decider; settle = settling())
     end
+end
 
 """
     given(s, r) -> Decided

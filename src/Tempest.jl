@@ -51,7 +51,7 @@ public Compiler
 include("Compiler/Compiler.jl")
 
 # What programs are written with: the way in, and what Base cannot spell.
-@republic using .Compiler: compile, Compiled, gradient, withgradient, explain, CPUTarget, CUDATarget,
+@republic using .Compiler: compile, Compiled, Searching, gradient, withgradient, explain, CPUTarget, CUDATarget,
     cuBLASProducts, cuDNNAttention, cuTileGenerator, logsumexp, scalar_partials, stopgrad
 @republic using .Compiler.IR: GenericFold
 
