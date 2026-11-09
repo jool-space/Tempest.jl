@@ -314,11 +314,20 @@ function cover(d::Decider)
     search!(d, base)
     clock = lap!(:cover_search, clock)
     proposals = Tuple{Any, Union{Nothing, Implementation}}[]
+    # Each proposal once, by what it is and by the values it fixes, found by
+    # a lookup rather than by a pass over the proposals before it, as many as
+    # a program has layers.
+    proposed, fixing = Set{Any}(), Set{Vector{Int}}()
     for i in implementations(d.target), q in Base.invokelatest(candidates, i, d.target, base)
-        any(x -> x[1] == q, proposals) || push!(proposals, (q, i))
+        q in proposed && continue
+        push!(proposals, (q, i))
+        push!(proposed, q)
+        push!(fixing, fixes(q))
     end
     for q in joins(base)
-        any(x -> fixes(x[1]) == q.group, proposals) || push!(proposals, (q, nothing))
+        q.group in fixing && continue
+        push!(proposals, (q, nothing))
+        push!(fixing, q.group)
     end
     foreach(q -> push!(proposals, (q, nothing)), shifted_maps(base))
     if any_recomputes_folds(d.target)
@@ -326,10 +335,13 @@ function cover(d::Decider)
             push!(proposals, (Recompute(v), nothing))
         end
     end
+    stores = Set{Int}()
     for g in base.groups
         isempty(failures(d, base, g)) && !unlowered(d, base, g) && continue
         for v in recomputed_maps(base, g)
-            any(x -> x[1] == Store(v), proposals) || push!(proposals, (Store(v), nothing))
+            v in stores && continue
+            push!(proposals, (Store(v), nothing))
+            push!(stores, v)
         end
     end
     measures(d) && foreach(v -> push!(proposals, (Ride(v), nothing)), riding_sums(base))
