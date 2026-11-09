@@ -284,7 +284,7 @@ end
 struct CloseCalls <: C.Implementation end
 C.claims(::CloseCalls, ::T.CPUTarget, g) = (:first, :second)
 C.estimate(::CloseCalls, claim, target, g) = [C.Work(claim === :first ? 1.0e3 : 1.2e3)]
-C.build_claim(::CloseCalls, claim, target, g, buffers) = g.reference(target, buffers)
+C.build_claim(::CloseCalls, claim, target, g, buffers, _) = g.reference(target, buffers)
 
 @testset "a cover measuring nothing counts what a cover measuring close calls would have timed" begin
     x, w = data(8, 4), data(8, 8)

@@ -364,7 +364,10 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference)
     replaced = Dict(pairs)
     stored(k) = haskey(replaced, k) ? arguments[replaced[k]] : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
     results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
-    built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers), collect(zip(p.groups, ds)), target)
+    # What its launches share and nothing else uses (see `Resources`), made
+    # as the first that needs it is built; the launches hold it.
+    resources = Resources(target)
+    built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers, resources), collect(zip(p.groups, ds)), target)
     clock = lap!(:build, clock)
     copies = Any[(() -> copyto!(buffers[a], buffers[r])) for (r, a) in s.staged]
     outs = rebuild(k -> k isa Int ? results[k] : constant_leaf(k), program.output_structure)

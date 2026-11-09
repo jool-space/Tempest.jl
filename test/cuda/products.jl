@@ -93,28 +93,74 @@ end
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, whole, states...)); rtol = 1.0e-5)
 end
 
-# Two programs whose plans take cuBLAS products, called at once from tasks
-# of their own, share the extension's one handle per context and its one
-# workspace. A call sets the handle's stream and workspace and then
-# multiplies: on two threads the first round fails, cuBLAS's internal error
-# on that call and on every call after it on the handle (GB10 and RTX 6000
-# Ada, every run). A handle per task alone turns those loud errors into
-# silently wrong results, 780 of 4000 (GB10), the products then running
-# beside each other on the one workspace; with a workspace each, none. So
-# the handle per task must not come without the workspace: what closes both
-# is a handle per task and a workspace per executable, which its graphs
-# record as they record its buffers, and the extension builds a product
-# without knowing whose it is.
-@testset "cuBLAS products of two programs at once (gap: a handle per task, a workspace per executable)" begin
+# A product's call is configured on its task's handle, the stream it runs on
+# and the workspace it writes set by one call and read by the next, and
+# writes its executable's workspace, which nothing else does: two programs'
+# products run at once on two streams on state of their own. On one handle
+# per context, two programs called at once from two threads failed the first
+# round on GB10 and on RTX 6000 Ada, cuBLAS's internal error on that call
+# and every later one on the handle; a handle per task alone turned those
+# into silently wrong results, 780 of 4000 on GB10, the products running
+# beside each other on the one workspace. A graph recorded of a program's
+# products leases its executable's workspace and constants, none of
+# another's. The calls at once, from threads, are in fixtures/at_once.jl,
+# run in a process of its own: the test runner's workers have one thread,
+# on which two tasks never call at once and the shared handle passed.
+@testset "cuBLAS products of two programs at once" begin
     Ext = Base.get_extension(Tempest, :cuBLASExt)
     took, done = Channel{Any}(2), Base.Event()
     holding = [Threads.@spawn (put!(took, Ext.handle()); wait(done)) for _ in 1:2]
     held = [take!(took) for _ in 1:2]
     notify(done)
     foreach(wait, holding)
-    @test_broken held[1] !== held[2]
+    @test held[1] != held[2]
     a, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112))
-    cs = [compile((a, b) -> a * b, CuArray(a), CuArray(b); target = T.CUDATarget(T.cuBLASProducts())) for _ in 1:2]
-    workspaces = [only(l.lib.workspace for l in c.executable.launches if l isa Ext.Product) for c in cs]
-    @test_broken workspaces[1] !== workspaces[2]
+    target = T.CUDATarget(T.cuBLASProducts())
+    scratch(ex) = only(unique(l.scratch for l in ex.launches if l isa Ext.Product))
+    arrays(s) = (s.workspace, s.one, s.zero)
+    for capture in (false, true)
+        cs = [compile((a, b) -> a * b, CuArray(a), CuArray(b); target, capture) for _ in 1:2]
+        ours, theirs = scratch(cs[1].executable), scratch(cs[2].executable)
+        @test isdisjoint(map(pointer, arrays(ours)), map(pointer, arrays(theirs)))
+        if capture
+            leased = [c.executable.captured.graph.memory for c in cs]
+            @test all(x -> x.data[] in leased[1], arrays(ours)) && all(x -> x.data[] in leased[2], arrays(theirs))
+            @test isdisjoint(leased[1], leased[2])
+        end
+    end
+    # A decider builds the claims it times on resources of its own, which
+    # the executable built after it does not share: a product no
+    # preparation here has decided, so that its claims are built and timed.
+    c, d = Float32.(data(72, 88; scale = 0.1)), Float32.(data(88, 104))
+    s = C.setup(trace((c, d) -> c * d, c, d); target, measure = :all)
+    ex = C.prepared(s, C.decide!(s), CuArray(c), CuArray(d))
+    deciders = only(r for r in values(s.decider.resources.made) if r isa Ext.Scratch)
+    any(l -> l isa Ext.Product, ex.launches) && @test isdisjoint(map(pointer, arrays(deciders)), map(pointer, arrays(scratch(ex))))
+    child = `$(Base.julia_cmd()) --threads=3 --project=$(Base.active_project()) $(joinpath(@__DIR__, "..", "fixtures", "at_once.jl")) cuBLAS`
+    output = IOBuffer()
+    process = run(pipeline(ignorestatus(child); stdout = output, stderr = output))
+    success(process) || println(stderr, String(take!(output)))
+    @test success(process)
+end
+
+# An executable's workspace is its own, and goes with it: 64 programs
+# prepared and let go hold none of theirs once collected, nor does the
+# decider that timed claims for one (a product no preparation here has
+# decided). Each is prepared in a function of its own: code at the top
+# level keeps what it computed alive until it ends.
+@testset "cuBLAS workspaces go with their executables" begin
+    Ext = Base.get_extension(Tempest, :cuBLASExt)
+    a, b = Float32.(data(96, 80; scale = 0.1)), Float32.(data(80, 112))
+    p = trace((a, b) -> a * b, a, b)
+    target = T.CUDATarget(T.cuBLASProducts())
+    workspace(ex) = only(unique(l.scratch for l in ex.launches if l isa Ext.Product)).workspace
+    held = map(_ -> WeakRef(workspace(prepare(p, CuArray(a), CuArray(b); target))), 1:64)
+    function decided(c, d)
+        s = C.setup(trace((c, d) -> c * d, c, d); target, measure = :all)
+        C.decide!(s)
+        WeakRef(only(r for r in values(s.decider.resources.made) if r isa Ext.Scratch).workspace)
+    end
+    push!(held, decided(Float32.(data(56, 72; scale = 0.1)), Float32.(data(72, 40))))
+    foreach(_ -> GC.gc(true), 1:3)
+    @test count(w -> w.value !== nothing, held) == 0
 end

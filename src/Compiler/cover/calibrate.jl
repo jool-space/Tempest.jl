@@ -190,8 +190,9 @@ end
 
 """
 A reference program, `f` over arrays like `args`, built: planned as one group,
-with each implementation's first claim on it built on buffers of its own, for
-`time_reference` to time as claims are, and the floor's kernels too when
+with each implementation's first claim on it built on buffers of its own and
+the resources of the decider that times it, for `time_reference` to time as
+claims are, and the floor's kernels too when
 `floor`, as package `:floor`. The first claim is what a package stands by
 unmeasured, which a reference is measured under, not the fastest of its
 alternatives.
@@ -208,7 +209,8 @@ function build_reference(d::Decider, among, f, args...; recomputing = false, flo
     view = group_view(p, g)
     launches = Tuple{Symbol, Any, Vector{Work}}[]
     for i in among, c in Iterators.take(Base.invokelatest(claims, i, d.target, view), 1)
-        push!(launches, (package_name(i), first(Base.invokelatest(build_claim, i, c, d.target, view, buffers!(timing, p, g))), Base.invokelatest(estimate, i, c, d.target, view)))
+        built = Base.invokelatest(build_claim, i, c, d.target, view, buffers!(timing, p, g), resources!(d.resources, i))
+        push!(launches, (package_name(i), first(built), Base.invokelatest(estimate, i, c, d.target, view)))
     end
     floor && push!(launches, (:floor, first(build_floor(d.target, p, g, buffers!(timing, p, g))), floor_estimate(p, g, floor_splits(timing))))
     Reference(launches)

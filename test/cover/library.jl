@@ -126,10 +126,10 @@ function host_product(b)
         Y.buffer[element(Y, i, j, z)] = sum(A.buffer[element(A, i, l, z)] * B.buffer[element(B, l, j, z)] for l in 0:(e.k - 1))
     end
 end
-C.build(::HostLibrary, target, b::C.Binding) = (() -> host_product(b), "host product $(b.extents.m)×$(b.extents.n)×$(b.extents.k)")
+C.build(::HostLibrary, target, b::C.Binding, _) = (() -> host_product(b), "host product $(b.extents.m)×$(b.extents.n)×$(b.extents.k)")
 # Instances alike, as products of chunks of one value are: one launch.
 C.supports(::HostLibrary, ::T.CPUTarget, bs::Vector{C.Binding}) = true
-C.build(::HostLibrary, target, bs::Vector{C.Binding}) = (() -> foreach(host_product, bs), "host products ×$(length(bs))")
+C.build(::HostLibrary, target, bs::Vector{C.Binding}, _) = (() -> foreach(host_product, bs), "host products ×$(length(bs))")
 
 @testset "a library computes what it binds" begin
     target = T.CPUTarget(HostLibrary())

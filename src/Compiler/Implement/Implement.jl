@@ -11,7 +11,7 @@ module Implement
 using Republic: @republic
 @republic republic=false inherit=:public using ..IR
 
-public Implementation, Work, package_of, loaded, claims, variants, estimate, build_claim, repoints, repoint!, candidates,
+public Implementation, Work, package_of, loaded, claims, variants, estimate, resources, build_claim, repoints, repoint!, candidates,
     record_name, recomputes_folds, in_place, lowers, compiling, recurrence_axes
 
 include("groups.jl")
@@ -105,11 +105,26 @@ The launches of a claim. By default one launch moving the group's bytes.
 estimate(::Implementation, claim, target, group) = [Work(group.bytes)]
 
 """
-    build_claim(implementation, claim, target, group, buffers) -> (launch, description)
+    resources(implementation, target) -> resources
+
+What the launches `implementation` builds for one executable share, and
+nothing else uses: memory a launch writes only while it runs, as a library's
+workspace, made on `target` (`allocate`, `upload`) as the executable's
+buffers are. An executable runs one call at a time, its launches in order,
+so its launches may share it; another executable's, or a decider's timing
+claims beside it, have their own. Made once per executable, and once per
+decider for the claims it builds to time, when the first launch is built;
+`nothing` by default.
+"""
+resources(::Implementation, target) = nothing
+
+"""
+    build_claim(implementation, claim, target, group, buffers, resources) -> (launch, description)
 
 Build a claim: `launch()` runs its kernels, and `description` says what they
 are. `buffers[v]` is the storage of value `v`, for each value the group reads
-or stores.
+or stores, and `resources` what `resources(implementation, target)` made for
+the executable the launch is built for.
 """
 function build_claim end
 

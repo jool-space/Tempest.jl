@@ -36,7 +36,7 @@ end
 struct RecomputeOnTheFloor <: C.Implementation end
 C.recomputes_folds(::RecomputeOnTheFloor, target) = true
 C.claims(::RecomputeOnTheFloor, target, g) = isempty(C.recomputed_in(g)) ? () : (:floor,)
-C.build_claim(::RecomputeOnTheFloor, claim, target, g, buffers) = g.reference(target, buffers)
+C.build_claim(::RecomputeOnTheFloor, claim, target, g, buffers, _) = g.reference(target, buffers)
 
 attention_cases = [
     ("causal attention, grouped heads", (q, k, v) -> Ops.attention(q, k, v; causal = true),

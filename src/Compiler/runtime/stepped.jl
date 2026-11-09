@@ -374,13 +374,14 @@ end
 least_aligned(buffers) = argmin(b -> trailing_zeros(reinterpret(UInt, pointer(b))), collect(buffers))
 
 """
-    build_stepped(d, p, g, buffers) -> (launch, description) or nothing
+    build_stepped(d, p, g, buffers, r) -> (launch, description) or nothing
 
 Recurrence group `g` as a plan of one step, launched once per step on
-`buffers`, the outer plan's storage, or nothing where a step is not a
-program of its own or its kernels cannot be pointed elsewhere.
+`buffers`, the outer plan's storage, with resources `r`, the outer plan's
+(see `Resources`), or nothing where a step is not a program of its own or
+its kernels cannot be pointed elsewhere.
 """
-function build_stepped(d::Decider, p::Plan, g::Group, buffers)
+function build_stepped(d::Decider, p::Plan, g::Group, buffers, r::Resources)
     sp = stepped_plan(d, p, g)
     sp === nothing && return nothing
     s, bd, bp, ds, st, steps = sp.step, sp.decider, sp.plan, sp.decisions, sp.storage, sp.steps
@@ -472,7 +473,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers)
     # A sum its step's kernels could not write over the steps before's is
     # copied there after them.
     copies = Any[(let to = bbuffers[a], from = bbuffers[r]; () -> copyto!(to, from) end) for (r, a) in st.staged]
-    built = [build_group(bd, bp, bg, x, bbuffers) for (bg, x) in zip(bp.groups, ds)]
+    built = [build_group(bd, bp, bg, x, bbuffers, r) for (bg, x) in zip(bp.groups, ds)]
     launches = Any[b[1] for b in built]
     all(repoints, launches) || return nothing
     # Per step, where each launch reads the states and the values along the

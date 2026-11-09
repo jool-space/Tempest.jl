@@ -14,7 +14,8 @@ import Tempest
 using Tempest: CUDATarget
 using Tempest.Compiler: contract
 using Tempest.Compiler.Implement: Library, Template, Binding, Strided, cuBLASProducts
-import Tempest.Compiler.Implement: templates, supports, build, loaded, repoints, repoint!, in_place
+using Tempest.Compiler: allocate, upload
+import Tempest.Compiler.Implement: templates, supports, build, resources, loaded, repoints, repoint!, in_place
 
 # The library, `Tempest.cuBLASProducts`, can be made once this extension loads.
 loaded(::Type{cuBLASProducts}) = true
@@ -131,27 +132,74 @@ function supports(::cuBLASProducts, ::CUDATarget, bs::Vector{Binding})
     !any(isnothing, cs) && all(c -> c.d === nothing, cs) && allequal(map(alike, cs))
 end
 
-# One handle per context, its workspace and the device constants one and
-# zero, set up once: pointers to device constants, Float32 accumulation that
-# never reduces precision, and the precision of each call in its compute type.
-struct Handle
-    handle::cuBLAS.cublasHandle_t
+# A call is configured on a handle: the stream it runs on and the workspace
+# it writes are the handle's, set by one call and read by the next, and
+# cuBLAS's handles are not to be configured by two threads at once. So a
+# handle is a task's, as CUDA.jl's libraries give each task its own: on one
+# handle per context, two programs' products called at once from tasks on
+# two threads ran on each other's streams, and cuBLAS failed that call and
+# every later one on the handle, in the first round everywhere. A task takes
+# an idle handle per context as it first multiplies there, and the handle
+# goes back once the task is collected. Each is made with pointers to device
+# constants and Float32 accumulation that never reduces precision, the
+# precision of each call in its compute type.
+const IDLE = HandleCache{CUDACore.CuContext, cuBLAS.cublasHandle_t}(
+    context -> CUDACore.context!(made, context),
+    (context, handle) -> CUDACore.context!(() -> cuBLAS.cublasDestroy_v2(handle), context))
+
+function made()
+    handle = cuBLAS.cublasCreate()
+    cuBLAS.cublasSetPointerMode_v2(handle, cuBLAS.CUBLAS_POINTER_MODE_DEVICE)
+    cuBLAS.cublasSetMathMode(handle, cuBLAS.cublasMath_t(
+        cuBLAS.CUBLAS_DEFAULT_MATH | cuBLAS.CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION))
+    handle
+end
+
+# A task's handle on a context, in the task's local storage, given back to
+# the idle handles when this is collected with the task.
+mutable struct TaskHandle
+    const handle::cuBLAS.cublasHandle_t
+    const context::CUDACore.CuContext
+end
+
+function handle()
+    held = get!(() -> Dict{CUDACore.CuContext, TaskHandle}(), task_local_storage(), :TempestCuBLAS)::Dict{CUDACore.CuContext, TaskHandle}
+    context = CUDACore.context()
+    h = get(held, context, nothing)
+    h === nothing || return h.handle
+    taken = pop!(IDLE, context)
+    held[context] = CUDACore.resource_finalizer(h -> push!(IDLE, h.context, h.handle), TaskHandle(taken, context); blocking = false)
+    taken
+end
+
+"""
+What an executable's products share (see
+`Tempest.Compiler.Implement.resources`): the workspace cuBLAS's algorithms
+write as they run, a long sum's partial products, and the device constants
+one and zero. The workspace is the executable's: its products run one at a
+time, in order on one stream or in its graph, and another executable's, on
+another stream at once, write their own. On one workspace per context, with
+a handle per task, two programs' products at once gave 780 of 4,000 results
+wrong on GB10, silently.
+"""
+struct Scratch
     workspace::CuArray{UInt8, 1}
     one::CuArray{Float32, 1}
     zero::CuArray{Float32, 1}
 end
 
 const WORKSPACE_BYTES = 32 << 20
-const HANDLES = Dict{CUDACore.CuContext, Handle}()
 
-function handle()
-    get!(HANDLES, CUDACore.context()) do
-        handle = cuBLAS.cublasCreate()
-        cuBLAS.cublasSetPointerMode_v2(handle, cuBLAS.CUBLAS_POINTER_MODE_DEVICE)
-        cuBLAS.cublasSetMathMode(handle, cuBLAS.cublasMath_t(
-            cuBLAS.CUBLAS_DEFAULT_MATH | cuBLAS.CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION))
-        Handle(handle, CuArray{UInt8}(undef, WORKSPACE_BYTES), CuArray(Float32[1]), CuArray(Float32[0]))
-    end
+resources(::cuBLASProducts, target::CUDATarget) =
+    Scratch(allocate(target, UInt8, WORKSPACE_BYTES), upload(target, Float32[1]), upload(target, Float32[0]))
+
+# The task's handle, set to run on the task's stream and write `s`'s
+# workspace. Setting the stream resets the workspace: it is installed after.
+function configured(s::Scratch)
+    h = handle()
+    cuBLAS.cublasSetStream_v2(h, CUDACore.stream())
+    cuBLAS.cublasSetWorkspace_v2(h, s.workspace, sizeof(s.workspace))
+    h
 end
 
 struct BuiltProduct
@@ -175,20 +223,21 @@ function Base.show(io::IO, b::BuiltProduct)
         b.compute == cuBLAS.CUBLAS_COMPUTE_32F_FAST_TF32 ? "TF32" : c.factor === Float32 ? "full precision" : "$(c.factor) accumulating in Float32")
 end
 
-function build(::cuBLASProducts, target::CUDATarget, b::Binding)
+function build(::cuBLASProducts, target::CUDATarget, b::Binding, scratch::Scratch)
     c = gemm(b)
     operands = Strided[b.arrays[o.name] for o in (c.a, c.b, c.c, c.d) if o !== nothing]
     compute = compute_type(target, c.factor)
-    (Product(handle(), c, compute, operands, [CuPtr{Cvoid}(address(s.buffer, s)) for s in operands]), BuiltProduct(c, compute))
+    (Product(scratch, c, compute, operands, [CuPtr{Cvoid}(address(s.buffer, s)) for s in operands]), BuiltProduct(c, compute))
 end
 
 """
 A product's call on the addresses of its factors and result, and of the
 matrix it is added to if any, which `repoint!` moves: the operands it was
-built on keep their buffers alive.
+built on keep their buffers alive. It runs on its task's handle and its
+executable's workspace.
 """
 struct Product
-    lib::Handle
+    scratch::Scratch
     gemm::Gemm
     compute::cuBLAS.cublasComputeType_t
     operands::Vector{Strided}
@@ -196,18 +245,15 @@ struct Product
 end
 
 function (l::Product)()
-    c, lib = l.gemm, l.lib
+    c, s = l.gemm, l.scratch
     a, x, y = l.addresses
     # A product added to a matrix: the matrix copied into the result unless it
     # is there already, and the product added to it.
     if c.d !== nothing && l.addresses[4] != y
         unsafe_copyto!(reinterpret(CuPtr{UInt8}, y), reinterpret(CuPtr{UInt8}, l.addresses[4]), c.m * c.n * c.batch * sizeof(c.result); async = true)
     end
-    cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
-    # Setting the stream resets the workspace: install it after.
-    cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
-    cuBLAS.cublasGemmStridedBatchedEx(lib.handle, c.transposes..., c.m, c.n, c.k, lib.one, a, c.factor, c.a.leading, c.a.batch_stride,
-        x, c.factor, c.b.leading, c.b.batch_stride, c.d === nothing ? lib.zero : lib.one, y, c.result, c.c.leading, c.c.batch_stride, c.batch,
+    cuBLAS.cublasGemmStridedBatchedEx(configured(s), c.transposes..., c.m, c.n, c.k, s.one, a, c.factor, c.a.leading, c.a.batch_stride,
+        x, c.factor, c.b.leading, c.b.batch_stride, c.d === nothing ? s.zero : s.one, y, c.result, c.c.leading, c.c.batch_stride, c.batch,
         l.compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
     nothing
 end
@@ -226,14 +272,14 @@ address(buffer, s::Strided) = reinterpret(UInt, pointer(buffer)) + s.offset * si
 
 # The matrices of products alike, by arrays of their addresses on the device:
 # each operand's, a matrix per product of the batch of each binding.
-function build(::cuBLASProducts, target::CUDATarget, bs::Vector{Binding})
+function build(::cuBLASProducts, target::CUDATarget, bs::Vector{Binding}, scratch::Scratch)
     cs = map(gemm, bs)
     c = first(cs)
     operands = [[b.arrays[o.name] for b in bs] for o in (c.a, c.b, c.c)]
     strides = [c.a.batch_stride * sizeof(c.factor), c.b.batch_stride * sizeof(c.factor), c.c.batch_stride * sizeof(c.result)]
     hosts = [[Ptr{Cvoid}(address(s.buffer, s) + i * stride) for s in ss for i in 0:(c.batch - 1)] for (ss, stride) in zip(operands, strides)]
     compute = compute_type(target, c.factor)
-    (Products(handle(), c, compute, length(bs) * c.batch, operands, strides, hosts, map(CuArray, hosts)), BuiltProducts(cs, compute))
+    (Products(scratch, c, compute, length(bs) * c.batch, operands, strides, hosts, map(CuArray, hosts)), BuiltProducts(cs, compute))
 end
 
 """
@@ -241,7 +287,7 @@ Products alike as one call, on arrays of their operands' addresses on the
 device, which `repoint!` writes again.
 """
 struct Products
-    lib::Handle
+    scratch::Scratch
     gemm::Gemm
     compute::cuBLAS.cublasComputeType_t
     count::Int
@@ -252,12 +298,10 @@ struct Products
 end
 
 function (l::Products)()
-    c, lib = l.gemm, l.lib
+    c, s = l.gemm, l.scratch
     a, x, y = l.devices
-    cuBLAS.cublasSetStream_v2(lib.handle, CUDACore.stream())
-    cuBLAS.cublasSetWorkspace_v2(lib.handle, lib.workspace, sizeof(lib.workspace))
-    cuBLAS.cublasGemmBatchedEx(lib.handle, c.transposes..., c.m, c.n, c.k, lib.one, a, c.factor, c.a.leading, x, c.factor, c.b.leading,
-        lib.zero, y, c.result, c.c.leading, l.count, l.compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
+    cuBLAS.cublasGemmBatchedEx(configured(s), c.transposes..., c.m, c.n, c.k, s.one, a, c.factor, c.a.leading, x, c.factor, c.b.leading,
+        s.zero, y, c.result, c.c.leading, l.count, l.compute, cuBLAS.CUBLAS_GEMM_DEFAULT)
     nothing
 end
 

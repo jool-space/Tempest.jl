@@ -860,7 +860,7 @@ end
 
 # A fold by key in the storage of the contents it starts from (see
 # `Tempest.Compiler.storage`) starts from them there.
-function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buffers)
+function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buffers, _)
     c = Context(g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
     held = filter(r -> g.values[r].into isa Load && buffers[g.values[r].into.value] === buffers[r], keyed_folds(c))

@@ -93,12 +93,13 @@ supports(::Library, target, ::Binding) = true
 supports(::Library, target, ::Vector{Binding}) = false
 
 """
-    build(library, target, binding) -> (launch, description)
-    build(library, target, bindings::Vector{Binding}) -> (launch, description)
+    build(library, target, binding, resources) -> (launch, description)
+    build(library, target, bindings::Vector{Binding}, resources) -> (launch, description)
 
 What `build_claim` is for a library: `launch()` computes the template into
 the binding's outputs from its inputs, each `Strided` with its `buffer`, on
-the task's stream, or every instance of `bindings` it supports, and
-`description` says what it runs.
+the task's stream, or every instance of `bindings` it supports, using the
+executable's `resources` (see `resources`), and `description` says what it
+runs.
 """
 function build end

@@ -66,7 +66,9 @@ end
 # on two threads, each result as the program gives it alone: each task
 # executes on its own handle. On one handle per context, 33 of 1000 results
 # were wrong on GB10, silently. In a process of its own, with threads (see
-# fixtures/at_once.jl); it prints its failures.
+# fixtures/at_once.jl): the test runner's workers have one, on which two
+# tasks never call at once and the shared handle passed. It prints its
+# failures.
 @testset "cuDNN attention of two programs at once" begin
     child = `$(Base.julia_cmd()) --threads=3 --project=$(Base.active_project()) $(joinpath(@__DIR__, "..", "fixtures", "at_once.jl")) cuDNN`
     output = IOBuffer()

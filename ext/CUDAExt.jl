@@ -323,7 +323,10 @@ function moved_by(moves, before, after)
 end
 
 Tempest.Compiler.replay(::CUDATarget, g::Graph) = CUDACore.launch(g.exec)
-Tempest.Compiler.release(::CUDATarget, g::Graph) = finalize(g)
+# A graph released is destroyed, and what it launches is let go with it: kept
+# in `GRAPHS` until the graph is collected and the table next read, a timed
+# claim's launch held its decider's workspace past the decider.
+Tempest.Compiler.release(::CUDATarget, g::Graph) = (finalize(g); delete!(GRAPHS, g); nothing)
 
 # Iterated rather than collected: `collect` sizes its result first, and a
 # graph the collector freed meanwhile, which iteration skips, left a slot

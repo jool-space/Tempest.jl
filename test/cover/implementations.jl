@@ -15,7 +15,7 @@ C.candidates(::HostProducts, ::T.CPUTarget, p) = [C.grow(p.graph, r, set -> leng
     for g in map(g -> C.group_view(p, g), p.groups) if g.kind === :reduction && C.product_axes(g) !== nothing for r in g.reductions]
 C.claims(::HostProducts, ::T.CPUTarget, g) = lone_product(g) ? [:host] : []
 C.estimate(::HostProducts, claim, target, g) = [C.Work(0.0)]
-C.build_claim(::HostProducts, claim, target, g, buffers) = g.reference(target, buffers)
+C.build_claim(::HostProducts, claim, target, g, buffers, _) = g.reference(target, buffers)
 
 @testset "candidates from implementations" begin
     a, b = data(6, 5; scale = 0.3), data(5, 4)
@@ -31,6 +31,48 @@ C.build_claim(::HostProducts, claim, target, g, buffers) = g.reference(target, b
     planned = C.plan(graph)
     r = only(g.reductions[1] for g in planned.groups if C.product_axes(C.group_view(planned, g)) !== nothing)
     @test_throws C.NotAGroup C.plan(graph; fixed = [C.grow(graph, r, set -> length(set) <= 3)])
+end
+
+# What an executable's launches share is made once per executable, as the
+# first claim that needs it is built, and given to every claim of its
+# implementation the executable builds; another executable has its own, and
+# one whose claims it builds none of has none made. It goes with the
+# executable.
+struct SharingProducts <: C.Implementation end
+mutable struct Shared
+    made::Int
+end
+struct SharingLaunch
+    launch::Any
+    shared::Shared
+end
+(l::SharingLaunch)() = l.launch()
+const SHARED = Ref(0)
+C.candidates(::SharingProducts, target::T.CPUTarget, p) = C.candidates(HostProducts(), target, p)
+C.claims(::SharingProducts, target::T.CPUTarget, g) = C.claims(HostProducts(), target, g)
+C.estimate(::SharingProducts, claim, target, g) = [C.Work(0.0)]
+C.resources(::SharingProducts, ::T.CPUTarget) = Shared(SHARED[] += 1)
+C.build_claim(::SharingProducts, claim, target, g, buffers, shared) =
+    ((launch, description) -> (SharingLaunch(launch, shared), description))(g.reference(target, buffers)...)
+
+@testset "what an executable's launches share" begin
+    a, b, c = data(6, 5; scale = 0.3), data(5, 4), data(4, 3)
+    p = trace((a, b, c) -> tanh.((a * b) * c), a, b, c)
+    target = T.CPUTarget(SharingProducts())
+    shared(ex) = unique(l.shared for l in ex.launches if l isa SharingLaunch)
+    exs = [prepare(p, a, b, c; target) for _ in 1:2]
+    @test count(l -> l isa SharingLaunch, exs[1].launches) == 2 && length(shared(exs[1])) == 1
+    @test only(shared(exs[1])) !== only(shared(exs[2]))
+    @test isapprox(only(C.leaves(outputs(execute!(exs[1])))), interpret(p, a, b, c); rtol = 1.0e-12)
+    made = SHARED[]
+    prepare(trace(a -> tanh.(a), a), a; target)
+    @test SHARED[] == made
+    # Prepared in a function of its own: code at the top level keeps what it
+    # computed alive until it ends.
+    prepared_and_let_go() = WeakRef(only(shared(prepare(p, a, b, c; target))))
+    gone = prepared_and_let_go()
+    foreach(_ -> GC.gc(true), 1:3)
+    @test gone.value === nothing
 end
 
 # Recomputing a fold where it is read is a proposal: priced only where an
@@ -102,7 +144,7 @@ struct NoLog10 <: C.Implementation end
 applies_log10(g) = any(t -> t isa C.Apply && t.f === log10, C.subterms([g.terms[m] for m in C.members(g)]))
 C.claims(::NoLog10, ::T.CPUTarget, g) = g.kind === :pointwise || lone_product(g) ? [:host] : []
 C.estimate(::NoLog10, claim, target, g) = [C.Work(0.0)]
-C.build_claim(::NoLog10, claim, target, g, buffers) = applies_log10(g) ? error("log10 has no lowering") : g.reference(target, buffers)
+C.build_claim(::NoLog10, claim, target, g, buffers, _) = applies_log10(g) ? error("log10 has no lowering") : g.reference(target, buffers)
 
 @testset "a map stored apart from a kernel whose claim failed to build" begin
     a, b = data(6, 5; scale = 0.3), abs.(data(5, 4)) .+ 1
@@ -125,7 +167,7 @@ struct DeclinesLog10 <: C.Implementation end
 C.claims(::DeclinesLog10, ::T.CPUTarget, g) = (g.kind === :pointwise || lone_product(g)) && !applies_log10(g) ? [:host] : []
 C.lowers(::DeclinesLog10, ::T.CPUTarget, t, g) = t.f !== log10
 C.estimate(::DeclinesLog10, claim, target, g) = [C.Work(0.0)]
-C.build_claim(::DeclinesLog10, claim, target, g, buffers) = g.reference(target, buffers)
+C.build_claim(::DeclinesLog10, claim, target, g, buffers, _) = g.reference(target, buffers)
 
 @testset "a map stored apart from a kernel that applies a function an implementation cannot lower" begin
     a, b = data(6, 5; scale = 0.3), abs.(data(5, 4)) .+ 1
@@ -171,7 +213,7 @@ struct FailingVariant <: C.Implementation end
 C.claims(::FailingVariant, ::T.CPUTarget, g) = g.kind === :pointwise ? [:base] : []
 C.variants(::FailingVariant, ::T.CPUTarget, g, claim) = claim === :base ? [:variant] : []
 C.estimate(::FailingVariant, claim, target, g) = [C.Work(0.0)]
-C.build_claim(::FailingVariant, claim, target, g, buffers) = claim === :variant ? error("the variant has no lowering") : g.reference(target, buffers)
+C.build_claim(::FailingVariant, claim, target, g, buffers, _) = claim === :variant ? error("the variant has no lowering") : g.reference(target, buffers)
 
 @testset "a variant that fails to build" begin
     x = data(8, 8)

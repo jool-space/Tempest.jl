@@ -560,7 +560,7 @@ binding_name(l, b::Binding) = string(nameof(typeof(l)), " ", b.template, " ",
     join((string(n, " ", s.eltype, " +", s.offset, " ", s.strides) for (n, s) in pairs(b.arrays)), ", "))
 binding_name(l, bs::Vector{Binding}) = string(binding_name(l, first(bs)), " ×", length(bs))
 
-Implement.build_claim(l::Library, claim, target, g, buffers) = build(l, target, with_buffers(claim, buffers))
+Implement.build_claim(l::Library, claim, target, g, buffers, resources) = build(l, target, with_buffers(claim, buffers), resources)
 with_buffers(b::Binding, buffers) =
     Binding(b.template, b.extents, map(s -> Strided(s.eltype, s.offset, s.size, s.strides, buffers[s.value], s.value), b.arrays))
 with_buffers(bs::Vector{Binding}, buffers) = [with_buffers(b, buffers) for b in bs]

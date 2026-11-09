@@ -161,7 +161,7 @@ end
 # Every pointer the plan reads is in a variant pack, made again when an
 # operand's value moves (see `repoint!`), and the workspace is the launch's
 # own. A launch executes on its task's handle, which a graph captures.
-function build(::cuDNNAttention, target::CUDATarget, b::Binding)
+function build(::cuDNNAttention, target::CUDATarget, b::Binding, _)
     c = sdpa(b)
     g = graph(c)
     workspace = CuArray{UInt8}(undef, g.workspace_size)

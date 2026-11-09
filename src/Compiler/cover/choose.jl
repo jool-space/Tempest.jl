@@ -55,6 +55,20 @@ function Base.show(io::IO, d::Decision)
     d.how === :instead && print(io, "; in place of the choice, which failed to build")
 end
 
+"""
+What an executable's launches share and nothing else uses, by
+implementation: what `resources` made for each, as the first of its launches
+is built. A decider has its own, for the claims it builds to time, which it
+times one at a time; a recurrence's step's decider shares its preparation's.
+"""
+struct Resources
+    target::Any
+    made::Dict{Any, Any}
+    lock::ReentrantLock
+end
+
+Resources(target) = Resources(target, Dict{Any, Any}(), ReentrantLock())
+
 mutable struct Decider
     target::Any
     # Whether the target times kernels, asked once: the target's package
@@ -81,6 +95,8 @@ mutable struct Decider
     rides::Set{Int}
     buffers::Vector{Any}
     built::Dict{String, Any}
+    # What the claims it builds to time share (see `Resources`).
+    resources::Resources
     # The choice for each group alike (by `canonical`): its rank among the
     # options, how it was made, and the time measured; and each group's decision.
     decided::Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}
@@ -114,17 +130,17 @@ end
 A decider of a recurrence's step, planned within a preparation that decider
 `parent` decides: of its target, measuring as it does, on its rates, and
 reading its record and rates file, so that the step's decisions rest on what
-the preparation's do, and noting the options it wanted with the
-preparation's.
+the preparation's do, noting the options it wanted with the preparation's,
+and building the claims it times with the preparation's resources.
 """
 Decider(parent::Decider, graph::IndexGraph; steps) =
     decider(parent.target, parent.measurable, graph, parent.measure, parent.rates, parent.calibration, parent.calibration_path, parent.record, parent.record_path;
-        steps, wanted = parent.wanted)
+        steps, wanted = parent.wanted, resources = parent.resources)
 
 decider(target, measurable, graph, measure, rates, calibration, calibration_path, record, record_path; recompute = (), keep = (), ride = (), steps = 1,
-        wanted = Set{String}()) =
+        wanted = Set{String}(), resources = Resources(target)) =
     Decider(target, measurable, graph, measure, rates, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), record, record_path,
-        Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
+        Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), resources, Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
         Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}(), steps, wanted)
 
 # Forget every decision and option, so that the cover plans again from what
@@ -583,31 +599,36 @@ function spread(T, lo, hi, n)
     [T(lo + mod((k - 1) * s, m)) for k in 1:n]
 end
 
-# Build a choice on `buffers`.
-build_choice(target, p::Plan, g::Group, o::Choice, buffers) =
-    o.implementation === nothing ? build_floor(target, p, g, buffers) :
-    Base.invokelatest(build_claim, o.implementation, o.claim, target, group_view(p, g), buffers)
+# An implementation's resources, made once: the launches are built side by
+# side (`concurrently`), and making one may wait for the device.
+resources!(r::Resources, i) = @lock r.lock get!(() -> Base.invokelatest(resources, i, r.target), r.made, i)
 
-# Build a choice on the decider's buffers, once, to measure it: its key names
-# the group alike, so the first of them builds for all. A recurrence on the
-# floor is measured as it runs, a step at a time where it can.
+# Build a choice on `buffers`, with the executable's resources `r`.
+build_choice(target, p::Plan, g::Group, o::Choice, buffers, r::Resources) =
+    o.implementation === nothing ? build_floor(target, p, g, buffers) :
+    Base.invokelatest(build_claim, o.implementation, o.claim, target, group_view(p, g), buffers, resources!(r, o.implementation))
+
+# Build a choice on the decider's buffers and resources, once, to measure it:
+# its key names the group alike, so the first of them builds for all. A
+# recurrence on the floor is measured as it runs, a step at a time where it can.
 build_choice!(d::Decider, p::Plan, g::Group, o::Choice) = get!(d.built, o.key) do
     buffers = buffers!(d, p, g)
-    stepped = o.implementation === nothing && g.kind === :recurrence ? build_stepped(d, p, g, buffers) : nothing
-    stepped === nothing ? build_choice(d.target, p, g, o, buffers) : stepped
+    stepped = o.implementation === nothing && g.kind === :recurrence ? build_stepped(d, p, g, buffers, d.resources) : nothing
+    stepped === nothing ? build_choice(d.target, p, g, o, buffers, d.resources) : stepped
 end
 
 """
-A group's kernels and the decision that runs them: its choice, or, when that
-fails to build, the next option that builds, the floor last, a decision made
-`:instead`. The decider keeps each claim that fails (see `fail!`), so that
-the cover plans the program again without it (see `prepare`).
+A group's kernels, built on `buffers` with the executable's resources `r`,
+and the decision that runs them: its choice, or, when that fails to build,
+the next option that builds, the floor last, a decision made `:instead`.
+The decider keeps each claim that fails (see `fail!`), so that the cover
+plans the program again without it (see `prepare`).
 """
-function build_group(d::Decider, p::Plan, g::Group, x, buffers)
+function build_group(d::Decider, p::Plan, g::Group, x, buffers, r::Resources)
     # A recurrence no claim takes runs a step at a time where its step is a
     # program of its own, rather than on the floor (see `build_stepped`).
     if g.kind === :recurrence && (x === nothing || x.choice.implementation === nothing)
-        built = build_stepped(d, p, g, buffers)
+        built = build_stepped(d, p, g, buffers, r)
         built === nothing || return (built..., x)
         isempty(g.reductions) || error("a recurrence with sums riding its steps runs only a step at a time")
     end
@@ -615,7 +636,7 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers)
     for o in [x.choice; filter(!=(x.choice), x.options)]
         o.implementation === nothing && break
         built = try
-            build_choice(d.target, p, g, o, buffers)
+            build_choice(d.target, p, g, o, buffers, r)
         catch err
             err isa InterruptException && rethrow()
             fail!(d, p, g, o, err)

@@ -201,6 +201,7 @@ Tempest.Compiler.Implement.claims
 Tempest.Compiler.Implement.variants
 Tempest.Compiler.Implement.estimate
 Tempest.Compiler.Implement.Work
+Tempest.Compiler.Implement.resources
 Tempest.Compiler.Implement.build_claim
 Tempest.Compiler.Implement.repoints
 Tempest.Compiler.Implement.repoint!
