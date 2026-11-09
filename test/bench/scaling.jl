@@ -216,19 +216,18 @@ const FAMILIES = [
 """
 One preparation of the family's program at size `n`, its work tallied: the
 program's size, the counts, and each phase's seconds, bytes allocated and
-seconds collecting garbage.
+seconds collecting garbage. The whole is the trace's, the preparation's and
+the explanation's, each timed as one: phases nest, and which are outermost
+is the compiler's to change.
 """
-const OUTERMOST = (:trace, :lower, :rewrite, :partition, :decider, :planned, :bind, :explain)
-
 function measured(make, n; build)
     f, args, replaces, target = make(n)
     program, traced = spent(() -> C.trace(f, args...))
     inputs = build ? map(on_device, args) : args
-    ex, counts, phases = C.tallied(() -> C.prepare(program, inputs...; target, replaces, build, measure = :none))
+    (ex, counts, phases), prepared = spent(() -> C.tallied(() -> C.prepare(program, inputs...; target, replaces, build, measure = :none)))
     text, explained = spent(() -> sprint(T.explain, ex))
     phases = [:trace => traced; phases; :explain => explained]
-    # The whole is the sum of the outermost phases: the others are within them.
-    total = ntuple(k -> sum(p -> first(p) in OUTERMOST ? p[2][k] : 0, phases), 3)
+    total = traced .+ prepared .+ explained
     size = (; nodes = length(program.nodes), values = length(ex.plan.graph.values), kernels = length(ex.plan.groups),
         retained = Base.summarysize(ex), explained = length(text))
     (; size, counts, phases = [phases; :total => total])
