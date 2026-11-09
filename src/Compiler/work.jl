@@ -83,6 +83,9 @@ function heard(name, what)
     nothing
 end
 
+# Compiled once: a phase's work is a closure over what the preparation holds,
+# the user's arrays among them, and a mark compiled for each would be compiled
+# again for every program.
 """
 `f()` as phase `name`: its boundaries heard by the observer, and while
 tallying its seconds, the bytes allocated meanwhile on every thread and the
@@ -90,7 +93,7 @@ seconds collecting garbage added to the phase's, though `f` throw. Within a
 phase of the same name, as a recurrence's step's cover within the cover, it
 and its sections spend nothing: their seconds are the outer one's already.
 """
-function phase(f, name::Symbol)
+Base.@nospecializeinfer function phase(@nospecialize(f), name::Symbol)
     watching() || return f()
     start = mark()
     tallying = TALLYING[]
