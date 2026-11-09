@@ -1082,10 +1082,11 @@ end
 function recurrence_group(graph, stored, cs, fs, cycle, riders = Int[])
     values = graph.values
     c = first(cs)
-    all(f -> values[f].dims == values[c].dims, fs) || throw(ArgumentError("a recurrence's state carried from a value of another shape is not supported yet"))
     d = values[c].definition
     all(k -> values[k].dims == values[c].dims && values[k].definition.axis == d.axis && values[k].definition.reverse == d.reverse, cs) ||
         throw(ArgumentError("a recurrence whose states differ in shape or direction is not supported yet"))
+    all(((k, f),) -> values[f].dims == values[k].dims, zip(cs, fs)) ||
+        throw(ArgumentError("a recurrence's state carried from a value of another shape is not supported yet"))
     allunique([cs; fs]) || throw(ArgumentError("a recurrence's state carried from another state is not supported yet"))
     # The states, then the rest in the graph's order, which a step computes
     # them in: an LSTM's hidden state one step on reads its cell's.
