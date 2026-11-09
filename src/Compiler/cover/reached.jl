@@ -33,7 +33,7 @@
 # after, and on the record it leaves could rank its proposals otherwise:
 # what it reached is kept, marked unsettled, for what replaces it.
 
-const REACHED_SCHEMA = 2
+const REACHED_SCHEMA = 3
 const REACHED_MAGIC = "Tempest decisions\n"
 
 """

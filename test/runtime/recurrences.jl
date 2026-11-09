@@ -320,3 +320,48 @@ end
         @test agree(C.leaves(outputs(execute!(prepare(q, args...; ride = [r])))), C.leaves(grad(args...)))
     end
 end
+
+# A sum riding a recurrence is computed in its steps with what they compute
+# for it, which nothing else reads: an LSTM's weight gradient sums each
+# step's product of the input and the gate's gradient there. A kernel of
+# one of those products beside the ride, as an implementation's candidate
+# of the products made, is one whose work nothing reads, and its plan fails
+# the verifier; the LSTM's cuTile claims for it stored nothing and failed to
+# build. The ride is about those values too, so the cover takes no proposal
+# of a kernel of one with it.
+@testset "a sum riding a recurrence is about what its steps compute for it" begin
+    σ(x) = 1 / (1 + exp(-x))
+    function cell(p, (h, c), x)
+        i, f = σ.(p.Wi * x .+ p.Ui * h), σ.(p.Wf * x .+ p.Uf * h)
+        g, o = tanh.(p.Wg * x .+ p.Ug * h), σ.(p.Wo * x .+ p.Uo * h)
+        c = f .* c .+ i .* g
+        (o .* tanh.(c), c)
+    end
+    function loss(p, xs)
+        s = (p.h0, p.h0)
+        for t in axes(xs, 3)
+            s = cell(p, s, xs[:, :, t])
+        end
+        sum(abs2, first(s))
+    end
+    w(o, i) = data(o, i; scale = 0.3)
+    p = (; Wi = w(3, 2), Wf = w(3, 2), Wg = w(3, 2), Wo = w(3, 2), Ui = w(3, 3), Uf = w(3, 3), Ug = w(3, 3), Uo = w(3, 3), h0 = data(3, 2))
+    args = (p, data(2, 2, 4))
+    d = C.Decider(T.CPUTarget(), C.lower(trace((q, xs) -> T.withgradient(loss, q, xs), args...)))
+    rides = C.rides(C.generator_plan(d))
+    @test !isempty(rides)
+    kernels = 0
+    for (r, within) in rides, v in within
+        own = try
+            C.plan(d.graph; fixed = [[v]], ride = [r])
+        catch e
+            e isa C.NotAGroup || rethrow()
+            continue
+        end
+        kernels += 1
+        @test_throws C.InvalidPlan C.verify(own)
+        @test C.plan_taking(d, [C.Candidate([[v]]), C.Ride(r, within)]) === nothing
+        @test C.verify(C.plan_taking(d, [C.Ride(r, within)])) isa C.Plan
+    end
+    @test kernels > 0
+end

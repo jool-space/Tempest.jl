@@ -156,14 +156,18 @@ the planner's own, priced where the recurrence's step can be planned. The
 steps compute each part where its operands are fresh, and store only what
 else reads them; the sum after the steps reads every step's, as a neural
 ODE's weight gradients read every evaluation's activations. Small steps run
-fastest summed after, in a few kernels; large ones, read once.
+fastest summed after, in a few kernels; large ones, read once. It is about
+what its steps compute for the sum too (`within`), which nothing else reads:
+a proposal taken with it that made a kernel of one of them would make one
+whose work nothing reads, beside the steps computing it.
 """
 struct Ride <: Proposal
     value::Int
+    within::Vector{Int}
 end
 
 change(q::Ride) = Inputs(; ride = (q.value,))
-fixes(q::Ride) = [q.value]
+fixes(q::Ride) = [q.value; q.within]
 key_text(io, ::Plan, ::Ride) = print(io, " || ride")
 priceable(d::Decider, p::Plan, q::Ride) = stepped_plan(d, p, p.groups[p.owner[q.value]]) !== nothing
 explain(io, q::Ride, c, why) =

@@ -1003,7 +1003,11 @@ The sums of `plan` that could ride the steps of one of its recurrences:
 computed apart from them, over the steps, reading the recurrence's cycle
 through values only they read (see `riding`), each once.
 """
-function riding_sums(p::Plan)
+riding_sums(p::Plan) = first.(rides(p))
+
+# Each sum of `plan` that could ride the steps of one of its recurrences, with
+# the values the steps would compute for it, which nothing else reads.
+function rides(p::Plan)
     graph = p.graph
     values = graph.values
     live = falses(length(values))
@@ -1012,15 +1016,16 @@ function riding_sums(p::Plan)
         live[id] || continue
         foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(values[id].definition))
     end
-    found = Int[]
+    found = Pair{Int, Vector{Int}}[]
     for (cs, fs, cycle) in recurrences(graph)
         c = first(cs)
         live[c] || continue
         k = p.owner[c]
         for (r, v) in enumerate(values)
             d = v.definition
-            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(fs) && !(r in found) || continue
-            riding(graph, live, cycle, r) === nothing || push!(found, r)
+            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(fs) && !any(x -> first(x) == r, found) || continue
+            within = riding(graph, live, cycle, r)
+            within === nothing || push!(found, r => within)
         end
     end
     found
