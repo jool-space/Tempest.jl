@@ -549,25 +549,40 @@ end
 
 # A floor kernel and its exception slot, from the kernel cache or compiled and
 # kept. A kernel that refers to Julia values in the session (relocations) is
-# compiled once a session and kept out of the cache.
+# compiled once a session and kept out of the cache. Its key leaves Tempest's
+# code out, as a tile kernel's does: the kernel is kept with what its
+# compilation used of that code (see `floor_dependencies`), so that an edit to
+# Tempest compiles again only the kernels whose code it changed.
 function floor_function(@nospecialize(f), @nospecialize(arguments::Tuple))
     Base.issingletontype(typeof(f)) || error("a floor kernel captures values, which its launch does not pass")
     tt = Tuple{map(typeof, arguments)...}
     device = CUDACore.device()
     key = Tempest.Compiler.content_key("CUDA kernel", f, tt, CUDACore.capability(device), CUDACore.GPUCompiler,
-        CUDACore.CUDA_Compiler_jll, Base.libllvm_version)
+        CUDACore.CUDA_Compiler_jll, Base.libllvm_version; checked = true)
     entry, binary = Tempest.Compiler.cached_kernel(key) do
-        compiled = Base.invokelatest(f, tt) do f, tt
+        compiled, dependencies = Base.invokelatest(f, tt) do f, tt
             job = CUDACore.CompilerJob(CUDACore.methodinstance(typeof(f), tt), CUDACore.compiler_config(device))
-            Base.@lock CUDACore.cufunction_lock CUDACore.compile_or_lookup(job)
+            Base.@lock CUDACore.cufunction_lock (CUDACore.compile_or_lookup(job), floor_dependencies(job))
         end
-        isempty(compiled.relocations.records) && return Tempest.Compiler.store_kernel(key, compiled.entry, compiled.image)
+        isempty(compiled.relocations.records) && dependencies !== nothing &&
+            return Tempest.Compiler.store_kernel(key, compiled.entry, compiled.image; dependencies)
         Tempest.Compiler.uncached_kernel(compiled.entry, compiled)
     end
     # A kernel with relocations is the compiled kernel itself, and not an image.
     image, relocations = binary isa Vector{UInt8} ? (binary, CUDACore.GPUCompiler.Relocations()) : (binary.image, binary.relocations)
     fun = CUDACore.link_kernel(image, entry, relocations)
     fun, CUDACore.create_exceptions!(fun.mod)
+end
+
+# What a floor kernel's compilation used of Tempest's code, as a tile kernel's
+# (see `Tempest.Compiler.dependencies`): read from the code instances the
+# compiler's inference left under its job's owner, the kernel's own and those
+# its edges name. Nothing where inference left none, and the kernel is not kept.
+function floor_dependencies(job)
+    cache = Core.Compiler.WorldView(Core.Compiler.InternalCodeCache(CUDACore.GPUCompiler.cache_owner(job)), job.world)
+    lookup(mi) = Core.Compiler.get(cache, mi, nothing)
+    code = lookup(job.source)
+    code === nothing ? nothing : Tempest.Compiler.dependencies(code, lookup)
 end
 
 """
