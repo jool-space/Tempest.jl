@@ -22,8 +22,8 @@ function tuning_directory()
     dir === nothing ? TUNING[] : joinpath(dir, "tuning")
 end
 
-device_file(target, suffix) = (dir = tuning_directory(); dir === nothing ? nothing :
-    joinpath(dir, replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * suffix))
+device_file(target, suffix) = (dir = tuning_directory(); dir === nothing ? nothing : joinpath(dir, device_file_name(target, suffix)))
+device_file_name(target, suffix) = replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * suffix
 # Times taken with each launch's data in memory, the cache cleared before it
 # (see `time_launch`), in files named so: the files before them hold times
 # taken from the cache, which are not to be compared with these.
@@ -102,3 +102,60 @@ holds(t::Noted, evidence) = all(((key, value),) -> isequal(get(t.table, key, not
 # Whether anything was written to the table since it was made or `unwritten!`.
 written(t::Noted) = t.written[]
 unwritten!(t::Noted) = (t.written[] = false; t)
+
+# Rates fitted on devices Tempest knows, shipped with it, a file per device
+# named as a rates file is (`rates_path`), so that a first preparation there
+# prices its plans without calibrating. Rates only price options, and the
+# close calls among them are measured whichever rates priced them, so a file
+# from another version of a package, whose kernels are faster or slower than
+# it says, can make a plan slower, never wrong. test/bench/rates.jl writes
+# them, into this file's directory `rates`, found where the package is rather
+# than where it was precompiled.
+shipped_directory() = joinpath(pkgdir(ROOT), "src", "Compiler", "cover", "rates")
+
+"""
+    shipped_rates(target, directory = shipped_directory()) -> Dict
+
+The rates shipped for the device `target` runs on: the file in `directory`
+named for it whose identity, the lines `device_identity` gives, is the
+device's too. None for a device no file names, nor for one a file names whose
+identity differs in any line, as a product of the name with other clocks or
+fewer multiprocessors: its decider then fits the rates on first need, as with
+nothing shipped, or prices on nominal rates where it measures nothing.
+"""
+function shipped_rates(target, directory = shipped_directory())
+    identity = device_identity(target)
+    identity === nothing && return Dict{String, Float64}()
+    path = joinpath(directory, device_file_name(target, ".cold.rates.tsv"))
+    rates = load_record(path)
+    get(rates, "timing basis", nothing) == TIMING_BASIS || return Dict{String, Float64}()
+    all(((key, value),) -> get(rates, key, nothing) == value, identity) || return Dict{String, Float64}()
+    rates
+end
+
+# The rates a decider of `target` measuring at `measure` prices on where it is
+# given none: those fitted on this machine, in its rates file, over those
+# shipped for its device; none where it prices on nominal rates alone.
+known_rates(target, measure) =
+    Noted(level(measure) === :dry ? Dict{String, Float64}() : merge(shipped_rates(target), load_record(rates_path(target))))
+
+# The basis the times of a shipped file were taken on, which the file states:
+# each launch timed among the launches of a captured graph, its data in memory
+# rather than in the cache (see `time_launch`). A change to how launches are
+# timed changes it, so that the files are written again rather than read on
+# another basis.
+const TIMING_BASIS = 1.0
+
+# What tells the device `target` runs on from another of its name, as pairs of
+# a name and a number, which a shipped rates file states: the rates the device
+# reports (see `device_rates`), so that a product of the name with fewer
+# multiprocessors, a smaller cache or slower memory is another device to
+# price; nothing for a target that reports none. They are the configuration's
+# rated values, which the driver reports alike for every unit of it, not
+# measurements: two GB10s report the same, and a unit's own clocks and power
+# cap show as the spread of the rates fitted on each.
+function device_identity(target)
+    measurable(target) || return nothing
+    r = device_rates(target)
+    ["device bandwidth" => Float64(r.bandwidth), "device cache" => Float64(r.cache), "device blocks" => Float64(r.blocks)]
+end

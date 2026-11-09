@@ -82,6 +82,51 @@ end
     @test path == scratch(depot)
 end
 
+# A target on a device of a name and an identity, for the rates shipped.
+struct NamedDevice <: C.Target
+    name::String
+    identity::Vector{Pair{String, Float64}}
+end
+C.device_name(t::NamedDevice) = t.name
+C.device_identity(t::NamedDevice) = t.identity
+
+@testset "rates shipped for a device" begin
+    # Read for the device a file is named for, of the identity it states;
+    # not for a device of another name, nor one of that name and another
+    # identity, as a product of fewer multiprocessors.
+    dir = mktempdir()
+    identity = ["device bandwidth" => 2.7e11, "device cache" => 2.5e7, "device blocks" => 48.0]
+    function ship(basis)
+        open(joinpath(dir, "Some_GPU.cold.rates.tsv"), "w") do io
+            println(io, "timing basis\t", basis)
+            foreach(((k, v),) -> println(io, k, '\t', v), identity)
+            println(io, "cuTile memory latency\t1.5e-6")
+        end
+    end
+    # Nor one timed on another basis than the one Tempest times on.
+    ship(C.TIMING_BASIS + 1)
+    @test isempty(C.shipped_rates(NamedDevice("Some GPU", identity), dir))
+    ship(C.TIMING_BASIS)
+    @test C.shipped_rates(NamedDevice("Some GPU", identity), dir)["cuTile memory latency"] == 1.5e-6
+    @test isempty(C.shipped_rates(NamedDevice("Other GPU", identity), dir))
+    @test isempty(C.shipped_rates(NamedDevice("Some GPU", ["device bandwidth" => 2.7e11, "device cache" => 2.5e7, "device blocks" => 20.0]), dir))
+    @test isempty(C.shipped_rates(T.CPUTarget(), dir))
+    # Tempest ships the GB10's. A decider prices on them, under the rates
+    # fitted on the machine itself; one pricing on nominal rates reads none,
+    # and `calibrate!`, given the machine's alone, fits what its file lacks.
+    file = C.load_record(joinpath(C.shipped_directory(), "NVIDIA_GB10.cold.rates.tsv"))
+    gb10 = NamedDevice("NVIDIA GB10", [k => v for (k, v) in file if startswith(k, "device ")])
+    shipped = C.shipped_rates(gb10)
+    @test haskey(shipped, "cuTile tf32 rate") && haskey(shipped, "applied swept tf32 exp")
+    graph = C.lower(trace(x -> 2 .* x, [1.0f0]))
+    withenv("TEMPEST_CACHE" => mktempdir()) do
+        C.save_record(C.rates_path(gb10), "cuTile tf32 rate", 1.0e12)
+        @test C.Decider(gb10, graph).calibration["cuTile tf32 rate"] == 1.0e12
+        @test C.Decider(gb10, graph).calibration["cuBLAS tf32 rate"] == shipped["cuBLAS tf32 rate"]
+        @test isempty(C.known_rates(gb10, :dry))
+    end
+end
+
 # What Tempest compiles while it precompiles, which development sessions skip.
 @testset "the precompile workload" begin
     @test T.workload() === nothing

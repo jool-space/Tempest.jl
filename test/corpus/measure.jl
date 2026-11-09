@@ -79,7 +79,9 @@ function measure(case; check)
     isempty(path) || profile(path, ex)
     path = get(ENV, "TEMPEST_CORPUS_EXPLAIN", "")
     isempty(path) || open(io -> Tempest.Compiler.explain(io, ex), path, "w")
-    note = join(filter(!isempty, [get(case, :note, ""), check ? "worst at $worst, the first output to $(round(first_output; sigdigits = 2))" : ""]), "; ")
+    # A device Tempest ships rates for is not calibrated, cold or warm.
+    shipped = isempty(Tempest.Compiler.shipped_rates(case.target)) ? "" : "rates shipped for the device"
+    note = join(filter(!isempty, [get(case, :note, ""), shipped, check ? "worst at $worst, the first output to $(round(first_output; sigdigits = 2))" : ""]), "; ")
     (; prep_s, kernels = length(ex.kernels), step_ms, agreement = agrees, precision = case.precision, note)
 end
 

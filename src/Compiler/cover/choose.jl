@@ -116,13 +116,15 @@ mutable struct Decider
     wanted::Set{String}
 end
 
-# A decider reads the rates file and the record as they are when it is made.
-function Decider(target, graph; measure = measuring(), recompute = (), keep = (), ride = (), steps = 1)
+# A decider reads the rates file and the record as they are when it is made,
+# and prices on the rates `calibration` holds: by default those fitted on this
+# machine over those shipped for its device (see `known_rates`).
+function Decider(target, graph; measure = measuring(), recompute = (), keep = (), ride = (), steps = 1, calibration = known_rates(target, measure))
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     r = dry ? rates(target) : target_rates(target)
     how = dry ? :dry : measurable(target) ? level(measure) : :none
-    decider(target, measurable(target), graph, how, r, Noted(load_record(calibration_path)), calibration_path, Noted(load_record(path)), path;
+    decider(target, measurable(target), graph, how, r, calibration, calibration_path, Noted(load_record(path)), path;
         recompute, keep, ride, steps)
 end
 

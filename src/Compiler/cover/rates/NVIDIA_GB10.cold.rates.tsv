@@ -1,3 +1,7 @@
+timing basis	1.0
+device bandwidth	2.73056e11
+device cache	2.5165824e7
+device blocks	48.0
 cuBLAS memory latency	5.0e-7
 cuBLAS memory bandwidth	5.46112e11
 cuDNN memory latency	5.0e-7

@@ -141,7 +141,10 @@ function key_parts(d::Decider; measure = d.measure)
     # Tempest's extensions loaded, whose methods are part of what claims and lowers.
     extensions = sort!([string(nameof(m)) for m in Base.loaded_modules_array() if m !== ROOT && own_root(m)])
     device = measure === :dry ? nothing : device_name(d.target)
-    ("decisions", REACHED_SCHEMA, g.values, g.arguments, g.results, g.result_dims, g.result_scalar, g.result_eltype,
+    # The device's reported rates, `d.rates`, are its identity, as a shipped
+    # rates file states it (see `device_identity`); the record's times, and
+    # the shipped rates fitted on them, are on the timing basis.
+    ("decisions", REACHED_SCHEMA, TIMING_BASIS, g.values, g.arguments, g.results, g.result_dims, g.result_scalar, g.result_eltype,
         collect(g.backward), sort!(collect(d.pinned)), sort!(collect(d.kept)), sort!(collect(d.rides)), d.steps, measure,
         d.measurable, d.target, device, d.rates, loaded_implementations(), packages, extensions, read_settings())
 end

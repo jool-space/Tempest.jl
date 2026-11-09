@@ -318,9 +318,9 @@ function fit_memory!(d::Decider, among = implementations(d.target))
     end
 end
 
-"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function in products of each, now rather than on first need, so that a rates file it writes prices every plan alike wherever it is read."
+"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function in products of each, now rather than on first need, so that a rates file it writes prices every plan alike wherever it is read. What the rates file lacks is fitted, whatever is shipped for the device (see `shipped_rates`)."
 function calibrate!(target)
-    d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none)
+    d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none, calibration = Noted(load_record(rates_path(target))))
     packages = unique(map(package_name, implementations(target)))
     foreach(p -> memory!(d, p), packages)
     types = (Float32, Float16, BFloat16)

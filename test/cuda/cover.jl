@@ -32,6 +32,34 @@ include("../fixtures/programs.jl")
     end
 end
 
+@testset "rates from elsewhere price a plan, and make none wrong" begin
+    # The device's own, where Tempest ships them: those the suite prices on.
+    C.device_name(T.CUDATarget()) == "NVIDIA GB10" && @test !isempty(C.shipped_rates(T.CUDATarget()))
+    # The rates a decider reads, shipped for the device or fitted on another
+    # version of a package, whose kernels are faster or slower than they
+    # say, only price the options: with one package's products priced a
+    # thousand times slower, the plan takes the other's, and agrees with the
+    # interpreter as the first does.
+    a, b = single(data(512, 256; scale = 0.1)), single(data(256, 384))
+    p = trace((a, b) -> a * b, a, b)
+    target = T.CUDATarget()
+    rates = C.Decider(target, C.lower(p)).calibration
+    reference = interpret(p, a, b)
+    function package_with(slow)
+        dir = mktempdir()
+        withenv("TEMPEST_CACHE" => dir) do
+            for (k, v) in rates
+                C.save_record(C.rates_path(target), k, startswith(k, "$slow ") && occursin(r" (rate|split|recompute)$", k) ? 1.0e-3 * v : v)
+            end
+            ex = prepare(p, CuArray(a), CuArray(b); target, measure = :none)
+            @test agree(C.leaves(outputs(execute!(ex))), [reference]; rtol = 1.0e-4)
+            C.package_of(only(ex.decisions).choice.implementation)
+        end
+    end
+    @test package_with(:cuBLAS) === :cuTile
+    @test package_with(:cuTile) === :cuBLAS
+end
+
 @testset "choosing between claims" begin
     # Half-precision products cuBLAS claims and cuTile claims under each
     # of its tiles, every option measured at preparation and kept in the
