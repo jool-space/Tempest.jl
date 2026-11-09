@@ -297,3 +297,26 @@ end
         @test agree(C.leaves(outputs(execute!(prepare(q, args...; ride = [r])))), C.leaves(grad(args...)))
     end
 end
+
+# A recurrence a sum rides runs a step at a time, from its start in storage:
+# a start computed and read once, `tanh.(a)`, is stored for it rather than
+# recomputed in the recurrence's kernel, where the steps could not read it.
+@testset "a sum riding a recurrence whose start is computed" begin
+    function started(xs, a, U)
+        s = tanh.(a)
+        acc = []
+        for t in 2:4
+            s = 0.5 .* s .+ 0.5 .* tanh.(U * xs[:, :, t] .+ s)
+            push!(acc, s)
+        end
+        sum(abs2, stack(acc)) * 0.1
+    end
+    grad = (ys...) -> T.withgradient(started, ys...)
+    args = (data(2, 1, 5), data(1, 1; scale = 0.5), data(1, 2; scale = 0.3))
+    q = trace(grad, args...)
+    sums = C.riding_sums(prepare(q, args...; build = false).plan)
+    @test length(sums) == 2
+    for r in sums
+        @test agree(C.leaves(outputs(execute!(prepare(q, args...; ride = [r])))), C.leaves(grad(args...)))
+    end
+end

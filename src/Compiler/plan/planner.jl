@@ -485,6 +485,15 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
         d isa Keyed && d.into !== nothing && foreach(r -> materialized[r] = true, read_values(d.into))
     end
     foreach(v -> materialized[v] = true, store)
+    # A recurrence a sum rides runs a step at a time (see `build_stepped`),
+    # which starts each state from storage: a start recomputed in the
+    # recurrence's kernel, as `tanh.(a)` read once, left the steps nothing to
+    # start from.
+    for (cs, _, _) in cycles, c in cs
+        haskey(riders, first(cs)) || continue
+        init = values[c].definition.init
+        init isa Read && (materialized[init.value] = true)
+    end
     # Maps of recomputed folds are recomputed with them: a fold recomputed
     # where it is read has no storage, so a map of it is a map of its term. A
     # recomputed map's readers may still be stored; they recompute it inside.
