@@ -145,12 +145,6 @@ function estimate(::cuDNNAttention, b::Binding, target, g)
     [Work(g.bytes; flops = causal(b) ? flops / 2 : flops, factor = b.arrays.q.eltype)]
 end
 
-# One handle per context, which carries the stream: execution plans do not
-# belong to a handle.
-const HANDLES = Dict{CUDACore.CuContext, cuDNN.cudnnHandle_t}()
-
-handle() = @lock GRAPHS_LOCK get!(cuDNN.cudnnCreate, HANDLES, CUDACore.context())
-
 struct BuiltAttention
     call::Sdpa
     workspace::Int
@@ -165,8 +159,8 @@ function Base.show(io::IO, a::BuiltAttention)
 end
 
 # Every pointer the plan reads is in a variant pack, made again when an
-# operand's value moves (see `repoint!`). A launch sets the stream and
-# executes, which a graph captures.
+# operand's value moves (see `repoint!`), and the workspace is the launch's
+# own. A launch executes on its task's handle, which a graph captures.
 function build(::cuDNNAttention, target::CUDATarget, b::Binding)
     c = sdpa(b)
     g = graph(c)
@@ -179,7 +173,7 @@ function build(::cuDNNAttention, target::CUDATarget, b::Binding)
         t.name == "MaskValue" && return Base.unsafe_convert(Ptr{Float32}, mask)
         pointer(arrays[t.name])
     end
-    l = Attention(handle(), g, arrays, Any[pointers...], workspace, scale, mask, Ref{Any}())
+    l = Attention(g, arrays, Any[pointers...], workspace, scale, mask, Ref{Any}())
     pack!(l)
     (l, BuiltAttention(c, g.workspace_size))
 end
@@ -190,7 +184,6 @@ operands' addresses, which `repoint!` moves, and its scale's and mask
 value's, which it holds.
 """
 struct Attention
-    h::cuDNN.cudnnHandle_t
     g::Any
     arrays::Dict{String, Strided}
     pointers::Vector{Any}
@@ -203,9 +196,16 @@ end
 pack!(l::Attention) = l.pack[] = cuDNN.variant_pack(; uids = [t.uid for t in l.g.variant_tensors], pointers = l.pointers,
     workspace = l.g.workspace_size == 0 ? C_NULL : pointer(l.workspace))
 
+# The handle carries the stream a plan executes on, set by one call and read
+# by the next, and cuDNN's handles are not to be used by two threads at
+# once: so it is the task's, as CUDA.jl's cuDNN gives each task its own,
+# its stream kept the task's. On one handle per context, two programs'
+# attention called at once from tasks on two threads gave 33 of 1000
+# results wrong on GB10, silently. Plans are built on the building task's
+# handle and execute on any, one plan from several tasks at once with packs
+# of their own.
 function (l::Attention)()
-    cuDNN.cudnnSetStream(l.h, CUDACore.stream())
-    cuDNN.cudnnBackendExecute(l.h, l.g.plan.ptr, l.pack[].ptr)
+    cuDNN.cudnnBackendExecute(cuDNN.handle(), l.g.plan.ptr, l.pack[].ptr)
     nothing
 end
 

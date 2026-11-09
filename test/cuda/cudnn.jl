@@ -7,21 +7,7 @@
 # Tempest's, and so is any on a target that keeps the softmax's two passes.
 include("../fixtures/programs.jl")
 include("../fixtures/operations.jl")
-
-const LABELS = (d = 1, g = 2, h = 3, m = 4, b = 5, n = 6)
-# As a model writes it: (features, heads, positions, batch). With
-# `statistics`, the log-sum-exp of each query's scores too, (heads,
-# positions, batch), as a training forward keeps it.
-function sdpa(q, k, v; causal, round = true, statistics = false)
-    (; d, g, h, m, b, n) = LABELS
-    q5 = reshape(q, size(q, 1), size(q, 2) ÷ size(k, 2), size(k, 2), size(q, 3), size(q, 4))
-    s = C.contract(Float32.(k), Float32.(q5), (d, h, n, b), (d, g, h, m, b), (n, g, h, m, b)) .* Float32(inv(sqrt(size(q, 1))))
-    causal && (s = ifelse.(reshape(1:size(s, 1), :, 1, 1, 1) .<= reshape(1:size(s, 4), 1, 1, 1, :), s, -Inf32))
-    lse = T.logsumexp(s; dims = 1)
-    o = C.contract(v, exp.(s .- lse), (d, h, n, b), (n, g, h, m, b), (d, g, h, m, b))
-    o = reshape(round ? eltype(q).(o) : o, size(q))
-    statistics ? (o, reshape(lse, size(q, 2), size(q, 3), size(q, 4))) : o
-end
+include("../fixtures/sdpa.jl")
 
 @testset "attention on cuDNN" begin
     cuDNNExt = Base.get_extension(Tempest, :cuDNNExt)
@@ -74,4 +60,17 @@ end
         @test call.causal == causal && call.stats !== nothing && prod(call.stats.dims) == heads * positions * batch
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, q, k, v)); rtol = 1.0e-2)
     end
+end
+
+# Two programs whose plans take cuDNN's attention, called at once from tasks
+# on two threads, each result as the program gives it alone: each task
+# executes on its own handle. On one handle per context, 33 of 1000 results
+# were wrong on GB10, silently. In a process of its own, with threads (see
+# fixtures/at_once.jl); it prints its failures.
+@testset "cuDNN attention of two programs at once" begin
+    child = `$(Base.julia_cmd()) --threads=3 --project=$(Base.active_project()) $(joinpath(@__DIR__, "..", "fixtures", "at_once.jl")) cuDNN`
+    output = IOBuffer()
+    process = run(pipeline(ignorestatus(child); stdout = output, stderr = output))
+    success(process) || println(stderr, String(take!(output)))
+    @test success(process)
 end
