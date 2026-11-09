@@ -35,10 +35,10 @@ end
 
 The plan of what `p` was given with `change` merged in, formed near `p`:
 each kernel whose forming read nothing that differs is taken as `p` formed
-it, and the rest form again (see `Replay`). Where replanning is checked
-(`compares_replanned`), it is compared with the plan formed whole, and where
-they differ it throws, naming the first kernel that differs and what forming it whole
-read that the kernel taken had not.
+it, and the rest form again (see `Replay`). Crosschecking (see
+`crosschecking`), it is compared with the plan formed whole, and where they
+differ it throws, naming the first kernel that differs and what forming it
+whole read that the kernel taken had not.
 """
 function replanned(p::Planned, change::Inputs)
     tally!(:plans)
@@ -46,19 +46,12 @@ function replanned(p::Planned, change::Inputs)
     s = storing(p.grounds.source; i.recompute, i.store, i.ride)
     plan, first, second = passes(p.grounds, s, i, Recording, p)
     q = Planned(plan, i, p.grounds, first, second)
-    if compares_replanned()
+    if crosschecking()
         whole, grouped, regrouped = passes(p.grounds, s, i, Recording)
         agree(q, Planned(whole, i, p.grounds, grouped, regrouped), p)
     end
     q
 end
-
-"""
-Whether each plan formed near another is compared with the plan formed
-whole (see `replanned`): a check of the mechanism, on wherever the plans a
-preparation forms are verified.
-"""
-compares_replanned() = VERIFYING[]
 
 """
 A grouping pass formed near the same pass of a plan before, as `formation`

@@ -105,11 +105,11 @@ end
     # times (9,780 and 28,602), a trial that recomputes a fold forming again
     # the kernels after it that looked at whether it was stored. The ratio is
     # the weaker check of the two, its margin to planning whole thin. Not
-    # verified, which plans each trial whole as well.
+    # crosschecked, which plans each trial whole as well.
     function tried(n)
         q, args = rk4(n)
-        _, counts, _ = withenv("TEMPEST_REPLAY" => "false") do
-            C.tallied(() -> prepare(q, args...; target = T.CUDATarget(precision = :tf32), build = false, verify = false))
+        _, counts, _ = withenv("TEMPEST_REPLAY" => "false", "TEMPEST_CROSSCHECK" => "false") do
+            C.tallied(() -> prepare(q, args...; target = T.CUDATarget(precision = :tf32), build = false))
         end
         counts
     end

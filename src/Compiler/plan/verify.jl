@@ -33,7 +33,8 @@ const VERIFYING = Base.ScopedValues.ScopedValue(false)
 # Whether a result reached by a shorter way is checked against the whole
 # computation it stands for, from the environment's TEMPEST_CROSSCHECK: the
 # decisions a preparation replays against those a cover reaches (see
-# `reach!`). Verifying checks a plan against the invariants, at little cost;
+# `reach!`), and a plan formed near another against the plan formed whole
+# (see `replanned`). Verifying checks a plan against the invariants, at little cost;
 # a crosscheck checks the shorter way itself, at the cost of the whole
 # computation each time, and is the tests' to ask for.
 crosschecking() = parse(Bool, get(ENV, "TEMPEST_CROSSCHECK", "false"))
