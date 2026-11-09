@@ -31,6 +31,14 @@ filter!(((name, _),) -> name != "setup" && !startswith(name, "fixtures/") && !st
 # cases on CUDA.
 CUDA_FUNCTIONAL || filter!(((name, _),) -> !startswith(name, "cuda/"), testsuite)
 
+# What a run keeps on disk is the run's own (fixtures/stores.jl), set before
+# the workers start: the store of compiled kernels the workers share, and a
+# tuning directory each worker replaces with one of its own (setup.jl). No
+# run loads the kernels an earlier one compiled, and a suite's seconds are a
+# cold suite's. The directory is removed when the run ends.
+include(joinpath(@__DIR__, "fixtures", "stores.jl"))
+run_stores!()
+
 # The device's rates the plans are priced on. Where Tempest ships them for
 # the device (see `Tempest.Compiler.shipped_rates`), those: calibrated anew,
 # an estimate close to another's falls either way from run to run, and in CI
@@ -41,7 +49,6 @@ CUDA_FUNCTIONAL || filter!(((name, _),) -> !startswith(name, "cuda/"), testsuite
 # is shipped.
 if CUDA_FUNCTIONAL
     import cuBLAS, cuTile, cuDNN
-    ENV["TEMPEST_CACHE"] = mktempdir()
     if isempty(Tempest.Compiler.shipped_rates(Tempest.CUDATarget())) || haskey(ENV, "TEMPEST_CALIBRATE")
         foreach(precision -> Tempest.Compiler.calibrate!(Tempest.CUDATarget(; precision)), (:full, :tf32, :tf32x3))
         ENV["TEMPEST_RATES"] = Tempest.Compiler.rates_path(Tempest.CUDATarget())
