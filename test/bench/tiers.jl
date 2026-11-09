@@ -12,7 +12,9 @@
 #   TEMPEST_CACHE=dir JULIA_OBJCACHE_PATH=dir/objcache julia --threads=4 --project=test test/bench/tiers.jl PROGRAM [SHAPE] [--before] [--beside]
 # `--before` compiles with `search = :before`, today's default, and calls as
 # many times. `--wait` calls `wait(c)` after the first result, which takes
-# the search's timings until it ends, and prints its seconds. The calls are
+# the search's timings until it ends, and prints its seconds. With
+# TEMPEST_CORPUS_EXPLAIN=path, the first plan's `explain` is written there and
+# the searched one's, where the plan changed, to path.searched. The calls are
 # the step on the inputs as given, its results discarded: the plan, not the
 # training, is what is measured.
 import cuBLAS, cuTile
@@ -112,6 +114,9 @@ function main(name, shape, before, besides, waiting)
     step_first = Base.invokelatest(m.step_milliseconds, first_plan)
     step_last = executable(c) === first_plan ? step_first : Base.invokelatest(m.step_milliseconds, executable(c))
     println("  step ", round(step_first; sigdigits = 3), " ms on the first plan, ", round(step_last; sigdigits = 3), " ms on the last")
+    path = get(ENV, "TEMPEST_CORPUS_EXPLAIN", "")
+    isempty(path) || open(io -> C.explain(io, first_plan), path, "w")
+    isempty(path) || executable(c) === first_plan || open(io -> C.explain(io, executable(c)), path * ".searched", "w")
 end
 
 main(ARGS[1], Symbol(get(filter(a -> !startswith(a, "--"), ARGS), 2, "small")), "--before" in ARGS, "--beside" in ARGS, "--wait" in ARGS)
