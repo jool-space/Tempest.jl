@@ -752,21 +752,21 @@ function compose_observes(graph::IndexGraph)
     end)
 end
 
-# The generic fold the pointwise definition `d`, over `dims`, is a function
-# of, through the pointwise values over `dims` it reads, which go to
-# `between`: zero when it reads no fold, nothing when it reads anything else
-# or two folds.
-function state_source(graph, d::Pointwise, dims, between)
+# The generic fold pointwise value `w` is a function of, through the
+# pointwise values over its domain it reads: zero when it reads no fold,
+# nothing when it reads anything else or two folds. Each value's is found
+# once, in `known`, so a chain of maps is walked once, not from each map.
+state_source(graph, w, known) = get!(known, w) do
     F = 0
-    for o in d.operands
+    dims = graph.values[w].dims
+    for o in (graph.values[w].definition::Pointwise).operands
         o isa Literal && continue
         o isa Read && o.index == identity_index(dims) && graph.values[o.value].dims == dims || return nothing
         e = graph.values[o.value].definition
-        G = if e isa Reduction{<:GenericFold}
+        G = if e isa Reduction && e.fold isa GenericFold
             o.value
         elseif e isa Pointwise && e.f !== tuple
-            push!(between, o.value)
-            state_source(graph, e, dims, between)
+            state_source(graph, o.value, known)
         end
         G === nothing && return nothing
         F == 0 || G == 0 || F == G || return nothing
@@ -775,27 +775,18 @@ function state_source(graph, d::Pointwise, dims, between)
     F
 end
 
-# The fold `state_source` finds for pointwise value `w`, each value's once in
-# `known`: the values between are found only where it finds one. Asked of
-# each map afresh, a chain of maps was walked again from each of its maps.
-source_of(graph, w, known) = get!(known, w) do
-    F = 0
-    d = graph.values[w].definition::Pointwise
-    for o in d.operands
-        o isa Literal && continue
-        o isa Read && o.index == identity_index(graph.values[w].dims) && graph.values[o.value].dims == graph.values[w].dims ||
-            return nothing
-        e = graph.values[o.value].definition
-        G = if e isa Reduction && e.fold isa GenericFold
-            o.value
-        elseif e isa Pointwise && e.f !== tuple
-            source_of(graph, o.value, known)
+# The pointwise values between map `w` and the fold it is a function of
+# (see `state_source`): those it reads, and those they read, down to the fold.
+function values_between(graph, w)
+    found, pending = Set{Int}(), [w]
+    while !isempty(pending)
+        for o in graph.values[pop!(pending)].definition.operands
+            o isa Read || continue
+            e = graph.values[o.value].definition
+            e isa Pointwise && e.f !== tuple && !(o.value in found) && (push!(found, o.value); push!(pending, o.value))
         end
-        G === nothing && return nothing
-        F == 0 || G == 0 || F == G || return nothing
-        G == 0 || (F = G)
     end
-    F
+    found
 end
 
 # `d` as an observe of the state of fold `F`: the fold's own observe where it
@@ -809,12 +800,11 @@ end)
 # that runs reads the fold or the values between; or nothing.
 function observed_fold!(b::Builder, graph, id, users, live, results, known)
     v = graph.values[id]
-    F = source_of(graph, id, known)
+    F = state_source(graph, id, known)
     F isa Int && F != 0 || return nothing
-    between = Int[]
-    state_source(graph, v.definition, v.dims, between)
-    inside = Set([id; between])
-    all(u -> !(u in results) && all(w -> w in inside || !live[w], users[u]), [F; between]) || return nothing
+    between = values_between(graph, id)
+    inside = push!(copy(between), id)
+    all(u -> !(u in results) && all(w -> w in inside || !live[w], users[u]), [F; collect(between)]) || return nothing
     r = graph.values[F].definition
     fold = GenericFold(r.fold.init, r.fold.lift, r.fold.combine, observing(graph, v.definition, F), nothing)
     new = add!(b, Reduction(fold, remap(r.operand, b.ids), r.iteration, r.reduced), v.dims, v.eltype, v.scalar)
