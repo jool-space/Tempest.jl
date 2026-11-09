@@ -59,14 +59,18 @@ end
 # smaller case standing for it, prepared and checked in its place.
 checked(case) = (c = get(case, :check, true); c isa NamedTuple ? c : c ? case : nothing)
 
-prepared(case) = prepare(trace(case.step, case.args...), map(device, case.args)...; target = case.target, replaces = case.replaces)
+# Every plan a preparation forms is verified (see `Tempest.Compiler.verify`),
+# the cover's trials among them: under 1% of a cold preparation, the plan
+# built's check of a warm one, so that no time the corpus records is of a
+# plan the verifier would reject.
+prepared(case) = prepare(trace(case.step, case.args...), map(device, case.args)...; target = case.target, replaces = case.replaces, verify = true)
 
 function measure(case; check)
     stand_in = checked(case)
     check &= stand_in !== nothing
     started = time()
     program = trace(case.step, case.args...)
-    ex = prepare(program, map(device, case.args)...; target = case.target, replaces = case.replaces)
+    ex = prepare(program, map(device, case.args)...; target = case.target, replaces = case.replaces, verify = true)
     execute!(ex)
     CUDACore.synchronize()
     prep_s = time() - started
@@ -81,7 +85,7 @@ function measure(case; check)
     isempty(path) || open(io -> Tempest.Compiler.explain(io, ex), path, "w")
     # A device Tempest ships rates for is not calibrated, cold or warm.
     shipped = isempty(Tempest.Compiler.shipped_rates(case.target)) ? "" : "rates shipped for the device"
-    note = join(filter(!isempty, [get(case, :note, ""), shipped, check ? "worst at $worst, the first output to $(round(first_output; sigdigits = 2))" : ""]), "; ")
+    note = join(filter(!isempty, [get(case, :note, ""), "plans verified", shipped, check ? "worst at $worst, the first output to $(round(first_output; sigdigits = 2))" : ""]), "; ")
     (; prep_s, kernels = length(ex.kernels), step_ms, agreement = agrees, precision = case.precision, note)
 end
 

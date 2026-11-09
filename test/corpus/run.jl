@@ -9,13 +9,14 @@
 # the target; its challengers are in challengers/challengers.jl. Tempest's
 # side runs twice, each in a new process: cold, with an empty kernel cache
 # and no tuning record, then warm, with what the cold run left. Each traces
-# the step, prepares it and executes it once, its preparation the seconds to
-# that first result, and times it as replays of a captured graph of a few
-# milliseconds of steps, the minimum over samples (measure.jl). The warm run
-# also takes the step's outputs from the inputs as given and compares them
-# with the step run eagerly in Float64 on the same inputs, widened: the
-# agreement is the largest error of any output relative to that output's
-# largest magnitude, the note saying which output and the first output's.
+# the step, prepares it, verifying every plan it forms, and executes it once,
+# its preparation the seconds to that first result, and times it as replays
+# of a captured graph of a few milliseconds of steps, the minimum over
+# samples (measure.jl). The warm run also takes the step's outputs from the
+# inputs as given and compares them with the step run eagerly in Float64 on
+# the same inputs, widened: the agreement is the largest error of any output
+# relative to that output's largest magnitude, the note saying which output
+# and the first output's.
 # With `--challengers`, each challenger then runs by its own script, through
 # its launcher in challengers/.
 #

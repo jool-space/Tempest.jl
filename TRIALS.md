@@ -795,6 +795,33 @@ forms), and a measurement where the two are close; a cheaper trial, the
 scaling lane's replanning, would make it affordable, a search change to
 propose after that lands.
 
+Taken, verifying apart from crosschecking, and the corpus verifying.
+`verify` (TEMPEST_VERIFY) checked plans against the invariants and also
+compared the decisions a preparation replayed with those a fresh cover
+reached: a cover's cost on every warm preparation, the LSTM's 15.3 s to
+21.1 with its cover run again. The comparison checks the replay itself, a
+shorter way against the whole computation, and is now a crosscheck of its
+own (TEMPEST_CROSSCHECK, `crosschecking`), which the tests turn on beside
+verification and nothing else does; a trial planned incrementally against
+the plan of its whole inputs is the same kind of check. The corpus prepares
+with every plan verified, the cover's trials among them, and each row says
+so: 0.06 to 0.67 s of a cold preparation, under 1%, and the built plan's
+check of a warm one.
+
+Open, a preparation verifying by default. With verifying this cheap and
+free of the crosscheck, what stands in the way is that a trial plan the
+verifier rejects throws from inside the cover's task, ending a preparation
+over a trial that would likely not have won. The cover plans every trial in
+one place (`plan_taking`), which refuses a trial that forms no group by
+returning nothing; a trial the verifier rejects would be refused there the
+same way, counted, and shown by `explain` with the invariant it broke, and
+only the plan built would verify or throw. The proposal type needs nothing
+for it: a rejected trial is a composition of proposals the planner could
+not plan validly, not a kind of proposal. The planner's own check of each
+plan it forms would move to the two places a plan is used, `plan_taking`
+and the build, and the tests would assert that no trial was refused rather
+than rely on the throw.
+
 **How preparation grows with the program.** `test/bench/scaling.jl`
 prepares fourteen families of programs dry on the CUDA target, each scaled
 by one parameter: the GPT step by layers, length and heads; the neural
