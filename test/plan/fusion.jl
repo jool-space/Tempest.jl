@@ -41,14 +41,19 @@ end
 
 # A chain of maps each reading the last twice is one kernel, its term
 # sharing each map: built, shown and looked up once per map, its preparation
-# does not double with each one. At 40 maps it had taken hours.
+# does not double with each one. At 40 maps it had taken hours. The terms the
+# planner builds count it: each map tried into the kernel builds the
+# kernel's term once, so 40 maps build about four times the terms 20 do
+# (4,655 against 1,135), where building it along every path doubled them
+# with each map; and its text stays short.
 @testset "a chain of maps each reading the last twice" begin
-    f(x) = (for _ in 1:40; x = x ./ (1 .+ abs.(x)); end; sum(x))
+    chain(n) = x -> (for _ in 1:n; x = x ./ (1 .+ abs.(x)); end; sum(x))
     x = data(4)
-    p = trace(f, x)
-    seconds = @elapsed ex = prepare(p, x)
-    @test seconds < 30
-    @test only(C.leaves(outputs(execute!(ex))))[] ≈ f(x)
+    built(n) = (p = trace(chain(n), x); C.tallied(() -> prepare(p, x)))
+    _, short, _ = built(20)
+    ex, long, _ = built(40)
+    @test long[:terms] <= 5 * short[:terms]
+    @test only(C.leaves(outputs(execute!(ex))))[] ≈ chain(40)(x)
     @test maximum(g -> maximum(t -> length(string(t)), values(g.terms)), ex.plan.groups) < 10_000
 end
 
