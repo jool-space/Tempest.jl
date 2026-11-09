@@ -88,19 +88,21 @@ end
 end
 
 # Attention's scores and their gradient, each the size of every pair of
-# positions, are recomputed in a training step whose update replaces the
-# projections' weights in place: the projections stay stored, and the cover
-# proposes the folds that read them. By estimate alone, the record measuring
-# nothing, the proposals are made, but whether they are taken rests on the
-# device's calibration, measured in each process, which tips the call either
-# way: one GB10 stored both scores, in 15 kernels, where another recomputed
-# them, in 10, and a smaller fold there by 247 μs against 249. So by
-# estimate only the proposals and agreement are asserted. Measured, at TF32, recomputing pays by three times or so,
-# and both are taken, nothing the size of the scores stored: every
-# comparison measured, since measuring close calls alone keeps an estimate
-# that is no close call, as the forward's 337 μs against 1020 was here, and
-# a calibration that tips it the other way would keep that too.
-@testset "attention's scores are recomputed in a step that replaces its weights" begin
+# positions, are proposed for recomputing in a training step whose update
+# replaces the projections' weights in place: the projections stay stored,
+# and the cover proposes the folds that read them. Whether a proposal is
+# taken is the device's. By estimate it rests on the calibration, measured in
+# each process, which tips the call either way: one GB10 stored both scores,
+# in 15 kernels, where another recomputed them, in 10, and a smaller fold
+# there by 247 μs against 249. Measured, at TF32, it rests on the device's
+# times: the GB10 recomputes both, which pays by three times or so, and an
+# RTX 6000 Ada one. So what is asserted holds on any device: both proposals
+# are made; with every comparison measured, since measuring close calls
+# alone keeps an estimate that is no close call, as the forward's 337 μs
+# against 1020 was on the GB10, each is taken or refused by its own
+# measurement; a fold taken is not stored, and with both taken nothing the
+# size of the scores is; and the plan agrees with the interpreter.
+@testset "attention's scores are proposed for recomputing in a step that replaces its weights" begin
     function step(x, wq, wk, wv)
         heads(w) = reshape(w * x, 64, 4, 1024, 2)
         loss(wq, wk, wv) = sum(abs2, Ops.attention(heads(wq), heads(wk), heads(wv); causal = true))
@@ -118,8 +120,11 @@ end
     @test length(unique(c.proposal.value for c in recomputes(estimated))) == 2
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(estimated)))), reference; rtol = 1.0e-2)
     measured = prepared(:all)
-    @test length(unique(c.proposal.value for c in recomputes(measured) if c.accepted)) == 2
-    @test !any(v -> measured.plan.stored[v] && pairs(measured, v), eachindex(measured.plan.graph.values))
+    @test length(unique(c.proposal.value for c in recomputes(measured))) == 2
+    @test all(c -> c.comparison.how === :measured && c.accepted == C.cheaper(c.comparison), recomputes(measured))
+    recomputed = unique(c.proposal.value for c in recomputes(measured) if c.accepted)
+    @test !any(v -> measured.plan.stored[v], recomputed)
+    @test length(recomputed) < 2 || !any(v -> measured.plan.stored[v] && pairs(measured, v), eachindex(measured.plan.graph.values))
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(measured)))), reference; rtol = 1.0e-2)
 end
 
