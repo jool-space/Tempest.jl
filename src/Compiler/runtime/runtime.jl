@@ -302,9 +302,15 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference)
     # replaces it. One that is an input as it was before the program wrote it,
     # as `old` in `x -> (old = copy(x); x .= 0.9f0 .* x; old)`, is saved: the
     # input is copied into a buffer of its own before the kernels run.
+    # Each result is looked up among the pairs by its value, the pairs kept by
+    # the input each replaces: compared with every pair, a step that updates
+    # each of a stack's parameters compared its results and its pairs, each
+    # as many as the stack has layers.
     saved = Dict{Int, Int}()
-    for k in eachindex(p.graph.results), (r, a) in pairs
-        k != r && result_value(k) == input[a] || continue
+    replacing = Dict{Int, Vector{Pair{Int, Int}}}()
+    foreach(((r, a),) -> push!(get!(() -> Pair{Int, Int}[], replacing, input[a]), r => a), pairs)
+    for k in eachindex(p.graph.results), (r, a) in get(replacing, result_value(k), ())
+        k == r && continue
         (r => a) in program.writes || throw(ArgumentError("result $k is argument $a, which result $r replaces"))
         saved[k] = input[a]
     end
