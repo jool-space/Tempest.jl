@@ -46,6 +46,22 @@ const COUNTS = Dict{Symbol, Threads.Atomic{Int}}(k => Threads.Atomic{Int}(0) for
 const PHASES = Pair{Symbol, Tuple{Float64, Int, Float64}}[]
 const PHASES_LOCK = ReentrantLock()
 
+"""
+A phase open on a task while tallying, innermost first: its name, whether
+it and its sections spend their seconds (not where a phase of its name is
+open around it), and the phase it is within. Spawned tasks inherit it, so a
+phase nested in itself through a task, a trial's on a thread say, is seen.
+"""
+struct Open
+    name::Symbol
+    spends::Bool
+    outer::Union{Nothing, Open}
+end
+
+const OPEN = Base.ScopedValues.ScopedValue{Union{Nothing, Open}}(nothing)
+
+within(o::Union{Nothing, Open}, name) = o !== nothing && (o.name === name || within(o.outer, name))
+
 "Whether the compiler's work is tallied or observed."
 @inline watching() = TALLYING[] || OBSERVER[] !== nothing
 
@@ -70,17 +86,22 @@ end
 """
 `f()` as phase `name`: its boundaries heard by the observer, and while
 tallying its seconds, the bytes allocated meanwhile on every thread and the
-seconds collecting garbage added to the phase's, though `f` throw.
+seconds collecting garbage added to the phase's, though `f` throw. Within a
+phase of the same name, as a recurrence's step's cover within the cover, it
+and its sections spend nothing: their seconds are the outer one's already.
 """
 function phase(f, name::Symbol)
     watching() || return f()
     start = mark()
+    tallying = TALLYING[]
+    outer = tallying ? OPEN[] : nothing
+    spends = tallying && !within(outer, name)
     heard(name, :begin)
     try
-        f()
+        tallying ? Base.ScopedValues.@with(OPEN => Open(name, spends, outer), f()) : f()
     finally
         heard(name, :end)
-        TALLYING[] && spend!(name, start)
+        spends && spend!(name, start)
     end
 end
 
@@ -96,6 +117,8 @@ function lap!(name::Symbol, start)
     watching() || return start
     heard(name, :lap)
     TALLYING[] || return start
+    o = OPEN[]
+    o === nothing || o.spends || return mark()
     spend!(name, start)
     mark()
 end
@@ -116,10 +139,11 @@ end
 `f()` with the compiler's work tallied: what it counted, by name, and each
 phase's and section's seconds, bytes allocated and seconds collecting
 garbage, in the order each first ended. Each is inclusive: a phase's seconds
-hold those of the phases within it, and of what other tasks did meanwhile,
-whose bytes it counts too; so phases nested, as calibration in search, or
-run on other tasks, as compile, add to more than the whole. One tally at a
-time.
+hold those of the phases of other names within it, and of what other tasks
+did meanwhile, whose bytes it counts too; so phases nested, as calibration
+in search, or run on other tasks, as compile, add to more than the whole.
+A phase nested in one of its own name counts once, as the outer one: the
+inner one and its sections spend nothing. One tally at a time.
 """
 function tallied(f)
     TALLYING[] && throw(ArgumentError("the compiler's work is tallied already"))

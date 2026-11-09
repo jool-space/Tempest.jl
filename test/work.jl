@@ -1,8 +1,9 @@
 # The compiler's own work, counted and marked (src/Compiler/work.jl): off, a
 # count, a mark or an event costs nothing and allocates nothing; tallied, a
-# preparation's counts are the same each time and its phases are named; an
-# observer hears each phase begin and end, from every task, and what it
-# throws does not take a preparation down.
+# preparation's counts are the same each time and its phases are named, a
+# phase nested in itself counted once; an observer hears each phase begin
+# and end, from every task, and what it throws does not take a preparation
+# down.
 
 # A gradient: a fold, the maps that read it, and their gradients.
 tallied_program(x) = differentiate(trace(x -> sum(abs2, tanh.(x) .- sum(x; dims = 1) ./ size(x, 1)), x))
@@ -83,6 +84,24 @@ end
     finally
         C.OBSERVER[] = nothing
     end
+end
+
+@testset "a phase nested in itself spends once" begin
+    # Through a task it spawns, as a trial's: the outer phase's seconds are
+    # within the wall's, and the sections of the inner one spend nothing.
+    inside() = (clock = C.mark(); sleep(0.02); C.lap!(:within, clock))
+    function nested()
+        clock = C.mark()
+        sleep(0.02)
+        C.lap!(:section, clock)
+        C.phase(() -> fetch(Threads.@spawn(C.phase(inside, :outer))), :inner)
+    end
+    t = time_ns()
+    _, _, phases = C.tallied(() -> C.phase(nested, :outer))
+    wall = 1.0e-9 * (time_ns() - t)
+    seconds = Dict(name => s for (name, (s, _, _)) in phases)
+    @test sort!(collect(keys(seconds))) == [:inner, :outer, :section]
+    @test seconds[:inner] <= seconds[:outer] <= wall
 end
 
 @testset "an observer that throws is not heard from" begin
