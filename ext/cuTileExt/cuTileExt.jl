@@ -831,7 +831,38 @@ The variants of a product claim, its other depths and its split (see
 sum (see `vector_product_variants`).
 """
 variants(::cuTileGenerator, target::CUDATarget, g::GroupView, c::Claim) =
-    [product_variants(target, g, c); vector_product_variants(g, c)]
+    [product_variants(target, g, c); vector_product_variants(g, c); column_variants(g, c)]
+
+# A streamed column, a block per column, whose kernel sweeps the column again
+# after its folds to write what reads them, as a softmax's gradient reads its
+# log-sum-exp, reads the column twice: from L2 the second time only while the
+# columns of the blocks resident at once fit there. Longer steps hold more
+# of each block on chip, and fewer blocks are resident: the cross-entropy
+# over GPT-2's 50257 logits, 4096 columns, took 12.4 ms stepping 1024 rows,
+# 11.7 stepping 4096, 9.1 stepping 8192 and 9.0 stepping 16384, against 7.2
+# for one read and one write at the memory's rate. The longer steps are
+# offered for measurement, as a matrix-vector product's are.
+const COLUMN_STEPS = (4096, 8192, 16384)
+
+function column_variants(g::GroupView, c::Claim)
+    s = c.schedule
+    s.sketch === :streamed && !recomputing(g) || return Claim[]
+    p = sweep_axis(s)
+    ax = s.tiling[p]
+    ax.tile == STREAMED_ROWS && all(k -> s.tiling[k].reduced || s.tiling[k].tile == 1, eachindex(s.tiling)) || return Claim[]
+    # An output along the column, beside the folds, is what sweeps it again.
+    along(m) = !(m in g.reductions) && g.placement[m] !== nothing && any(e -> any(a -> mentions(e, a), ax.axes), g.placement[m])
+    any(along, g.outputs) || return Claim[]
+    found = Claim[]
+    for step in COLUMN_STEPS
+        cld(ax.extent, step) > 1 || continue
+        tiling = copy(s.tiling)
+        tiling[p] = TileAxis(ax.axes, ax.extent, step, true, ax.chunk)
+        x = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
+        fits(Context(g, x)) && push!(found, Claim(x))
+    end
+    found
+end
 
 # The positions at which a kernel of schedule `s` computes term `t`: every
 # position of the tiles it moves along, once per tile of the kept axes it does

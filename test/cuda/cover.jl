@@ -178,6 +178,29 @@ end
     end
 end
 
+@testset "a streamed column swept again searches its step" begin
+    # A softmax over columns longer than a tile holds writes each column
+    # after the log-sum-exp it reads, sweeping the column again, and the
+    # cover tries the longer steps that keep the second read in L2; a fold
+    # alone sweeps once and has none.
+    x = single(data(9000, 64))
+    target = T.CUDATarget(T.cuTileGenerator())
+    dir = mktempdir()
+    rates = C.rates_path(target)
+    isfile(rates) && (mkpath(joinpath(dir, "tuning")); cp(rates, joinpath(dir, "tuning", basename(rates))))
+    ext = Base.get_extension(Tempest, :cuTileExt)
+    step(o) = (s = o.claim.schedule; s.tiling[ext.sweep_axis(s)].tile)
+    withenv("TEMPEST_CACHE" => dir) do
+        for (f, steps) in ((softmax_columns, [1024, 4096, 8192]), (x -> sum(x; dims = 1), [1024]))
+            p = trace(f, x)
+            ex = prepare(p, CuArray(x); target)
+            d = only(d for d in ex.decisions if d !== nothing && d.choice.claim.schedule.sketch === :streamed)
+            @test sort([step(o) for o in d.options if o.implementation isa ext.cuTileGenerator]) == steps
+            @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, x)]; rtol = 1.0e-4)
+        end
+    end
+end
+
 @testset "products grouped with a product by a constant" begin
     # Products of one factor with several, grouped as one kernel and the
     # first by a constant zero, which no product claim takes, are a streamed
