@@ -64,13 +64,22 @@ const init_code = quote
 end
 
 # Each worker holds a CUDA context and its own compiled kernels, about 4.4 GB
-# under coverage. The runner's default divides free memory by 2 GB, but under a
-# memory limit free memory is the limit less the file cache earlier jobs left,
-# which gave CI's 20 GiB runners 1 to 3 jobs; here the limit and the CPUs decide.
+# of the host's memory under coverage, and at its peak 3.5 GiB of the device's:
+# sampled every 2 s through one run of the suite on a GB10, each worker held at
+# most that, most under 0.6 GiB, and all of them together at most 5.6 GiB. The
+# runner's default divides free memory by 2 GB, but under a memory limit free
+# memory is the limit less the file cache earlier jobs left, which gave CI's
+# 20 GiB runners 1 to 3 jobs; here the limit, the device's free memory and the
+# CPUs decide, the device's by a worker's peak and an eighth for what the
+# sampling missed. On a GB10 the device's memory is the host's, and the driver
+# counts as free only the pages nothing holds, the file cache's not among them:
+# with the file cache full, 12 workers sized by the limit alone could not all
+# open a context.
 args = parse_args(ARGS)
 if CUDA_FUNCTIONAL && args.jobs === nothing && !haskey(ENV, "PTR_NUM_JOBS")
     cpus = @static isdefined(Sys, :EFFECTIVE_CPU_THREADS) ? Sys.EFFECTIVE_CPU_THREADS : Sys.CPU_THREADS
-    jobs = clamp(min(cpus, Int(Sys.total_memory() ÷ (5 * 2^30))), 1, 12)
+    host, device = 5 * 2^30, 4 * 2^30
+    jobs = clamp(min(cpus, Int(Sys.total_memory() ÷ host), Int(CUDACore.free_memory() ÷ device)), 1, 12)
     args = ParallelTestRunner.ParsedArgs(
         Some(jobs), args.verbose, args.quickfail, args.list, args.custom, args.positionals,
     )
