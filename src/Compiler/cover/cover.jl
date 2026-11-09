@@ -442,21 +442,18 @@ function cover(d::Decider)
 end
 
 """
-    plan_taking(d, proposals; near, formed) -> Plan or nothing
+    plan_taking(d, proposals) -> Plan or nothing
 
 The plan with `proposals` taken, in order (see `inputs`): the cover's trial
-of them, and the plan it reached when they are those it took. Nothing where two share a
-value or a set does not form one group. `near` and `formed`, where given,
-pass to `plan`: the kernels of a plan of the same graph to form only what
-the proposals change, and where to note how this one formed its own.
+of them, and the plan it reached when they are those it took. Nothing where
+two share a value or a set does not form one group.
 """
-function plan_taking(d::Decider, proposals; near = nothing, formed = nothing)
+function plan_taking(d::Decider, proposals)
     # A value belongs to one proposal.
     allunique(Iterators.flatten(fixes(x) for x in proposals)) || return nothing
     i = inputs(d, proposals)
     try
-        forming = near === nothing && formed === nothing ? (;) : (; near, formed)
-        plan(d.graph; fixed = i.fixed, i.recompute, i.store, i.ride, forming...)
+        plan(d.graph; fixed = i.fixed, i.recompute, i.store, i.ride)
     catch e
         e isa NotAGroup || rethrow()
         nothing
