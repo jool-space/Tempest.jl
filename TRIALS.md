@@ -428,7 +428,7 @@ capturing its graph, an internal cuBLAS error, twice). The LSTM at batch 64,
 optimizer step). test/bench/gpt.jl's step, 1.19 ms and 70 s cold, against
 the same model under `torch.compile` captured as a graph, 1.31 ms; at GPT-2
 124M's geometry, batch 4, 878 ms and 224 s cold, against 264 ms, and since
-the GPT-2 step's entry 275 ms and 231 s cold, against 262. The heat
+the GPT-2 step's entry 190.7 ms and 188 s cold, against 264.6. The heat
 equation on a 256×256 grid, its steps `accumulate`d so that they roll: 1.89
 s at 100 steps and 18.9 s at 1000, against 0.34 and 3.6 ms for a kernel a
 step in CUDA.jl, both recurrences of the gradient on the floor; written as a
@@ -489,23 +489,58 @@ full vocabulary and length against Float64, the loss to 1.0e-6 and the
 worst output 6.0e-2, a weight Adam's first step moves by its rate times the
 sign of a gradient near zero, as at the small shape.
 
-What remains open, named. Attention is planned as the eager form, the
-scores and the probabilities stored by the forward (201 MB a layer each),
-the scores' gradient stored by the backward: 97 ms of the step, against
-under 10 for its flops at TF32, where the attention trial's three kernels
-recompute the scores. Pinned to be recomputed (`prepare`'s `recompute`), the
-scores fold alone takes a layer's step, at batch 4 and a vocabulary of 256,
-from 19.2 to 13.8 ms, some 65 ms of the full step; the cover never proposes
-it, since `recomputable_folds` takes the projections the scores read first,
-and proposed alone (tried, not kept) its trial was never compared, a plan
-the cover does not price. Reaching that form is the cover's search over
-recomputing several folds together, not one proposal at a time. The head's
-softmax over 50257 sweeps the logits twice and writes their gradient, 12 ms
-against 7 for one read and one write, and its three products run at 31 to 38
-TFLOP/s. Adam's 111 kernels are at the memory's rate already; one kernel over
-every parameter would save only their launches, well under a millisecond in
-a captured graph. Cold preparation is 231 s, warm 56, past the gate of a
-minute; that is the trial of the time to first execution.
+Then attention was planned as the eager form, the scores and the
+probabilities stored by the forward (201 MB a layer each) and the scores'
+gradient by the backward, 97 ms of the step against under 10 for its flops
+at TF32. The cover never proposed recomputing them: `recomputable_folds`
+(`src/Compiler/plan/planner.jl`) counted the folds `prepare` keeps stored,
+those reading what a result replaces, among the folds recomputed when it
+asked whether a fold would be recomputed inside another's sweep; the
+projections read the weights Adam replaces in place, so the scores, reading
+the projections, and their gradient, reading the output's, were taken for
+nested and left out. A fold kept stored now nests nothing. Proposed, the
+cover takes both by measurement, one at a time: at one layer, batch 4 and a
+vocabulary of 256, the kernels that differ 8.1 ms against 2.9 for the
+scores, then 2.6 against 1.1 for their gradient, the forward one kernel and
+the backward of the three gradients another, the layer's step 19.1 to 12.4
+ms. Recomputing the sum of the output's gradient against the output beside
+them was measured too, 1.25 against 1.39, and not taken. By the corpus in one
+session, SM clocks 2420 to 2510 MHz:
+
+| | before | after |
+|---|---|---|
+| step, captured graph | 277.9 ms, 538 kernels | 190.7 ms, 490 kernels |
+| attention forward, kernels summed | 41.8 ms | 3.8 ms |
+| attention backward, kernels summed | 53.2 ms | 13.6 ms |
+| preparation, cold / warm | 235 / 57 s | 188 / 67 s |
+| `torch.compile` captured as a graph / without / eager | | 264.6 / 266.2 / 358.2 ms |
+
+The step now runs at 0.72 of `torch.compile`'s; checked by its layer at batch
+1 against Float64 as before, the loss to 1.5e-6 and the worst output 6.0e-2,
+the same weight's sign. The small shape, whose update replaces its weights
+too, recomputes its scores as well: 1.18 to 1.10 ms a step, 178 to 158
+kernels, and cold preparation 78 to 100 s, its agreement unchanged.
+
+What remains open, named. The attention backward is a third of its fused
+roofline, 13.6 ms against 5.1. The head's softmax over 50257 sweeps the
+logits twice and writes their gradient, 12 ms against 7 for one read and one
+write, and its three products run at 31 to 38 TFLOP/s; with the FFN's
+products, 110 ms of the 183 the kernels sum to are products cuBLAS or the
+generator's product kernels run at 0.5 to 0.8 of their roofline. Adam's 111
+kernels are at the memory's rate already. A product that recomputes a fold
+from a stored array in its steps runs hundreds of times its flops' time:
+the value gradient's product reading the probabilities through the
+log-sum-exp over keys recomputed from stored scores, 1024 keys by 1024
+queries over a layer's 48 heads and batches, takes 471 ms under its first
+claim (tile 64×128 by 32) and 185 ms under its best, against 7 ms for
+reading the scores once per block of keys, as each recomputes the same sums;
+the scores' tile loaded as stored and summed along its first axis instead of
+permuted, by hand, 419 ms, so the load's order is not the cause. The cover
+measured it in a layer's step (12.8 ms there, against 1.5 estimated) and
+refused it. A fold over the keys reading the probabilities so runs at the
+memory's rate under each tile tried, 1.65 to 1.90 ms, kept tiles of 1 and 64
+alike. Cold preparation is 188 s,
+past the gate of a minute; that is the trial of the time to first execution.
 
 **The laws are hand-written matchers.** Every algorithm Tempest knows as a
 rewrite lives in `src/Compiler/plan/rewrites.jl` (758 lines) as a function
