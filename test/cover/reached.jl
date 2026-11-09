@@ -224,6 +224,29 @@ end
     end
 end
 
+# Two claims on every group, estimated within each other's error: close calls.
+struct CloseCalls <: C.Implementation end
+C.claims(::CloseCalls, ::T.CPUTarget, g) = (:first, :second)
+C.estimate(::CloseCalls, claim, target, g) = [C.Work(claim === :first ? 1.0e3 : 1.2e3)]
+C.build_claim(::CloseCalls, claim, target, g, buffers) = g.reference(target, buffers)
+
+@testset "a cover measuring nothing counts what a cover measuring close calls would have timed" begin
+    x, w = data(8, 4), data(8, 8)
+    graph = C.lower(trace(mlp, x, w))
+    target = T.CPUTarget(CloseCalls())
+    kept() do
+        d = C.Decider(target, graph)
+        _, _, _, r = C.reach!(d)
+        @test r.wanted == length(d.wanted) > 0
+        # Each timed, at its estimate, none is wanted.
+        for os in values(d.options), o in os
+            o.key in d.wanted && C.save_record(C.record_path(target), o.key, o.estimate)
+        end
+        _, _, _, r = C.reach!(C.Decider(target, graph))
+        @test r.wanted == 0
+    end
+end
+
 @testset "a table in memory holds what its file reads back" begin
     # The record and the rates file have one writer, `keep!`: what it keeps,
     # whatever a target's timer returned, a decider in another process reads

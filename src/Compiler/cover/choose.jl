@@ -94,6 +94,10 @@ mutable struct Decider
     # How many times the graph's kernels run: a recurrence's step's run once
     # per step (see `plan_step`).
     steps::Int
+    # The options a decider measuring close calls would have timed where
+    # this one, measuring nothing, decided without a time, by key; shared,
+    # as the tables are, with a recurrence's step's decider.
+    wanted::Set{String}
 end
 
 # A decider reads the rates file and the record as they are when it is made.
@@ -110,15 +114,18 @@ end
 A decider of a recurrence's step, planned within a preparation that decider
 `parent` decides: of its target, measuring as it does, on its rates, and
 reading its record and rates file, so that the step's decisions rest on what
-the preparation's do.
+the preparation's do, and noting the options it wanted with the
+preparation's.
 """
 Decider(parent::Decider, graph::IndexGraph; steps) =
-    decider(parent.target, parent.measurable, graph, parent.measure, parent.rates, parent.calibration, parent.calibration_path, parent.record, parent.record_path; steps)
+    decider(parent.target, parent.measurable, graph, parent.measure, parent.rates, parent.calibration, parent.calibration_path, parent.record, parent.record_path;
+        steps, wanted = parent.wanted)
 
-decider(target, measurable, graph, measure, rates, calibration, calibration_path, record, record_path; recompute = (), keep = (), ride = (), steps = 1) =
+decider(target, measurable, graph, measure, rates, calibration, calibration_path, record, record_path; recompute = (), keep = (), ride = (), steps = 1,
+        wanted = Set{String}()) =
     Decider(target, measurable, graph, measure, rates, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), record, record_path,
         Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
-        Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}(), steps)
+        Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}(), steps, wanted)
 
 # Forget every decision and option, so that the cover plans again from what
 # the decider knows now: the claims that failed to build, and the times it
@@ -127,6 +134,7 @@ function forget_decisions!(d::Decider)
     empty!(d.decided)
     empty!(d.instances)
     empty!(d.options)
+    empty!(d.wanted)
     d
 end
 
@@ -363,6 +371,8 @@ function search!(d::Decider, groups)
         if !isempty(pending) && d.measure in (:close, :all)
             build_unmeasured!(d, pending)
             foreach(((p, g, o),) -> measure!(d, p, g, o), pending)
+        elseif d.measure === :none
+            foreach(((_, _, o),) -> push!(d.wanted, o.key), pending)
         end
         any(map(((p, g, os),) -> expand!(d, p, g, os), groups)) || break
     end
@@ -478,6 +488,8 @@ function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
     if d.measure === :all || (d.measure === :close && (close_call(ea, eb) || any(x -> refuted(d, x[3].choice), [da; db])))
         build_unmeasured!(d, [(p, g, x.choice) for (p, g, x) in [da; db]])
         foreach(((p, g, x),) -> measure!(d, p, g, x.choice), [da; db])
+    elseif d.measure === :none && (close_call(ea, eb) || any(x -> refuted(d, x[3].choice), [da; db]))
+        foreach(x -> haskey(d.record, x[3].choice.key) || push!(d.wanted, x[3].choice.key), [da; db])
     end
     ta = [get(d.record, x[3].choice.key, nothing) for x in da]
     tb = [get(d.record, x[3].choice.key, nothing) for x in db]

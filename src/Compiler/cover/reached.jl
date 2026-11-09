@@ -33,7 +33,7 @@
 # after, and on the record it leaves could rank its proposals otherwise:
 # what it reached is kept, marked unsettled, for what replaces it.
 
-const REACHED_SCHEMA = 1
+const REACHED_SCHEMA = 2
 const REACHED_MAGIC = "Tempest decisions\n"
 
 """
@@ -45,7 +45,13 @@ without the plans; each of its recurrences' steps, by the key of its
 decider; and how it was reached: by the decider's `measure`, `settled` when
 nothing was measured, fitted or failed to build as it was, and the keys of
 the record and of the rates file it read, each with the value it held once
-it was reached, or nothing.
+it was reached, or nothing; and, reached measuring nothing, how many options
+a cover measuring close calls would have timed at the points this one
+decided without a time (see `wanted`).
+
+Reached measuring nothing with none wanted, they are what a cover measuring
+close calls reaches on the same record: it would visit the same points,
+find a time at each it measures, and measure nothing.
 """
 struct Reached
     key::Union{Nothing, String}
@@ -56,6 +62,7 @@ struct Reached
     groups::Vector{String}
     decisions::Vector{Any}
     steps::Vector{Pair{String, Reached}}
+    wanted::Int
     record::Vector{Pair{String, Union{Nothing, Float64}}}
     calibration::Vector{Pair{String, Union{Nothing, Float64}}}
 end
@@ -198,7 +205,7 @@ function reached(d::Decider, key, p::Plan, considered, ds)
         sp = get(d.stepped, group_identity(p, g), nothing)
         sp === nothing || any(s -> first(s) == sp.reached.key, steps) || push!(steps, sp.reached.key => sp.reached)
     end
-    Reached(key, d.measure, false, taken, kept, [canonical(p, g) for g in p.groups], Any[ds...], steps,
+    Reached(key, d.measure, false, taken, kept, [canonical(p, g) for g in p.groups], Any[ds...], steps, length(d.wanted),
         Pair{String, Union{Nothing, Float64}}[], Pair{String, Union{Nothing, Float64}}[])
 end
 
@@ -211,7 +218,7 @@ nothing was written to either and no claim failed to build, so that the
 cover, on the files as they now are, reaches them again.
 """
 settled(r::Reached, d::Decider) = Reached(r.key, r.how, !written(d.record) && !written(d.calibration) && isempty(d.failed),
-    r.taken, r.considered, r.groups, r.decisions, r.steps, evidence(d.record), evidence(d.calibration))
+    r.taken, r.considered, r.groups, r.decisions, r.steps, r.wanted, evidence(d.record), evidence(d.calibration))
 
 """
     replayable(d, key) -> Reached or nothing
