@@ -225,6 +225,21 @@ end
     end
 end
 
+@testset "a cover that wrote as it decided is followed by another, until one writes nothing" begin
+    x, w = data(8, 4), data(8, 8)
+    graph = C.lower(trace(mlp, x, w))
+    kept() do
+        for (settle, covers) in ((false, 1), (true, 2))
+            d = C.Decider(T.CPUTarget(), graph)
+            # A time measured as the cover decided.
+            d.record["a claim measured"] = 1.0e-6
+            _, replayed, covered = counted(() -> C.reach!(d; settle))
+            @test (replayed, covered) == (0, covers)
+            @test C.written(d.record) == !settle
+        end
+    end
+end
+
 @testset "a decisions file cut short, or another's, is not read" begin
     x, w = data(8, 4), data(8, 8)
     kept() do

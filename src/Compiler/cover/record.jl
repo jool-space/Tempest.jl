@@ -99,5 +99,6 @@ evidence(t::Noted) = @lock t.lock sort!([key => get(t.table, key, nothing) for k
 # Whether the table holds what `evidence` found, each key's value or its absence.
 holds(t::Noted, evidence) = all(((key, value),) -> isequal(get(t.table, key, nothing), value), evidence)
 
-# Whether anything was written to the table since it was made.
+# Whether anything was written to the table since it was made or `unwritten!`.
 written(t::Noted) = t.written[]
+unwritten!(t::Noted) = (t.written[] = false; t)

@@ -88,7 +88,12 @@ the record and the rates file holding what those decisions read, replays it:
 it plans the program once, and plans no trial, prices and measures nothing.
 Anything else a decision reads that differs, the program's extents, element
 types or captured constants, the target's numerics, Tempest's own code or a
-time recorded since, makes them the cover's to reach again.
+time recorded since, makes them the cover's to reach again. Decisions are
+replayed only where the cover would reach them again on the record as it is:
+a preparation that measured as it decided covers again on what it measured,
+until a cover measures nothing, three covers at most, and keeps the last
+one's; with the environment's `TEMPEST_SETTLE=false` it keeps the first's,
+which the next preparation reaches again.
 
 A claim that fails to build is no option once it has: the program is planned
 again without it, each map of the group it claimed proposed to be stored
@@ -218,7 +223,7 @@ const PLANS = 4
 # `reach!`): `prepare` once its graph is lowered.
 function planned(program, d, @nospecialize(inputs), pairs, input, by_reference, build)
     target = d.target
-    p, considered, ds, reached = reach!(d)
+    p, considered, ds, reached = reach!(d; settle = settling())
     # The sections of `planned` after its decisions (see `lap!`).
     clock = mark()
     values = p.graph.values

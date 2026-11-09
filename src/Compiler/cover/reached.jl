@@ -75,7 +75,8 @@ struct NotReplayed <: Exception end
 # The environment's settings that the cover does not read, or reads into
 # the decider's `measure`, which the key holds: every other `TEMPEST_`
 # setting is part of the key, as the generator's product tiles are.
-const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_MEASURE", "TEMPEST_RATES", "TEMPEST_CALIBRATE", "TEMPEST_GPU_LOCK")
+const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_MEASURE", "TEMPEST_SETTLE", "TEMPEST_RATES", "TEMPEST_CALIBRATE",
+    "TEMPEST_GPU_LOCK")
 
 read_settings() = sort!([k => v for (k, v) in ENV if startswith(k, "TEMPEST_") && !(k in UNREAD_SETTINGS) && !startswith(k, "TEMPEST_CORPUS")])
 
@@ -261,7 +262,7 @@ preparation replayed is replayed from the preparation's. A preparation that
 verifies reaches its decisions by the cover too, and throws where the two
 differ.
 """
-function reach!(d::Decider)
+function reach!(d::Decider; settle = false)
     key = decisions_key(d)
     within = REPLAYING[]
     if within !== nothing
@@ -273,12 +274,12 @@ function reach!(d::Decider)
         return (replayed..., step)
     end
     stored = key === nothing ? nothing : replayable(d, key)
-    stored === nothing && return covered!(d, key)
+    stored === nothing && return covered!(d, key; settle = settle && key !== nothing)
     replayed = phase(() -> replay(d, stored), :replay)
     replayed === nothing || VERIFYING[] || return (replayed..., stored)
     # The steps replayed are the cover's to plan again.
     empty!(d.stepped)
-    found = covered!(d, key)
+    found = covered!(d, key; settle)
     if VERIFYING[]
         difference = replayed === nothing ? "the plan of the proposals taken" : differs(stored, found[4])
         difference === nothing || error("decisions replayed differ from the cover's: ", difference)
@@ -286,8 +287,37 @@ function reach!(d::Decider)
     found
 end
 
-# The cover's decisions, with what was reached.
-function covered!(d::Decider, key)
+# The covers a preparation runs at most to settle its decisions.
+const SETTLES = 3
+
+# Whether a preparation settles its decisions: `prepare`'s default, from the
+# environment's TEMPEST_SETTLE, true unless it says false. Settling adds a
+# cover's work to a preparation that measured, for the next to replay.
+settling() = parse(Bool, get(ENV, "TEMPEST_SETTLE", "true"))
+
+"""
+    covered!(d, key; settle = false) -> (plan, considered, decisions, reached)
+
+The cover's decisions, with what was reached. With `settle`, a cover that
+measured or fitted as it decided is followed by another on what it left,
+its decisions and options forgotten, until one writes nothing, `SETTLES`
+covers at most: the decisions of the last are those a preparation in a new
+process would reach, and replay (see `settled`).
+"""
+function covered!(d::Decider, key; settle = false)
+    found = cover_once!(d, key)
+    for _ in 2:(settle ? SETTLES : 1)
+        (written(d.record) || written(d.calibration)) && isempty(d.failed) || break
+        unwritten!(d.record)
+        unwritten!(d.calibration)
+        forget_decisions!(d)
+        empty!(d.stepped)
+        found = cover_once!(d, key)
+    end
+    found
+end
+
+function cover_once!(d::Decider, key)
     Threads.atomic_add!(REACHED_COUNTS.covered, 1)
     p, considered = phase(() -> cover(d), :cover)
     # The sections after the cover (see `lap!`).
