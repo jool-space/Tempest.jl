@@ -610,10 +610,10 @@ function splice_step!(nodes, body::LoopBody, inputs)
     # state its own.
     alike = collect(eachindex(nodes))
     if length(carries) > 1
-        table = Dict{Any, Int}()
+        table = Dict{Key, Int}()
         for (i, nd) in enumerate(nodes)
             (nd.op isa Carry || isempty(nd.inputs) && !(nd.op isa Constant)) && continue
-            alike[i] = get!(table, (nd.op, map(j -> alike[j], nd.inputs), nd.dims, nd.eltype, nd.scalar), i)
+            alike[i] = get!(table, Key((nd.op, map(j -> alike[j], nd.inputs), nd.dims, nd.eltype, nd.scalar)), i)
         end
     end
     taken = Set{Int}()
