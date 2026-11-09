@@ -36,7 +36,7 @@ const COUNTED = (
     :trials,     # the cover's trials, each a plan of the whole graph unless refused before
     :compared,   # the cover's comparisons of a trial with the plan it changes
     :options,    # groups whose claims and estimates were found (`options`)
-    :ordered,    # kernels looked at to order them, each pass over them (`order_groups`)
+    :ordered,    # kernels looked at to order them (`order_groups`)
 )
 
 const COUNTS = Dict{Symbol, Threads.Atomic{Int}}(k => Threads.Atomic{Int}(0) for k in COUNTED)

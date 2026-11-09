@@ -1318,26 +1318,41 @@ function group_reads(graph, g::Group)
     reads
 end
 
-# Kernels in an order where every stored value is written before it is read.
+# Kernels in an order where every stored value is written before it is read:
+# in passes over the kernels in their order, each pass taking every kernel
+# whose writers are taken, the ones it took already among them. A kernel's
+# pass is found from its writers': a writer before it taken in the same
+# pass, one after it in the pass before. So each kernel is looked at once,
+# where passes repeated until all were taken looked at every kernel a pass,
+# as many passes as the program has layers: 22 million times for the GPT
+# step's 1354 kernels at 32 layers.
 function order_groups(graph, groups, owner)
+    n = length(groups)
     needs = map(eachindex(groups)) do k
         deps = Set(owner[r] for r in group_reads(graph, groups[k]) if owner[r] > 0)
         delete!(deps, k)
         deps
     end
-    order = Int[]
-    placed = falses(length(groups))
-    while length(order) < length(groups)
-        progress = false
-        tally!(:ordered, length(groups))
-        for k in eachindex(groups)
-            placed[k] && continue
-            all(d -> placed[d], needs[k]) || continue
-            push!(order, k)
-            placed[k] = true
-            progress = true
+    tally!(:ordered, n)
+    # Each kernel's pass once every writer's is known, in an order where
+    # writers come first.
+    waiting = map(length, needs)
+    after = [Int[] for _ in groups]
+    foreach(k -> foreach(d -> push!(after[d], k), needs[k]), eachindex(groups))
+    ready = filter(k -> waiting[k] == 0, collect(eachindex(groups)))
+    pass = ones(Int, n)
+    done = 0
+    while !isempty(ready)
+        k = pop!(ready)
+        done += 1
+        for d in needs[k]
+            pass[k] = max(pass[k], d < k ? pass[d] : pass[d] + 1)
         end
-        progress || error("kernels depend on each other in a cycle")
+        for j in after[k]
+            waiting[j] -= 1
+            waiting[j] == 0 && push!(ready, j)
+        end
     end
-    order
+    done == n || error("kernels depend on each other in a cycle")
+    sort!(collect(eachindex(groups)); by = k -> (pass[k], k))
 end
