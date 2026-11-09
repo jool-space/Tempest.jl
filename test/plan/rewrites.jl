@@ -194,7 +194,7 @@ end
     x = data(3, 3)
     f(x) = sum(exp.(-maximum(x; dims = 2)))
     g = C.rewrite(C.lower(trace(f, x)))
-    @test count(v -> v.definition isa C.Reduction{IR.SumFold}, g.values) == 1
+    @test count(v -> v.definition isa C.Reduction && v.definition.fold isa IR.SumFold, g.values) == 1
     @test agree(C.execute(recomputing(g), x), [f(x)])
 end
 

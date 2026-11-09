@@ -34,16 +34,21 @@ struct ConstantArray{A} <: Definition
     data::A
 end
 
+# A definition's function or fold is a field without a type parameter, as
+# `Apply`'s is: definitions are data to plan, and a parameter would compile
+# every method that takes one again for each function and fold a program
+# applies.
+
 """
 `f` applied to the operands at each index of the value's domain. The operands of
 a commutative `f` are kept in one order, so that spelling does not change the value.
 """
-struct Pointwise{F} <: Definition
-    f::F
+struct Pointwise <: Definition
+    f::Any
     operands::Tuple{Vararg{Operand}}
-    function Pointwise(f::F, operands) where {F}
+    function Pointwise(f, operands)
         commutative(f) && (operands = Tuple(sort(collect(Operand, operands); by = operand_key)))
-        new{F}(f, operands)
+        new(f, operands)
     end
 end
 
@@ -56,8 +61,8 @@ operand_key(o::Literal) = (2, string(nameof(typeof(o.value))), o.value)
 A fold of `operand` over the `reduced` axes of `iteration`. The operand is read
 over the iteration domain; the value's own domain is the iteration's other axes.
 """
-struct Reduction{F} <: Definition
-    fold::F
+struct Reduction <: Definition
+    fold::Fold
     operand::Operand
     iteration::Tuple{Vararg{Int}}
     reduced::Tuple{Vararg{Int}}
@@ -71,8 +76,8 @@ from the last position down with `reverse`, and without the position itself
 with `exclusive`. The operand is read over the value's domain. Its elements
 combine in order, the earlier state first, so its fold need not commute.
 """
-struct Scan{F} <: Definition
-    fold::F
+struct Scan <: Definition
+    fold::Fold
     operand::Operand
     axes::Tuple{Vararg{Int}}
     reverse::Bool
@@ -89,8 +94,8 @@ position no element reaches holds `into` there, or the fold's initial state.
 The value holds the states, in the accumulator of the operand's elements: the
 fold's state is one number, observed as itself.
 """
-struct Keyed{F} <: Definition
-    fold::F
+struct Keyed <: Definition
+    fold::Fold
     operand::Operand
     iteration::Tuple{Vararg{Int}}
     key::Tuple{Vararg{Affine}}

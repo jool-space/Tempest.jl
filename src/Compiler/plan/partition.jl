@@ -74,7 +74,7 @@ function factor_of_backward_product(graph, users, live, v)
         d = graph.values[u].definition
         d isa Pointwise && d.f isa Cast{<:AbstractFloat} && return factor_of_backward_product(graph, users, live, u)
         d isa Pointwise && d.f === (*) && length(d.operands) == 2 || return false
-        any(w -> live[w] && graph.values[w].definition isa Reduction{SumFold}, users[u])
+        any(w -> live[w] && graph.values[w].definition isa Reduction && graph.values[w].definition.fold isa SumFold, users[u])
     end
 end
 

@@ -224,7 +224,7 @@ function exchanged_sums(graph::IndexGraph; rounded::Bool = false)
     users = rounded ? readers(graph) : Vector{Int}[]
     found = Dict{Int, Any}()
     for (r, v) in enumerate(graph.values)
-        v.definition isa Reduction{SumFold} || continue
+        v.definition isa Reduction && v.definition.fold isa SumFold || continue
         e = exchange(graph, r, sums)
         rounded && e !== nothing && (e = merge(e, (; sum = rounded_sum(graph, users, e.sum))))
         e === nothing || (found[r] = e)
@@ -253,7 +253,7 @@ function exchange(graph, r, sums)
     eltype_of(graph, x) === T || return nothing
     fs = factors(graph, x, domain, T)
     for (j, (f, power)) in enumerate(fs)
-        power == 1 && f isa Read && graph.values[f.value].definition isa Reduction{SumFold} && graph.values[f.value].eltype === T || continue
+        power == 1 && f isa Read && graph.values[f.value].definition isa Reduction && graph.values[f.value].definition.fold isa SumFold && graph.values[f.value].eltype === T || continue
         F = graph.values[f.value].definition
         extents = (d.iteration..., map(k -> F.iteration[k], F.reduced)...)
         wide = Domain(extents)
@@ -414,7 +414,7 @@ function mean_of(graph, F)
     o, c = d.operands
     o isa Read && c isa Literal && c.value isa Real && o.index == identity_index(v.dims) || return nothing
     S = graph.values[o.value]
-    S.definition isa Reduction{SumFold} && S.dims == v.dims && S.eltype === v.eltype || return nothing
+    S.definition isa Reduction && S.definition.fold isa SumFold && S.dims == v.dims && S.eltype === v.eltype || return nothing
     n = prod(k -> S.definition.iteration[k], S.definition.reduced; init = 1)
     (d.f === (/) && c.value == n || d.f === (*) && c.value * n == 1) ? o.value : nothing
 end
@@ -422,9 +422,9 @@ end
 function frame(graph, F)
     v = graph.values[F]
     d = v.definition
-    if d isa Reduction{MaxFold}
+    if d isa Reduction && d.fold isa MaxFold
         return Frame(Exponential(), F, Statistic(), d.iteration, d.reduced, d.operand)
-    elseif d isa Reduction{<:Relative}
+    elseif d isa Reduction && d.fold isa Relative
         return Frame(d.fold.law, F, d.fold.observe, d.iteration, d.reduced, element_y(graph, d.operand, Domain(d.iteration)))
     elseif d isa Pointwise
         S = mean_of(graph, F)
@@ -587,7 +587,7 @@ function kept_statistics(graph::IndexGraph)
         for R in get(relative, y_key(fr.y), Int[])
             live[R] && R != F || continue
             e = graph.values[R].definition
-            e isa Reduction{<:Relative} && e.fold.law == fr.law && length(e.iteration) > length(fr.iteration) || continue
+            e isa Reduction && e.fold isa Relative && e.fold.law == fr.law && length(e.iteration) > length(fr.iteration) || continue
             index = embedding(graph, fr, R)
             index === nothing && continue
             found[F] = (R, index)
@@ -674,9 +674,9 @@ law_note(::Square) = "Welford"
 function relative_read(graph, o)
     o isa Read || return nothing
     d = graph.values[o.value].definition
-    if d isa Reduction{<:Relative}
+    if d isa Reduction && d.fold isa Relative
         return (law = d.fold.law, observe = d.fold.observe, value = o.value, iteration = d.iteration, reduced = d.reduced, operand = d.operand, index = o.index, sums = true)
-    elseif d isa Reduction{MaxFold}
+    elseif d isa Reduction && d.fold isa MaxFold
         return (law = Exponential(), observe = Statistic(), value = o.value, iteration = d.iteration, reduced = d.reduced, operand = d.operand, index = o.index, sums = false)
     end
     nothing
