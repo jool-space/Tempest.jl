@@ -67,26 +67,28 @@ signature(n::Node) = hash((typeof(n.op), n.dims, n.eltype, n.scalar, length(n.in
 rollable(n::Node) = !(n.op isa Union{Loop, Placeholder, Argument, Carry})
 
 """
-    periodic_window(nodes, lo, last) -> (; first, period, periods) or nothing
+    periodic_window(nodes, lo, last[, alike_at, runs]) -> (; first, period, periods) or nothing
 
 The window of `nodes[lo:last]` ending at `last` that repeats with a period,
 over the most nodes, the shortest period among those: each node of it after
-the first period alike its node a period back.
+the first period alike its node a period back. `alike_at` holds the nodes
+that may be alike `last`, in order; `runs` what earlier calls with the same
+`lo` found of each period (see `run_start`).
 """
-function periodic_window(nodes, lo, last, alike_at = nothing)
+function periodic_window(nodes, lo, last, alike_at = nothing, runs = Dict{Int, Tuple{Int, Int}}())
     best = nothing
     accepted = Int[]
     n = nodes[last]
-    candidates = alike_at === nothing ? ((last - 1):-1:lo) : Iterators.reverse(filter(j -> lo <= j < last, alike_at))
+    candidates = alike_at === nothing ? ((last - 1):-1:lo) :
+        view(alike_at, (searchsortedfirst(alike_at, last) - 1):-1:searchsortedfirst(alike_at, lo))
     for j in candidates
         p = last - j
         (last - lo + 1) ÷ p < ROLLED_PERIODS && break
+        # Every period is a multiple of one.
+        1 in accepted && break
         any(q -> p % q == 0, accepted) && continue
         alike_nodes(n, nodes[j], p) || continue
-        i = last
-        while i - p >= lo && rollable(nodes[i]) && alike_nodes(nodes[i], nodes[i - p], p)
-            i -= 1
-        end
+        i = run_start(runs, nodes, lo, last, p)
         matched = last - i
         periods = matched ÷ p + 1
         periods >= 2 || continue
@@ -109,6 +111,25 @@ function periodic_window(nodes, lo, last, alike_at = nothing)
 end
 
 """
+The node before the run of nodes up to `last`, each alike its node `p`
+back: walked down from `last` once per stretch, and kept in `runs` as the
+stretch's ends by period. A window is sought from every node down from the
+last, and walked afresh each time, a run was walked again from each of its
+nodes: a heat equation's 800 slices of its source took 0.9 s to trace.
+"""
+function run_start(runs, nodes, lo, last, p)
+    start, stop = get(runs, p, (0, 0))
+    start < last <= stop && return start
+    last == start && return last
+    i = last
+    while i - p >= lo && rollable(nodes[i]) && alike_nodes(nodes[i], nodes[i - p], p)
+        i -= 1
+    end
+    runs[p] = (i, last)
+    i
+end
+
+"""
     roll!(tape, range, required) -> Int
 
 Rewrite the last window of `tape.nodes[range]` that repeats as a loop, in
@@ -128,9 +149,10 @@ function roll!(tape::Tape, range, required)
     for k in lo:hi
         push!(get!(() -> Int[], alike, signature(nodes[k])), k)
     end
+    runs = Dict{Int, Tuple{Int, Int}}()
     for at in hi:-1:lo
         rollable(nodes[at]) || continue
-        window = periodic_window(nodes, lo, at, alike[signature(nodes[at])])
+        window = periodic_window(nodes, lo, at, alike[signature(nodes[at])], runs)
         window === nothing || break
     end
     window === nothing && return 0
