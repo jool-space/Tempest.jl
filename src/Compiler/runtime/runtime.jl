@@ -11,7 +11,9 @@ wrote it a buffer of its own, which the input is copied into before the
 kernels run. `bind!` copies inputs into the buffers the executable owns, and
 `point!` makes an argument's storage the caller's array where the kernels
 can read and write it there; `execute!` and `replay!` run the program over
-them, and `outputs` is where the results are, overwritten by each run.
+them, and copy what it wrote into an argument back into the caller's array
+where that is not its storage, and `outputs` is where the results are,
+overwritten by each run.
 """
 # Where an argument's storage is used, for `point!` to move it: each step of
 # an execution (see `execution`) that reads or writes it, by its place among
@@ -80,12 +82,15 @@ mutable struct Executable{T <: Target}
     # holding the array would keep a caller's last arrays alive, as a
     # training step's last weights. And per argument, whether it is pointed
     # only once the caller brings the same array twice in a row: once its
-    # graph had to be recorded again.
+    # graph had to be recorded again. And per argument the program writes,
+    # the caller's array `point!` bound it to where that is not its storage,
+    # which each run copies what the program wrote back into, else nothing.
     pointable::Vector{Union{Nothing, Uses}}
     pointed::Vector{Any}
     at::Vector{UInt}
     seen::Vector{UInt}
     settles::Vector{Bool}
+    back::Vector{Any}
     # The executions of the program a replay runs (see `capture!`).
     repetitions::Int
     # Whether its kernels were built; a plan alone can be explained, not run.
@@ -356,7 +361,8 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference)
             none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
             Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], nothing,
             Vector{Union{Nothing, Uses}}(nothing, length(program.arguments)), none(length(program.arguments)),
-            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)), 1, false, reached)
+            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)),
+            none(length(program.arguments)), 1, false, reached)
     end
     slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
     referenced = Vector{Any}(nothing, length(program.arguments))
@@ -425,7 +431,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference)
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outputs_over(program, results),
         launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, pointable, pointed, at, zeros(UInt, length(program.arguments)),
-        fill(false, length(program.arguments)), 1, true, reached)
+        fill(false, length(program.arguments)), Vector{Any}(nothing, length(program.arguments)), 1, true, reached)
 end
 
 runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
@@ -540,6 +546,7 @@ function bind_leaves!(ex, positions, xs)
     moves = nothing
     for (k, x) in zip(positions, xs)
         k === nothing && continue
+        ex.back[k] = nothing
         x === ex.referenced[k] && continue
         moves = point_at!(ex, k, ex.arguments[k], moves)
         copyto!(ex.arguments[k], vec(x))
@@ -554,17 +561,18 @@ Bind inputs as `compile`'s call does: an argument's storage is the caller's
 array, read and written where it is, when every launch can be pointed
 elsewhere (`repoints`) and the target can read and write the array where it
 is (`pointable`); the array is copied into the argument's buffer otherwise,
-as `bind!` copies, and `write_back!` copies what the program wrote there
-back. An argument bound by reference keeps its array. An array the storage
-is already costs nothing. The steps that use the storage of one elsewhere,
-the kernels that read or write it and the copies of saved inputs and staged
-results, are pointed at it, the results over it are over it, and a captured
-graph is changed where it records their addresses (`retarget!`), or recorded
-again where the target cannot change it; recording again costs more than
-copying an array that moves every call, as a training step's weights do, so
-an argument whose graph was recorded again is the caller's array only once
-the caller brings the same array twice in a row. The executable holds the
-arrays it reads and writes until it is bound again.
+as `bind!` copies, and each `execute!` or `replay!` after copies what the
+program wrote there back into it. An argument bound by reference keeps its
+array. An array the storage is already costs nothing. The steps that use the
+storage of one elsewhere, the kernels that read or write it and the copies
+of saved inputs and staged results, are pointed at it, the results over it
+are over it, and a captured graph is changed where it records their
+addresses (`retarget!`), or recorded again where the target cannot change
+it; recording again costs more than copying an array that moves every call,
+as a training step's weights do, so an argument whose graph was recorded
+again is the caller's array only once the caller brings the same array twice
+in a row. The executable holds the arrays it reads and writes until it is
+bound again.
 """
 function point!(ex::Executable, @nospecialize(inputs...))
     runnable(ex)
@@ -573,6 +581,10 @@ function point!(ex::Executable, @nospecialize(inputs...))
     moves = nothing
     for (k, x) in zip(positions, xs)
         k === nothing || (moves = point_leaf!(ex, k, x, moves))
+    end
+    for (_, a) in ex.program.writes
+        x = xs[findfirst(==(a), positions)]
+        ex.back[a] = x === ex.pointed[a] || x === ex.referenced[a] ? nothing : x
     end
     retarget!(ex, moves)
 end
@@ -593,22 +605,14 @@ function point_leaf!(ex::Executable, k::Int, x, moves)
     moves
 end
 
-"""
-    write_back!(ex, inputs...) -> ex
-
-After an execution on `inputs` bound by `point!`, what the program wrote into
-an argument is in the caller's array: one whose storage `point!` made the
-caller's array the kernels wrote where it is, and costs nothing; any other,
-an array not of the target's array type, or not as aligned as its kernels
-assume, or one waiting to be brought twice in a row, is copied from the
-storage the program wrote it in.
-"""
-function write_back!(ex::Executable, @nospecialize(inputs...))
-    isempty(ex.program.writes) && return ex
-    xs = argument_leaves(ex.program, inputs)
+# After a run, what the program wrote into an argument bound to an array
+# that is not its storage (see `point!`), an array not of the target's array
+# type, or not as aligned as its kernels assume, or one waiting to be brought
+# twice in a row, is copied into that array, from the storage it wrote.
+function write_back!(ex::Executable)
     for (_, a) in ex.program.writes
-        x = xs[a]
-        x === ex.pointed[a] || x === ex.referenced[a] || copyto!(vec(x), ex.arguments[a])
+        x = ex.back[a]
+        x === nothing || copyto!(vec(x), ex.arguments[a])
     end
     ex
 end
@@ -700,14 +704,16 @@ execution_steps(ex::Executable, i) = i .+ (length(ex.saves) + length(ex.launches
 
 Run the program on the inputs bound last: copy the inputs it writes into
 the results that are them as they were before, launch every kernel in order,
-then copy staged results into the arguments they replace. The results are in
-`outputs(ex)`. Whether or not the program is captured, this launches kernel by
-kernel; `replay!` runs the capture.
+then copy staged results into the arguments they replace, and what it wrote
+into an argument into the caller's array `point!` bound it to, where that is
+not its storage. The results are in `outputs(ex)`. Whether or not the
+program is captured, this launches kernel by kernel; `replay!` runs the
+capture.
 """
 function execute!(ex::Executable)
     runnable(ex)
     run_once(ex)
-    ex
+    write_back!(ex)
 end
 
 # What an execution launches, and what a capture records.
@@ -747,13 +753,14 @@ end
     replay!(ex) -> ex
 
 Run what `capture!` recorded, on the inputs bound last: what `execute!` does,
-`repetitions` times over, as one launch of a graph on a target with graphs.
-The results are in `outputs(ex)`.
+`repetitions` times over, as one launch of a graph on a target with graphs,
+then copy what it wrote into an argument into the caller's array `point!`
+bound it to, where that is not its storage. The results are in `outputs(ex)`.
 """
 function replay!(ex::Executable)
     ex.captured === nothing && throw(ArgumentError("nothing to replay: capture! records the program first"))
     replay(ex.target, ex.captured)
-    ex
+    write_back!(ex)
 end
 
 function explain(io::IO, ex::Executable)

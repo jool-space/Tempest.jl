@@ -80,9 +80,8 @@ each call replays, as `capture!` and `replay!` do. Results are the same either
 way.
 
 The level beneath is in `Tempest.Compiler`: `prepare`, `bind!`, and
-`execute!` or `replay!`, with `point!` and `write_back!` binding a call's
-arrays as `compile` does. `c.executable` is the prepared program, and
-`explain(c)` shows it.
+`execute!` or `replay!`, with `point!` binding a call's arrays as `compile`
+does. `c.executable` is the prepared program, and `explain(c)` shows it.
 """
 function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), capture::Bool = true)
     passed = argument_arrays((f, args...))
@@ -301,7 +300,6 @@ function (c::Compiled)(@nospecialize(args...))
     isempty(ex.program.writes) || refuse_shared(ex, (c.f, args...))
     point!(ex, c.f, args...)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
-    write_back!(ex, c.f, args...)
     # The results apart from the buffers the next call overwrites: a number
     # where the program computed a number, else an array, though it have no
     # dimensions. The arrays are copied first: each copy waits for the

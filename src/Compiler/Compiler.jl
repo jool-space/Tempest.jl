@@ -44,7 +44,7 @@ import .IR: mentions
 using .Implement: loaded_implementations
 
 # Beneath `compile`: a program traced and prepared, for a step run in place.
-public trace, prepare, bind!, point!, write_back!, execute!, capture!, replay!, outputs
+public trace, prepare, bind!, point!, execute!, capture!, replay!, outputs
 
 # What proposals read, until a view of the graph replaces it: the plan, and the
 # views of its groups; and how kernels are built side by side.

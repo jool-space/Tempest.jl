@@ -444,6 +444,28 @@ end
     check_written_in_place(identity)
 end
 
+@testset "the level beneath binds a call's arrays as compile does" begin
+    # `point!` binds the caller's arrays both ways: one the kernels can
+    # write where it is they write there, one they cannot, a view say, is
+    # copied in, and each run copies what the program wrote back into it.
+    # `bind!` copies in alone.
+    f!(s, x) = (s .= 0.5 .* s .+ x; sum(s))
+    s, x = data(2), data(2; scale = 0.5)
+    ex = prepare(trace(f!, s, x), s, x)
+    both = [data(2) data(2)]
+    mine = view(both, :, 1)
+    C.point!(ex, mine, x)
+    @test execute!(ex) === ex && mine ≈ 0.5 .* data(2) .+ x
+    execute!(ex)
+    @test mine ≈ 0.25 .* data(2) .+ 1.5 .* x && both[:, 2] == data(2)
+    bind!(ex, data(2), x)
+    execute!(ex)
+    @test mine ≈ 0.25 .* data(2) .+ 1.5 .* x
+    C.point!(ex, s, x)
+    execute!(ex)
+    @test s ≈ 0.5 .* data(2) .+ x && ex.pointed[1] === s
+end
+
 if CUDA_FUNCTIONAL
     @testset "compiled on CUDA" begin
         m, x = Dense(single(data(64, 32; scale = 0.3)), single(data(64)), tanh), single(data(32, 16; scale = 0.5))
