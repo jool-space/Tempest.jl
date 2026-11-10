@@ -179,22 +179,30 @@ function fold_steps!(statements, graph, g::Group, rs, terms, states, c; options.
     end
 end
 
-function scalar_kernel(graph, stored, g::Group, slots)
-    g.kind isa ScanKind && return scan_kernel(graph, stored, g, slots)
-    g.kind isa RecurrenceKind && return recurrence_kernel(graph, stored, g, slots)
+scalar_kernel(graph, stored, g::Group, slots) = scalar_kernel(g.kind, graph, stored, g, slots)
+scalar_kernel(::ScanKind, graph, stored, g::Group, slots) = scan_kernel(graph, stored, g, slots)
+scalar_kernel(::RecurrenceKind, graph, stored, g::Group, slots) = recurrence_kernel(graph, stored, g, slots)
+
+function scalar_kernel(::PointwiseKind, graph, stored, g::Group, slots)
     D = g.domain
     vars = index_vars(length(D))
     c = EmitContext(graph, slots, vars, Domain(D))
     body = Expr(:block)
     s = body.args
-    if g.kind isa PointwiseKind
-        delinearize_expr(s, :lin, 1:length(D), D, vars)
-        names = emit_terms!(s, [g.terms[m] for m in g.outputs], c)
-        for m in g.outputs
-            push!(s, store_expr(c, m, identity_index(D), names[g.terms[m]]))
-        end
-        return ScalarKernel(slots, prod(D; init = 1), body)
+    delinearize_expr(s, :lin, 1:length(D), D, vars)
+    names = emit_terms!(s, [g.terms[m] for m in g.outputs], c)
+    for m in g.outputs
+        push!(s, store_expr(c, m, identity_index(D), names[g.terms[m]]))
     end
+    ScalarKernel(slots, prod(D; init = 1), body)
+end
+
+function scalar_kernel(::ReductionKind, graph, stored, g::Group, slots)
+    D = g.domain
+    vars = index_vars(length(D))
+    c = EmitContext(graph, slots, vars, Domain(D))
+    body = Expr(:block)
+    s = body.args
     # Items are the positions of the primary folds; other folds get launches of
     # their own (`fold_kernel`).
     reduced = collect(primary_axes(graph, g))

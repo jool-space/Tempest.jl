@@ -11,7 +11,7 @@
 # read the group's other values as terms or where a step stored them
 # (`stepwise`); whether a fold of it covers fewer positions than its domain
 # (`restricted`); and, as it grows, the group with one more value taken
-# (`taking`, with the planner). Nothing else in the planner names a kind.
+# (`taking`, with the planner). The planner tests no group's kind.
 
 """
 A reduction's group: folds over one domain, and the maps that read them or

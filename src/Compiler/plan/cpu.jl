@@ -33,12 +33,11 @@ function evaluate_term(t::Recomputed, x, k, buffers, stats, graph)
     val.eltype(fold_observe(fold, state))
 end
 
-function run_group!(g::Group, buffers, graph)
-    g.kind isa ReductionKind && return run_reduction!(g, buffers, graph)
-    g.kind isa ScanKind && return run_scan!(g, buffers, graph)
-    g.kind isa RecurrenceKind && return run_recurrence!(g, buffers, graph)
-    run_pointwise!(g, buffers, graph)
-end
+run_group!(g::Group, buffers, graph) = run_group!(g.kind, g, buffers, graph)
+run_group!(::ReductionKind, g::Group, buffers, graph) = run_reduction!(g, buffers, graph)
+run_group!(::ScanKind, g::Group, buffers, graph) = run_scan!(g, buffers, graph)
+run_group!(::PointwiseKind, g::Group, buffers, graph) = run_pointwise!(g, buffers, graph)
+run_group!(::RecurrenceKind, g::Group, buffers, graph) = run_recurrence!(g, buffers, graph)
 
 # A step at a time, the last first for states carried in reverse: the
 # states, where they start at the first step; then each other member over

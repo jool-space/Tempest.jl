@@ -172,13 +172,16 @@ end
 # cache, where neighbouring items brought it. Where the target splits a
 # reduction's items (`split`, see `Split`), the lanes of their parts share
 # the device, and each phase of folds is a launch more.
-function floor_estimate(p::Plan, g::Group, split = (items, positions, adjacent) -> nothing)
-    g.kind isa RecurrenceKind && return recurrence_floor_estimate(p, g)
+floor_estimate(p::Plan, g::Group, split = (items, positions, adjacent) -> nothing) = floor_estimate(g.kind, p, g, split)
+floor_estimate(::RecurrenceKind, p::Plan, g::Group, split) = recurrence_floor_estimate(p, g)
+
+function floor_estimate(::Union{ReductionKind, ScanKind, PointwiseKind}, p::Plan, g::Group, split)
     points = prod(g.domain; init = 1)
     loaded(m) = unique(l.value for l in loads(g.terms[m]))
     per_point = sum(m -> sum(v -> sizeof(p.graph.values[v].eltype), loaded(m); init = 0), members(g); init = 0)
     bytes = Float64(points * per_point) + group_bytes(p, g)
-    items = g.kind isa Union{ReductionKind, ScanKind} ? prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1) : points
+    # A group of maps has no primary axes: its items are its points.
+    items = prod(kept_dims(g.domain, primary_axes(p.graph, g)); init = 1)
     s = group_split(p.graph, g, split)
     s === nothing && return [Work(bytes; blocks = items / 256)]
     blocks = items * s.parts * s.lanes / 256
