@@ -217,28 +217,20 @@ position_formula(o::Operand, at, d::Domain) = nothing
 # at the block the position lies in. Slices concatenated are one, the results
 # of a recurrence's steps concatenated say, and so is their adjoint, a sum of
 # what each slice receives, scattered. Nothing for any other definition.
-function covering(values, def::Pointwise, d::Domain, T)
+# `found` keeps the pieces of the values read (see `pieces`).
+function covering(values, def::Pointwise, d::Domain, T, found)
     def.f === ifelse || def.f === (+) || return nothing
-    found = pieces(values, def, identity_index(d.extents), d)
-    found === nothing && return nothing
-    ps = first(found)
-    length(ps) >= 2 && all(p -> p.read.value == ps[1].read.value, ps) && values[ps[1].read.value].eltype === T || return nothing
-    # The formula the masks bound, from either side.
-    any(p -> isempty(p.mask), ps) && return nothing
-    f = first(first(ps).mask)
-    e = Affine(0, f.terms)
-    isempty(e.terms) && return nothing
-    e = e.terms[1].second < 0 ? scale(e, -1) : e
+    set = pieces(values, def, identity_index(d.extents), d, found)
+    set === nothing && return nothing
+    set.count >= 2 && set.value != 0 && values[set.value].eltype === T && set.formula !== nothing || return nothing
+    # The formula the masks bound, from either side; the blocks, which
+    # cover its range only where they hold as many positions as it has.
+    e = set.formula
     lo, hi = affine_range(e, d)
-    blocks = map(ps) do p
-        a, b = lo, hi
-        for m in p.mask
-            m.terms == e.terms ? (b = min(b, -m.constant)) : m.terms == scale(e, -1).terms ? (a = max(a, m.constant)) : return nothing
-        end
-        (a, b)
-    end
-    any(isnothing, blocks) && return nothing
-    order = sortperm(blocks::Vector)
+    set.held == hi - lo + 1 || return nothing
+    ps = listed(set)
+    blocks = map(p -> p.block, ps)
+    order = sortperm(blocks)
     width = blocks[order[1]][2] - blocks[order[1]][1] + 1
     width >= 1 || return nothing
     for (j, k) in enumerate(order)
@@ -256,29 +248,96 @@ function covering(values, def::Pointwise, d::Domain, T)
     Read(ps[1].read.value, map((x, s) -> add(x, mul(block, s.constant, d), d), base, steps))
 end
 
+"""
+A read a select chooses where its mask holds, and the block of positions
+that mask bounds: the formula of the position its first bound bounds, its
+first term positive, and the least and the most the formula is over the
+domain where the mask holds; or no formula, where the mask bounds none, or
+another besides.
+"""
+struct Piece
+    read::Read
+    formula::Union{Nothing, Affine}
+    block::Tuple{Int, Int}
+end
+
+function Piece(read::Read, mask, d::Domain)
+    isempty(mask) && return Piece(read, nothing, (0, -1))
+    e = Affine(0, first(mask).terms)
+    isempty(e.terms) && return Piece(read, nothing, (0, -1))
+    e = e.terms[1].second < 0 ? scale(e, -1) : e
+    lo, hi = affine_range(e, d)
+    a, b = lo, hi
+    for m in mask
+        m.terms == e.terms ? (b = min(b, -m.constant)) : m.terms == scale(e, -1).terms ? (a = max(a, m.constant)) :
+            return Piece(read, nothing, (0, -1))
+    end
+    Piece(read, e, (a, b))
+end
+
+"""
+The pieces a select, or a sum of selects over zero, chooses between, as
+`pieces` finds them: those of this select or sum, and of the selects below
+it, which it shares with every value it reads them through; and what is
+read where none is chosen. With what all of them have in common: how many
+they are, the value their reads read, or 0 where they read several, the
+formula their masks bound, or nothing where they bound several or not one,
+and how many positions their blocks hold. So pieces that cannot cover their
+value, a concatenation written part of the way, are known without listing
+them.
+"""
+struct Pieces
+    own::Vector{Piece}
+    below::Vector{Pieces}
+    rest::Operand
+    count::Int
+    value::Int
+    formula::Union{Nothing, Affine}
+    held::Int
+end
+
+function Pieces(own::Vector{Piece}, below::Vector{Pieces}, rest::Operand)
+    reads = Int[[p.read.value for p in own]; [s.value for s in below]]
+    formulas = Union{Nothing, Affine}[[p.formula for p in own]; [s.formula for s in below]]
+    value = all(==(first(reads)), reads) ? first(reads) : 0
+    formula = all(f -> f !== nothing && f == first(formulas), formulas) ? first(formulas) : nothing
+    held = sum(p -> p.block[2] - p.block[1] + 1, own; init = 0) + sum(s -> s.held, below; init = 0)
+    Pieces(own, below, rest, length(own) + sum(s -> s.count, below; init = 0), value, formula, held)
+end
+
+# The pieces listed, each select's before those below it.
+listed(set::Pieces) = foldl((out, s) -> append!(out, listed(s)), set.below; init = copy(set.own))
+
 # The pieces `def`, its variables at `at`, selects between: each a read and the
 # mask, formulas at most zero, where it is selected; and what `def` is where
-# none is, zero for a sum. Nothing when it is no such select or sum.
-function pieces(values, def::Pointwise, at, d::Domain)
+# none is, zero for a sum. Nothing when it is no such select or sum. The
+# pieces of a value read are kept in `found`, by the value, where it is read
+# and the domain: a concatenation's every write is a select over the write
+# before, and each sought its pieces through all the writes before it, T²/2
+# selects for T slices.
+function pieces(values, def::Pointwise, at, d::Domain, found)
     through(o::Read) = Read(o.value, map(e -> substitute(e, at, d), o.index))
     through(o) = o
-    inner(o) = o isa Read && values[o.value].definition isa Pointwise ?
-        pieces(values, values[o.value].definition, through(o).index, d) : nothing
+    function inner(o)
+        o isa Read && values[o.value].definition isa Pointwise || return nothing
+        r = through(o)
+        get!(() -> pieces(values, values[r.value].definition, r.index, d, found), found, (r.value, r.index, d))
+    end
     if def.f === ifelse && length(def.operands) == 3
         c, x, y = def.operands
         m = block_mask(values, c, at, d)
         (m === nothing || !(x isa Read)) && return nothing
         rest = inner(y)
-        piece = (; mask = m, read = through(x))
-        return rest === nothing ? ([piece], through(y)) : ([piece; first(rest)], last(rest))
+        piece = Piece(through(x), m, d)
+        return rest === nothing ? Pieces([piece], Pieces[], through(y)) : Pieces([piece], [rest], rest.rest)
     elseif def.f === (+) && length(def.operands) == 2
-        zeros = Any[]
+        zeros = Pieces[]
         for o in def.operands
             p = inner(o)
-            p !== nothing && last(p) isa Literal && iszero(last(p).value) || return nothing
+            p !== nothing && p.rest isa Literal && iszero(p.rest.value) || return nothing
             push!(zeros, p)
         end
-        return ([first(zeros[1]); first(zeros[2])], last(zeros[1]))
+        return Pieces(Piece[], zeros, zeros[1].rest)
     end
     nothing
 end
@@ -667,12 +726,13 @@ function lower(p::Program)
     backward = BitVector()
     in_backward = false
     numbered = Dict{Value, Int}()
+    found = Dict{Tuple{Int, Tuple{Vararg{Affine}}, Domain}, Union{Nothing, Pieces}}()
     access = Vector{Access}(undef, length(nodes))
     # A value defined over a node's shape, over the node's wide axes instead.
     # Two nodes with one definition are one value: a subexpression written
     # twice is computed once, and spellings that repeat it read the same value.
     function value!(definition, dims, T; scalar = false)
-        whole = !scalar && definition isa Pointwise ? covering(values, definition, Domain(dims), T) : nothing
+        whole = !scalar && definition isa Pointwise ? covering(values, definition, Domain(dims), T, found) : nothing
         whole === nothing || return ValueAccess(whole.value, whole.index)
         v = Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar)
         id = get!(numbered, v) do
