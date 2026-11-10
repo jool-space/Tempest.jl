@@ -1397,9 +1397,9 @@ elements and scales as two arrays (a reshape to blocks, `repeat`,
 `Float32.(w)` of a Microfloats type, Microscaling's `copy`), MXFP4, MXFP8 and
 NVFP4's two levels each plan one kernel that reads the scale at `k ÷ 32` and
 agree with Float64; a table indexed by code agrees, its index stored first;
-and two faults stand, neither yet a test: the planner's `BoundsError`
-(`atom_range`) on `getindex.(Ref(s), k .÷ 32 .+ 1, m)`, and the stack
-overflow.
+`getindex.(Ref(s), k .÷ 32 .+ 1, m)`, which failed planning with a
+`BoundsError` (`atom_range`), is a gather by the linear index its elements
+name; and one fault stands, not yet a test: the stack overflow.
 
 **Whole programs against their challengers.** The corpus (`test/corpus`): a
 neural ODE's training step, an LSTM's, a GPT's, and a heat equation's

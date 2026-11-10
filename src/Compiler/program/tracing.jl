@@ -843,8 +843,24 @@ function select(x::TracedArray, I; scalar)
     scalar ? Traced(x.tape, id) : TracedArray(x.tape, id)
 end
 
-Base.getindex(x::TracedArray, I...) = select(x, I; scalar = true)
+Base.getindex(x::TracedArray, I...) = any(reads_element, I) ? select_elements(x, I) : select(x, I; scalar = true)
 Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
+
+# In a broadcast's function, indices that stand for elements of arrays, as in
+# `getindex.(Ref(x), i, j)`, select an element at each position of their
+# broadcast, as Base's broadcast does: a gather from `vec(x)` by the linear
+# index they name together, itself an element. A selection by them as arrays
+# would take every combination of their positions.
+function select_elements(x::TracedArray, I)
+    I = Tuple(Iterators.flatten(map(index_components, I)))
+    linear = first(I)
+    stride = 1
+    for k in 2:length(I)
+        stride *= size(x, k - 1)
+        linear += (I[k] - 1) * stride
+    end
+    handle(vec(x)[TracedArray(linear.tape, linear.id)])
+end
 
 # A reversal is a selection by reversed ranges, not a loop of swaps.
 Base.reverse(x::TracedArray; dims = :) = x[ntuple(k -> dims isa Colon || k in dims ? (size(x, k):-1:1) : (1:size(x, k)), ndims(x))...]

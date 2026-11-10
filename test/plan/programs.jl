@@ -48,3 +48,25 @@ end
     @test count(g -> !isempty(C.recomputed_in(g)), planned.groups) == 1
     @test agree(C.execute(planned, q, k, x), [interpret(p, q, k, x)])
 end
+
+# A broadcast that indexes an array by elements, `getindex.(Ref(s), i, j)`,
+# selects an element at each position of the broadcast, as Base's does: a
+# gather by the linear index the elements name together, whose shape is
+# theirs. A block's scale read at `k ÷ 32` is one.
+@testset "a broadcast getindex through a Ref" begin
+    x, s, v = data(64, 6), data(2, 6), data(64)
+    k, m = reshape(0:63, :, 1), reshape(1:6, 1, :)
+    scaled(x, s) = x .* getindex.(Ref(s), k .÷ 32 .+ 1, m)
+    @testset "$name" for (name, f, args) in [
+        ("by two indices", scaled, (x, s)),
+        ("by a linear index", (x, s) -> x .* getindex.(Ref(s), k .÷ 32 .+ 1 .+ 2 .* (m .- 1)), (x, s)),
+        ("a block-scaled product", (x, s, v) -> scaled(x, s)' * v, (x, s, v)),
+    ]
+        p = trace(f, args...)
+        @test interpret(p, args...) ≈ f(args...)
+        for q in (p, differentiate(trace((args...) -> sum(abs2, f(args...)), args...)))
+            @test agree(C.execute(C.plan(C.lower(q)), args...), filter(!isnothing, C.leaves(interpret(q, args...))))
+        end
+        @test outputs(execute!(prepare(p, args...))) ≈ f(args...)
+    end
+end
