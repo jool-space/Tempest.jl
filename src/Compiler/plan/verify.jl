@@ -62,8 +62,9 @@ Check the invariants the kernels of `plan` rely on, and throw an
     value's kernel and every reader.
  3. A recurrence's group has every state of its cycle first among its
     members, each carried from a different value it computes, and stores the
-    values of the cycle no other kernel stores; each fold of it is a sum that
-    rides its steps, through values nothing stores.
+    values of the cycle no other kernel stores; each member outside the
+    cycle rides its steps along them or at their last, and each fold of it
+    is a sum that rides them, through values nothing stores.
  4. Each member's term loads values stored apart, its own only in a
     recurrence's; each member has a place within the domain; a fold read as
     a `Stat` is a primary fold of the group complete in an earlier phase;
@@ -138,17 +139,17 @@ function verify_recurrences(p::Plan)
             p.owner[w] == k || !p.stored[w] && p.owner[w] == 0 ||
                 invalid(3, value_name(p, w), ", of the cycle of ", kernel_name(p, k), ", is ", p.owner[w] == 0 ? "stored by no kernel" : string("owned by ", kernel_name(p, p.owner[w])))
         end
-        for m in g.outputs
-            m in cycle || invalid(3, value_name(p, m), " is a member of ", kernel_name(p, k), " outside its cycle")
-        end
         (; domain) = recurrence_places(graph, g.outputs)
         domain == g.domain || invalid(3, kernel_name(p, k), " steps over ", g.domain, " where its members lie over ", domain)
-        isempty(g.reductions) && continue
+        riders = [[m for m in g.outputs if !(m in cycle)]; g.reductions]
+        isempty(riders) && continue
         live === nothing && (live = planned_live(p))
-        for r in g.reductions
-            between = riding(graph, live, cycle, r)
-            between === nothing && invalid(3, value_name(p, r), ", a fold of ", kernel_name(p, k), ", does not ride its steps")
-            for u in between
+        for r in riders
+            rider = riding(graph, live, cycle, r)
+            summed = r in g.reductions
+            (rider === nothing || (rider.how === :summed) != summed) &&
+                invalid(3, value_name(p, r), summed ? ", a fold of " : ", a member of ", kernel_name(p, k), " outside its cycle, does not ride its steps")
+            for u in rider.between
                 p.stored[u] || p.owner[u] > 0 || continue
                 invalid(3, value_name(p, u), ", which ", value_name(p, r), " reads at each step of ", kernel_name(p, k), ", is ",
                     p.owner[u] == 0 ? "stored" : string("owned by ", kernel_name(p, p.owner[u])))

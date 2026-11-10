@@ -112,7 +112,21 @@ function stages!(out, case, cuda)
     p === nothing && return
     out[:nodes] = length(p.nodes)
     stage!(out, :fwd_interp, () -> relerr(C.interpret(p, args...), ref))
-    stage!(out, :fwd_cpu, () -> relerr(only(C.leaves(C.outputs(C.execute!(C.prepare(p, args...))))), ref))
+    forward = nothing
+    stage!(out, :fwd_cpu, function ()
+        ex = C.prepare(p, args...)
+        forward = ex.plan
+        relerr(only(C.leaves(C.outputs(C.execute!(ex)))), ref)
+    end)
+    if forward !== nothing
+        riders = C.riding_values(forward)
+        out[:riders] = length(riders)
+        if !isempty(riders)
+            # A generator of its own, so that the stages after draw as before.
+            ride = some(Xoshiro(case.seed + 2), riders)
+            stage!(out, :fwd_ride, () -> relerr(only(C.leaves(C.outputs(C.execute!(C.prepare(p, args...; ride))))), ref))
+        end
+    end
     g = (xs...) -> T.withgradient(f, xs...)
     eager = nothing
     # Eager `withgradient` is Tempest's own differentiation, interpreted: only
@@ -139,7 +153,7 @@ function stages!(out, case, cuda)
                 leaves_err(C.leaves(C.outputs(C.execute!(ex))), reference)
             end)
             if planned !== nothing
-                sums = C.riding_sums(planned)
+                sums = C.riding_values(planned)
                 out[:sums] = length(sums)
                 if !isempty(sums)
                     ride = some(rng, sums)
@@ -177,7 +191,7 @@ function stages!(out, case, cuda)
         leaves_err(C.leaves(C.outputs(C.execute!(ex))), reference; floor = 1.0e-4)
     end)
     if planned !== nothing
-        sums = C.riding_sums(planned)
+        sums = C.riding_values(planned)
         if !isempty(sums)
             ride = some(rng, sums)
             stage!(out, :cuda_ride, () -> leaves_err(C.leaves(C.outputs(C.execute!(C.prepare(q32, dev...; ride, measure = :none)))), reference; floor = 1.0e-4))

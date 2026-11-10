@@ -116,7 +116,7 @@ end
 
 """
 How one grouping pass formed its kernels, kept where its context records: what
-was stored as it began, the sets fixed and the sums riding each recurrence's
+was stored as it began, the sets fixed and the values riding each recurrence's
 steps, by the recurrence's state; and each kernel as formed (see `Formed`),
 in order, whether taken as it was from a formation before (`taken`), and its
 place by its seed (`at`).
@@ -124,7 +124,7 @@ place by its seed (`at`).
 struct Formation
     stored::Vector{Bool}
     fixed::Vector{Vector{Int}}
-    riders::Dict{Int, Vector{Int}}
+    riders::Dict{Int, Vector{Pair{Int, Symbol}}}
     formed::Vector{Formed}
     taken::Vector{Bool}
     at::Dict{Seed, Int}
@@ -153,7 +153,7 @@ passed!(::Nothing, seed) = nothing
 
 The kernels of one grouping pass, formed through context `cx` from each seed
 in turn (see `Seed`): a kernel of each set in `fixed`, of each recurrence,
-with the sums in `riders` riding its steps, then one grown from each fold and
+with the values in `riders` riding its steps, then one grown from each fold and
 each map no kernel holds yet. Where `near` replays the formation of a plan
 before (see `Replay`), a kernel it formed from the same seed is taken as it
 was where nothing its forming read differs; the rest form here. With them,
@@ -197,7 +197,7 @@ grown(grounds::Grounds, cx::Forming, seed::MapSeed, fixed, riders) = grown_map(g
 
 function grown(grounds::Grounds, cx::Forming, seed::RecurrenceSeed, fixed, riders)
     recurrence = grounds.recurrences[seed.at]
-    g = recurrence_group(grounds.graph, cx, recurrence, get(riders, first(recurrence.states), Int[]))
+    g = recurrence_group(grounds.graph, cx, recurrence, get(riders, first(recurrence.states), Pair{Int, Symbol}[]))
     # What a recurrence computes at each step is its group's alone: a set
     # fixed apart holding any of it would be a second kernel writing it.
     held = filter(m -> owned(cx, m), members(g))

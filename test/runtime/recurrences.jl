@@ -351,7 +351,7 @@ end
     rides = C.rides(C.generator_plan(d))
     @test !isempty(rides)
     kernels = 0
-    for (r, within) in rides, v in within
+    for (r, within, how) in rides, v in within
         own = try
             C.plan(d.graph; fixed = [[v]], ride = [r])
         catch e
@@ -360,8 +360,8 @@ end
         end
         kernels += 1
         @test_throws C.InvalidPlan C.verify(own)
-        @test C.plan_taking(d, [C.Candidate([[v]]), C.Ride(r, within)]) === nothing
-        @test C.verify(C.plan_taking(d, [C.Ride(r, within)])) isa C.Plan
+        @test C.plan_taking(d, [C.Candidate([[v]]), C.Ride(r, within, how)]) === nothing
+        @test C.verify(C.plan_taking(d, [C.Ride(r, within, how)])) isa C.Plan
     end
     @test kernels > 0
 end
@@ -384,4 +384,60 @@ end
     loss(xs...) = (r = delta(xs...); sum(abs2, r[1]) + sum(r[2]))
     grad = (xs...) -> T.withgradient(loss, xs...)
     @test agree(C.leaves(outputs(execute!(prepare(trace(grad, args...), args...)))), C.leaves(grad(args...)); rtol = 1.0e-10)
+end
+
+# A value computed from one step of a recurrence, which nothing else reads of
+# it, rides its steps as a sum over them does: an output at each step is
+# written at each, the state the steps leave at the last, and the states of
+# every step are stored nowhere when nothing else reads them, as the delta
+# rule's outputs in Qwen3.5-4B, which had stored 2 MiB of state a step to
+# read each step's output from. Its gradient reads every step's state, which
+# the steps then store.
+@testset "values riding a recurrence's steps" begin
+    function delta(S, q, k, v, β)
+        outputs = []
+        for t in axes(q, 2)
+            δ = β[t] .* (v[:, t] .- S' * k[:, t])
+            S = S .+ k[:, t] * δ'
+            push!(outputs, S' * q[:, t])
+        end
+        stack(outputs), S
+    end
+    args = (data(4, 3; scale = 0.3), data(4, 6; scale = 0.4), data(4, 6; scale = 0.2), data(3, 6; scale = 0.5), 0.5 .+ 0.1 .* data(6))
+    eager = C.leaves(delta(args...))
+    p = trace(delta, args...)
+    planned = prepare(p, args...; build = false).plan
+    recurrence(q) = only(g for g in q.groups if g.kind isa C.RecurrenceKind)
+    state = first(recurrence(planned).outputs)
+    # Nothing outside reads the state at any step: it is stored at none.
+    @test !planned.stored[state]
+    riders = C.rides(planned)
+    @test sort(last.(riders)) == [:each, :last] && isempty(C.riding_sums(planned))
+    ridden = C.plan(planned.graph; ride = C.riding_values(planned))
+    @test length(ridden.groups) == 1 && sort(C.structure(ridden).stored) == sort(first.(riders))
+    @test agree(C.execute(ridden, args...), eager; rtol = 1.0e-12)
+    explained = sprint(C.explain, ridden)
+    @test occursin("at each step, riding the steps", explained) && occursin("at the last step, riding the steps", explained)
+    for ride in ([first(r) for r in riders if last(r) === :each], C.riding_values(planned))
+        ex = prepare(p, args...; ride)
+        @test agree(C.leaves(outputs(execute!(ex))), eager; rtol = 1.0e-12)
+    end
+    # The outputs alone ride: the steps run a step at a time, as plans of their own.
+    @test count(k -> k isa C.SteppedKernels, prepare(p, args...; ride = [first(r) for r in riders if last(r) === :each]).kernels) == 1
+    loss(xs...) = (r = delta(xs...); sum(abs2, r[1]) + sum(r[2]))
+    grad = (xs...) -> T.withgradient(loss, xs...)
+    q = trace(grad, args...)
+    @test agree(C.leaves(outputs(execute!(prepare(q, args...)))), C.leaves(grad(args...)); rtol = 1.0e-10)
+    backward = prepare(q, args...; build = false).plan
+    @test any(g -> g.kind isa C.RecurrenceKind && backward.stored[first(g.outputs)], backward.groups)
+    if CUDA_FUNCTIONAL
+        # The cover takes both: one kernel steps through the delta rule, the
+        # state on chip, writing each step's output and the last state.
+        q32 = trace(delta, map(single, args)...)
+        ex = prepare(q32, map(x -> CuArray(single(x)), args)...; measure = :none)
+        @test length(ex.kernels) == 1 && occursin("cuTile recurrence", string(only(ex.kernels)))
+        @test agree(map(Array, C.leaves(outputs(execute!(ex)))), eager; rtol = 1.0e-4)
+        ex = prepare(trace(grad, map(single, args)...), map(x -> CuArray(single(x)), args)...; measure = :none)
+        @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), C.leaves(grad(args...)); rtol = 1.0e-4)
+    end
 end

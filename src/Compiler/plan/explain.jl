@@ -66,12 +66,36 @@ function explain(io::IO, p::Plan)
         print(io, "kernel ", k, ": ", g.kind, " over ", g.domain)
         println(io, isempty(reads) ? "" : string(", reads ", join(map(r -> "%$r", reads), " ")))
         for r in sort(g.reductions; by = r -> (g.phase[r], r))
-            g.kind isa RecurrenceKind && (println(io, "  adds to ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r], " at each step"); continue)
+            g.kind isa RecurrenceKind && (println(io, "  adds to ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r], " at each step, riding the steps"); continue)
             println(io, "  phase ", g.phase[r], ": ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r])
         end
+        g.kind isa RecurrenceKind && (explain_recurrence(io, p, g); continue)
         for m in g.outputs
             p.stored[m] || continue
             println(io, "  writes ", describe_value(graph, m), " = ", g.terms[m])
+        end
+    end
+end
+
+# A recurrence's members: its states, which it carries from step to step and
+# stores where something reads them, the values of its cycle it stores, and
+# the values riding its steps, written at each or at the last.
+function explain_recurrence(io::IO, p::Plan, g::Group)
+    graph = p.graph
+    cs = recurrence_states(graph, g.outputs)
+    cycle = recurrence_cycle(graph, cs, [carried_from(graph, c) for c in cs])
+    places = recurrence_places(graph, g.outputs).places
+    axis = graph.values[first(cs)].definition.axis
+    for m in g.outputs
+        if m in cs
+            println(io, "  carries ", describe_value(graph, m), " from ", g.terms[m], p.stored[m] ? ", writing it at each step" : ", writing it at no step")
+        elseif !p.stored[m]
+            continue
+        elseif m in cycle
+            println(io, "  writes ", describe_value(graph, m), " = ", g.terms[m])
+        else
+            println(io, "  writes ", describe_value(graph, m), " = ", g.terms[m], last_step(places[m], axis) ? " at the last step" : " at each step",
+                ", riding the steps")
         end
     end
 end

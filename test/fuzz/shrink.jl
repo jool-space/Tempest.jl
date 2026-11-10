@@ -81,7 +81,8 @@ const HOW = Dict(
     :grad_interp => "C.interpret(C.trace((xs...) -> T.withgradient(f, xs...), args...), args...)  # against T.withgradient(f, args...)",
     :grad_cpu => "C.outputs(C.execute!(C.prepare(C.trace((xs...) -> T.withgradient(f, xs...), args...), args...)))  # against T.withgradient(f, args...)",
     :cuda_fwd => "C.outputs(C.execute!(C.prepare(C.trace(f, single...), map(CuArray, single)...)))  # single: the arguments in Float32",
-    :grad_ride => "C.prepare(C.trace((xs...) -> T.withgradient(f, xs...), args...), args...; ride)  # ride: some of C.riding_sums(plan)",
+    :fwd_ride => "C.prepare(C.trace(f, args...), args...; ride)  # ride: some of C.riding_values(plan)",
+    :grad_ride => "C.prepare(C.trace((xs...) -> T.withgradient(f, xs...), args...), args...; ride)  # ride: some of C.riding_values(plan)",
     :grad_recompute => "C.prepare(C.trace((xs...) -> T.withgradient(f, xs...), args...), args...; recompute)  # some of C.recomputable_folds(plan.graph)",
     :cuda_grad => "C.outputs(C.execute!(C.prepare(C.trace((xs...) -> T.withgradient(f, xs...), single...), map(CuArray, single)...)))",
 )

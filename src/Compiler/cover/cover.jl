@@ -273,7 +273,7 @@ function cover(d::Decider)
             push!(proposed, Store(v))
         end
     end
-    measures(d) && foreach(((v, within),) -> push!(proposals, (Ride(v, within), nothing)), rides(base))
+    measures(d) && foreach(((v, within, how),) -> push!(proposals, (Ride(v, within, how), nothing)), rides(base))
     clock = lap!(:cover_proposals, clock)
     # What the starting plan stores: a set that does not form one group
     # there, where a trial would first form it, is not tried. A set holding a

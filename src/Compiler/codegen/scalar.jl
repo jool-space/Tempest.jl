@@ -397,7 +397,8 @@ end
 # along the states' axis. At the first step it stores the states where they
 # start; at each it computes and stores each other member over its axes,
 # reading what this step stored, the values the states are carried from
-# last, each into its state one step on.
+# last, each into its state one step on; at the last, the members of the
+# last step alone. It keeps every member in storage (see `floor_stored`).
 function recurrence_kernel(graph, stored, g::Group, slots)
     D = g.domain
     vars = index_vars(length(D))
@@ -428,7 +429,9 @@ function recurrence_kernel(graph, stored, g::Group, slots)
         loop = :(for position in 0:$(prod(k -> D[k], inner; init = 1) - 1)
             $compute
         end)
-        push!(steps.args, m in states ? :($(vars[axis]) == $first_step && $loop) : loop)
+        # A member along none of the steps is of the last alone.
+        once = !any(e -> mentions(e, axis), places[m])
+        push!(steps.args, m in states ? :($(vars[axis]) == $first_step && $loop) : once ? :($(vars[axis]) == $last_step && $loop) : loop)
     end
     push!(body.args, :(for $(vars[axis]) in $first_step:$step:$last_step
         $steps

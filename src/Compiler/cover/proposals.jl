@@ -217,41 +217,64 @@ end
 explain(io, q::Store, c, why) = c.accepted && println(io, "%", q.value, " is stored apart, in a kernel of its own", why)
 
 """
-A sum over a recurrence's steps of what they compute, added as they run
-rather than after them from what they store (see `riding`): a proposal of
-the planner's own, priced where the recurrence's step can be planned. The
-steps compute each part where its operands are fresh, and store only what
-else reads them; the sum after the steps reads every step's, as a neural
-ODE's weight gradients read every evaluation's activations. Small steps run
-fastest summed after, in a few kernels; large ones, read once. It is about
-what its steps compute for the sum too (`within`), which nothing else reads:
-a proposal taken with it that made a kernel of one of them would make one
-whose work nothing reads, beside the steps computing it.
+A value computed from a recurrence's steps, computed as they run rather
+than after them from what they store (see `riding`): a proposal of the
+planner's own. A sum over the steps adds each step's part as the steps run,
+priced where the recurrence's step can be planned, since only the steps run
+a step at a time add it: the steps compute each part where its operands are
+fresh, and store only what else reads them; the sum after the steps reads
+every step's, as a neural ODE's weight gradients read every evaluation's
+activations. Small steps run fastest summed after, in a few kernels; large
+ones, read once. A value along the steps, or of their last, is written by
+the steps as they compute it, as a recurrent network's output at each step
+and its state after the last are: what it reads of the steps need not be
+stored for it, the states of every step among them where nothing else reads
+them. A product a step computes once a step may run fastest after the steps
+instead, over all of them at once. It is about what its steps compute for
+the value too (`within`), which nothing else reads: a proposal taken with it
+that made a kernel of one of them would make one whose work nothing reads,
+beside the steps computing it. How it meets the steps is `how` (see
+`riding`).
 """
 struct Ride <: Proposal
     value::Int
     within::Vector{Int}
+    how::Symbol
 end
 
 change(q::Ride) = Inputs(; ride = (q.value,))
 fixes(q::Ride) = [q.value; q.within]
-key_text(io, ::Plan, ::Ride) = print(io, " || ride")
-priceable(d::Decider, p::Plan, q::Ride) = stepped_plan(d, p, p.groups[p.owner[q.value]]) !== nothing
-explain(io, q::Ride, c, why) =
-    println(io, "%", q.value, c.accepted ? " is summed as the steps of the recurrence it reads run" :
-        " is summed after the steps of the recurrence it reads", why)
+key_text(io, ::Plan, q::Ride) = print(io, " || ride ", q.how)
+# A recurrence a sum rides runs only a step at a time.
+function priceable(d::Decider, p::Plan, q::Ride)
+    g = p.groups[p.owner[q.value]]
+    isempty(g.reductions) || stepped_plan(d, p, g) !== nothing
+end
+explain(io, q::Ride, c, why) = println(io, "%", q.value, ridden(q.how, c.accepted), why)
+
+ridden(how, accepted) = how === :summed ?
+    (accepted ? " is summed as the steps of the recurrence it reads run" : " is summed after the steps of the recurrence it reads") :
+    how === :each ? (accepted ? " is computed at each step of the recurrence it reads, as the steps run" :
+        " is computed after the steps of the recurrence it reads, from what they store") :
+    (accepted ? " is computed at the last step of the recurrence it reads, as the steps run" :
+        " is computed after the steps of the recurrence it reads, from what the last stores")
 
 """
+    riding_values(plan) -> values
     riding_sums(plan) -> values
 
-The sums of `plan` that could ride the steps of one of its recurrences:
-computed apart from them, over the steps, reading the recurrence's cycle
-through values only they read (see `riding`), each once.
+The values of `plan` that could ride the steps of one of its recurrences:
+computed apart from them, along them, at their last or over them, reading
+the recurrence's cycle through values only they read (see `riding`), each
+once; and of those, the sums over the steps.
 """
-riding_sums(p::Plan) = first.(rides(p))
+riding_values(p::Plan) = [r for (r, _, _) in rides(p)]
+riding_sums(p::Plan) = [r for (r, _, how) in rides(p) if how === :summed]
 
-# Each sum of `plan` that could ride the steps of one of its recurrences, with
-# the values the steps would compute for it, which nothing else reads.
+# Each value of `plan` that could ride the steps of one of its recurrences,
+# with the values the steps would compute for it, which nothing else reads,
+# and how it meets the steps. A value along them or of their last is one a
+# kernel stores; a sum, any.
 function rides(p::Plan)
     graph = p.graph
     values = graph.values
@@ -261,16 +284,25 @@ function rides(p::Plan)
         live[id] || continue
         foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(values[id].definition))
     end
-    found = Pair{Int, Vector{Int}}[]
+    found = Tuple{Int, Vector{Int}, Symbol}[]
+    taken = Set{Int}()
     for recurrence in recurrences(graph)
         c = first(recurrence.states)
         live[c] || continue
         k = p.owner[c]
-        for (r, v) in enumerate(values)
-            d = v.definition
-            d isa Reduction && d.fold isa SumFold && p.owner[r] != k && r > maximum(recurrence.from) && !any(x -> first(x) == r, found) || continue
-            within = riding(graph, live, recurrence.values, r)
-            within === nothing || push!(found, r => within)
+        reaching = Reaching(graph, recurrence.values)
+        # What a value reads between it and the cycle only it reads: a value
+        # one of whose operands a later one reads too rides nothing, as each
+        # layer after a recurrence's reads the one before.
+        (; inside, reaches, users) = reaching
+        apart(r) = all(o -> all(x -> !reaches[x] || x in inside || all(u -> u <= r || !live[u], users[x]), read_values(o)),
+            operands(values[r].definition))
+        for r in (maximum(recurrence.from) + 1):length(values)
+            p.owner[r] != k && !(r in taken) && reaches[r] && apart(r) || continue
+            rider = riding(graph, live, recurrence.values, r, reaching)
+            rider !== nothing && (rider.how === :summed || p.owner[r] > 0 && p.stored[r]) || continue
+            push!(found, (r, rider.between, rider.how))
+            push!(taken, r)
         end
     end
     found

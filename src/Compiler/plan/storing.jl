@@ -33,17 +33,19 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
         end
         grown || break
     end
-    # Each sum riding a recurrence's steps, by the recurrence's state, and
-    # the values between it and the cycle, which its steps compute.
+    # Each value riding a recurrence's steps, by the recurrence's state, with
+    # how it meets them, and the values between it and the cycle, which its
+    # steps compute.
     recurring = recurrences(graph)
-    riders = Dict{Int, Vector{Int}}()
+    riders = Dict{Int, Vector{Pair{Int, Symbol}}}()
     between = Dict{Int, Set{Int}}()
     for r in ride
         k = findfirst(e -> live[first(e.states)] && riding(graph, live, e.values, r) !== nothing, recurring)
         k === nothing && throw(NotAGroup([r]))
         c = first(recurring[k].states)
-        push!(get!(() -> Int[], riders, c), r)
-        union!(get!(() -> Set{Int}(), between, c), riding(graph, live, recurring[k].values, r))
+        rider = riding(graph, live, recurring[k].values, r)
+        push!(get!(() -> Pair{Int, Symbol}[], riders, c), r => rider.how)
+        union!(get!(() -> Set{Int}(), between, c), rider.between)
     end
     foreach(b -> union!(recomputed, b), Base.values(between))
     # Reads of a value, one per running reader and formula: a reader that
@@ -73,7 +75,7 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     # recurrence's kernel, as `tanh.(a)` read once, left the steps nothing to
     # start from.
     for recurrence in recurring, c in recurrence.states
-        haskey(riders, first(recurrence.states)) || continue
+        any(x -> last(x) === :summed, get(riders, first(recurrence.states), ())) || continue
         init = values[c].definition.init
         init isa Read && (materialized[init.value] = true)
     end
@@ -102,32 +104,42 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
         live[id] && !stored[id] && !(id in recomputed || after[id]) && accumulates(values, id) || continue
         any(r -> live[r] && accumulates(values, r), users[id]) && (stored[id] = true)
     end
-    # A recurrence's state is stored, and the values of its cycle something
-    # outside it reads, the value the state is carried from among them: its
-    # group stores them at each step. The rest it recomputes at each step,
-    # the value it is carried from becoming the state one step on (see
-    # `recurrence_group`); so does a map of what is stored, which a reader
-    # outside recomputes too.
+    # A recurrence's group stores the values of its cycle something outside
+    # it reads, its states and the values they are carried from among them,
+    # at each step. The rest it computes at each step, the value a state is
+    # carried from becoming the state one step on (see `recurrence_group`);
+    # so does a map of what is stored, which a reader outside recomputes too.
+    # A kernel that holds the states between steps stores none of them
+    # nothing reads: Qwen3.5-4B's delta rule, its outputs riding the steps,
+    # had stored 2 MiB of state a step it never read again. One that keeps
+    # them in storage between steps keeps its own (see `recurrence_carry`).
     if !isempty(recurring)
         users = readers(graph)
         for recurrence in recurring
             cs, fs, cycle = recurrence.states, recurrence.from, recurrence.values
-            foreach(c -> stored[c] = true, cs)
-            # A sum riding the steps, and what it computes there, are read
+            # What rides the steps, and what it computes there, are read
             # within them.
             c = first(cs)
-            within = union(Set(cycle), get(riders, c, Int[]), get(between, c, Set{Int}()))
+            within = union(Set(cycle), first.(get(riders, c, Pair{Int, Symbol}[])), get(between, c, Set{Int}()))
+            outside(w) = any(u -> live[u] && !(u in within), users[w])
+            foreach(w -> stored[w] = true, cs)
             for w in cycle
                 w in cs && continue
                 d = values[w].definition
                 # A value a state is carried from that another of the step
                 # reads, as an LSTM's hidden state reads its cell's, is
                 # stored where the step reads it.
-                stored[w] = w in results || materialized[w] || any(u -> live[u] && !(u in within), users[w]) ||
+                stored[w] = w in results || materialized[w] || outside(w) ||
                     w in fs && any(u -> live[u] && u in cycle && !(u in cs), users[w])
                 # A result, or what a gather reads, is stored whatever it reads.
                 stored[w] && !(w in fs) && !(w in results) && !materialized[w] && d isa Pointwise &&
                     all(o -> !(o isa Read) || stored[o.value], d.operands) && (stored[w] = false)
+            end
+            # A state is read outside where a map of the cycle that reads it
+            # is, recomputed by its reader there.
+            for w in cs
+                stored[w] = w in results || materialized[w] || outside(w) ||
+                    any(u -> u in cycle && !stored[u] && values[u].definition isa Pointwise && outside(u), users[w])
             end
         end
     end
@@ -152,6 +164,8 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
         o isa Read && stored[o.value] && (stored[id] = false)
     end
     foreach(b -> foreach(u -> stored[u] = false, b), Base.values(between))
+    # A value riding the steps is written by them.
+    foreach(rs -> foreach(((r, _),) -> stored[r] = true, rs), Base.values(riders))
     (; graph, stored, live, results, materialized, riders)
 end
 
@@ -182,6 +196,10 @@ end
 function recomputable(p::Plan, users, id, live, results, materialized)
     v = p.graph.values[id]
     v.definition isa Pointwise && p.stored[id] && live[id] && !(id in results) && !materialized[id] || return false
+    # What a recurrence computes is read from it: recomputed outside, its
+    # reader would read the state of each step, which the recurrence stores
+    # only where something outside reads it.
+    p.owner[id] > 0 && p.groups[p.owner[id]].kind isa RecurrenceKind && return false
     groups = Set{Int}()
     pending, seen = [id], Set{Int}()
     while !isempty(pending)

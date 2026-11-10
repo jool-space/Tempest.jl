@@ -67,7 +67,7 @@ struct Replay
     graph::IndexGraph
     before::Formation
     fixed::Vector{Vector{Int}}
-    riders::Dict{Int, Vector{Int}}
+    riders::Dict{Int, Vector{Pair{Int, Symbol}}}
     up::Vector{BitVector}
     restored::BitVector
     lost::BitVector
@@ -109,13 +109,13 @@ function formed_before(r::Replay, seed::Seed)
 end
 
 # Whether `seed` is here what it was there, where kernel `f` formed from it:
-# a fixed seed the same set, a recurrence's the same sums riding it.
+# a fixed seed the same set, a recurrence's the same values riding it.
 same_seed(r::Replay, seed::FixedSeed, f::Formed) = r.before.fixed[seed.at] == r.fixed[seed.at]
 same_seed(r::Replay, seed::Union{FoldSeed, MapSeed}, f::Formed) = true
 
 function same_seed(r::Replay, seed::RecurrenceSeed, f::Formed)
     c = first(f.group.outputs)
-    get(r.riders, c, Int[]) == get(r.before.riders, c, Int[])
+    get(r.riders, c, Pair{Int, Symbol}[]) == get(r.before.riders, c, Pair{Int, Symbol}[])
 end
 
 """

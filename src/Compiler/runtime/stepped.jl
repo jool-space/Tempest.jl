@@ -44,10 +44,12 @@ end
     step_graph(graph, stored, g) -> StepGraph or nothing
 
 The cycle of recurrence group `g` at one step, the values it recomputes
-outside the cycle with it, and each part of the sums riding its steps; or
-nothing where a step is not a program of its own: where it reads a value of
-the cycle at another step, or a value along the steps other than by its last
-axis, or by an index array, or a sum riding the steps reads none along them.
+outside the cycle with it, the values riding its steps along them, and each
+part of the sums riding them; or nothing where a step is not a program of
+its own: where it reads a value of the cycle at another step, or a value
+along the steps other than by its last axis, or by an index array, or a sum
+riding the steps reads none along them, or a value rides at the last step
+alone.
 """
 function step_graph(graph::IndexGraph, stored, g::Group)
     values = graph.values
@@ -78,7 +80,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         elseif u in cs
             s == cd.axis || (ok[] = false)
             :state
-        elseif u in cycle
+        elseif u in cycle || u in members
             (s == 0 || u in members && s != along(u)) && (ok[] = false)
             :step
         elseif stored[u]
@@ -390,9 +392,9 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers, r::Resources)
     cs = [first(leaf) for leaf in s.leaves[1:s.states]]
     fs = [carried_from(p.graph, c) for c in cs]
     cd = values[first(cs)].definition::Carried
-    # A value a state is carried from, where the plan does not store it, is
-    # stored by the steps, each step's where the next reads it.
-    own = Dict(f => allocate(target, values[f].eltype, storage_length(values[f])) for f in fs if buffers[f] === nothing)
+    # A state, or a value one is carried from, where the plan does not store
+    # it, is stored by the steps, each step's where the next reads it.
+    own = Dict(f => allocate(target, values[f].eltype, storage_length(values[f])) for f in [cs; fs] if buffers[f] === nothing)
     stacked(u) = haskey(own, u) ? own[u] : buffers[u]
     # The step's slice of value `u` along its last axis, at step `t`.
     function slice(u, t)

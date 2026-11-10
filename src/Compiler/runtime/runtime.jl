@@ -169,9 +169,11 @@ others.
 `recompute` pins folds to be recomputed where they are read rather than
 stored, by their numbers among the values of the program's index graph, as
 `explain` prints them: what the cover would otherwise decide by cost (see
-`Tempest.Compiler.recomputable_folds`). `ride` pins sums over a
-recurrence's steps to be added as the steps run, so numbered: what the cover
-would otherwise decide by cost (see `Tempest.Compiler.riding_sums`).
+`Tempest.Compiler.recomputable_folds`). `ride` pins values computed
+from a recurrence's steps to be computed as the steps run, so numbered: a
+sum over the steps added at each, a value along them written at each, one of
+the last step written at it; what the cover would otherwise decide by cost
+(see `Tempest.Compiler.riding_values`).
 `partition` decides which of the
 forward's maps the backward recomputes rather than reads, by a minimum cut
 of what saving them costs (see `Tempest.Compiler.partition`); `false` saves
@@ -959,8 +961,8 @@ outputs(ex::Executable) = ex.outputs
 # The buffers a group's kernels take, in the order the group first mentions
 # their values (`appearance`), as `canonical` numbers them: groups alike take
 # theirs in one order, and generate one kernel, however the values are numbered.
-function kernel_slots(p, g)
-    slots = union(group_reads(p.graph, g), [v for v in members(g) if p.stored[v]])
+function kernel_slots(p, g, stored = p.stored)
+    slots = union(group_reads(p.graph, g), [v for v in members(g) if stored[v]])
     order = Dict(v => k for (k, v) in enumerate(appearance(p, g)))
     sort!(collect(slots); by = v -> (get(order, v, typemax(Int)), v))
 end
@@ -997,9 +999,24 @@ starts_in_place(graph, r, buffers) = graph.values[r].definition.into isa Read &&
 # from starts from them there.
 function build_floor(target, p::Plan, g::Group, buffers)
     held = filter(r -> keyed(p.graph, r) && starts_in_place(p.graph, r, buffers), g.reductions)
-    ks = scalar_kernels(p.graph, p.stored, g, kernel_slots(p, g); held, split = (items, positions, adjacent) -> floor_split(target, items, positions, adjacent))
+    stored = floor_stored(p, g)
+    ks = scalar_kernels(p.graph, stored, g, kernel_slots(p, g, stored); held, split = (items, positions, adjacent) -> floor_split(target, items, positions, adjacent))
     spaces = Dict{Int, Any}()
     space(w) = get!(() -> allocate(target, w.state, w.length), spaces, w.fold)
-    launches = Any[floor_launch(target, k, (Tuple(buffers[v] for v in k.slots)..., map(space, k.workspaces)...)) for k in ks]
-    (FloorRun(launches, collect(values(spaces))), FloorKernels(ks))
+    # What the floor keeps that the plan does not store, in storage of its own.
+    own = Dict{Int, Any}()
+    buffer(v) = buffers[v] !== nothing || p.stored[v] ? buffers[v] :
+        get!(() -> allocate(target, p.graph.values[v].eltype, storage_length(p.graph.values[v])), own, v)
+    launches = Any[floor_launch(target, k, (Tuple(buffer(v) for v in k.slots)..., map(space, k.workspaces)...)) for k in ks]
+    (FloorRun(launches, [collect(values(spaces)); collect(values(own))]), FloorKernels(ks))
+end
+
+# What a group's floor kernels store: what the plan stores, and for a
+# recurrence every member, its states among them, which its kernel reads
+# from storage at the next step where a claim's would hold them.
+function floor_stored(p::Plan, g::Group)
+    g.kind isa RecurrenceKind || return p.stored
+    stored = copy(p.stored)
+    foreach(m -> stored[m] = true, g.outputs)
+    stored
 end

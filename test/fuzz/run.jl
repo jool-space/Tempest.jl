@@ -6,9 +6,10 @@
 # draws a program for each seed from LO to HI (gen.jl: maps, folds, scans,
 # layouts, gathers, writes, products and loops, as source) and checks it
 # stage by stage (check.jl): eager Julia in Float64 is the reference; the
-# program traced, interpreted and prepared on the CPU; its gradient against
-# central differences, interpreted, prepared, and prepared again with random
-# sums riding a recurrence and random folds recomputed; with `--cuda` on the
+# program traced, interpreted and prepared on the CPU, and prepared again with
+# random values riding a recurrence; its gradient against central
+# differences, interpreted, prepared, and prepared again with random values
+# riding a recurrence and random folds recomputed; with `--cuda` on the
 # device in Float32, forward and gradient, and two runs compared bitwise.
 # `--big` (and `--cuda`) draws extents around the tiles' multiples (31, 32,
 # 33, 127, 128, 129) besides small ones and ones.

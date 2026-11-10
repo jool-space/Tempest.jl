@@ -751,10 +751,12 @@ end
 # along the states' axis with each state's tile, from its last position for
 # states carried in reverse. Each step computes each member but the states
 # as a tile, reading the states and the members before it from the tiles it
-# holds; then stores them where they are stored, and the states, and carries
-# the values the states are carried from, the last. A step that stores the
-# state before reading it ran 3.4 times as long (2.1 ms against 0.63 for
-# chunked gated DeltaNet's at T 1024, H 32), its stores waited on.
+# holds; then stores those stored, the states among them where they are,
+# and carries the values the states are carried from, the last. A member of
+# the last step alone, as the state the steps leave, is computed and stored
+# at the last. A step that stores the state before reading it ran 3.4 times
+# as long (2.1 ms against 0.63 for chunked gated DeltaNet's at T 1024, H 32),
+# its stores waited on.
 function recurrence_kernel(c::Context)
     k = TileKernel("recurrence", (), c.s.occupancy)
     st = k.body
@@ -788,15 +790,23 @@ function recurrence_kernel(c::Context)
     loop = Any[]
     held = Context(c.g, c.s, held_states)
     members = [m for m in c.g.outputs if !(m in states)]
+    # A member along none of the steps is of the last alone, computed and
+    # stored there.
+    once = [m for m in members if !any(e -> mentions(e, p), c.g.placement[m])]
+    last = Any[]
     for m in members
-        names = emit_tiles!(k, loop, held, [c.g.terms[m]], Dict{Term, Any}(), at...)
+        body = m in once ? last : loop
+        names = emit_tiles!(k, body, held, [c.g.terms[m]], Dict{Term, Any}(), at...)
         x = gensym(:member)
-        push!(loop, :($x = $(as_tile(m, names[c.g.terms[m]]))))
+        push!(body, :($x = $(as_tile(m, names[c.g.terms[m]]))))
         tiles[m] = x
-        held.held[m] = (x, along(m), shape(m))
+        m in once || (held.held[m] = (x, along(m), shape(m)))
     end
-    stored = [m for m in members if c.g.values[m].stored]
-    foreach(m -> store_values!(k, loop, c, [m], Dict{Term, Any}(c.g.terms[m] => tiles[m]), at...), [stored; states])
+    stored = [m for m in [members; states] if c.g.values[m].stored]
+    foreach(m -> store_values!(k, m in once ? last : loop, c, [m], Dict{Term, Any}(c.g.terms[m] => tiles[m]), at...), stored)
+    isempty(last) || push!(loop, :(if $t == Int32($(reverse ? 1 : steps))
+        $(last...)
+    end))
     foreach(m -> push!(loop, :($(tiles[m]) = $(tiles[from[m]]))), states)
     if reverse
         u = gensym(:count)
