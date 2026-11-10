@@ -1342,11 +1342,19 @@ On trial is whether the model is array code and nothing else: one
 `forward(weights, states, tokens, positions, length)` in Base's arrays, a
 decode step its case of one token and a prefill its case of T, run eagerly as
 it is, compiled by Tempest and traced by Reactant, from one file that names
-none of them. What of Tempest stands trial with it: `compile`, which after
-each call copies what the program wrote back into the caller's arrays
-(`src/Compiler/runtime/compile.jl`), the whole cache a token, where `prepare`
-with `replaces` and `replay!` beneath it feed results back with no copy and
-are not exported; and a prefill's extent (Sizes are constants, above). A
+none of them. What of Tempest stands trial with it: `compile`, which writes
+what the program writes into an argument where the caller has it, the
+kernels and copies that use the argument pointed at each call's array
+(`point!`, `src/Compiler/runtime/runtime.jl`), so the model's `forward!`
+writes its states as it does eagerly, with no copy of a cache in or out,
+where it had copied every written array in before each call and back after;
+what still stands is the call's checks, which walk the 4B call's 541 leaves
+four times, 5 ms of the host's a token (its signature 2.1, the arrays
+sharing memory 1.5, binding and writing back 0.7 each), so that on the GB10
+a plain loop over the compiled `forward!`, its token a number, took 43.2 to
+44.0 ms a token at extent 512 against 37.9 to 38.2 for the step's `replay!`
+in the same process, tokens equal, and 44.5 to 45.6 before; and a prefill's
+extent (Sizes are constants, above). A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
