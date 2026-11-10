@@ -798,8 +798,9 @@ end
 The program extended by its reverse pass. `program` must have one scalar
 result, the loss. The new program returns the loss and, in the structure of the
 inputs, the gradient with respect to every floating-point input (`nothing` for
-other inputs), with each struct a named tuple of its fields', at the inputs'
-contents before the program writes any of them; its writes are the program's.
+other inputs), with each struct a named tuple of its fields' and each vector a
+vector of its elements', at the inputs' contents before the program writes any
+of them; its writes are the program's.
 
 ```jldoctest
 julia> p = differentiate(trace(x -> sum(abs2, x), [1.0, 2.0, 3.0]));
@@ -838,8 +839,8 @@ with one per argument, in that argument's structure: an array for each
 floating-point array, and `nothing` for anything else. Numbers are constants,
 among a gradient's arguments as among a program's, so a number to
 differentiate by is an array, `[x]` say. A struct's gradient is a named tuple
-of its fields'. It is Zygote's `gradient`, and `withgradient` returns the value
-too.
+of its fields', and a vector's a vector of its elements'. It is Zygote's
+`gradient`, and `withgradient` returns the value too.
 
 In traced code it differentiates `f` where it is called, so a training step
 is a function like any other, traced and prepared as one program (see
@@ -868,7 +869,7 @@ What `f` closes over is a constant to the gradient.
 function withgradient(@nospecialize(f), @nospecialize(args...))
     # The program being traced: an argument's, or, when no argument is traced,
     # as for a layer without weights, the one of the values `f` closes over.
-    traced = filter(x -> x isa Union{Traced, TracedArray}, leaves((args, fields(f))))
+    traced = filter(x -> x isa Union{Traced, TracedArray}, leaves((args, parts(f))))
     if isempty(traced)
         value, gradients... = interpret(differentiate(trace(f, args...)), args...)
         return (val = value, grad = gradients)

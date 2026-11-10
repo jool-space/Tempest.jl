@@ -142,8 +142,8 @@ end
     # A closure is a struct of what it captures, built anew around results.
     shift = compile(x -> (y -> y .+ 2 .* x), x)(x)
     @test shift([1.0, 1.0, 1.0, 1.0]) ≈ 1 .+ 2 .* x
-    # An array of traced arrays would hand them out.
-    @test occursin("may hold traced values", message(() -> trace(x -> Any[x, x], x)))
+    # A matrix of traced arrays would hand them out.
+    @test occursin("may hold traced values", message(() -> trace(x -> reshape(Any[x, x], 1, 2), x)))
 end
 
 @testset "the function's arrays are inputs" begin
@@ -239,6 +239,34 @@ end
     after = compile(update, m, x)(m, x)
     @test after isa Running && after !== m && after.mean ≈ 0.9 .* before .+ 0.1 .* x
     @test m.mean == before
+end
+
+@testset "vectors among the arguments" begin
+    # A vector of layers, as a checkpoint's tree holds them, is looked inside
+    # as a tuple is: each layer's arrays are inputs, and its length is the
+    # program's.
+    forward(model, x) = foldl((x, layer) -> tanh.(layer.w * x .+ layer.b), model.layers; init = x)
+    layer(scale) = (w = data(3, 3; scale), b = data(3; scale))
+    model, x = (; layers = [layer(0.3), layer(0.7)]), data(3, 2)
+    other = (; layers = [layer(0.5), layer(0.2)])
+    p = trace(forward, model, x)
+    @test length(p.arguments) == 5
+    @test interpret(p, other, x) ≈ forward(other, x)
+    c = compile(forward, model, x)
+    @test c(other, x) ≈ forward(other, x)
+    @test occursin("argument 1.layers is a vector of 3, not a vector of 2", message(() -> c((; layers = [layer(0.1), layer(0.2), layer(0.3)]), x)))
+    # So is a vector of structs, and a vector of arrays.
+    stack = [Dense(data(3, 3; scale = 0.3), data(3), tanh), Dense(data(3, 3; scale = 0.6), data(3), tanh)]
+    @test compile((ds, x) -> ds[2](ds[1](x)), stack, x)(stack, x) ≈ stack[2](stack[1](x))
+    arrays = [data(3), data(3; scale = 0.5)]
+    @test compile((vs, x) -> vs[1] .* x .+ vs[2], arrays, x)(arrays, x) ≈ arrays[1] .* x .+ arrays[2]
+    # A vector among the results is built as `map` builds one, and a vector's
+    # gradient is a vector of its elements'.
+    twice = compile(x -> [x, 2 .* x], x)(x)
+    @test twice isa Vector{Matrix{Float64}} && twice == [x, 2 .* x]
+    g = compile((m, x) -> Tempest.gradient(m -> sum(forward(m, x)), m), model, x)(model, x)[1]
+    reference = interpret(differentiate(trace(m -> sum(forward(m, x)), model)), model)[2]
+    @test g.layers isa Vector && length(g.layers) == 2 && all(k -> g.layers[k].w ≈ reference.layers[k].w, 1:2)
 end
 
 # Results that are inputs as they were before the program wrote them, against

@@ -1092,8 +1092,9 @@ LinearAlgebra.normalize(x::TracedArray{<:Real}, p::Real = 2) = x ./ norm(x, p)
 is_input(leaf) = leaf isa AbstractArray{<:Number}
 
 # A constant among the results, returned as it is, unless it could hold traced
-# values: an array of other things than numbers, or a dictionary. A closure
-# over traced values is a struct, built anew around the results.
+# values: an array of other things than numbers that is no vector, or a
+# dictionary. A closure over traced values is a struct, and a vector of
+# traced arrays a vector, built anew around the results.
 function kept(leaf)
     holds = leaf isa Union{AbstractArray, AbstractDict}
     holds && throw(ArgumentError("a program's results are arrays, numbers and constants; a $(typeof(leaf)) may hold traced values"))
@@ -1104,13 +1105,15 @@ end
     trace(f, args...) -> Program
 
 Run `f` on stand-ins for `args` and record what it computes. Arrays among
-`args`, also inside tuples, named tuples and structs, mutable ones too, become
-the program's inputs. Numbers are constants, as configuration is: an integer
+`args`, also inside tuples, named tuples, structs, mutable ones too, and
+vectors of other things than numbers, become the program's inputs. Numbers are constants, as configuration is: an integer
 can be a size, a layer's epsilon or a rule's rate is a number of the program,
 and a number that varies between executions is an array, `[x]` say. Each
-struct is built anew around the stand-ins, so `f` never writes the caller's.
-The results are arrays and numbers in the same kinds of structure; any other
-leaf, `nothing` or a layer's function, is returned as it is.
+struct and vector is built anew around the stand-ins, so `f` never writes the
+caller's, and a vector's length is the program's. The results are arrays and
+numbers in the same kinds of structure, a vector among them built as `map`
+builds one, its element type the join of its elements'; any other leaf,
+`nothing` or a layer's function, is returned as it is.
 
 `f` itself is code here: the arrays it holds, a closure's captures or a
 callable struct's fields, are constants of the program, copied when traced.

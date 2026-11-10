@@ -139,7 +139,7 @@ end
     Program
 
 A traced program: its nodes, the nodes that are its inputs and results, the
-structures they came in, as nested tuples, named tuples and `Fields` of leaf
+structures they came in, as nested tuples, named tuples and `Parts` of leaf
 indices, the nodes that are its backward, where a reverse pass recorded them,
 and its writes into its inputs: pairs `result => argument` of positions, each
 input's contents when the program ends, a result after those its output
@@ -252,13 +252,13 @@ function Base.show(io::IO, ::MIME"text/plain", p::Program)
     show_nodes(io, p.nodes, p.results)
 end
 
-# Nested inputs and outputs: tuples, named tuples and structs, down to leaves. A
-# program's structures record a struct as `Fields`, since the leaf indices they
-# hold could not be its fields.
+# Nested inputs and outputs: tuples, named tuples, structs and vectors, down to
+# leaves. A program's structures record a struct or a vector as `Parts`, since
+# the leaf indices they hold could not be its fields or its elements.
 
-"A struct in a structure: its type, and its fields."
-struct Fields{T}
-    fields::NamedTuple
+"A struct or a vector in a structure: its type, and its parts, a struct's fields by name or a vector's elements in order."
+struct Parts{T}
+    parts::Union{NamedTuple, Tuple}
 end
 
 "A constant among a program's results, which its structure holds as it is."
@@ -285,7 +285,14 @@ function nested(@nospecialize(x))
         isstructtype(T) && fieldcount(T) > 0 && Base.moduleroot(parentmodule(T)) !== Base.moduleroot(@__MODULE__)
 end
 
-fields(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))
+# A vector whose elements are not numbers holds what a tuple would, a model's
+# layers as a checkpoint's tree gives them, and is looked inside as a tuple
+# is, its length fixed when traced. As with a struct, tracing builds a vector
+# of its own, so a program never pushes into the caller's.
+nested(@nospecialize(x::Vector)) = !(eltype(x) <: Number)
+
+parts(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))
+parts(x::Vector) = Tuple(x)
 
 # A struct of the kind of `T` with these fields, built as `new` builds one: its
 # constructors never run, since what they check of a number or an array a
@@ -311,6 +318,24 @@ end
 
 @generated built(::Type{S}, fields::Tuple) where {S} = Expr(:splatnew, S, :fields)
 
+# A vector of these elements, as `map` over the vector `T` builds one: its
+# element type the join of theirs, which a traced copy's elements and a
+# result's arrays need, being of other types than the caller's. An empty one
+# keeps `T`'s. The elements are walked by their fields, as the walkers below
+# walk a tuple.
+Base.@nospecializeinfer function construct(::Type{T}, @nospecialize(elements::Tuple)) where {T <: Vector}
+    isempty(elements) && return T()
+    E = Union{}
+    for k in 1:nfields(elements)
+        E = Base.promote_typejoin(E, typeof(getfield(elements, k)))
+    end
+    v = Vector{E}(undef, nfields(elements))
+    for k in 1:nfields(elements)
+        v[k] = getfield(elements, k)
+    end
+    v
+end
+
 # The leaves of `x` in order, gathered into one vector: a model's hundreds of
 # arrays walked at each call in time linear in them.
 #
@@ -324,30 +349,37 @@ Base.@nospecializeinfer function leaves!(out, @nospecialize(x::Union{Tuple, Name
     end
     out
 end
-Base.@nospecializeinfer leaves!(out, @nospecialize(x::Fields)) = leaves!(out, x.fields)
-Base.@nospecializeinfer leaves!(out, @nospecialize(x)) = nested(x) ? leaves!(out, fields(x)) : push!(out, x)
+Base.@nospecializeinfer leaves!(out, @nospecialize(x::Parts)) = leaves!(out, x.parts)
+Base.@nospecializeinfer leaves!(out, @nospecialize(x)) = nested(x) ? leaves!(out, parts(x)) : push!(out, x)
 
 # `g` on each element of a tuple or named tuple, its names kept.
 Base.@nospecializeinfer each(g, @nospecialize(x::Tuple)) = map_elements(g, x)
 Base.@nospecializeinfer each(g, @nospecialize(x::NamedTuple)) = NamedTuple{keys(x)}(map_elements(g, values(x)))
 
-# `x` with `f` applied to each leaf, structs built anew from their fields.
+# `x` with `f` applied to each leaf, structs and vectors built anew from their parts.
 Base.@nospecializeinfer rebuild(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> rebuild(f, y), x)
-Base.@nospecializeinfer rebuild(f, @nospecialize(x::Fields)) = construct(typeof(x).parameters[1], rebuild(f, x.fields))
+Base.@nospecializeinfer rebuild(f, @nospecialize(x::Parts)) = construct(typeof(x).parameters[1], rebuild(f, x.parts))
 # A leaf is inferred for the value it is given, so a scalar function written
 # through `rebuild`, as `stopgrad` is, has the result type `promote_op` finds.
-rebuild(f, @nospecialize(x)) = nested(x) ? construct(typeof(x), rebuild(f, fields(x))) : f(x)
+rebuild(f, @nospecialize(x)) = nested(x) ? construct(typeof(x), rebuild(f, parts(x))) : f(x)
 
-# The structure of `x`, `f` applied to each leaf: as `rebuild`, with structs as `Fields`.
+# The structure of `x`, `f` applied to each leaf: as `rebuild`, with structs and vectors as `Parts`.
 Base.@nospecializeinfer structure_of(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> structure_of(f, y), x)
-Base.@nospecializeinfer structure_of(f, @nospecialize(x::Fields)) = Fields{typeof(x).parameters[1]}(structure_of(f, x.fields))
-structure_of(f, @nospecialize(x)) = nested(x) ? Fields{typeof(x)}(structure_of(f, fields(x))) : f(x)
+Base.@nospecializeinfer structure_of(f, @nospecialize(x::Parts)) = Parts{typeof(x).parameters[1]}(structure_of(f, x.parts))
+structure_of(f, @nospecialize(x)) = nested(x) ? Parts{typeof(x)}(structure_of(f, parts(x))) : f(x)
 
-# As `structure_of`, with each struct a named tuple of its fields: the structure
-# of a gradient, which has no value for a struct's other fields.
+# As `structure_of`, with each struct a named tuple of its fields and each
+# vector a vector of its elements', as Zygote's are: the structure of a
+# gradient, which has no value for a struct's other fields.
 Base.@nospecializeinfer tangent(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> tangent(f, y), x)
-Base.@nospecializeinfer tangent(f, @nospecialize(x::Fields)) = tangent(f, x.fields)
-tangent(f, @nospecialize(x)) = nested(x) ? tangent(f, fields(x)) : f(x)
+Base.@nospecializeinfer tangent(f, @nospecialize(x::Parts)) = tangent_of(x, tangent(f, x.parts))
+tangent(f, @nospecialize(x)) = nested(x) ? tangent_of(x, tangent(f, parts(x))) : f(x)
+
+# A struct's tangent from its parts' is their named tuple; a vector's is a
+# vector of them, in a structure the record of one.
+tangent_of(@nospecialize(x), parts) = parts
+tangent_of(@nospecialize(x::Vector), elements) = construct(Vector{Any}, elements)
+tangent_of(@nospecialize(x::Parts{<:Vector}), elements) = Parts{Vector{Any}}(elements)
 
 # Each of the program's arguments among `inputs`, given in the structure it was traced with.
 Base.@nospecializeinfer function argument_leaves(p, @nospecialize(inputs))

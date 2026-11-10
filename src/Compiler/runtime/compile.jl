@@ -17,7 +17,8 @@ option; `true` and `false` mean `:close` and `:none`. The default is
 `TEMPEST_MEASURE`'s where the environment sets it.
 
 Which leaves of the arguments are inputs follows `trace`: arrays, also inside
-tuples, named tuples and structs, mutable ones too. Numbers are constants; a
+tuples, named tuples, structs, mutable ones too, and vectors of other things
+than numbers, whose lengths a call must match. Numbers are constants; a
 number that varies between calls is an array, `[x]` say. `f` is an argument
 like the others, the call `f(args...)` traced: the arrays of a callable
 struct's fields and those a closure captures are inputs too, read at each
@@ -321,7 +322,7 @@ end
 leaf_paths(call) = foldl((out, (k, x)) -> leaf_paths!(out, x, k == 1 ? "f" : "argument $(k - 1)"), enumerate(call); init = String[])
 leaf_paths!(out, x::Tuple, path) = foldl((out, (k, y)) -> leaf_paths!(out, y, "$path[$k]"), enumerate(x); init = out)
 leaf_paths!(out, x::NamedTuple, path) = foldl((out, k) -> leaf_paths!(out, x[k], "$path.$k"), keys(x); init = out)
-leaf_paths!(out, x, path) = nested(x) ? leaf_paths!(out, fields(x), path) : push!(out, path)
+leaf_paths!(out, x, path) = nested(x) ? leaf_paths!(out, parts(x), path) : push!(out, path)
 
 # Where the call `got`, `f` and its arguments, differs from `expected`, in
 # words, or `nothing`. The function is `f`, and the arguments are counted after it.
@@ -348,15 +349,16 @@ function difference(expected, got, path)
 end
 
 inner(x::Union{Tuple, NamedTuple}) = x
-inner(x::Fields) = x.fields
+inner(x::Parts) = x.parts
 inner(x) = nothing
 
 kind(::Tuple) = Tuple
 kind(::NamedTuple) = NamedTuple
-kind(::Fields{T}) where {T} = Base.typename(T).wrapper
+kind(::Parts{T}) where {T} = Base.typename(T).wrapper
 
 describe(x::InputType) = string("a ", x.eltype, " array of size ", x.dims)
-describe(x::Fields{T}) where {T} = string("a ", nameof(T))
+describe(x::Parts{T}) where {T} = string("a ", nameof(T))
+describe(x::Parts{<:Vector}) = string("a vector of ", length(x.parts))
 describe(x::Tuple) = string("a tuple of ", length(x))
 describe(x::NamedTuple) = string("a named tuple of ", join(keys(x), ", "))
 describe(x) = string("the constant ", sprint(show, x; context = :limit => true))
