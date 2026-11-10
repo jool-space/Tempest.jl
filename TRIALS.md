@@ -1346,9 +1346,9 @@ none of them. What of Tempest stands trial with it: `compile`, which after
 each call copies what the program wrote back into the caller's arrays
 (`src/Compiler/runtime/compile.jl`), the whole cache a token, where `prepare`
 with `replaces` and `replay!` beneath it feed results back with no copy and
-are not exported; a prefill's extent (Sizes are constants, above); and a
-traced array's element type, which `push!` into a vector of arrays of another
-cannot convert. Challengers: Vallmo's captured step and its eager prefill,
+are not exported; and a prefill's extent (Sizes are constants, above). A
+`push!` of a traced array into a vector of arrays of another element type
+converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
 of 167, kernels of 1,307); the same file under Reactant; the same file eager.
 Judged by tokens equal to Vallmo's on its tiny checkpoint (`test/tiny.jl`) and
@@ -1362,7 +1362,7 @@ programs trace, plan and agree with Float64, in Float32 and in BFloat16, among
 them a whole model's decode step, its prefill, a suffix prefill over a
 restored state, eight tokens generated greedily and a decode loop of `replay!`
 alone; a chunk of 8 padded positions serves lengths 1 to 8 from one
-preparation; the one refused is the `push!`. None of it has run on a device at
+preparation; the one refused was the `push!`, which converts now. None of it has run on a device at
 the model's shapes since the script was lost.
 
 **Block-scaled quantized products.** A weight in MXFP8, MXFP4 or NVFP4 is

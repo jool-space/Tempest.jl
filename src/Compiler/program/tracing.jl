@@ -224,6 +224,15 @@ Base.float(x::Traced{T}) where {T} = cast(float(T), x)
 Base.oftype(x::Traced{T}, y::Real) where {T} = convert(T, y)
 Base.oftype(x::Traced{T}, y::Traced) where {T} = cast(T, y)
 
+# An array converts as Base converts one to an `Array`'s type: to its own
+# type, itself; to another element type, a copy of its elements cast, which
+# `push!` into a vector of arrays of that type makes; to another number of
+# axes, by no method.
+TracedArray{T, N}(x::TracedArray{<:Any, N}) where {T, N} = TracedArray(x.tape, cast(T, handle(x)).id)
+TracedArray{T}(x::TracedArray{<:Any, N}) where {T, N} = TracedArray{T, N}(x)
+Base.AbstractArray{T, N}(x::TracedArray{<:Any, N}) where {T, N} = TracedArray{T, N}(x)
+Base.convert(::Type{T}, x::TracedArray) where {T <: TracedArray} = x isa T ? x : T(x)
+
 # Rounding to a type, `round(Int, x)` or `floor(Int32, x)`, is Base's: the
 # number rounded in the mode, then converted. Base asks a new number for its
 # rounding by mode, which is the primitive of that name.

@@ -371,3 +371,21 @@ end
     # What the refusal names instead traces.
     @test interpret(trace(x -> ifelse(any(x .> 1), 1.0, -1.0) .* x, x), x) == (any(x .> 1) ? x : -x)
 end
+
+# A traced array converts to a traced array's type as Base converts an
+# array to an `Array`'s: of another element type, a copy cast element by
+# element, the conversion `push!` into a vector of them makes; of its own
+# type, itself; of another number of axes, no method.
+@testset "a traced array converted to another element type" begin
+    x = Float32.(data(3, 2))
+    cast(x) = (v = [BFloat16s.BFloat16.(x)]; push!(v, x); v)
+    p = trace(cast, x)
+    @test count(n -> n.op isa C.Map{C.Cast{BFloat16s.BFloat16}}, p.nodes) == 2
+    @test interpret(p, x) == cast(x) && interpret(p, x) isa Vector{Matrix{BFloat16s.BFloat16}}
+    @test outputs(execute!(prepare(p, x))) == cast(x)
+    @test interpret(trace(x -> (v = [x]; push!(v, 2 .* x); v), x), x) == [x, 2 .* x]
+    @test interpret(trace(x -> (v = [x]; push!(v, x); v[2] === x), x), x)
+    @test interpret(trace(x -> convert(AbstractMatrix{Float64}, x), x), x) == Float64.(x)
+    @test occursin("no method matching", message(() -> trace(x -> push!([x], vec(x)), x)))
+    @test occursin("no method matching", message(() -> push!([x], vec(x))))
+end
