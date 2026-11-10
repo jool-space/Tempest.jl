@@ -293,6 +293,29 @@ end
         bind!(ex, 4 => CuArray(m))
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q3, k3, v3, m)]; rtol = 1.0e-4)
     end
+    # The mask as a condition two layers share, stored once, each choosing
+    # its scores by it: a sum over keys that loads it finds its formula, the
+    # condition being false where it fails, and stops at the length. The
+    # results are those of every step run.
+    function chosen(q, k, v, len)
+        seen = axes(k, 2) .<= reshape(len, 1, 1, 1, :)
+        attend(x) = (s = ifelse.(seen, Einops.@einsum(k, x, "d n h b, d (g h) b -> n g h b", h = size(k, 3)) .* 0.25f0, -Inf32);
+            Einops.@einsum(v, exp.(s .- T.logsumexp(s; dims = 1)), "d n h b, n g h b -> d (g h) b"))
+        attend(sin.(attend(q)))
+    end
+    # Over 512 keys, blocks many enough that the scores' sum is not split.
+    k5, v5, n5 = single(data(64, 512, 2, 3; scale = 0.2)), single(data(64, 512, 2, 3; scale = 0.3)), Int32[37, 512, 1]
+    p = trace(chosen, q3, k5, v5, n5)
+    prepared(skip) = withenv(() -> prepare(p, map(CuArray, (q3, k5, v5, n5))...; target), "TEMPEST_SKIP_MASKED" => skip)
+    ex, every = prepared("1"), prepared("0")
+    @test count(k -> occursin("masked steps skipped", string(k)), ex.kernels) == 2
+    for m in (n5, Int32[512, 5, 130])
+        bind!(ex, 4 => CuArray(m))
+        bind!(every, 4 => CuArray(m))
+        o = Array(only(C.leaves(outputs(execute!(ex)))))
+        @test o == Array(only(C.leaves(outputs(execute!(every)))))
+        @test agree([o], [interpret(p, q3, k5, v5, m)]; rtol = 1.0e-4)
+    end
     # Over a BFloat16s.BFloat16 cache, the probabilities rounded to it
     # before their product, as Vallmo's decode rounds them: the product
     # reads the length only through their mask.

@@ -38,13 +38,18 @@ end
 
 What `f` gives, as a `T`, where a mask fails, from its arguments there, each
 a number, `:finite` or nothing (unknown): a number when the numbers decide
-it, as a zero factor or an infinite summand does, in exact arithmetic;
+it, as a zero factor or an infinite summand does, in exact arithmetic; for a
+choice by a known condition, the branch it takes, whatever the other is;
 `:finite` for sums, products, quotients by a nonzero number and the
 functions here of finite arguments, which an overflow could make infinite,
 so that a program whose unmasked positions overflow computes a different
 nothing here.
 """
 Base.@nospecializeinfer function masked_result(@nospecialize(f), T, @nospecialize(args))
+    if f === ifelse && first(args) isa Bool
+        x = first(args) ? args[2] : args[3]
+        return x isa Number ? convert(T, x) : x
+    end
     any(isnothing, args) && return nothing
     all(a -> a isa Number, args) && return f isa Cast ? convert(T, only(args)) : f === ifelse ? nothing : f(args...)
     known = [a for a in args if a isa Number]

@@ -40,6 +40,15 @@
     length_read = IR.held_formula(h.arguments[2], (IR.var(2),), Int32, d)
     @test !isempty(found) && all(((m, x),) -> m == [IR.add(IR.add(IR.var(1), 1, d), IR.scale(length_read, -1), d)], found)
     @test any(((m, x),) -> x == 0.0f0, found)
+    # The condition masks itself, false where it fails, so that a choice by
+    # it is known there wherever the condition is computed, as a kernel that
+    # loads it stored once for two layers finds; a choice by a known
+    # condition is its branch, whatever the other.
+    h = C.lower(trace((s, n) -> (c = reshape(1:size(s, 1), :, 1) .<= reshape(n, 1, :); (ifelse.(c, s, -Inf32), ifelse.(c, s, 0.0f0))), s, n))
+    condition = only(v for v in eachindex(h.values) if h.values[v].eltype === Bool)
+    @test C.masked(h, condition) == ([IR.add(IR.add(IR.var(1), 1, d), IR.scale(length_read, -1), d)], false)
+    @test IR.masked_result(ifelse, Float32, (false, nothing, -Inf32)) === -Inf32
+    @test IR.masked_result(ifelse, Float32, (true, :finite, nothing)) === :finite
     # A kernel that reads a value masked by such a length reads the length
     # too, by which it may bound its sweep: an additive mask stored once, as
     # two sums a product apart read it, is all they read of the length.

@@ -2,10 +2,13 @@
 # with `cond` a conjunction of comparisons between index formulas, a
 # position and an integer the program reads among them, or a map of such a
 # value that is a known number where the mask fails, as the probabilities
-# exp(s - lse) of masked scores s are zero. An implementation
-# that sweeps such a value skips the tiles the mask rules out entirely (the
-# cuTile generator's `live_steps`), as FlexAttention's block mask does, which
-# it derives from the formulas rather than by evaluating the mask on tiles.
+# exp(s - lse) of masked scores s are zero. The condition is one too, false
+# where it fails, so that a choice by it is known there wherever the
+# condition is computed, stored once for every layer that reads it say. An
+# implementation that sweeps such a value skips the tiles the mask rules out
+# entirely (the cuTile generator's `live_steps`), as FlexAttention's block
+# mask does, which it derives from the formulas rather than by evaluating the
+# mask on tiles.
 
 """
     masked(graph, v) -> (mask, value) or nothing
@@ -85,6 +88,9 @@ function masks_of(graph::IndexGraph, v, index, d::Domain, shifted)
     masks = Vector{Affine}[]
     def = graph.values[v].definition
     def isa Pointwise || return masks
+    # A condition of comparisons masks itself.
+    own = mask_of(graph, v, index, d)
+    own === nothing || push!(masks, own)
     w = walked(graph, v, index, d)
     w.condition !== nothing && def.operands[3] isa Literal && push!(masks, w.condition)
     for (o, at) in zip(def.operands, w.indices)
@@ -127,10 +133,11 @@ shifts(a::Union{Div, Mod}) = shifts(a.e)
 shifts(a::Indirect) = shifts(a.index)
 
 # What `v`, read at `index`, is where `mask` fails, when the mask's literal
-# decides it: a number; `:finite` for an input, a fold, an index, and for
-# what sums, scales, exponentiates or converts those; nothing when unknown,
-# as a map read through a second shift is (see `value_masks`). Each value at
-# each index is asked once a mask in a graph (`known`).
+# decides it: a number, `false` for the mask's own condition; `:finite` for
+# an input, a fold, an index, and for what sums, scales, exponentiates or
+# converts those; nothing when unknown, as a map read through a second shift
+# is (see `value_masks`). Each value at each index is asked once a mask in a
+# graph (`known`).
 function masked_value(graph::IndexGraph, v, index, mask, d::Domain, shifted)
     known = graph.masks[].known
     key = (v, index, mask, d, shifted)
@@ -149,6 +156,7 @@ function masked_value_of(graph::IndexGraph, v, index, mask, d::Domain, shifted)
         masked_value(graph, o.value, at, mask, d, shifted || shift)
     end
     operand(o, at) = o isa Literal ? o.value : o isa IndexOperand ? :finite : o isa Read ? read_value(o, at) : nothing
+    mask_of(graph, v, index, d) == mask && return false
     w.condition == mask && return operand(def.operands[3], w.indices[3])
     masked_result(def.f, val.eltype, map(operand, def.operands, w.indices))
 end
