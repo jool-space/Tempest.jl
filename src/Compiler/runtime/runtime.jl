@@ -4,16 +4,17 @@
     Executable
 
 A program prepared for a target: its plan, its storage, and a launch per
-kernel. Each stored value has a buffer: inputs, constants and results their
-own, other values a view of their slot, a result that replaces an argument
-the argument's, and a result that is an input as it was before the program
-wrote it a buffer of its own, which the input is copied into before the
-kernels run. `bind!` copies inputs into the buffers the executable owns, and
-`point!` makes an argument's storage the caller's array where the kernels
-can read and write it there; `execute!` and `replay!` run the program over
-them, and copy what it wrote into an argument back into the caller's array
-where that is not its storage, and `outputs` is where the results are,
-overwritten by each run.
+kernel. Each stored value has storage: constants and results a buffer of
+their own, other values a view of their slot, a result that replaces an
+argument the argument's, and a result that is an input as it was before the
+program wrote it a buffer of its own, which the input is copied into before
+the kernels run. An argument's storage is the array its binding gives it:
+`point!` makes it the caller's array where the kernels can read and write it
+there, and `bind!` copies the caller's array into a buffer the executable
+owns, made when a binding first copies into it. `execute!` and `replay!` run
+the program over them, and copy what it wrote into an argument back into the
+caller's array where that is not its storage, and `outputs` is where the
+results are, overwritten by each run.
 """
 # Where an argument's storage is used, for `point!` to move it: each step of
 # an execution (see `execution`) that reads or writes it, by its place among
@@ -53,9 +54,12 @@ mutable struct Executable{T <: Target}
     target::T
     storage::Storage
     slots::Vector{Any}
+    # Per value, its storage, but for a value over an argument's: that is
+    # the argument's, its buffer or the caller's array (`pointed`).
     buffers::Vector{Any}
-    # Per argument of the program: its buffer, and the caller's array when it
-    # is bound by reference.
+    # Per argument of the program: the buffer a binding copies it into, made
+    # when one first does (`own!`), or the array bound by reference; and the
+    # caller's array when it is bound by reference.
     arguments::Vector{Any}
     referenced::Vector{Any}
     # Per result: an array over its buffer, or over the argument's it replaces.
@@ -77,7 +81,8 @@ mutable struct Executable{T <: Target}
     # Per argument whose storage can be the caller's array (see `point!`):
     # where the storage is used; nothing for one copied. And per such
     # argument, its storage: its buffer, or the caller's array it was
-    # pointed at last, and its address. And per
+    # pointed at last, as the first binding found it or a later one, and
+    # its address. And per
     # argument, the address of the array it was bound to last, as a number:
     # holding the array would keep a caller's last arrays alive, as a
     # training step's last weights. And per argument, whether it is pointed
@@ -101,7 +106,7 @@ end
 
 
 """
-    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), recompute = (), ride = (), build = true, verify) -> Executable
+    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), point = false, recompute = (), ride = (), build = true, verify) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
@@ -154,7 +159,12 @@ the positions in `by_reference`, which must be of the target's array type:
 they are the executable's storage. The caller keeps them alive and may write
 them between executions, and a result that replaces one writes into it.
 `point!` makes the caller's arrays the storage at each binding instead, as
-`compile` does.
+`compile` does. The preparation binds `inputs` as `bind!` does, or as
+`point!` does with `point = true`, as `compile` prepares: the kernels are
+built on the caller's arrays where they can read them there, and the
+executable makes no storage of its own for those arguments until a binding
+copies into it, holding the arrays as `point!` does, until it is bound to
+others.
 
 `recompute` pins folds to be recomputed where they are read rather than
 stored, by their numbers among the values of the program's index graph, as
@@ -197,12 +207,13 @@ A function that writes its arguments needs none of this: `compile` writes
 them where the caller has them, for any arrays a call brings.
 """
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = measuring(),
-        replaces = (), by_reference = (), recompute = (), ride = (), partition::Bool = true, build::Bool = true, verify::Bool = verifying())
+        replaces = (), by_reference = (), point::Bool = false, recompute = (), ride = (), partition::Bool = true, build::Bool = true,
+        verify::Bool = verifying())
     # The terms an earlier preparation interned are of its program.
     IR.forget_terms!()
     forget_matches!()
     s = setup(program; target, measure, replaces, recompute, ride, partition, build)
-    prepared(s, decide!(s; verify), inputs...; by_reference, verify)
+    prepared(s, decide!(s; verify), inputs...; by_reference, point, verify)
 end
 
 """
@@ -288,27 +299,27 @@ they rest on held against the files (see `given!`).
 given(s::Setup, r) = given!(s.decider, r)
 
 """
-    prepared(s, decided, inputs...; by_reference, verify) -> Executable
+    prepared(s, decided, inputs...; by_reference, point, verify) -> Executable
 
 The preparation set up as `s` built on decisions `decided` (see `decide!`
-and `given`) and bound to `inputs`, as `prepare` builds it. Where claims
+and `given`) and bound to `inputs`, as `prepare` builds and binds it. Where claims
 fail to build, it decides again, knowing they failed, and builds again. The
 decisions it builds on are kept for a preparation of the same program to
 replay, unless they were replayed.
 """
-function prepared(s::Setup, decided, @nospecialize(inputs...); by_reference = (), verify::Bool = verifying())
+function prepared(s::Setup, decided, @nospecialize(inputs...); by_reference = (), point::Bool = false, verify::Bool = verifying())
     d = s.decider
     # Decided and built again while the last plan's builds failed, a few
     # times at most; then what fails runs on the next option, the floor last
     # (see `build_group`). The last plan's buffers are let go first. Without
     # `build`, implementations compile nothing as they claim (`compiling`).
     ex = Base.ScopedValues.with(Implement.COMPILING => s.build, VERIFYING => verify) do
-        ex = phase(() -> planned(s, decided, inputs, by_reference), :planned)
+        ex = phase(() -> planned(s, decided, inputs, by_reference, point), :planned)
         for _ in 2:PLANS
             any(x -> x !== nothing && x.how === :instead, ex.decisions) || break
             ex = nothing
             forget_decisions!(d)
-            ex = phase(() -> planned(s, decide!(s; verify), inputs, by_reference), :planned)
+            ex = phase(() -> planned(s, decide!(s; verify), inputs, by_reference, point), :planned)
         end
         # Decisions the cover reached are kept, for a preparation of the
         # same program to replay (see `reach!`); those replayed are kept already.
@@ -316,7 +327,7 @@ function prepared(s::Setup, decided, @nospecialize(inputs...); by_reference = ()
         r.key === nothing || r.settled || store_reached(settled(r, d))
         ex
     end
-    ex.built && phase(() -> bind!(ex, inputs...), :bind)
+    ex.built && phase(() -> point ? point!(ex, inputs...) : bind!(ex, inputs...), :bind)
     ex
 end
 
@@ -324,8 +335,9 @@ end
 const PLANS = 4
 
 # The program of preparation `prep` planned on `decided` and, where it
-# builds, built on buffers of its own, its inputs not yet bound.
-function planned(prep::Setup, decided, @nospecialize(inputs), by_reference)
+# builds, built on the storage the binding of `inputs` it makes first gives
+# them (see `prepare`'s `point`), before they are bound.
+function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, point::Bool)
     program, d, pairs, input, build = prep.program, prep.decider, prep.pairs, prep.input, prep.build
     target = d.target
     p, considered, ds, reached = decided.plan, decided.considered, decided.decisions, decided.reached
@@ -365,74 +377,119 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference)
             none(length(program.arguments)), 1, false, reached)
     end
     slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
-    referenced = Vector{Any}(nothing, length(program.arguments))
+    n = length(program.arguments)
+    referenced = Vector{Any}(nothing, n)
     xs = argument_leaves(program, inputs)
     for j in by_reference, k in leaves(program.input_structure[j])
         k === nothing || (referenced[k] = xs[k])
     end
-    buffers = Vector{Any}(nothing, length(values))
     # Results in an argument's storage, and folds by key over the contents they
-    # start from, take that storage, in the order values are computed.
+    # start from, take that storage, in the order values are computed: each
+    # value's storage is its root's, and a value over an argument's storage
+    # is that argument's.
     taken = sort!([s.donated; s.overwrites]; by = first)
+    root = collect(eachindex(values))
+    foreach(((r, a),) -> root[r] = root[a], taken)
+    over(v) = (def = values[root[v]].definition) isa Input ? def.argument : 0
+    # Each argument's storage, where its launches are built, as the first
+    # binding gives it (see `prepare`'s `point`): the array bound by
+    # reference; the caller's array where `point!` binds them, and the
+    # kernels can read it where it is; else a buffer of the executable's own,
+    # which that binding copies into. `pointed` keeps it as the caller has
+    # it, and the launches read it as a vector.
+    arguments = Vector{Any}(nothing, n)
+    pointed = Vector{Any}(nothing, n)
+    own(k) = (v = values[input[k]]; allocate(target, v.eltype, storage_length(v)))
+    for (k, id) in input
+        x, v = xs[k], values[id]
+        if referenced[k] !== nothing
+            bindable(target, x) && eltype(x) === v.eltype && length(x) == storage_length(v) ||
+                throw(ArgumentError("input $k is bound by reference, but $(typeof(x)) is not storage on $target"))
+            arguments[k] = pointed[k] = vec(x)
+        elseif point && pointable(target, x, address_of(x)) && eltype(x) === v.eltype && length(x) == storage_length(v)
+            pointed[k] = x
+        else
+            arguments[k] = pointed[k] = own(k)
+        end
+    end
+    buffers = Vector{Any}(nothing, length(values))
     for (id, v) in enumerate(values)
-        any(t -> first(t) == id, taken) && continue
+        root[id] == id || continue
         def = v.definition
         if def isa ConstantArray
             # Uploaded already if a claim was measured.
             buffers[id] = get(d.buffers, id, nothing)
             buffers[id] === nothing && (buffers[id] = upload(target, vec(collect(def.data))))
-        elseif def isa Input && referenced[def.argument] !== nothing
-            x = referenced[def.argument]
-            bindable(target, x) && eltype(x) === v.eltype && length(x) == storage_length(v) ||
-                throw(ArgumentError("input $(def.argument) is bound by reference, but $(typeof(x)) is not storage on $target"))
-            buffers[id] = vec(x)
         elseif s.slots[id] > 0
             buffers[id] = slot_view(slots[s.slots[id]], v.eltype, storage_length(v))
-        elseif p.stored[id]
+        elseif p.stored[id] && !(def isa Input)
             buffers[id] = allocate(target, v.eltype, storage_length(v))
         end
     end
-    foreach(((r, a),) -> buffers[r] = buffers[a], taken)
-    arguments = Any[get(buffers, get(input, k, 0), nothing) for k in eachindex(program.arguments)]
+    # The values over an argument's storage take it, the others their root's.
+    function share!(buffers)
+        for v in eachindex(values)
+            a = over(v)
+            a == 0 ? root[v] == v || (buffers[v] = buffers[root[v]]) : (buffers[v] = vec(pointed[a]))
+        end
+        buffers
+    end
+    share!(buffers)
     # One buffer per input saved, however many results are it.
     befores = Dict(v => allocate(target, values[v].eltype, storage_length(values[v])) for v in unique(Base.values(saved)))
-    saves = Any[(argument = values[v].definition.argument, before = b, copy = Copy(b, buffers[v], 0 => v)) for (v, b) in befores]
     replaced = Dict(pairs)
-    stored(k) = haskey(replaced, k) ? arguments[replaced[k]] : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
-    results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     # What its launches share and nothing else uses (see `Resources`), made
     # as the first that needs it is built; the launches hold it.
     resources = Resources(target)
-    built = concurrently(((g, x),) -> build_group(d, p, g, x, buffers, resources), collect(zip(p.groups, ds)), target)
-    clock = lap!(:build, clock)
-    copies = Copy[Copy(buffers[a], buffers[r], a => r) for (r, a) in s.staged]
-    launches = Any[b[1] for b in built]
+    build() = concurrently(((g, x),) -> build_group(d, p, g, x, buffers, resources), collect(zip(p.groups, ds)), target)
+    built = build()
     # An argument's storage, read or written, can be the caller's array when
     # every launch can be pointed elsewhere, unless the caller's array is the
-    # storage already, bound by reference: the steps that use it, by the
-    # values they name it by, and the results over it, are found by the
-    # storage itself, which the values written over it share.
-    pointable = Vector{Union{Nothing, Uses}}(nothing, length(program.arguments))
-    if all(repoints, launches)
-        owner = IdDict{Any, Int}(arguments[a] => a for a in keys(input) if referenced[a] === nothing)
-        foreach(a -> pointable[a] = (steps = Tuple{Int, Int}[], results = Int[]), Base.values(owner))
+    # storage already, bound by reference. Where a launch cannot be, an
+    # argument built on the caller's array has a buffer of its own instead,
+    # its storage for good, and the launches are built again on it.
+    movable = all(b -> repoints(b[1]), built)
+    if !movable && any(k -> arguments[k] === nothing && pointed[k] !== nothing, 1:n)
+        foreach(k -> arguments[k] === nothing && pointed[k] !== nothing && (arguments[k] = pointed[k] = own(k)), 1:n)
+        built = (share!(buffers); build())
+        movable = all(b -> repoints(b[1]), built)
+    end
+    clock = lap!(:build, clock)
+    launches = Any[b[1] for b in built]
+    saves = Any[(argument = values[v].definition.argument, before = b, copy = Copy(b, buffers[v], 0 => v)) for (v, b) in befores]
+    copies = Copy[Copy(buffers[a], buffers[r], a => r) for (r, a) in s.staged]
+    stored(k) = haskey(replaced, k) ? vec(pointed[replaced[k]]) : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
+    results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
+    # Where each pointable argument's storage is used: the steps that use
+    # it, by the values they name it by, and the results over it.
+    used = Vector{Union{Nothing, Uses}}(nothing, n)
+    if movable
+        foreach(a -> referenced[a] === nothing && (used[a] = (steps = Tuple{Int, Int}[], results = Int[])), keys(input))
         named = [[[last(save.copy.values)] for save in saves]; [kernel_slots(p, g) for g in p.groups]; [[first(c.values)] for c in copies]]
         for (i, vs) in enumerate(named), v in vs
-            a = get(owner, buffers[v], 0)
-            a == 0 || push!(pointable[a].steps, (i, v))
+            a = over(v)
+            a == 0 || used[a] === nothing || push!(used[a].steps, (i, v))
         end
         for k in eachindex(results)
-            a = get(owner, stored(k), 0)
-            a == 0 || push!(pointable[a].results, k)
+            a = haskey(replaced, k) ? replaced[k] : haskey(saved, k) ? 0 : over(result_value(k))
+            a == 0 || used[a] === nothing || push!(used[a].results, k)
         end
     end
-    pointed = Any[x === nothing ? nothing : arguments[a] for (a, x) in enumerate(pointable)]
-    at = UInt[x === nothing ? 0 : reinterpret(UInt, pointer(x)) for x in pointed]
+    # The executable reaches an argument's storage through `pointed` alone
+    # (see `point!`), and holds no caller's array once bound to another. A
+    # launch may hold `buffers` itself, as a recurrence's steps do.
+    kept = Any[over(v) == 0 ? buffers[v] : nothing for v in eachindex(values)]
+    foreach(a -> used[a] === nothing && (pointed[a] = nothing), 1:n)
+    at = UInt[x === nothing ? 0 : address_of(x) for x in pointed]
     lap!(:executable, clock)
-    Executable(program, p, target, s, slots, buffers, arguments, referenced, results, outputs_over(program, results),
-        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, pointable, pointed, at, zeros(UInt, length(program.arguments)),
-        fill(false, length(program.arguments)), Vector{Any}(nothing, length(program.arguments)), 1, true, reached)
+    Executable(program, p, target, s, slots, kept, arguments, referenced, results, outputs_over(program, results),
+        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, used, pointed, at, zeros(UInt, n),
+        fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
 end
+
+# The address of array `x`'s first element, as a number, as `pointer` gives
+# it; 0 for an array without one.
+address_of(x) = x isa StridedArray ? reinterpret(UInt, pointer(x)) : UInt(0)
 
 runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
 
@@ -466,14 +523,16 @@ end
 """
     Tempest.Compiler.footprint(ex) -> (; bytes, apart)
 
-The bytes of a prepared program's buffers (inputs, constants, results and
-slots), and what they would be with each value stored apart instead of in
-slots.
+The bytes of the buffers a prepared program holds of its own (the inputs it
+copies into, constants, results and slots), and what they would be with
+each value stored apart instead of in slots. An argument read where the
+caller has it, or bound by reference, holds none.
 """
 function footprint(ex::Executable)
     graph, s = ex.plan.graph, ex.storage
-    own = sum(v -> s.slots[v] == 0 && ex.buffers[v] !== nothing ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
-    own -= sum(v -> s.slots[v] == 0 ? value_bytes(graph.values[v]) : 0, unique(first.([s.donated; s.overwrites])); init = 0)
+    taken = Set(first.([s.donated; s.overwrites]))
+    own = sum(v -> s.slots[v] == 0 && !(v in taken) && ex.buffers[v] !== nothing ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
+    own += sum(k -> ex.referenced[k] === nothing && ex.arguments[k] !== nothing ? sizeof(ex.arguments[k]) : 0, eachindex(ex.arguments); init = 0)
     own += sum(save -> sizeof(save.before), ex.saves; init = 0)
     apart = sum(v -> s.slots[v] > 0 ? value_bytes(graph.values[v]) : 0, eachindex(graph.values); init = 0)
     (bytes = own + sum(s.sizes; init = 0), apart = own + apart)
@@ -548,8 +607,9 @@ function bind_leaves!(ex, positions, xs)
         k === nothing && continue
         ex.back[k] = nothing
         x === ex.referenced[k] && continue
-        moves = point_at!(ex, k, ex.arguments[k], moves)
-        copyto!(ex.arguments[k], vec(x))
+        own = own!(ex, k)
+        moves = point_at!(ex, k, own, moves)
+        copyto!(own, vec(x))
     end
     retarget!(ex, moves)
 end
@@ -560,9 +620,10 @@ end
 Bind inputs as `compile`'s call does: an argument's storage is the caller's
 array, read and written where it is, when every launch can be pointed
 elsewhere (`repoints`) and the target can read and write the array where it
-is (`pointable`); the array is copied into the argument's buffer otherwise,
-as `bind!` copies, and each `execute!` or `replay!` after copies what the
-program wrote there back into it. An argument bound by reference keeps its
+is (`pointable`); the array is copied otherwise, as `bind!` copies, into a
+buffer of the executable's own made the first time one is, and each
+`execute!` or `replay!` after copies what the program wrote there back into
+it. An argument bound by reference keeps its
 array. An array the storage is already costs nothing. The steps that use the
 storage of one elsewhere, the kernels that read or write it and the copies
 of saved inputs and staged results, are pointed at it, the results over it
@@ -664,9 +725,22 @@ function point_leaf!(ex::Executable, k::Int, x, at::UInt, moves)
         at == ex.at[k] && return moves
         (again || !ex.settles[k]) && return point_at!(ex, k, x, moves)
     end
-    moves = point_at!(ex, k, ex.arguments[k], moves)
-    x === ex.referenced[k] || copyto!(ex.arguments[k], vec(x))
+    x === ex.referenced[k] && return moves
+    own = own!(ex, k)
+    moves = point_at!(ex, k, own, moves)
+    copyto!(own, vec(x))
     moves
+end
+
+# The buffer of the executable's own that a binding copies argument `k` into,
+# made when a binding first does: an argument read and written where the
+# caller has it needs none (see `prepare`'s `point`).
+function own!(ex::Executable, k)
+    b = ex.arguments[k]
+    b === nothing || return b
+    values = ex.plan.graph.values
+    v = values[findfirst(v -> v.definition isa Input && v.definition.argument == k, values)]
+    ex.arguments[k] = allocate(ex.target, v.eltype, storage_length(v))
 end
 
 # After a run, what the program wrote into an argument bound to an array
@@ -689,7 +763,7 @@ end
 function point_at!(ex::Executable, k, x, moves)
     uses = ex.pointable[k]
     uses === nothing && return moves
-    to = reinterpret(UInt, pointer(x))
+    to = address_of(x)
     to == ex.at[k] && return moves
     buffer = vec(x)
     moves = something(moves, Tuple{Int, Int, Move, Any}[])

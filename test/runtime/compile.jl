@@ -448,9 +448,9 @@ ring_shift!(ring, x) = (ring .= hcat(ring[:, 2:end], x); sum(ring))
 # Each compiled on `device`'s arrays and called three times on each of two
 # sets of arrays, in turn, against the function run eagerly on copies: the
 # results, and every argument after the call. The written argument is the
-# program's storage, the caller's array itself, and the buffer the program
-# owns for it is never written; an `Array` passed to a function compiled for
-# a device is copied in and back.
+# program's storage, the caller's array itself, and the program holds no
+# buffer of its own for it; an `Array` passed to a function compiled for a
+# device is copied in and back, through a buffer made for it then.
 function check_written_in_place(device; options...)
     arguments = (
         cache_put! => s -> (data(4, 6, 2; scale = s), data(4, 2, 2; scale = 2s), Int32[5, 2]),
@@ -460,7 +460,7 @@ function check_written_in_place(device; options...)
         on(s) = map(x -> device(single(x)), make(s))
         c = compile(f, on(0.1)...; options...)
         ex = c.executable
-        own = Array(ex.arguments[1])
+        @test all(isnothing, ex.arguments)
         sets = (on(0.3), on(0.7))
         for _ in 1:3, mine in sets
             theirs = map(host, mine)
@@ -468,12 +468,13 @@ function check_written_in_place(device; options...)
             @test (r === nothing ? e === nothing : r ≈ e) && all(map((a, b) -> host(a) ≈ b, mine, theirs))
             @test ex.pointed[1] === mine[1]
         end
-        @test Array(ex.arguments[1]) == own && !any(ex.settles)
+        @test all(isnothing, ex.arguments) && !any(ex.settles)
         @test occursin("input 1 is the caller's array", sprint(explain, c))
         mine = map(host, on(0.5))
         theirs = deepcopy(mine)
         r, e = c(mine...), f(theirs...)
         @test (r === nothing ? e === nothing : r ≈ e) && mine[1] ≈ theirs[1]
+        @test all(isnothing, ex.arguments) == (device === identity)
     end
     @test occursin("staged, then copied into input 1", sprint(explain, compile(ring_shift!, device(single(data(3, 5))), device(single(data(3))))))
 end
@@ -502,6 +503,57 @@ end
     C.point!(ex, s, x)
     execute!(ex)
     @test s ≈ 0.5 .* data(2) .+ x && ex.pointed[1] === s
+end
+
+# A recurrence no one kernel holds, which runs a step at a time.
+function settled(W, u)
+    for _ in 1:8
+        u = tanh.(W' * (W * u)) .+ u
+    end
+    sum(abs2, u)
+end
+
+@testset "an argument's storage: the caller's array, or a buffer made when one is copied" begin
+    add(a, b) = a .+ b
+    a, b = data(6), data(6; scale = 0.5)
+    c = compile(add, a, b)
+    ex = c.executable
+    # Built on the caller's arrays, the program holds no buffer of its own
+    # for them: its bytes are its result's.
+    @test all(isnothing, ex.arguments) && C.footprint(ex).bytes == sizeof(a)
+    @test c(a, b) == a .+ b && all(isnothing, ex.arguments)
+    # An array the kernels cannot read where it is, a stepped view, is
+    # copied into a buffer made then, and kept for the next.
+    m = data(12)
+    @test c(view(m, 1:2:12), b) == m[1:2:12] .+ b && ex.arguments[1] isa Vector{Float64} && ex.arguments[2] === nothing
+    own = ex.arguments[1]
+    @test c(view(m, 2:2:12), b) == m[2:2:12] .+ b && ex.arguments[1] === own && C.footprint(ex).bytes == 2 * sizeof(a)
+    @test c(a, b) == a .+ b && ex.pointed[1] === a
+    # The level beneath copies into a buffer for each argument from the start.
+    e = prepare(trace(add, a, b), a, b)
+    @test all(x -> x isa Vector{Float64}, e.arguments) && C.footprint(e).bytes == 3 * sizeof(a)
+    bind!(e, b, a)
+    @test outputs(execute!(e)) == b .+ a && e.arguments[1] == b
+    # A compiled program holds the arrays it was compiled on until a call
+    # brings others, and those of its last call after.
+    function compiled_and_called()
+        x, y = data(6), data(6)
+        c = compile(add, x, y)
+        @test c(a, b) == a .+ b
+        c, WeakRef(x), WeakRef(y)
+    end
+    c, x, y = compiled_and_called()
+    foreach(_ -> GC.gc(true), 1:3)
+    @test x.value === nothing && y.value === nothing && c.executable.pointed[1] === a
+    # A recurrence run a step at a time cannot be pointed elsewhere: each
+    # argument has a buffer of the program's own, its storage for good, and
+    # a call's arrays are copied into it, as the level beneath copies.
+    W, u = data(4, 4; scale = 0.2), data(4, 3)
+    r = compile(settled, W, u)
+    ex = r.executable
+    @test any(k -> k isa C.SteppedKernels, ex.kernels)
+    @test all(isnothing, ex.pointable) && all(x -> x isa Vector{Float64}, ex.arguments)
+    @test r(W, u) ≈ settled(W, u) && r(2 .* W, u) ≈ settled(2 .* W, u)
 end
 
 if CUDA_FUNCTIONAL

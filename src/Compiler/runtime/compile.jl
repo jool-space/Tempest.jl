@@ -41,15 +41,19 @@ the caller has it, not copied: a call on the arrays of the call before costs
 nothing for them, and one on others changes the addresses the captured
 graph's kernels read and write, in place (see `Tempest.Compiler.point!`), so
 a training step whose weights are new arrays at every call copies none of
-them. What `f` writes into an argument the kernels write into the caller's
-array: where the kernel that writes it reads the array only at the
-addresses it writes, and the kernels that read it otherwise can run first,
-directly, as an append to a cache writes only its new positions; else into
-storage of the program's own and then copied into the array once, after the
-last kernel (`explain` says which). Everything else the program stores lives
-in buffers it owns and reuses at every call. An array not of the target's
-array type, an `Array` for a function compiled for the GPU say, is copied
-into the program's storage and, if written, back after the call.
+them. The program is built on the arrays `compile` is given and holds no
+storage of its own for them, so a model's weights are in memory once; it
+holds the arrays of its last call, or until the first those it was compiled
+on, until a call brings others. What `f` writes into an argument the kernels
+write into the caller's array: where the kernel that writes it reads the
+array only at the addresses it writes, and the kernels that read it
+otherwise can run first, directly, as an append to a cache writes only its
+new positions; else into storage of the program's own and then copied into
+the array once, after the last kernel (`explain` says which). Everything else
+the program stores lives in buffers it owns and reuses at every call. An
+array not of the target's array type, an `Array` for a function compiled for
+the GPU say, is copied into a buffer the program makes the first time it
+needs one and keeps, and, if written, back after the call.
 
 A call whose arguments, `f`'s own leaves or the globals `f` reads differ in
 anything but the values of inputs throws, naming the difference. So does a
@@ -88,7 +92,7 @@ function compile(f, @nospecialize(args...); target = default_target((f, args...)
     globals = read_globals(f, args, passed)
     program, met = trace_meeting(call, f, args...)
     refuse_held(met, (f, args...), passed)
-    ex = prepare(program, f, args...; target, measure)
+    ex = prepare(program, f, args...; target, measure, point = true)
     capture && capture!(ex)
     Compiled(f, ex, signature((f, args...), leaves(program.input_structure)), globals)
 end
