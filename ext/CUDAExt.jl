@@ -81,10 +81,12 @@ struct Kernel
 end
 
 # Another node: its kind and parameters, which a step must keep to be
-# changed in place; a kind whose parameters are not read keeps `nothing`,
-# and a step with one is recorded again.
-struct Node
-    kind::CUDACore.CUgraphNodeType
+# changed in place, as the executable graph has them now; a kind whose
+# parameters are not read keeps `nothing`, and a step with one is recorded
+# again. A copy's addresses are among its parameters, changed where they are.
+mutable struct Node
+    const node::CUDACore.CUgraphNode
+    const kind::CUDACore.CUgraphNodeType
     params::Any
 end
 
@@ -94,7 +96,7 @@ function node_record(node)
     if kind[] == CUDACore.CU_GRAPH_NODE_TYPE_KERNEL
         p = Ref{CUDACore.CUDA_KERNEL_NODE_PARAMS}()
         CUDACore.cuGraphKernelNodeGetParams_v2(node, p)
-        p[].kernelParams == C_NULL && return Node(kind[], nothing)
+        p[].kernelParams == C_NULL && return Node(node, kind[], nothing)
         func = p[].func
         if func == C_NULL
             f = Ref{CUDACore.CUfunction}()
@@ -111,13 +113,13 @@ function node_record(node)
     elseif kind[] == CUDACore.CU_GRAPH_NODE_TYPE_MEMSET
         p = Ref{CUDACore.CUDA_MEMSET_NODE_PARAMS}()
         CUDACore.cuGraphMemsetNodeGetParams(node, p)
-        return Node(kind[], p[])
+        return Node(node, kind[], p[])
     elseif kind[] == CUDACore.CU_GRAPH_NODE_TYPE_MEMCPY
         p = Ref{CUDACore.CUDA_MEMCPY3D}()
         CUDACore.cuGraphMemcpyNodeGetParams(node, p)
-        return Node(kind[], p[])
+        return Node(node, kind[], p[])
     end
-    Node(kind[], nothing)
+    Node(node, kind[], nothing)
 end
 
 # A node's dependencies, read with their edges' data: the driver refuses to
@@ -208,7 +210,7 @@ alike(a, b) = false
 # The record of a node takes the arguments of its counterpart in a graph
 # recorded again, whose launch it now is.
 adopt!(a::Kernel, b::Kernel) = foreach(copyto!, a.arguments, b.arguments)
-adopt!(a::Node, b::Node) = nothing
+adopt!(a::Node, b::Node) = (a.params = b.params; nothing)
 
 # Launch the kernel node as its record has it now.
 function relaunch!(g::Graph, k::Kernel)
@@ -223,12 +225,36 @@ alignment(address) = min(trailing_zeros(address), 12)
 
 function Tempest.Compiler.retarget!(::CUDATarget, g::Graph, steps, moves, repoint)
     key = first(steps)
+    copies(g.nodes[key]) && (repoint(); foreach(step -> foreach(n -> move_copy!(g, n, moves), g.nodes[step]), steps); return true)
     key in g.recorded && (repoint(); return record_alone!(g, steps))
     known = all(m -> haskey(g.slots, (key, m.value)) && alignment(m.to) in g.aligned[(key, m.value)], moves)
     known || return learn!(g, steps, moves, repoint)
     repoint()
     foreach(step -> patch!(g, step, key, moves), steps)
     true
+end
+
+# Whether a step is copies alone, as an input saved apart or a staged result
+# copied into its argument: a copy names its addresses in its parameters,
+# and nothing need be learned.
+copies(nodes) = !isempty(nodes) && all(n -> n isa Node && n.kind == CUDACore.CU_GRAPH_NODE_TYPE_MEMCPY, nodes)
+
+# The copy reads and writes where its source and destination moved, if they did.
+function move_copy!(g::Graph, n::Node, moves)
+    p = n.params::CUDACore.CUDA_MEMCPY3D
+    src, dst = moved(moves, p.srcDevice, p.srcXInBytes), moved(moves, p.dstDevice, p.dstXInBytes)
+    (src, dst) == (p.srcDevice, p.dstDevice) && return
+    fields = map(f -> f === :srcDevice ? src : f === :dstDevice ? dst : getfield(p, f), fieldnames(CUDACore.CUDA_MEMCPY3D))
+    n.params = CUDACore.CUDA_MEMCPY3D(fields...)
+    CUDACore.cuGraphExecMemcpyNodeSetParams(g.exec, n.node, Ref(n.params), CUDACore.context())
+end
+
+# A copy's base address, which with `offset` bytes is into a value that
+# moved, moved with it.
+function moved(moves, base, offset)
+    at = UInt(base) + offset
+    i = findfirst(m -> m.from <= at < m.from + m.bytes, moves)
+    i === nothing ? base : typeof(base)(UInt(base) + moves[i].to - moves[i].from)
 end
 
 # Write where each value moved into the words of the step's kernels that

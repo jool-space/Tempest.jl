@@ -466,6 +466,18 @@ if CUDA_FUNCTIONAL
         check_before_write(CuArray; capture = false)
     end
 
+    @testset "writes land in the caller's arrays, on CUDA" begin
+        # A captured graph's kernels and copies are changed in place where
+        # they read and write an argument, not recorded again.
+        check_written_in_place(CuArray)
+        check_written_in_place(CuArray; capture = false)
+        # Arrays that share memory with one the function writes are refused
+        # on the device as on the CPU: the kernels would read what they write.
+        u = CuArray(single(data(4)))
+        c = compile((a, b) -> (a .= 2 .* a; sum(b)), CuArray(single(data(4))), CuArray(single(data(4))))
+        @test occursin("argument 2 shares memory with argument 1", message(() -> c(u, u)))
+    end
+
     @testset "arguments read where the caller has them, on CUDA" begin
         # The captured graph's kernels are changed in place where they read
         # an argument pointed elsewhere, not recorded again.
