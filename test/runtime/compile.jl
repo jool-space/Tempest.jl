@@ -379,7 +379,10 @@ end
     @test occursin("argument 2 shares memory with argument 1", message(() -> g(long, transpose(reshape(long, 2, 2)))))
     @test occursin("argument 2 shares memory with argument 1", message(() -> c(u, Opaque(u))))
     # Arrays apart run as the function does, two parts of one array apart
-    # too, and arrays it only reads may share memory.
+    # too, though they lie between each other as two rows do, and arrays it
+    # only reads may share memory.
+    rows = permutedims([data(2) data(2; scale = 0.5)])
+    @test c(view(rows, 1, :), view(rows, 2, :)) ≈ sum(data(2; scale = 0.5)) && rows[1, :] == 2 .* data(2) && rows[2, :] == data(2; scale = 0.5)
     v, w = data(2), data(2; scale = 0.5)
     @test c(v, w) == f!(data(2), data(2; scale = 0.5)) && v == 2 .* data(2)
     both = [data(2) data(2; scale = 0.5)]

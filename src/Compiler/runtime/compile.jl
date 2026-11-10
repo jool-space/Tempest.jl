@@ -438,32 +438,37 @@ shown(x) = sprint(show, x; context = :limit => true)
 # A call whose arrays share memory with one the program writes throws: the
 # program reads each array as one of its own, which the function itself,
 # run on the same arrays, would not, as `f!(x, x)` writing its first
-# argument and reading its second reads what it wrote. Two arrays share
-# memory where the addresses their elements span overlap (see `extent`),
-# which the arrays sorted by where they start find in one pass; an array
-# whose addresses are not known shares it where Base's `mightalias` says
-# so, as broadcasting's. `b` holds the call's arrays.
+# argument and reading its second reads what it wrote. Which arrays may
+# share memory is Base's `mightalias`, as broadcasting's, asked only of two
+# that the addresses their elements span (see `extent`) do not show apart:
+# the arrays sorted by where they start find in one pass every two whose
+# spans meet, none in a call of arrays each its own allocation, and two
+# rows of one matrix, which lie between each other and share no element,
+# are asked and pass. An array whose addresses are not known is asked
+# beside every other. `b` holds the call's arrays.
 function refuse_shared(ex::Executable, b::Passed, call)
-    written = falses(length(b.arrays))
+    xs = b.arrays
+    written = falses(length(xs))
     foreach(((_, a),) -> written[a] = true, ex.program.writes)
+    function ask(k, j)
+        (written[k] || written[j]) && Base.mightalias(xs[k], xs[j]) || return
+        written[j] ? refuse_sharing(ex, call, k, j) : refuse_sharing(ex, call, j, k)
+    end
     spans = Tuple{UInt, UInt, Int}[]
     unknown = Int[]
     for (k, r) in enumerate(b.extents)
         r === nothing ? push!(unknown, k) : isempty(r) || push!(spans, (first(r), last(r), k))
     end
     sort!(spans)
-    # The array reaching furthest so far, and the written one.
-    far, farthest = (UInt(0), 0), (UInt(0), 0)
+    # The spans begun and not ended, each by where it ends.
+    open = Tuple{UInt, Int}[]
     for (start, stop, k) in spans
-        start <= first(farthest) && refuse_sharing(ex, call, k, last(farthest))
-        written[k] && start <= first(far) && refuse_sharing(ex, call, last(far), k)
-        stop > first(far) && (far = (stop, k))
-        written[k] && stop > first(farthest) && (farthest = (stop, k))
+        filter!(((ends, _),) -> ends >= start, open)
+        foreach(((_, j),) -> ask(k, j), open)
+        push!(open, (stop, k))
     end
-    xs = b.arrays
     for u in unknown, k in eachindex(xs)
-        k != u && (written[u] || written[k]) && Base.mightalias(xs[u], xs[k]) || continue
-        written[u] ? refuse_sharing(ex, call, k, u) : refuse_sharing(ex, call, u, k)
+        k == u || ask(u, k)
     end
 end
 
