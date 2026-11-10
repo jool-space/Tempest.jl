@@ -243,6 +243,16 @@ Base.round(x::Traced, ::RoundingMode{:ToZero}) = trunc(x)
 # A value outside the type is undefined, as a kernel's conversion leaves it.
 Base.unsafe_trunc(::Type{T}, x::Traced) where {T <: Integer} = cast(T, trunc(x))
 
+# A traced number's type stands for its element type: what Base asks of a
+# number's type, its promotion with another, its widening, its zero, answers
+# as of the element type, in plain types and numbers, which no tape holds, as
+# Base's `float` of it already did. So a widening written by type,
+# `promote_type(typeof(x), Float32)(x)`, converts, by the cast the plain type
+# makes, and `rand(float(typeof(x)))` draws a plain number.
+Base.promote_rule(::Type{Traced{S}}, ::Type{T}) where {S, T <: Number} = promote_type(S, T)
+Base.promote_rule(::Type{Traced{S}}, ::Type{Traced{T}}) where {S, T} = promote_type(S, T)
+Base.widen(::Type{Traced{T}}) where {T} = widen(T)
+
 for f in (:zero, :one, :typemin, :typemax, :eps, :floatmin, :floatmax)
     @eval begin
         Base.$f(::Traced{T}) where {T} = $f(T)

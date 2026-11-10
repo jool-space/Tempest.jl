@@ -389,3 +389,27 @@ end
     @test occursin("no method matching", message(() -> trace(x -> push!([x], vec(x)), x)))
     @test occursin("no method matching", message(() -> push!([x], vec(x))))
 end
+
+# Scalar code that asks a number's type, `promote_type(typeof(x), Float32)`
+# say, is answered for a traced number as for its element type, traced: a
+# widening written by type converts, inside a broadcast's function as on the
+# array.
+widened(x) = promote_type(typeof(x), Float32)(x)
+
+@testset "a traced number's type promotes as its element type's" begin
+    @testset "$S" for S in (BFloat16s.BFloat16, Float16, Int8, Int32, Bool)
+        w = S <: Integer ? S.(data(4, 4) .> 0) : S.(data(4, 4))
+        @testset "$name" for (name, f) in [
+            ("widened.(w)", w -> widened.(w)),
+            ("a widened number computed with", w -> (x -> (y = widened(x); y / (1 + exp(-y)))).(w)),
+            ("float(typeof(x))(x)", w -> (x -> float(typeof(x))(x)).(w)),
+            ("promote_type of two traced numbers", w -> (x -> promote_type(typeof(x), typeof(2.0 * x))(x)).(w)),
+            ("one(x) + x", w -> (x -> one(x) + x).(w)),
+        ]
+            p = trace(f, w)
+            @test eltype(interpret(p, w)) === eltype(f(w)) && interpret(p, w) == f(w)
+            @test outputs(execute!(prepare(p, w))) == f(w)
+        end
+        S <: Union{Int8, Int32, Float16} && @test interpret(trace(w -> widen.(w), w), w) == widen.(w)
+    end
+end
