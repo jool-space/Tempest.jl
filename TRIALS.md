@@ -1307,6 +1307,10 @@ it, and a program for a new size is a new preparation. Decode escapes it, its
 cache of a fixed extent and its length held on the device, which bounds the
 sweep (decided below), so Qwen3.5-4B's step prepares once for every token; a
 prefill, whose extent is the prompt's length, prepares for each length.
+A chunk padded to a fixed extent, its length data and its pad tokens steps
+that leave the state as it was, serves every length up to it from one
+preparation today (A model written once, below), the model carrying what the
+extent would.
 Challenger: tinygrad's
 symbolic shapes (`Variable` in `tinygrad/shape/shapetracker.py`), a bound
 dimension as a runtime argument of one kernel; Futhark's incremental
@@ -1330,6 +1334,72 @@ tinygrad's BEAM is its smallest form, already taken for products. Judged on
 the GPT step and the guard rails, with the cold cost bounded as the staged
 search bounds it, and on a second device when there is one, where the
 constants are a guess and a search is not.
+
+**A model written once.** Qwen3.5-4B's decode and prefill are run today by
+Vallmo (`~/dev/jool/Vallmo`): 1,883 lines of cuTile kernels written by hand
+(`src/kernels`, speculative decoding's apart) under a model that calls them.
+On trial is whether the model is array code and nothing else: one
+`forward(weights, states, tokens, positions, length)` in Base's arrays, a
+decode step its case of one token and a prefill its case of T, run eagerly as
+it is, compiled by Tempest and traced by Reactant, from one file that names
+none of them. What of Tempest stands trial with it: `compile`, which after
+each call copies what the program wrote back into the caller's arrays
+(`src/Compiler/runtime/compile.jl`), the whole cache a token, where `prepare`
+with `replaces` and `replay!` beneath it feed results back with no copy and
+are not exported; a prefill's extent (Sizes are constants, above); and a
+traced array's element type, which `push!` into a vector of arrays of another
+cannot convert. Challengers: Vallmo's captured step and its eager prefill,
+stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
+of 167, kernels of 1,307); the same file under Reactant; the same file eager.
+Judged by tokens equal to Vallmo's on its tiny checkpoint (`test/tiny.jl`) and
+on the 4B in BFloat16; a captured decode step within 1.1 times Vallmo's at
+every length of the cache (the decode entries below hold 39.3 to 43.6 ms
+against 39.7 to 44.9, by a script no repository kept); a prefill against
+Vallmo's; and the lines that remain against those removed. Recorded 10
+November, on the CPU target at toy sizes
+(`~/dev/jool/challengers/vallmo-2026-11-10`, the model 268 lines): 59 of 60
+programs trace, plan and agree with Float64, in Float32 and in BFloat16, among
+them a whole model's decode step, its prefill, a suffix prefill over a
+restored state, eight tokens generated greedily and a decode loop of `replay!`
+alone; a chunk of 8 padded positions serves lengths 1 to 8 from one
+preparation; the one refused is the `push!`. None of it has run on a device at
+the model's shapes since the script was lost.
+
+**Block-scaled quantized products.** A weight in MXFP8, MXFP4 or NVFP4 is
+narrow elements with a scale to each block of 32 or 16 along the axis a
+product sums, its value `T(e[i]) * T(s[fld1(i, k)])` (Microscaling's
+`BlockScaledArray`, over Microfloats' types and BitPacking's layouts, in
+`~/dev/jool`). Nothing in Tempest names any of it, and on trial is whether
+anything need: the meaning stays array code in those packages and Tempest's
+part is general. What stands trial: an array argument is one input whatever
+wraps it (`is_input`, `src/Compiler/program/tracing.jl`), so a
+`BlockScaledArray` or a packed `NarrowArray` is made dense on the host at each
+call and the program never reads its scales; a traced number converts to
+thirteen types (`tracing.jl`), so narrowing to a microfloat is an opaque map
+inside a broadcast and overflows the stack outside one; no cast of bits
+exists; an index that divides by a constant is not split into an axis of
+blocks, so no library's template, whose addresses are affine
+(`src/Compiler/cover/library.jl`), matches a block's scale; and the element
+types cuTile and cuBLAS take (`TILE_TYPES`, `ext/cuTileExt/cuTileExt.jl`;
+`FACTOR_TYPES`, `ext/cuBLASExt.jl`) hold no narrow type, so such a kernel runs
+on the floor. Challengers: Vallmo's product that dequantizes in registers
+(`src/kernels/gemv.jl`); cuBLASLt's block-scaled products over the 128×4
+layout of scales; XLA's scaled dot as Reactant reaches it by a named operation
+(the fork in `~/dev/jool/Reactant`, branch `microscaling`: three formats run
+right, found by hand, and a quantized weight against BFloat16 activations
+never reaches it); MLIR's `arith.scaling_extf`, block scaling as a conversion
+broadcast, the nearest to Tempest's way. Judged by a program in the packages'
+own types, taken as an argument, planning one kernel a product with its bytes
+left packed; that kernel within 1.1 times Vallmo's on the GB10; and no name
+for the product in Tempest. Recorded 10 November, on the CPU target at toy
+sizes (`~/dev/jool/challengers/microscaling-2026-11-10`): written with
+elements and scales as two arrays (a reshape to blocks, `repeat`,
+`Float32.(w)` of a Microfloats type, Microscaling's `copy`), MXFP4, MXFP8 and
+NVFP4's two levels each plan one kernel that reads the scale at `k ÷ 32` and
+agree with Float64; a table indexed by code agrees, its index stored first;
+and two faults stand, neither yet a test: the planner's `BoundsError`
+(`atom_range`) on `getindex.(Ref(s), k .÷ 32 .+ 1, m)`, and the stack
+overflow.
 
 **Whole programs against their challengers.** The corpus (`test/corpus`): a
 neural ODE's training step, an LSTM's, a GPT's, and a heat equation's
