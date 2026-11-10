@@ -379,8 +379,7 @@ pointed(c) = (ex = c.executable; count(k -> ex.pointable[k] !== nothing && ex.po
     w = copy(y)
     @test c(m, w) ≈ m(w) && pointed(c) == 2
     @test c(m, w) ≈ m(w) && pointed(c) == 3
-    # An argument the program writes is copied into its storage and back on
-    # every call, the same array or not; the others are read where they are.
+    # An argument the program writes is written where the caller has it too.
     function normalized(m, x)
         μ = vec(sum(x; dims = 2)) ./ size(x, 2)
         m.mean .= 0.9 .* m.mean .+ 0.1 .* μ
@@ -391,14 +390,58 @@ pointed(c) = (ex = c.executable; count(k -> ex.pointable[k] !== nothing && ex.po
     for _ in 1:3
         @test n(mine, x) ≈ normalized(theirs, x) && mine.mean ≈ theirs.mean
     end
-    @test pointed(n) == 2
-    # A result that is an input is the caller's array copied, never pointed at.
+    @test pointed(n) == 3
+    # A result that is an input is over the caller's array, and copied out of it.
     same = compile(x -> (x, 2 .* x), x)
     before = copy(x)
     a, = same(x)
     b, = same(x)
     x .= 0
-    @test a == b == before && pointed(same) == 0
+    @test a == b == before && pointed(same) == 1
+end
+
+# Functions that write their arguments: a cache at positions the device
+# holds, a state overwritten whole, and a ring shifted within itself, whose
+# reads and writes overlap, so that its result is staged and copied in.
+cache_put!(K, x, positions) = (K[:, positions, :] .= x; sum(x))
+state_over!(S, x) = (S .= tanh.(S .+ x); nothing)
+ring_shift!(ring, x) = (ring .= hcat(ring[:, 2:end], x); sum(ring))
+
+# Each compiled on `device`'s arrays and called three times on each of two
+# sets of arrays, in turn, against the function run eagerly on copies: the
+# results, and every argument after the call. The written argument is the
+# program's storage, the caller's array itself, and the buffer the program
+# owns for it is never written; an `Array` passed to a function compiled for
+# a device is copied in and back.
+function check_written_in_place(device; options...)
+    arguments = (
+        cache_put! => s -> (data(4, 6, 2; scale = s), data(4, 2, 2; scale = 2s), Int32[5, 2]),
+        state_over! => s -> (data(3, 4; scale = s), data(3, 4; scale = 2s)),
+        ring_shift! => s -> (data(3, 5; scale = s), data(3; scale = 2s)))
+    for (f, make) in arguments
+        on(s) = map(x -> device(single(x)), make(s))
+        c = compile(f, on(0.1)...; options...)
+        ex = c.executable
+        own = Array(ex.arguments[1])
+        sets = (on(0.3), on(0.7))
+        for _ in 1:3, mine in sets
+            theirs = map(host, mine)
+            r, e = c(mine...), f(theirs...)
+            @test (r === nothing ? e === nothing : r ≈ e) && all(map((a, b) -> host(a) ≈ b, mine, theirs))
+            @test ex.pointed[1] === mine[1]
+        end
+        @test Array(ex.arguments[1]) == own && !any(ex.settles)
+        @test occursin("input 1 is the caller's array", sprint(explain, c))
+        mine = map(host, on(0.5))
+        theirs = deepcopy(mine)
+        r, e = c(mine...), f(theirs...)
+        @test (r === nothing ? e === nothing : r ≈ e) && mine[1] ≈ theirs[1]
+    end
+    @test occursin("staged, then copied into input 1", sprint(explain, compile(ring_shift!, device(single(data(3, 5))), device(single(data(3))))))
+end
+
+@testset "writes land in the caller's arrays" begin
+    check_written_in_place(identity)
 end
 
 if CUDA_FUNCTIONAL

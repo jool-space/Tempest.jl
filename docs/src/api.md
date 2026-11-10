@@ -61,6 +61,7 @@ Tempest.Compiler.trace
 Tempest.Compiler.prepare
 Tempest.Compiler.bind!
 Tempest.Compiler.point!
+Tempest.Compiler.write_back!
 Tempest.Compiler.execute!
 Tempest.Compiler.capture!
 Tempest.Compiler.replay!

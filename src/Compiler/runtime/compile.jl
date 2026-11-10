@@ -36,11 +36,20 @@ declared `const` is checked at each call. A number a function `f` calls reads,
 or a copy it makes of a global's array before using it with an input, is kept
 as it was when traced.
 
-An array the program only reads is read where the caller has it, not
-copied: a call on the arrays of the call before costs nothing for them, and
-one on others changes the addresses the captured graph's kernels read, in
-place (see `Tempest.Compiler.point!`), so a training step whose weights
-are new arrays at every call copies none of them.
+An argument's array is the program's storage for it, read and written where
+the caller has it, not copied: a call on the arrays of the call before costs
+nothing for them, and one on others changes the addresses the captured
+graph's kernels read and write, in place (see `Tempest.Compiler.point!`), so
+a training step whose weights are new arrays at every call copies none of
+them. What `f` writes into an argument the kernels write into the caller's
+array: where the kernel that writes it reads the array only at the
+addresses it writes, and the kernels that read it otherwise can run first,
+directly, as an append to a cache writes only its new positions; else into
+storage of the program's own and then copied into the array once, after the
+last kernel (`explain` says which). Everything else the program stores lives
+in buffers it owns and reuses at every call. An array not of the target's
+array type, an `Array` for a function compiled for the GPU say, is copied
+into the program's storage and, if written, back after the call.
 
 A call whose arguments, `f`'s own leaves or the globals `f` reads differ in
 anything but the values of inputs throws, naming the difference. So does a
@@ -54,13 +63,25 @@ julia> c([1.0, 2.0, 3.0, 4.0])
 30.0
 ```
 
+A function that writes its arguments is compiled as it is written, and its
+state stays where the caller keeps it:
+
+```jldoctest
+julia> f!(s, x) = (s .= 0.5 .* s .+ x; sum(s));
+
+julia> s = [1.0, 2.0]; c = compile(f!, s, [0.0, 0.0]);
+
+julia> c(s, [1.0, 1.0]), s
+(3.5, [1.5, 2.0])
+```
+
 With `capture`, the program's launches are recorded once as one graph that
 each call replays, as `capture!` and `replay!` do. Results are the same either
 way.
 
-For a step that updates its state where it is and replays without copies,
-use the level beneath, in `Tempest.Compiler`: `prepare`, `bind!`, and
-`execute!` or `replay!`. `c.executable` is the prepared program, and
+The level beneath is in `Tempest.Compiler`: `prepare`, `bind!`, and
+`execute!` or `replay!`, with `point!` and `write_back!` binding a call's
+arrays as `compile` does. `c.executable` is the prepared program, and
 `explain(c)` shows it.
 """
 function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), capture::Bool = true)
@@ -280,11 +301,7 @@ function (c::Compiled)(@nospecialize(args...))
     isempty(ex.program.writes) || refuse_shared(ex, (c.f, args...))
     point!(ex, c.f, args...)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
-    # What the program wrote into an input, the caller's array takes.
-    if !isempty(ex.program.writes)
-        xs = argument_leaves(ex.program, (c.f, args...))
-        foreach(((_, a),) -> copyto!(vec(xs[a]), ex.arguments[a]), ex.program.writes)
-    end
+    write_back!(ex, c.f, args...)
     # The results apart from the buffers the next call overwrites: a number
     # where the program computed a number, else an array, though it have no
     # dimensions. The arrays are copied first: each copy waits for the
