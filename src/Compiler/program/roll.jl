@@ -63,8 +63,16 @@ folds(n::Node) = n.op isa Union{Reduce, Contract, Accumulate}
 # a kernel a step.
 shifts(nodes, k, p) = nodes[k].op isa Select && nodes[k].inputs != nodes[k - p].inputs
 
-# Nodes alike may be: of one operation's type, shape and element type.
-signature(n::Node) = hash((typeof(n.op), n.dims, n.eltype, n.scalar, length(n.inputs)))
+# What an operation shares with every operation alike it (see `alike_ops`):
+# itself, but a constant's value, which may be another array of equal
+# elements, and a selection's integers, of which one may slide.
+op_class(@nospecialize(op)) = op
+op_class(::Constant) = nothing
+op_class(op::Select) = map(i -> i isa Integer ? nothing : i, op.indices)
+
+# Nodes alike may be: of one operation's type, shape and element type, their
+# operations of one class.
+signature(n::Node) = hash((typeof(n.op), op_class(n.op), n.dims, n.eltype, n.scalar, length(n.inputs)))
 
 # Operations a step of a loop may not hold: a loop's own, or a stand-in's.
 rollable(n::Node) = !(n.op isa Union{Loop, Placeholder, Argument, Carry})
@@ -72,22 +80,85 @@ rollable(n::Node) = !(n.op isa Union{Loop, Placeholder, Argument, Carry})
 """
 What `roll!` seeks windows with, among `nodes[lo:hi]`, from each node down
 from the last: the nodes of each signature in order, the only ones alike
-each other, and the runs found so far (see `run_start`), which each search
-from a node further down reuses.
+each other; of each node from `lo`, its signature, how many of its signature
+come before it, and the nearest node before it with fewer before it, or
+`lo - 1` (see `Periods`); and the runs found so far (see `run_start`), which
+each search from a node further down reuses.
 """
 struct WindowSearch
     nodes::Vector{Node}
     lo::Int
     alike::Dict{UInt, Vector{Int}}
+    signatures::Vector{UInt}
+    earlier::Vector{Int}
+    rarer::Vector{Int}
     runs::Dict{Int, Tuple{Int, Int}}
 end
 
 function WindowSearch(nodes, lo, hi)
     alike = Dict{UInt, Vector{Int}}()
+    signatures, earlier, rarer = UInt[], Int[], Int[]
+    # The nodes so far each with fewer before it than every later one.
+    fewest = Int[]
     for k in lo:hi
-        push!(get!(() -> Int[], alike, signature(nodes[k])), k)
+        s = signature(nodes[k])
+        members = get!(() -> Int[], alike, s)
+        push!(signatures, s)
+        push!(earlier, length(members))
+        push!(members, k)
+        while !isempty(fewest) && earlier[fewest[end] - lo + 1] >= last(earlier)
+            pop!(fewest)
+        end
+        push!(rarer, isempty(fewest) ? lo - 1 : fewest[end])
+        push!(fewest, k)
     end
-    WindowSearch(nodes, lo, alike, Dict{Int, Tuple{Int, Int}}())
+    WindowSearch(nodes, lo, alike, signatures, earlier, rarer, Dict{Int, Tuple{Int, Int}}())
+end
+
+"""
+    Periods(search, last)
+
+The periods a window ending at `last` may have, in increasing order. Its
+last period, the `p` nodes up to `last`, holds nodes each alike its node `p`
+back, so a period whose last period holds node `a` is the distance from `a`
+back to a node of `a`'s signature. The periods are taken from the nodes of
+`last`'s signature, up to those whose last period would reach `b`, the
+nearest node before `last` with fewer of its signature before it; then from
+`b`'s, up to the next such node before `b`; and so on. A period left out has
+a node in its last period with no node of its signature a period back, where
+the window's run ends (see `run_start`): the search finds what it found
+trying every node alike `last`. They are few where `last`'s signature is
+common and a rarer node lies just below it: after a loop whose results
+`stack` copies one by one, a write of the stack's is alike only the same
+write after each other such loop, and the nodes between the writes alike
+those between every two.
+"""
+struct Periods
+    search::WindowSearch
+    last::Int
+end
+
+Base.IteratorSize(::Type{Periods}) = Base.SizeUnknown()
+Base.eltype(::Type{Periods}) = Int
+
+# From node `a`, the periods whose last period holds `a` but not `below`, the
+# nearest node before `a` with fewer of its signature before it: the nodes of
+# `a`'s signature they reach back to, as positions among those, from the
+# nearest down to `stop`.
+function periods_from(ps::Periods, a)
+    (; search, last) = ps
+    members = search.alike[search.signatures[a - search.lo + 1]]
+    below = search.rarer[a - search.lo + 1]
+    (a, members, searchsortedlast(members, 2a - last - 1), searchsortedfirst(members, a - last + below), below)
+end
+
+function Base.iterate(ps::Periods, state = periods_from(ps, ps.last))
+    a, members, k, stop, below = state
+    while k < stop
+        below < ps.search.lo && return nothing
+        a, members, k, stop, below = periods_from(ps, below)
+    end
+    (a - members[k], (a, members, k - 1, stop, below))
 end
 
 """
@@ -103,15 +174,12 @@ function periodic_window(search::WindowSearch, last)
     best = nothing
     accepted = Int[]
     n = nodes[last]
-    alike_at = search.alike[signature(n)]
-    candidates = view(alike_at, (searchsortedfirst(alike_at, last) - 1):-1:searchsortedfirst(alike_at, lo))
-    for j in candidates
-        p = last - j
+    for p in Periods(search, last)
         (last - lo + 1) ÷ p < ROLLED_PERIODS && break
         # Every period is a multiple of one.
         1 in accepted && break
         any(q -> p % q == 0, accepted) && continue
-        alike_nodes(n, nodes[j], p) || continue
+        alike_nodes(n, nodes[last - p], p) || continue
         i = run_start(search, last, p)
         matched = last - i
         periods = matched ÷ p + 1
