@@ -30,6 +30,14 @@ end
 
 loss(m, x) = sum(abs2, m(x))
 
+# An array whose memory Tempest cannot see: no strides, no parent, only Base's `dataids`.
+struct Opaque{T} <: AbstractVector{T}
+    data::Vector{T}
+end
+Base.size(x::Opaque) = size(x.data)
+Base.getindex(x::Opaque, i::Int) = x.data[i]
+Base.dataids(x::Opaque) = Base.dataids(x.data)
+
 # Globals a compiled function may read by name, as a script's or the REPL's.
 held_weights = data(3, 4)
 held_layer = Dense(data(3, 4), data(3), tanh)
@@ -359,10 +367,23 @@ end
     @test occursin("argument 1 shares memory with argument 2", message(() -> compile((b, a) -> f!(a, b), data(2), data(2))(u, u)))
     m = Running(data(3), data(3))
     @test occursin("argument 2 shares memory with argument 1.mean", message(() -> compile((m, x) -> (m.mean .+= x; sum(m.scale)), m, data(3))(m, m.mean)))
-    # Arrays apart run as the function does, and arrays it only reads may
-    # share memory.
+    # Memory is shared through a view, reversed or not, a reshape, a
+    # transpose and a view by indices, of the array or of its parent, and
+    # through an array whose memory Tempest cannot see, by Base's `dataids`.
+    long = data(4)
+    @test occursin("argument 2 shares memory with argument 1", message(() -> c(view(long, 1:2), view(long, 2:3))))
+    @test occursin("argument 2 shares memory with argument 1", message(() -> c(u, view(u, 2:-1:1))))
+    @test occursin("argument 2 shares memory with argument 1", message(() -> c(view(u, [2, 1]), u)))
+    g = compile((a, b) -> (a .= 2 .* a; sum(b)), data(4), data(2, 2))
+    @test occursin("argument 2 shares memory with argument 1", message(() -> g(long, reshape(long, 2, 2))))
+    @test occursin("argument 2 shares memory with argument 1", message(() -> g(long, transpose(reshape(long, 2, 2)))))
+    @test occursin("argument 2 shares memory with argument 1", message(() -> c(u, Opaque(u))))
+    # Arrays apart run as the function does, two parts of one array apart
+    # too, and arrays it only reads may share memory.
     v, w = data(2), data(2; scale = 0.5)
     @test c(v, w) == f!(data(2), data(2; scale = 0.5)) && v == 2 .* data(2)
+    both = [data(2) data(2; scale = 0.5)]
+    @test c(view(both, :, 1), view(both, :, 2)) ≈ sum(data(2; scale = 0.5)) && both[:, 1] == 2 .* data(2)
     @test compile((a, b) -> sum(a) + sum(b), data(2), data(2))(u, u) == 2 * sum(u)
 end
 

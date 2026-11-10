@@ -438,13 +438,32 @@ shown(x) = sprint(show, x; context = :limit => true)
 # A call whose arrays share memory with one the program writes throws: the
 # program reads each array as one of its own, which the function itself,
 # run on the same arrays, would not, as `f!(x, x)` writing its first
-# argument and reading its second reads what it wrote. Which arrays may
-# share memory is Base's `mightalias`, as broadcasting's. `b` holds the
-# call's arrays.
+# argument and reading its second reads what it wrote. Two arrays share
+# memory where the addresses their elements span overlap (see `extent`),
+# which the arrays sorted by where they start find in one pass; an array
+# whose addresses are not known shares it where Base's `mightalias` says
+# so, as broadcasting's. `b` holds the call's arrays.
 function refuse_shared(ex::Executable, b::Passed, call)
+    written = falses(length(b.arrays))
+    foreach(((_, a),) -> written[a] = true, ex.program.writes)
+    spans = Tuple{UInt, UInt, Int}[]
+    unknown = Int[]
+    for (k, r) in enumerate(b.extents)
+        r === nothing ? push!(unknown, k) : isempty(r) || push!(spans, (first(r), last(r), k))
+    end
+    sort!(spans)
+    # The array reaching furthest so far, and the written one.
+    far, farthest = (UInt(0), 0), (UInt(0), 0)
+    for (start, stop, k) in spans
+        start <= first(farthest) && refuse_sharing(ex, call, k, last(farthest))
+        written[k] && start <= first(far) && refuse_sharing(ex, call, last(far), k)
+        stop > first(far) && (far = (stop, k))
+        written[k] && stop > first(farthest) && (farthest = (stop, k))
+    end
     xs = b.arrays
-    for (_, a) in ex.program.writes, k in eachindex(xs)
-        k == a || !Base.mightalias(xs[a], xs[k]) || refuse_sharing(ex, call, k, a)
+    for u in unknown, k in eachindex(xs)
+        k != u && (written[u] || written[k]) && Base.mightalias(xs[u], xs[k]) || continue
+        written[u] ? refuse_sharing(ex, call, k, u) : refuse_sharing(ex, call, u, k)
     end
 end
 

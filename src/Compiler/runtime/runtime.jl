@@ -579,17 +579,18 @@ point!(ex::Executable, @nospecialize(inputs...)) = point_each!(ex, bound(ex.prog
 """
 A call's arrays, one per argument of a program, each with where it lives:
 the address of its first element, as `pointer` gives it, 0 for an array
-without one. One walk of the call's leaves finds them, `compile`'s call
-checking each against its signature as it goes, and binding the call
-(`point!`) and finding memory it shares with an argument the program writes
-read them.
+without one, and the addresses its elements span (see `extent`). One walk of
+the call's leaves finds them, `compile`'s call checking each against its
+signature as it goes, and binding the call (`point!`) and finding memory it
+shares with an argument the program writes read them.
 """
 struct Passed
     arrays::Vector{Any}
     at::Vector{UInt}
+    extents::Vector{Union{Nothing, UnitRange{UInt}}}
 end
 
-Passed(n::Int) = Passed(Vector{Any}(nothing, n), zeros(UInt, n))
+Passed(n::Int) = Passed(Vector{Any}(nothing, n), zeros(UInt, n), Vector{Union{Nothing, UnitRange{UInt}}}(nothing, n))
 
 # The arrays among `inputs`, given in the structure program `p` was traced
 # with, bound to its arguments.
@@ -607,8 +608,34 @@ end
 # leaf's type, which asks where it lives once.
 function place!(b::Passed, k::Int, x)
     b.arrays[k] = x
-    x isa StridedArray && (b.at[k] = reinterpret(UInt, pointer(x)))
+    if x isa StridedArray
+        at = reinterpret(UInt, pointer(x))
+        b.at[k], b.extents[k] = at, extent(x, at)
+    else
+        b.extents[k] = extent(x)
+    end
     b
+end
+
+# The addresses the elements of array `x` span, its first byte to its last,
+# along its strides from `at`, its first element's: none for an array with
+# no elements, or that holds no memory, as a range; those of the array it
+# wraps where it has no strides, as a transpose of one; `nothing` where
+# neither is known.
+function extent(x::StridedArray, at = reinterpret(UInt, pointer(x)))
+    isempty(x) && return UInt(1):UInt(0)
+    start = stop = at
+    for (n, s) in zip(size(x), strides(x))
+        reach = (n - 1) * s * Base.elsize(x)
+        reach < 0 ? (start -= UInt(-reach)) : (stop += UInt(reach))
+    end
+    start:(stop + UInt(Base.elsize(x)) - UInt(1))
+end
+
+function extent(x)
+    isbits(x) && return UInt(1):UInt(0)
+    p = parent(x)
+    p === x ? nothing : extent(p)
 end
 
 # Bind the arrays of `b`, as `point!` binds a call's inputs.
