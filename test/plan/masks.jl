@@ -49,6 +49,14 @@
     @test C.masked(h, condition) == ([IR.add(IR.add(IR.var(1), 1, d), IR.scale(length_read, -1), d)], false)
     @test IR.masked_result(ifelse, Float32, (false, nothing, -Inf32)) === -Inf32
     @test IR.masked_result(ifelse, Float32, (true, :finite, nothing)) === :finite
+    # Where a value is observed: a product read only scaled and chosen by
+    # the length is observed up to it, through the map that scales it,
+    # where what a fold or the results read is observed everywhere.
+    chose(a, n) = sum(exp.(ifelse.(reshape(1:size(a, 1), :, 1) .<= reshape(n, 1, :), 2 .* (a * a), -Inf32)); dims = 1)
+    h = C.lower(trace(chose, s, n))
+    product = only(v for v in eachindex(h.values) if h.values[v].definition isa C.Reduction && C.observed(h, v) !== nothing)
+    @test C.observed(h, product) == [IR.add(IR.add(IR.var(1), 1, d), IR.scale(length_read, -1), d)]
+    @test C.observed(h, h.arguments[1]) === nothing && C.observed(h, only(C.read_values(only(h.results)))) === nothing
     # A kernel that reads a value masked by such a length reads the length
     # too, by which it may bound its sweep: an additive mask stored once, as
     # two sums a product apart read it, is all they read of the length.

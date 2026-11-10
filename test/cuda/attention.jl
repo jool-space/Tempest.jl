@@ -295,8 +295,9 @@ end
     end
     # The mask as a condition two layers share, stored once, each choosing
     # its scores by it: a sum over keys that loads it finds its formula, the
-    # condition being false where it fails, and stops at the length. The
-    # results are those of every step run.
+    # condition being false where it fails, and stops at the length; and the
+    # scores, stored bare and read only where it holds, are computed only in
+    # the tiles it leaves. The results are those of every step and tile run.
     function chosen(q, k, v, len)
         seen = axes(k, 2) .<= reshape(len, 1, 1, 1, :)
         attend(x) = (s = ifelse.(seen, Einops.@einsum(k, x, "d n h b, d (g h) b -> n g h b", h = size(k, 3)) .* 0.25f0, -Inf32);
@@ -309,6 +310,7 @@ end
     prepared(skip) = withenv(() -> prepare(p, map(CuArray, (q3, k5, v5, n5))...; target), "TEMPEST_SKIP_MASKED" => skip)
     ex, every = prepared("1"), prepared("0")
     @test count(k -> occursin("masked steps skipped", string(k)), ex.kernels) == 2
+    @test count(k -> occursin("masked tiles skipped", string(k)), ex.kernels) == 2
     for m in (n5, Int32[512, 5, 130])
         bind!(ex, 4 => CuArray(m))
         bind!(every, 4 => CuArray(m))

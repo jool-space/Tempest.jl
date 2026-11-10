@@ -17,7 +17,10 @@ element out of its own prefix (`exclusive`), nothing for any other value; and
 for a value masked by formulas over its positions, `masked`: the formulas,
 each at most zero where the mask holds, and the number the value is where it
 fails (see `Tempest.Compiler.IR.comparison_mask` and
-`Tempest.Compiler.IR.masked_result`); and for a recurrence's state,
+`Tempest.Compiler.IR.masked_result`); `observed`: formulas over its
+positions, each at most zero where the program's results may depend on what
+it holds, nothing when they may depend on all of it (see
+`Tempest.Compiler.observed`); and for a recurrence's state,
 `carried`: the axis it steps along, the value it is carried from, a load
 over its domain read one step back, and whether it steps from the axis's
 last position to its first, reading one step on (`reverse`; see
@@ -34,11 +37,12 @@ struct ValueView
     into::Union{Nothing, Term}
     scan::Union{Nothing, @NamedTuple{reverse::Bool, exclusive::Bool}}
     masked::Union{Nothing, Tuple{Vector{Affine}, Any}}
+    observed::Union{Nothing, Vector{Affine}}
     carried::Union{Nothing, @NamedTuple{axis::Int, from::Term, reverse::Bool}}
     # Compiled once, whatever the rank of the value and the type of its terms.
     Base.@nospecializeinfer function ValueView(eltype, @nospecialize(dims), scalar, stored, @nospecialize(fold), @nospecialize(reduced), keyed,
-            @nospecialize(into), @nospecialize(scan), @nospecialize(masked), @nospecialize(carried))
-        new(eltype, dims, scalar, stored, fold, reduced, keyed, into, scan, masked, carried)
+            @nospecialize(into), @nospecialize(scan), @nospecialize(masked), @nospecialize(observed), @nospecialize(carried))
+        new(eltype, dims, scalar, stored, fold, reduced, keyed, into, scan, masked, observed, carried)
     end
 end
 

@@ -158,15 +158,17 @@ end
 # the walks under it find of a value read at an index, which the walks from
 # many values share (see plan/masks.jl): the indices it reads at and its
 # condition's mask (`walks`), the masks it is computed from (`found`), and
-# what it is where a mask fails (`known`).
+# what it is where a mask fails (`known`); and where each value is observed
+# (`observed`), found for every value at once, empty until asked.
 struct Masks
     of::Dict{Int, Any}
     walks::Dict{Any, Any}
     found::Dict{Any, Vector{Vector{Affine}}}
     known::Dict{Any, Any}
+    observed::Vector{Any}
 end
 
-Masks() = Masks(Dict{Int, Any}(), Dict{Any, Any}(), Dict{Any, Vector{Vector{Affine}}}(), Dict{Any, Any}())
+Masks() = Masks(Dict{Int, Any}(), Dict{Any, Any}(), Dict{Any, Vector{Vector{Affine}}}(), Dict{Any, Any}(), Any[])
 
 """
     IndexGraph

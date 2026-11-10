@@ -214,15 +214,18 @@ end
     ruled_out(k, c, stored, indices) -> Expr or nothing
 
 An Int32 expression over the block's indices, above zero when each value of
-`stored` is its mask's literal across the block's whole tile, so that the
-block's sweep may be skipped: a decoding step's scores past the length the
-device holds are minus infinity whatever the keys there, and the sweep over
-the features reads every key. A tile is ruled out when some formula of a
-value's mask is above zero at its lowest over the tile (`step_bounds`).
-Only sums are skipped: a sum over nothing is zero, a finite statistic, as a
-mask's literal takes a fold to be (`Tempest.Compiler.masked`), where an
-exponential fold over nothing is not. Nothing when a stored value has no
-such mask, or the kernel keeps partial states.
+`stored` is its mask's literal across the block's whole tile, or what it
+holds there is observed nowhere, so that the block's sweep may be skipped: a
+decoding step's scores past the length the device holds are minus infinity
+whatever the keys there, or, stored bare, read only where the length's mask
+holds (`Tempest.Compiler.observed`), and the sweep over the features reads
+every key. A tile is ruled out when some formula of a value's mask, or of
+where it is observed, is above zero at its lowest over the tile
+(`step_bounds`). Only sums are skipped: a sum over nothing is zero, a finite
+statistic, as a mask's literal takes a fold to be
+(`Tempest.Compiler.masked`), where an exponential fold over nothing is not.
+Nothing when a stored value has no such formulas, or the kernel keeps
+partial states.
 """
 function ruled_out(k, c::Context, stored, indices)
     isempty(partial_folds(c)) && isempty(keyed_folds(c)) || return nothing
@@ -235,9 +238,10 @@ function ruled_out(k, c::Context, stored, indices)
     highest = Any[]
     for m in stored
         mask, place = c.g.values[m].masked, c.g.placement[m]
-        (mask === nothing || place === nothing || isempty(first(mask))) && return nothing
+        formulas = [mask === nothing ? Affine[] : first(mask); something(c.g.values[m].observed, Affine[])]
+        (place === nothing || isempty(formulas)) && return nothing
         lowest = Any[]
-        for e in first(mask)
+        for e in formulas
             bounds = step_bounds(k, c, IR.substitute(e, place, d), p, indices)
             # A formula that moves along the sweep is not one tile's.
             (bounds === nothing || first(bounds) != 0) && return nothing

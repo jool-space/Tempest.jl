@@ -56,7 +56,7 @@ function exchanged(c::Context, folds, σ, km, d)
         v = values[r]
         terms[r] = t
         placement[r] = map(e -> IR.substitute(e, σ, d), g.placement[r])
-        values[r] = ValueView(v.eltype, v.dims, v.scalar, v.stored, v.fold, (km,), v.keyed, v.into, v.scan, v.masked, v.carried)
+        values[r] = ValueView(v.eltype, v.dims, v.scalar, v.stored, v.fold, (km,), v.keyed, v.into, v.scan, v.masked, v.observed, v.carried)
     end
     Context(GroupView(g.kind, g.domain, g.reductions, g.outputs, terms, g.phase, g.primary_axes, values, placement, g.bytes, g.reference), c.s, c.held)
 end

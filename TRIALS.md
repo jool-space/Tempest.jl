@@ -1852,7 +1852,55 @@ one block sweeps the first 4096 keys. What is not judged, named: a split
 sum's partial states and a resident kernel skip nothing; and the skip needs
 the masked scores stored, as a mask the layers share makes them, where a
 mask written as a formula may let the plan store the scores bare and mask
-them where they are read, and then every tile is computed.
+them where they are read, and then every tile is computed (judged in the
+next entry).
+
+**Scores stored bare and chosen by a stored condition are computed whole:
+a condition masks itself, and a value is computed only where it is
+observed, adopted.** On trial was the same step as Vallmo's model now
+spells it, `ifelse.(seen, scores, -Inf32)` with `seen` the cache's
+positions compared with the position the device holds. The plan stores
+`seen` once for the eight attention layers, and each layer's scores bare,
+chosen by the loaded condition inside the sum over keys. The generator
+followed a loaded condition back to no comparison, so that sum swept the
+whole cache, 420 to 436 μs a layer at every fill; and the product into the
+scores computed every key, 290 μs a layer, though nothing reads the scores
+past the length. The challengers as before, FlexAttention's block mask and
+FlashAttention's decode, both bounding both products; Vallmo's split
+kernel the bar. Now a condition of comparisons is a masked value itself,
+false where it fails, and a choice by a condition known there is the
+branch it takes (`masked`, `src/Compiler/plan/masks.jl`; `masked_result`),
+so the sum over keys finds the formula as the planner does. And a walk
+from the readers back finds where a value is observed at all
+(`observed`): a choice observes the branch it takes where its condition
+holds only there, a map observes its operands where it is observed itself,
+through a read that permutes or broadcasts their axes, and a fold, a
+gather or a result observes everything. A block of a sum whose tile no
+reader observes skips its sweep as one its mask rules out does, so nothing
+need decide whether the scores are stored bare or masked. The integers
+such formulas read are among the reads of the kernels that bound their
+sweeps by them (`group_reads`): an additive mask stored apart had left the
+length unread, and its sums, built to be measured on no buffer for it,
+fell to the floor's kernels, 50 ms a token against 38.
+
+| ms per token at 32768, captured, GB10 | fill 8 | 16376 | 32736 |
+|---|---|---|---|
+| before | 43.92 | 43.91 | 43.94 |
+| after | 37.95 | 40.81 | 43.75 |
+| Vallmo | 37.87 | 42.99 | 44.02 |
+
+Medians of 15 samples, three processes each, alternating, cold first.
+The tokens of the 512 run's three prompts are main's, bit for bit; a toy
+step of two layers, 64 features over 1024 positions, gives the same
+results bit for bit with `TEMPEST_SKIP_MASKED=0`, both spellings of the
+mask. Plans of the fuzzer's seeds 1 to 200 are main's line for line, and
+its failures main's one. What is not judged, named: at the whole cache the
+sum over keys is 16 blocks each sweeping every key, where Vallmo and
+FlashAttention's decode split the keys among blocks, which a sum relative
+to its maximum cannot here (`splittable`); and an additive mask's scores
+are observed everywhere, since a sum with minus infinity read where nothing
+computed the other summand could be not-a-number, so their product
+computes every tile.
 
 **A write at positions the device holds is refused: writes by key, in
 place, adopted.** On trial was a write at an array of integers, refused

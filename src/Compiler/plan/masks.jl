@@ -8,7 +8,9 @@
 # implementation that sweeps such a value skips the tiles the mask rules out
 # entirely (the cuTile generator's `live_steps`), as FlexAttention's block
 # mask does, which it derives from the formulas rather than by evaluating the
-# mask on tiles.
+# mask on tiles. The dual walk, from the readers back, finds where a value
+# is observed at all (`observed`): scores stored bare and masked where they
+# are read are observed only where the mask holds.
 
 """
     masked(graph, v) -> (mask, value) or nothing
@@ -22,14 +24,97 @@ masked(graph::IndexGraph, v) = @lock graph.masks get!(() -> masked_of(graph, v),
 """
     mask_reads(graph, v) -> Vector{Int}
 
-The inputs the formulas of `v`'s mask read, as a length the device holds: a
-kernel that reads or stores `v` may read them to bound its sweep (see
-`masked`), and needs run after no other kernel to.
+The inputs the formulas of `v`'s mask, and of where it is observed, read, as
+a length the device holds: a kernel that reads or stores `v` may read them to
+bound its sweep (see `masked` and `observed`), and needs run after no other
+kernel to.
 """
 function mask_reads(graph::IndexGraph, v)
     mask = masked(graph, v)
-    mask === nothing && return Int[]
-    [u for e in first(mask) for u in indirect_values(e) if graph.values[u].definition isa Union{Input, ConstantArray}]
+    formulas = [mask === nothing ? Affine[] : first(mask); something(observed(graph, v), Affine[])]
+    [u for e in formulas for u in indirect_values(e) if graph.values[u].definition isa Union{Input, ConstantArray}]
+end
+
+"""
+    observed(graph, v) -> Vector{Affine} or nothing
+
+Formulas over `v`'s axes, each at most zero where the program's results may
+depend on what `v` holds: elsewhere every map reading `v` is a choice that
+takes its other branch, or is observed nowhere itself. Nothing when they may
+depend on all of `v`. A kernel storing `v` need not compute it elsewhere: the
+scores of a decoding step, stored bare and masked by the length where they
+are read, are observed up to the length, and the product into them need not
+sweep the features of the keys past it.
+"""
+function observed(graph::IndexGraph, v)
+    @lock graph.masks begin
+        found = graph.masks[].observed
+        isempty(found) && append!(found, observed_values(graph))
+        found[v]
+    end
+end
+
+# Each value's `observed`, from the last value to the first, after its
+# readers. A read by a gather, by the results, by anything but a map, or
+# through an index that places no variable of the reader on an axis of the
+# value (see `read_observes`), observes all of it. A recurrence's state reads
+# the value it is carried from, later in the graph, by none of its operands.
+function observed_values(graph::IndexGraph)
+    n = length(graph.values)
+    users = [Tuple{Int, Int}[] for _ in 1:n]
+    for (u, val) in enumerate(graph.values)
+        d = val.definition
+        for (k, o) in enumerate(operands(d)), r in read_values(o)
+            push!(users[r], (u, o isa Read && o.value == r ? k : 0))
+        end
+        d isa Carried && foreach(r -> push!(users[r], (u, 0)), read_values(d.from))
+    end
+    for o in graph.results, r in read_values(o)
+        push!(users[r], (0, 0))
+    end
+    found = Vector{Any}(nothing, n)
+    for v in n:-1:1
+        isempty(users[v]) && continue
+        common = nothing
+        for (u, k) in users[v]
+            f = k == 0 ? nothing : read_observes(graph, found, u, k)
+            common = f === nothing ? Affine[] : common === nothing ? f : intersect(common, f)
+            isempty(common) && break
+        end
+        found[v] = isempty(common) ? nothing : common
+    end
+    found
+end
+
+# The positions of its `k`th operand that map `u` observes, as formulas over
+# the operand's axes: where `u` is observed, and for the branch a choice
+# takes where its condition holds, where it holds. A formula that mentions a
+# variable of `u` the read places on no axis of the operand, as a broadcast
+# does, is dropped, which observes more. Nothing when there are none, or the
+# read's index is no permutation of variables of `u`.
+function read_observes(graph::IndexGraph, found, u, k)
+    def = graph.values[u].definition
+    def isa Pointwise || return nothing
+    dims = graph.values[u].dims
+    formulas = Affine[something(found[u], Affine[])...]
+    if def.f === ifelse && k == 2
+        w = walked(graph, u, Tuple(var(j) for j in eachindex(dims)), Domain(dims))
+        w.condition === nothing || append!(formulas, w.condition)
+    end
+    isempty(formulas) && return nothing
+    o = def.operands[k]
+    back = Any[constant(0) for _ in dims]
+    placed = falses(length(dims))
+    for (a, e) in enumerate(o.index)
+        isempty(e.terms) && continue
+        length(e.terms) == 1 && e.constant == 0 || return nothing
+        (atom, coefficient) = only(e.terms)
+        atom isa Var && coefficient == 1 && !placed[atom.n] || return nothing
+        back[atom.n], placed[atom.n] = var(a), true
+    end
+    d = Domain(graph.values[o.value].dims)
+    mapped = [substitute(e, Tuple(back), d) for e in formulas if all(j -> placed[j] || !mentions(e, j), eachindex(dims))]
+    isempty(mapped) ? nothing : unique(mapped)
 end
 
 function masked_of(graph::IndexGraph, v)
