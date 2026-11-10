@@ -418,12 +418,13 @@ end
     @test agree(C.execute(ridden, args...), eager; rtol = 1.0e-12)
     explained = sprint(C.explain, ridden)
     @test occursin("at each step, riding the steps", explained) && occursin("at the last step, riding the steps", explained)
+    # On the CPU the steps run a step at a time, as plans of their own, the
+    # state the steps leave written at each, the last write staying.
     for ride in ([first(r) for r in riders if last(r) === :each], C.riding_values(planned))
         ex = prepare(p, args...; ride)
+        @test count(k -> k isa C.SteppedKernels, ex.kernels) == 1
         @test agree(C.leaves(outputs(execute!(ex))), eager; rtol = 1.0e-12)
     end
-    # The outputs alone ride: the steps run a step at a time, as plans of their own.
-    @test count(k -> k isa C.SteppedKernels, prepare(p, args...; ride = [first(r) for r in riders if last(r) === :each]).kernels) == 1
     loss(xs...) = (r = delta(xs...); sum(abs2, r[1]) + sum(r[2]))
     grad = (xs...) -> T.withgradient(loss, xs...)
     q = trace(grad, args...)

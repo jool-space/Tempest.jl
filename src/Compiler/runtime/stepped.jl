@@ -22,8 +22,10 @@ struct StepGraph
     # `xs[:, t + 1]`; `(:position, T)`, the step's position as a `T`; or
     # `(:sum, r)`, sum `r` riding the steps.
     leaves::Vector{Any}
-    # Each result's value outside, stored a step at a time; the sums' results follow.
+    # Each result's value outside, stored a step at a time, or whole at each
+    # where it is of the last step alone (`whole`); the sums' results follow.
     stored::Vector{Int}
+    whole::Set{Int}
     states::Int
     sums::Vector{Int}
 end
@@ -44,12 +46,13 @@ end
     step_graph(graph, stored, g) -> StepGraph or nothing
 
 The cycle of recurrence group `g` at one step, the values it recomputes
-outside the cycle with it, the values riding its steps along them, and each
-part of the sums riding them; or nothing where a step is not a program of
-its own: where it reads a value of the cycle at another step, or a value
-along the steps other than by its last axis, or by an index array, or a sum
-riding the steps reads none along them, or a value rides at the last step
-alone.
+outside the cycle with it, the values riding its steps, and each part of
+the sums riding them; or nothing where a step is not a program of its own:
+where it reads a value of the cycle at another step, or a value along the
+steps other than by its last axis, or by an index array, or a sum riding the
+steps reads none along them. A value of the last step alone is computed at
+each, reading the step's values where it reads the last's, and written
+whole, the last step's write the one that stays.
 """
 function step_graph(graph::IndexGraph, stored, g::Group)
     values = graph.values
@@ -60,11 +63,21 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     all(c -> values[c].definition.from.index == identity_index(values[c].dims), cs) || return nothing
     cycle = Set(recurrence_cycle(graph, cs, fs))
     places = recurrence_places(graph, g.outputs).places
-    # The axis along the steps of each member, from its place.
+    # The axis along the steps of each member, from its place; none for one
+    # of the last step alone.
     along(m) = findfirst(==(var(cd.axis)), places[m])
+    once(m) = m in g.outputs && last_step(places[m], cd.axis)
     # The values the states are carried from first, in the states' order.
     members = [fs; [m for m in g.outputs if !(m in cs) && !(m in fs)]]
-    any(m -> along(m) === nothing, members) && return nothing
+    any(m -> along(m) === nothing && !once(m), members) && return nothing
+    # Where a value of the last step reads one along the steps at the last,
+    # it reads the step's: its axis along them, nothing for a read elsewhere.
+    lies = lying(graph, cs, sort!(collect(cycle)))
+    final = cd.reverse ? 0 : values[c].dims[cd.axis] - 1
+    function at_final(o::Read)
+        a = o.value in cycle ? (o.value in cs ? cd.axis : lies[o.value][cd.axis]) : o.value in members && !once(o.value) ? along(o.value) : nothing
+        a === nothing || a == 0 || o.index[a] != constant(final) ? nothing : a
+    end
     # The values a step needs, each with its axis along the steps or 0 and
     # the steps on from the step it is read at, and how: :state, :leaf, or
     # :step, computed in the step. Only an argument is read steps on.
@@ -80,6 +93,9 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         elseif u in cs
             s == cd.axis || (ok[] = false)
             :state
+        elseif once(u)
+            s == 0 || (ok[] = false)
+            :step
         elseif u in cycle || u in members
             (s == 0 || u in members && s != along(u)) && (ok[] = false)
             :step
@@ -115,7 +131,8 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         all(e -> isempty(indirect_values(e)), o.index) || (ok[] = false; return)
         at = si == 0 ? Int[] : findall(e -> mentions(e, si), collect(o.index))
         if isempty(at)
-            visit(o.value, 0)
+            a = at_final(o)
+            a === nothing ? visit(o.value, 0) : visit(o.value, a)
         elseif length(at) == 1 && o.index[only(at)].terms == var(si).terms
             visit(o.value, only(at), o.index[only(at)].constant)
         else
@@ -123,7 +140,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         end
     end
     for m in members
-        visit(m, along(m))
+        visit(m, once(m) ? 0 : along(m))
         ok[] || return nothing
     end
     ok[] || return nothing
@@ -171,13 +188,13 @@ function step_graph(graph::IndexGraph, stored, g::Group)
             kept = [k for k in eachindex(d.iteration) if !(k in d.reduced)]
             si = s == 0 ? 0 : kept[s]
             iteration = drop_axis(d.iteration, si)
-            o = restricted(d.operand, si, Domain(iteration), id)
+            o = restricted(d.operand, si, Domain(iteration), id, at_final)
             o === nothing && return nothing
             reduced = Tuple(k > si && si > 0 ? k - 1 : k for k in d.reduced)
             push!(new, Value(Reduction(d.fold, o, iteration, reduced), drop_axis(v.dims, s), v.eltype, v.scalar))
         else
             dims = drop_axis(v.dims, s)
-            os = map(o -> restricted(o, s, Domain(dims), id), d.operands)
+            os = map(o -> restricted(o, s, Domain(dims), id, at_final), d.operands)
             any(isnothing, os) && return nothing
             push!(new, Value(Pointwise(d.f, Tuple(os)), dims, v.eltype, v.scalar))
         end
@@ -185,7 +202,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     end
     results = Operand[]
     for m in members
-        b = id[(m, along(m), 0)]
+        b = id[(m, once(m) ? 0 : along(m), 0)]
         push!(results, Read(b, identity_index(new[b].dims)))
     end
     stored_order = members
@@ -197,7 +214,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         d = values[r].definition
         v = values[r]
         kept = drop_axis(d.iteration, k)
-        o = restricted(d.operand, k, Domain(kept), id)
+        o = restricted(d.operand, k, Domain(kept), id, at_final)
         o === nothing && return nothing
         reduced = Tuple(a > k ? a - 1 : a for a in d.reduced if a != k)
         if !isempty(reduced)
@@ -213,7 +230,7 @@ function step_graph(graph::IndexGraph, stored, g::Group)
     end
     dims = [new[r.value].dims for r in results]
     body = IndexGraph(new, collect(1:length(leaves)), results, dims, [isempty(d) for d in dims], [new[r.value].eltype for r in results])
-    StepGraph(body, leaves, stored_order, length(cs), sums)
+    StepGraph(body, leaves, stored_order, Set(filter(once, members)), length(cs), sums)
 end
 
 # The operands sum `o` adds, a value of the step past `computed` read whole:
@@ -226,8 +243,9 @@ function summands(new, o, computed)
 end
 
 # Operand `o` of a value computed in the step, over the step's domain `d`:
-# axis `s` of the value's own, the steps, left out.
-function restricted(o::Operand, s, d::Domain, id)
+# axis `s` of the value's own, the steps, left out; a read of the last step,
+# along the axis `at_final` gives, the step's.
+function restricted(o::Operand, s, d::Domain, id, at_final)
     o isa Literal && return o
     if o isa IndexOperand
         s > 0 && o.expr == var(s) && return Read(id[(:position, eltype_of(o))], ())
@@ -237,6 +255,10 @@ function restricted(o::Operand, s, d::Domain, id)
     o isa Read || return nothing
     at = s == 0 ? 0 : something(findfirst(e -> mentions(e, s), collect(o.index)), 0)
     key = (o.value, at, at == 0 ? 0 : o.index[at].constant)
+    if at == 0 && (a = at_final(o)) !== nothing
+        at = a
+        key = (o.value, a, 0)
+    end
     haskey(id, key) || return nothing
     index = Affine[]
     for (k, e) in enumerate(o.index)
@@ -452,7 +474,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers, r::Resources)
         a == 0 ? (bbuffers[k] = buffers[u]) : (moving[k] = u; on[k] = ahead)
     end
     for (k, u) in enumerate(s.stored)
-        moving[bp.graph.results[k].value] = u
+        u in s.whole ? (bbuffers[bp.graph.results[k].value] = buffers[u]) : (moving[bp.graph.results[k].value] = u)
     end
     any(t -> haskey(moving, first(t)), taken) && return nothing
     for (id, v) in enumerate(bvalues)
