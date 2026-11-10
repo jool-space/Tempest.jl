@@ -14,6 +14,13 @@ Tempest.Compiler.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
 # again in each session where cuBLAS added its own (a Diagonal's).
 Tempest.Compiler.upload(::CUDATarget, x) = copyto!(CuArray{eltype(x)}(undef, size(x)), x)
 Tempest.Compiler.bindable(::CUDATarget, x) = x isa CuArray
+# An array on the host other than an `Array`, a stepped view of one say,
+# which the device's copy cannot read or write in one piece, goes to or
+# from a buffer through an `Array`.
+Tempest.Compiler.upload!(::CUDATarget, buffer, x) =
+    x isa Union{Array, CUDACore.AnyCuArray} ? copyto!(buffer, x) : copyto!(buffer, Array(x))
+Tempest.Compiler.download!(::CUDATarget, x, buffer) =
+    x isa Union{Array, CUDACore.AnyCuArray} ? copyto!(x, buffer) : copyto!(x, Array(buffer))
 
 # cuTile compiles a kernel for the alignment of each address it was built on,
 # up to 128 bytes, which every allocation has.

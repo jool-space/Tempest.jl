@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, allocate, upload, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     measurable, time_launch, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -145,6 +145,24 @@ The elements of the array `x` as a buffer on `target`: how a program's
 constants get there.
 """
 upload(::CPUTarget, x) = x
+
+"""
+    upload!(target, buffer, x) -> buffer
+
+Copy the array `x`, which is not storage on `target`, into `buffer`, which
+is: how a caller's array that cannot be an argument's storage gets into the
+buffer that is (see `bind!` and `point!`).
+"""
+upload!(::Target, buffer, x) = copyto!(buffer, x)
+
+"""
+    download!(target, x, buffer) -> x
+
+Copy `buffer`, storage on `target`, into the array `x`, which is not: how
+what a program wrote into an argument gets back into a caller's array that
+could not be its storage (see `point!`).
+"""
+download!(::Target, x, buffer) = copyto!(x, buffer)
 
 "Whether array `x` can be storage on `target`, bound by reference."
 bindable(::Target, x) = false

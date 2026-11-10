@@ -609,7 +609,7 @@ function bind_leaves!(ex, positions, xs)
         x === ex.referenced[k] && continue
         own = own!(ex, k)
         moves = point_at!(ex, k, own, moves)
-        copyto!(own, vec(x))
+        upload!(ex.target, own, vec(x))
     end
     retarget!(ex, moves)
 end
@@ -728,7 +728,7 @@ function point_leaf!(ex::Executable, k::Int, x, at::UInt, moves)
     x === ex.referenced[k] && return moves
     own = own!(ex, k)
     moves = point_at!(ex, k, own, moves)
-    copyto!(own, vec(x))
+    upload!(ex.target, own, vec(x))
     moves
 end
 
@@ -750,7 +750,7 @@ end
 function write_back!(ex::Executable)
     for (_, a) in ex.program.writes
         x = ex.back[a]
-        x === nothing || copyto!(vec(x), ex.arguments[a])
+        x === nothing || download!(ex.target, vec(x), ex.arguments[a])
     end
     ex
 end

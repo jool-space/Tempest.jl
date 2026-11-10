@@ -588,6 +588,14 @@ if CUDA_FUNCTIONAL
         u = CuArray(single(data(4)))
         c = compile((a, b) -> (a .= 2 .* a; sum(b)), CuArray(single(data(4))), CuArray(single(data(4))))
         @test occursin("argument 2 shares memory with argument 1", message(() -> c(u, u)))
+        # A stepped view of a host array is copied in, and what the program
+        # wrote copied back through an `Array`.
+        step!(s, x) = (s .= 0.5f0 .* s .+ x; sum(s))
+        c = compile(step!, CuArray(single(data(4))), CuArray(single(data(4))))
+        b, x = single(data(8)), single(data(4; scale = 0.5))
+        before = copy(b)
+        expected = 0.5f0 .* before[1:2:8] .+ x
+        @test c(view(b, 1:2:8), x) ≈ sum(expected) && b[1:2:8] ≈ expected && b[2:2:8] == before[2:2:8]
     end
 
     @testset "arguments read where the caller has them, on CUDA" begin

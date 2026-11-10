@@ -85,6 +85,8 @@ Tempest.Compiler.deterministic
 Tempest.Compiler.product_class
 Tempest.Compiler.allocate
 Tempest.Compiler.upload
+Tempest.Compiler.upload!
+Tempest.Compiler.download!
 Tempest.Compiler.bindable
 Tempest.Compiler.pointable
 Tempest.Compiler.task_state
