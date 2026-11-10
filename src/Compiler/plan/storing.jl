@@ -125,7 +125,9 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
                 # stored where the step reads it.
                 stored[w] = w in results || materialized[w] || any(u -> live[u] && !(u in within), users[w]) ||
                     w in fs && any(u -> live[u] && u in cycle && !(u in cs), users[w])
-                stored[w] && !(w in fs) && d isa Pointwise && all(o -> !(o isa Read) || stored[o.value], d.operands) && (stored[w] = false)
+                # A result, or what a gather reads, is stored whatever it reads.
+                stored[w] && !(w in fs) && !(w in results) && !materialized[w] && d isa Pointwise &&
+                    all(o -> !(o isa Read) || stored[o.value], d.operands) && (stored[w] = false)
             end
         end
     end

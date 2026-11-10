@@ -365,3 +365,23 @@ end
     end
     @test kernels > 0
 end
+
+# A result that is a map of a recurrence's cycle is stored, though what it
+# reads is: the gradient of a delta rule's values is the step's map of the
+# state's adjoint, which its group had left for the result to recompute, and
+# no kernel wrote it.
+@testset "a result of a recurrence's cycle is stored" begin
+    function delta(S, q, k, v, β)
+        outputs = []
+        for t in axes(q, 2)
+            δ = β[t] .* (v[:, t] .- S' * k[:, t])
+            S = S .+ k[:, t] * δ'
+            push!(outputs, S' * q[:, t])
+        end
+        stack(outputs), S
+    end
+    args = (data(4, 3; scale = 0.3), data(4, 6; scale = 0.4), data(4, 6; scale = 0.2), data(3, 6; scale = 0.5), 0.5 .+ 0.1 .* data(6))
+    loss(xs...) = (r = delta(xs...); sum(abs2, r[1]) + sum(r[2]))
+    grad = (xs...) -> T.withgradient(loss, xs...)
+    @test agree(C.leaves(outputs(execute!(prepare(trace(grad, args...), args...)))), C.leaves(grad(args...)); rtol = 1.0e-10)
+end
