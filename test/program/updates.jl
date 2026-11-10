@@ -11,6 +11,12 @@
     @test same((x, v) -> (y = copy(x); y[2:4, :] = v; y[end, :] .= 2; y), x, v)
     @test same(x -> (y = fill!(similar(x, 10, 8), 0); y[1:2:8, end:-2:1] = x[1:4, 1:4]; y), x)
     @test same(x -> (y = fill!(similar(x, 7), 0.5); copyto!(y, 2, x, 5, 3); y), x)
+    @test same(x -> (y = fill!(similar(x, 4, 5), 0.5); copyto!(y, 3, x, 5, 9); y), x)
+    # Base's `stack` copies each slice in at its offset: the nodes it records
+    # grow with the slices, where each copy moved a view of every copy before.
+    recorded(n) = (count = Ref(0); trace(x -> (s = stack([x[:, mod1(t, 6)] for t in 1:n]); count[] = length(s.tape.nodes); s), x); count[])
+    @test recorded(64) - recorded(32) == 2 * (recorded(32) - recorded(16))
+    @test same(x -> stack([x[:, t] .+ t for t in 1:6]), x)
     @test same(x -> (y = similar(x, 6, 8); permutedims!(y, x, (2, 1)); map!(abs, y, y)), x)
     @test same(x -> (r = sum(x; dims = 1); r ./= size(x, 1); r), x)
     @test same(x -> (y = copy(x); a = sum(y); y[1, 1] = 100; (a, sum(y))), x)

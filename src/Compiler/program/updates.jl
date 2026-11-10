@@ -152,9 +152,22 @@ function Base.copyto!(dest::TracedArray, src::AbstractArray)
     dest
 end
 
+# The `n` elements of `src` from its `s`th on, written over those of `dest`
+# from its `d`th on in linear order: an update of the contents of `dest` laid
+# out along one axis, laid back. The layout is a node of this write alone,
+# not a view of `dest`: a view is moved by every later write into `dest` until
+# the collector drops it (see `moved!`), and Base's `stack` copies each slice
+# so, which moved the views of all the slices before at each one, T²/2 nodes
+# for a stack of T slices.
 function Base.copyto!(dest::TracedArray, d::Integer, src::AbstractArray, s::Integer, n::Integer)
     n >= 0 || throw(ArgumentError("tried to copy n=$n elements, but n should be nonnegative"))
-    n == 0 || (vec(dest)[d:(d + n - 1)] = vec(src)[s:(s + n - 1)])
+    n == 0 && return dest
+    checkbounds(dest, d:(d + n - 1))
+    elements = vec(src)[s:(s + n - 1)]
+    tape, T = dest.tape, eltype(dest)
+    flat = ndims(dest) == 1 ? dest : TracedArray(tape, record!(tape, Reshape(), (dest.id,), (length(dest),), T))
+    written = update(flat, (linear_range(d:(d + n - 1)),), (), converted(tape, elements, T))
+    write!(dest, ndims(dest) == 1 ? written : record!(tape, Reshape(), (written,), dest.dims, T))
     dest
 end
 
