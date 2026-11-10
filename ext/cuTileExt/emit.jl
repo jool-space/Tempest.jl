@@ -364,6 +364,15 @@ store_expr(sym, spans, ta, tb, ia, ib, value) = :($(tile_store)(
     tile = $(ct.broadcast_to)($(tile_of(value)), $((spans[1] ? ta : 1, spans[2] ? tb : 1))),
 ))
 
+# A function over tiles and numbers, as an expression of cuTile's broadcast.
+# A bare number there takes the element type of a tile of its kind, so that a
+# literal never widens a narrow tile; the program's number is of its own type
+# and widens the tile as Julia's arithmetic does, which a number in a `Ref`,
+# handed to the function as it is, keeps.
+over_tiles(f, args) = :($f.($(map(as_typed, args)...)))
+as_typed(x::Number) = :($(Ref)($x))
+as_typed(x) = x
+
 # Statements for `roots`, each subterm once, at the tile of block indices
 # `indices` (one per tile axis). `names` maps terms already in scope (loads
 # hoisted out of a loop, reductions) to their symbols.
@@ -392,7 +401,7 @@ Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Conte
             T === Int32 ? x : :(convert($(ct.Tile){$T}, $x))
         elseif t isa Apply
             args = map(a -> names[a], t.args)
-            t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
+            t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : over_tiles(t.f, args)
         else
             error("no tile lowering for $(typeof(t))")
         end
@@ -402,7 +411,7 @@ Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Conte
         P === nothing && continue
         if t isa Apply && !any(a -> names[a] isa Vector, t.args)
             args = map(a -> in_plane(c, names, a, P), t.args)
-            matrix[] = t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : :($(t.f).($(args...)))
+            matrix[] = t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : over_tiles(t.f, args)
         end
         matrix[] === nothing && continue
         m = gensym(:m)

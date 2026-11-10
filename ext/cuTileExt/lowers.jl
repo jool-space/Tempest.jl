@@ -57,7 +57,7 @@ function trial(f, kinds, R)
         push!(body, :($y = $(x === Bool ? :($load .!= Int32(0)) : load)))
         push!(args, y)
     end
-    y = :($f.($(args...)))
+    y = over_tiles(f, args)
     R === Bool && (y = :(convert($(ct.Tile){Int32}, $y)))
     source = :(function (out, $(params...))
         $(body...)
