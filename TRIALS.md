@@ -1348,13 +1348,17 @@ kernels and copies that use the argument pointed at each call's array
 (`point!`, `src/Compiler/runtime/runtime.jl`), so the model's `forward!`
 writes its states as it does eagerly, with no copy of a cache in or out,
 where it had copied every written array in before each call and back after;
-what still stands is the call's checks, which walk the 4B call's 541 leaves
-four times, 5 ms of the host's a token (its signature 2.1, the arrays
-sharing memory 1.5, binding and writing back 0.7 each), so that on the GB10
-a plain loop over the compiled `forward!`, its token a number, took 43.2 to
-44.0 ms a token at extent 512 against 37.9 to 38.2 for the step's `replay!`
-in the same process, tokens equal, and 44.5 to 45.6 before; and a prefill's
-extent (Sizes are constants, above). A
+and a call that walks the 4B call's 541 leaves once, beside the signature,
+into a record of each array and its address that the check for shared
+memory and the binding read (`bound`, `src/Compiler/runtime/compile.jl`),
+about 0.5 ms of the host's a token where four walks took 5, so that on the
+GB10 a plain loop over the compiled `forward!`, its token a number, takes
+39.5 to 39.6 ms a token at extent 512 against 38.1 to 38.3 for the step's
+`replay!` in the same process and 38.8 to 38.9 for `forward!`'s own graph
+replayed in a row, tokens equal, where main took 44.7 to 45.2 against 38.4
+to 38.5 and 39.2; what still stands between the loop and the graph's
+replays, 1.8%, is that walk and the token read on the host each step, 0.6%
+alone; and a prefill's extent (Sizes are constants, above). A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
