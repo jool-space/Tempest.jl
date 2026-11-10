@@ -40,6 +40,17 @@
     length_read = IR.held_formula(h.arguments[2], (IR.var(2),), Int32, d)
     @test !isempty(found) && all(((m, x),) -> m == [IR.add(IR.add(IR.var(1), 1, d), IR.scale(length_read, -1), d)], found)
     @test any(((m, x),) -> x == 0.0f0, found)
+    # A kernel that reads a value masked by such a length reads the length
+    # too, by which it may bound its sweep: an additive mask stored once, as
+    # two sums a product apart read it, is all they read of the length.
+    function shared(s, t, n)
+        b = ifelse.(reshape(Int32(1):Int32(size(s, 1)), :, 1) .<= reshape(n, 1, :), 0.0f0, -Inf32)
+        sum(exp.(t * sum(exp.(s .+ b); dims = 1)' .+ b); dims = 1)
+    end
+    h = C.lower(trace(shared, s, 2 .* s, n))
+    planned = C.plan(h)
+    reading = [g for g in planned.groups if any(v -> C.masked(h, v) !== nothing, C.group_reads(h, g))]
+    @test length(reading) == 2 && all(g -> h.arguments[3] in C.group_reads(h, g), reading)
     # A length of 64 bits is no formula: its range would overflow one's.
     h = C.lower(trace((s, n) -> upto(s, n), s, Int64.(n)))
     @test C.masked(h, length(h.values)) === nothing

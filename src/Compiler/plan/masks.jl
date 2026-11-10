@@ -16,6 +16,19 @@ such value.
 """
 masked(graph::IndexGraph, v) = @lock graph.masks get!(() -> masked_of(graph, v), graph.masks[].of, v)
 
+"""
+    mask_reads(graph, v) -> Vector{Int}
+
+The inputs the formulas of `v`'s mask read, as a length the device holds: a
+kernel that reads or stores `v` may read them to bound its sweep (see
+`masked`), and needs run after no other kernel to.
+"""
+function mask_reads(graph::IndexGraph, v)
+    mask = masked(graph, v)
+    mask === nothing && return Int[]
+    [u for e in first(mask) for u in indirect_values(e) if graph.values[u].definition isa Union{Input, ConstantArray}]
+end
+
 function masked_of(graph::IndexGraph, v)
     d = Domain(graph.values[v].dims)
     index = Tuple(var(k) for k in 1:length(graph.values[v].dims))

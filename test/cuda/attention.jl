@@ -268,6 +268,31 @@ end
         @test agree([o], [o′]; rtol = 1.0e-4)
         @test isinf.(s) == isinf.(s′) && agree([s[isfinite.(s)]], [s′[isfinite.(s′)]]; rtol = 1.0e-4)
     end
+    # The mask as an additive bias two layers share, stored once: the sums
+    # over keys read the length only through it, and are built with it among
+    # their buffers, as their claims are to be measured. Before, a sum's
+    # build found a buffer for the length only where a kernel decided before
+    # it had read the length, and otherwise fell to the floor's kernels.
+    function biased(q, k, v, len)
+        b = ifelse.((Int32(1):Int32(size(k, 2))) .<= reshape(len, 1, 1, 1, :), 0.0f0, -Inf32)
+        attend(x) = (s = Einops.@einsum(k, x, "d n h b, d (g h) b -> n g h b", h = size(k, 3)) .* 0.25f0 .+ b;
+            Einops.@einsum(v, exp.(s .- T.logsumexp(s; dims = 1)), "d n h b, n g h b -> d (g h) b"))
+        attend(sin.(attend(q)))
+    end
+    p = trace(biased, q3, k3, v3, n)
+    graph = C.lower(p)
+    planned = C.plan(graph)
+    for g in planned.groups
+        any(v -> C.masked(graph, v) !== nothing, C.group_reads(graph, g)) || continue
+        @test C.buffers!(C.Decider(target, graph; measure = false), planned, g)[graph.arguments[4]] !== nothing
+    end
+    ex = withenv(() -> prepare(p, map(CuArray, (q3, k3, v3, n))...; target), "TEMPEST_MEASURE" => "all")
+    @test !any(k -> k isa C.FloorKernels, ex.kernels)
+    @test count(k -> occursin("masked steps skipped", string(k)), ex.kernels) == 2
+    for m in (n, Int32[200, 5, 64])
+        bind!(ex, 4 => CuArray(m))
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q3, k3, v3, m)]; rtol = 1.0e-4)
+    end
     # Over a BFloat16s.BFloat16 cache, the probabilities rounded to it
     # before their product, as Vallmo's decode rounds them: the product
     # reads the length only through their mask.

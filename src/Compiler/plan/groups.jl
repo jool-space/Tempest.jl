@@ -234,7 +234,9 @@ varies(graph, g::Group, t::Term, a) = any(subterms((t,); nested = true)) do s
     s isa Union{Load, Ix} && mentions(s, a)
 end
 
-# The values a group reads from storage, its own excepted.
+# The values a group reads from storage, its own excepted: those its terms
+# load, and the inputs the masks of those and of its members read, which a
+# kernel may read to bound its sweep (`mask_reads`).
 function group_reads(graph, g::Group)
     reads = Set{Int}()
     for v in members(g)
@@ -245,6 +247,9 @@ function group_reads(graph, g::Group)
                 union!(reads, read_values(o))
             end
         end
+    end
+    for v in [collect(reads); members(g)]
+        union!(reads, mask_reads(graph, v))
     end
     setdiff!(reads, members(g))
     reads
