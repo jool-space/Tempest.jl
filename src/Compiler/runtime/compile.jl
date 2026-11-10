@@ -18,7 +18,9 @@ option; `true` and `false` mean `:close` and `:none`. The default is
 
 Which leaves of the arguments are inputs follows `trace`: arrays, also inside
 tuples, named tuples, structs, mutable ones too, and vectors of other things
-than numbers, whose lengths a call must match. Numbers are constants; a
+than numbers, whose lengths a call must match. An array the function reads
+inside any other leaf, a dictionary's say, would be a constant, and is refused,
+naming the argument. Numbers are constants; a
 number that varies between calls is an array, `[x]` say. `f` is an argument
 like the others, the call `f(args...)` traced: the arrays of a callable
 struct's fields and those a closure captures are inputs too, read at each
@@ -65,7 +67,7 @@ function compile(f, @nospecialize(args...); target = default_target((f, args...)
     passed = argument_arrays((f, args...))
     globals = read_globals(f, args, passed)
     program, met = trace_meeting(call, f, args...)
-    refuse_held(met, passed)
+    refuse_held(met, (f, args...), passed)
     ex = prepare(program, f, args...; target, measure)
     capture && capture!(ex)
     Compiled(f, ex, signature((f, args...)), globals)
@@ -141,8 +143,11 @@ end
 # `f`'s own code names are: what a function `f` calls reads, seen by its arrays
 # rather than its name. The globals of every module loaded are looked through,
 # only when tracing met an array. A global a function assigned while traced
-# holds stand-ins of the program, and is refused first.
-function refuse_held(met, passed)
+# holds stand-ins of the program, and is refused first. An array met inside a
+# leaf of the call `(f, args...)` that is no input, a dictionary or a matrix
+# of layers, was reached through that argument, whatever global holds it too,
+# and the argument is named.
+function refuse_held(met, call, passed)
     isempty(met) && return
     held = held_arrays()
     if !isempty(held.traced)
@@ -151,16 +156,37 @@ function refuse_held(met, passed)
             "stand-ins of the program: assign ", name, " again, then pass it as an argument and assign what the ",
             "compiled function returns")))
     end
+    hidden = hidden_arrays(call)
     for x in met
+        within = holder(hidden.arrays, x)
+        within === nothing || throw(ArgumentError(holds_hidden(within...)))
         at = holder(held.arrays, x)
         at === nothing || throw(ArgumentError(holds_arrays(global_name(at), wraps(passed, x))))
     end
 end
 
-"The arrays that live in globals, each with the global's module and name, and the globals that hold stand-ins."
-struct Held
-    arrays::IdDict{Any, Tuple{Module, Symbol}}
-    traced::Vector{Tuple{Module, Symbol}}
+holds_hidden(path, leaf) = string(path, ", a ", summary(leaf), ", holds arrays Tempest does not look inside: compiled, ",
+    "the function would keep them as they were when traced. Hold them in tuples, named tuples, structs or vectors, ",
+    "whose arrays are inputs")
+
+# The arrays held inside the leaves of the call that are no inputs, each with
+# the leaf's path and the leaf.
+function hidden_arrays(call)
+    hidden = Held(IdDict{Any, Tuple{String, Any}}(), Tuple{String, Any}[])
+    seen = Base.IdSet{Any}()
+    for (path, leaf) in zip(leaf_paths(call), leaves(call))
+        is_input(leaf) || hold!(hidden, seen, Any[leaf], (path, leaf))
+    end
+    hidden
+end
+
+"""
+The arrays that live in globals, or in a call's leaves, each with where it
+lives, and the globals that hold stand-ins.
+"""
+struct Held{A}
+    arrays::IdDict{Any, A}
+    traced::Vector{A}
 end
 
 # The globals of every module loaded, of Main and of each package, and their

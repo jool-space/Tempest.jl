@@ -216,6 +216,22 @@ end
     global held_total = total
 end
 
+@testset "arrays inside an argument that is not looked inside" begin
+    # A dictionary or an array of other things than numbers that is no
+    # vector is a constant of the program, and so are the arrays it holds:
+    # refused, naming the argument they were reached through, though a global
+    # holds them too.
+    x = data(4)
+    table = Dict(:w => held_table)
+    @test occursin("argument 1, a Dict{Symbol, Vector{Float64}} with 1 entry, holds arrays",
+        message(() -> compile((d, x) -> d[:w] .* x, table, x)))
+    grid = reshape([held_table, data(4)], 1, 2)
+    @test occursin("argument 1.grid, a 1×2 Matrix{Vector{Float64}}, holds arrays",
+        message(() -> compile((m, x) -> m.grid[1] .* x, (; grid), x)))
+    @test occursin("f.table, a Dict", message(() -> compile(x -> table[:w] .* x, x)))
+    @test occursin("Hold them in tuples, named tuples, structs or vectors", message(() -> compile((d, x) -> d[:w] .* x, table, x)))
+end
+
 @testset "mutable structs among the arguments" begin
     # A mutable struct's arrays are inputs, as an immutable one's are: the
     # compiled function takes another's, and a copy is no other argument.
