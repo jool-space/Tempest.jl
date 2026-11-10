@@ -57,10 +57,20 @@ it stored them, and the sums riding its steps, its folds (see
 """
 struct RecurrenceKind end
 
-"The kind of a group: what its kernel does over its domain."
+"""
+The kind of a group: what its kernel does over its domain. The kinds are a
+union and not the subtypes of an abstract type: a group holds its kind in
+place, and a call on it is decided where it is made, among the four, as the
+kernels of a long program form; a fifth kind is added here, with its
+methods, and to the union.
+"""
 const GroupKind = Union{ReductionKind, ScanKind, PointwiseKind, RecurrenceKind}
 
-"A kind's name, as a group's view has it and as it is written out."
+"""
+A kind's name, as it is written out. A group's view keeps the name and not
+the kind (see `GroupView`): what an implementation reads of a group is data,
+and what the tuning record and the kernel cache are keyed by is text.
+"""
 kind_name(::ReductionKind) = :reduction
 kind_name(::ScanKind) = :scan
 kind_name(::PointwiseKind) = :pointwise

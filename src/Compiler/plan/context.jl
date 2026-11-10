@@ -154,6 +154,7 @@ end
 Where forming starts a kernel, in the order it forms them: each set fixed as
 a group, each recurrence, then each fold and each map no kernel holds yet.
 A seed answers whether a kernel forms from it (`starts`) and which (`grown`).
+A union, as a group's kinds are (see `GroupKind`).
 """
 const Seed = Union{FixedSeed, RecurrenceSeed, FoldSeed, MapSeed}
 

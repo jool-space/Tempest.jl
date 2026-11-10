@@ -246,7 +246,13 @@ function grown_fold(grounds::Grounds, cx::Forming, id)
 end
 
 # The kernel grown from stored map `id`, joined by the later ones over its
-# domain that read it.
+# domain that read it. One pass, where a fold's kernel grows by passes until
+# one changes nothing (see `grown_fold`): what a map brings into reach reads
+# it and so comes after it, above the cursor, and a map that could not join
+# is not tried again. The two are kept apart for that: as one loop, either a
+# group of maps would try again every map that had failed, work the scaling
+# trials count, or the loop would ask each kind how to walk as well as what
+# to take.
 function grown_map(grounds::Grounds, cx::Forming, id)
     graph = grounds.graph
     values = graph.values
