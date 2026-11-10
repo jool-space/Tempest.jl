@@ -39,11 +39,21 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     recurring = recurrences(graph)
     riders = Dict{Int, Vector{Pair{Int, Symbol}}}()
     between = Dict{Int, Set{Int}}()
+    # What riding asks of each recurrence, once: asked of each for each value
+    # riding, Qwen3.5-4B's 96 took 12 s a plan.
+    read_by, feeds = readers(graph), feeding(graph)
+    reachings = Dict{Int, Reaching}()
+    reaching(k) = get!(() -> reaching_from(graph, recurring[k].values, read_by, feeds), reachings, k)
     for r in ride
-        k = findfirst(e -> live[first(e.states)] && riding(graph, live, e.values, r) !== nothing, recurring)
-        k === nothing && throw(NotAGroup([r]))
+        found = nothing
+        for (k, e) in enumerate(recurring)
+            live[first(e.states)] && reaching(k).reaches[r] || continue
+            rider = riding(graph, live, e.values, r, reaching(k))
+            rider === nothing || (found = (k, rider); break)
+        end
+        found === nothing && throw(NotAGroup([r]))
+        k, rider = found
         c = first(recurring[k].states)
-        rider = riding(graph, live, recurring[k].values, r)
         push!(get!(() -> Pair{Int, Symbol}[], riders, c), r => rider.how)
         union!(get!(() -> Set{Int}(), between, c), rider.between)
     end

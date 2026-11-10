@@ -57,7 +57,7 @@ recurrence_states(graph, members) = [m for m in members if graph.values[m].defin
 carried_from(graph, c) = (graph.values[c].definition.from::Read).value
 
 """
-    riding(graph, live, cycle, r, reaching = Reaching(graph, cycle)) -> (; between, how) or nothing
+    riding(graph, live, cycle, r, reaching = reaching_from(graph, cycle)) -> (; between, how) or nothing
 
 Value `r` riding a recurrence's steps: computed at each step from the values
 of its `cycle` there, through `between`, the values `r` reads between it and
@@ -72,21 +72,26 @@ value of the cycle, or another reads one of them, or a state is carried from
 one, or a value reads the cycle at another step than its own or the last,
 or along two of its axes, or a fold sums the steps without being `r`, a sum.
 """
-function riding(graph, live, cycle, r, reaching = Reaching(graph, cycle))
+function riding(graph, live, cycle, r, reaching = reaching_from(graph, cycle))
     values = graph.values
     d = values[r].definition
     (; inside, reaches, users, carried) = reaching
     d isa Union{Pointwise, Reduction} && !(r in inside) && reaches[r] || return nothing
-    # The values `r` reads that read the cycle, through others.
+    # The values `r` reads that read the cycle, through others: each a map
+    # or a fold that nothing after `r` reads, or `r` rides nothing, found
+    # before the walk goes on to what they read, which for a value of a
+    # later layer is every layer back to the recurrence's.
     found, pending = Set{Int}(), [r]
     while !isempty(pending)
         u = pop!(pending)
         for o in operands(values[u].definition), x in read_values(o)
-            reaches[x] && !(x in inside) && !(x in found) && (push!(found, x); push!(pending, x))
+            reaches[x] && !(x in inside) && !(x in found) || continue
+            values[x].definition isa Union{Pointwise, Reduction} && all(w -> w <= r || !live[w], users[x]) || return nothing
+            push!(found, x)
+            push!(pending, x)
         end
     end
     between = sort!(collect(found))
-    all(u -> values[u].definition isa Union{Pointwise, Reduction}, between) || return nothing
     set = Set(push!(copy(between), r))
     all(u -> all(w -> !live[w] || w in set, users[u]), between) || return nothing
     # A state reads the value it is carried from, which no reader counts.
@@ -133,23 +138,34 @@ struct Reaching
     carried::Vector{Tuple{Int, Int}}
 end
 
-function Reaching(graph, cycle)
+function reaching_from(graph, cycle, users = readers(graph), feeds = feeding(graph))
     values = graph.values
     inside = Set(cycle)
-    reaches = falses(length(values))
     carried = [(c, carried_from(graph, c)) for (c, v) in enumerate(values) if v.definition isa Carried && v.definition.from isa Read]
-    while true
-        for u in eachindex(values)
-            reaches[u] && continue
-            reaches[u] = u in inside || any(o -> any(x -> reaches[x], read_values(o)), operands(values[u].definition))
+    state_of = Dict(f => c for (c, f) in carried)
+    # Forward from the cycle, through what reads each value and the state
+    # carried from it: a pass over every value until none grew took a pass
+    # a recurrence after it, 1 s a plan of Qwen3.5-4B's.
+    reaches = falses(length(values))
+    pending = collect(cycle)
+    foreach(u -> reaches[u] = true, pending)
+    while !isempty(pending)
+        u = pop!(pending)
+        for w in [feeds[u]; get(state_of, u, Int[])]
+            reaches[w] || (reaches[w] = true; push!(pending, w))
         end
-        grown = false
-        for (c, f) in carried
-            !reaches[c] && reaches[f] && (reaches[c] = grown = true)
-        end
-        grown || break
     end
-    Reaching(inside, reaches, readers(graph), carried)
+    Reaching(inside, reaches, users, carried)
+end
+
+# The values that read each value, through any operand, an index gathered
+# by among them.
+function feeding(graph)
+    feeds = [Int[] for _ in graph.values]
+    for (id, v) in enumerate(graph.values), o in operands(v.definition), x in read_values(o)
+        push!(feeds[x], id)
+    end
+    feeds
 end
 
 # What `steps_iteration` gives a value read at the last of the steps alone.

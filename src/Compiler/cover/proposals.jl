@@ -286,11 +286,12 @@ function rides(p::Plan)
     end
     found = Tuple{Int, Vector{Int}, Symbol}[]
     taken = Set{Int}()
+    users, feeds = readers(graph), feeding(graph)
     for recurrence in recurrences(graph)
         c = first(recurrence.states)
         live[c] || continue
         k = p.owner[c]
-        reaching = Reaching(graph, recurrence.values)
+        reaching = reaching_from(graph, recurrence.values, users, feeds)
         # What a value reads between it and the cycle only it reads: a value
         # one of whose operands a later one reads too rides nothing, as each
         # layer after a recurrence's reads the one before.
