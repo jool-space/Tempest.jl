@@ -17,7 +17,8 @@
 # and unrolled with steps of their own lengths), lstm_loop and
 # lstm_accumulate (the LSTM's step, as a plain loop and as `accumulate`),
 # heat_loop and heat_accumulate (a stencil's steps, as a plain loop under the
-# gradient and as `accumulate`), wide (independent branches), maps and norms
+# gradient and as `accumulate`), stacked (a recurrence's result at every
+# step, stacked), wide (independent branches), maps and norms
 # (a deep chain of maps, and of maps and folds), leaves (a step over a nested
 # structure of many arrays) and decode (a transformer's decoding step over a
 # cache, forward only). Without any, all. `--build` prepares on the device,
@@ -116,6 +117,30 @@ function heat(steps; accumulated = true)
     (accumulated ? Heat.step : (u, q) -> T.withgradient(v -> looped(v, q), u), (u, q), (), T.CUDATarget())
 end
 
+# A recurrence whose result at every step is kept, as a linear attention's
+# outputs are: a matrix state decayed and written at each of `steps` tokens
+# and read at each, the reads stacked by Base's `stack`, in four layers of
+# their own keys, each writing the last's outputs. Forward only.
+function stacked(steps)
+    rng = Xoshiro(0)
+    D = 32
+    q, x = (0.3f0 .* randn(rng, Float32, D, steps) for _ in 1:2)
+    ks = Tuple(0.3f0 .* randn(rng, Float32, D, steps) for _ in 1:4)
+    function step(q, ks, x, S0)
+        for k in ks
+            S = S0
+            outputs = []
+            for t in 1:steps
+                S = 0.9f0 .* S .+ x[:, t] * transpose(k[:, t])
+                push!(outputs, S * q[:, t])
+            end
+            x = tanh.(stack(outputs))
+        end
+        sum(abs2, x)
+    end
+    (step, (q, ks, x, zeros(Float32, D, D)), (), TF32)
+end
+
 # `n` branches, each a layer of its own weights on the shared input, summed:
 # a program as wide as it is long.
 function wide(n)
@@ -206,6 +231,7 @@ const FAMILIES = [
     "lstm_accumulate" => (n -> lstm(n; accumulated = true), [16, 32, 64, 128, 256]),
     "heat_loop" => (n -> heat(n; accumulated = false), [5, 10, 20, 40]),
     "heat_accumulate" => (heat, [25, 50, 100, 200, 400]),
+    "stacked" => (stacked, [32, 64, 128, 256, 512]),
     "wide" => (wide, [8, 16, 32, 64, 128]),
     "maps" => (maps, [16, 32, 64, 128, 256]),
     "norms" => (norms, [8, 16, 32, 64, 128]),
