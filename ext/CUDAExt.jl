@@ -19,7 +19,7 @@ Tempest.Compiler.bindable(::CUDATarget, x) = x isa CuArray
 # up to 128 bytes, which every allocation has.
 const ALIGNMENT = 128
 
-Tempest.Compiler.pointable(::CUDATarget, x) = x isa CuArray{<:Any, <:Any, CUDACore.DeviceMemory} && reinterpret(UInt, pointer(x)) % ALIGNMENT == 0
+Tempest.Compiler.pointable(::CUDATarget, x, at) = x isa CuArray{<:Any, <:Any, CUDACore.DeviceMemory} && at % ALIGNMENT == 0
 
 function Tempest.Compiler.task_state(::CUDATarget)
     context, stream = CUDACore.context(), CUDACore.stream()

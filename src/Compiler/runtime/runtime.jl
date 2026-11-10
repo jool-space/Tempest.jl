@@ -574,30 +574,67 @@ again is the caller's array only once the caller brings the same array twice
 in a row. The executable holds the arrays it reads and writes until it is
 bound again.
 """
-function point!(ex::Executable, @nospecialize(inputs...))
-    runnable(ex)
-    positions, xs = leaves(ex.program.input_structure), leaves(inputs)
+point!(ex::Executable, @nospecialize(inputs...)) = point_each!(ex, bound(ex.program, inputs))
+
+"""
+A call's arrays, one per argument of a program, each with where it lives:
+the address of its first element, as `pointer` gives it, 0 for an array
+without one. One walk of the call's leaves finds them, `compile`'s call
+checking each against its signature as it goes, and binding the call
+(`point!`) and finding memory it shares with an argument the program writes
+read them.
+"""
+struct Passed
+    arrays::Vector{Any}
+    at::Vector{UInt}
+end
+
+Passed(n::Int) = Passed(Vector{Any}(nothing, n), zeros(UInt, n))
+
+# The arrays among `inputs`, given in the structure program `p` was traced
+# with, bound to its arguments.
+Base.@nospecializeinfer function bound(p::Program, @nospecialize(inputs))
+    positions, xs = leaves(p.input_structure), leaves(inputs)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
-    moves = nothing
+    b = Passed(length(p.arguments))
     for (k, x) in zip(positions, xs)
-        k === nothing || (moves = point_leaf!(ex, k, x, moves))
+        k === nothing || place!(b, k, x)
+    end
+    b
+end
+
+# Array `x` as argument `k` of `b`: one call a leaf, specialized on the
+# leaf's type, which asks where it lives once.
+function place!(b::Passed, k::Int, x)
+    b.arrays[k] = x
+    x isa StridedArray && (b.at[k] = reinterpret(UInt, pointer(x)))
+    b
+end
+
+# Bind the arrays of `b`, as `point!` binds a call's inputs.
+function point_each!(ex::Executable, b::Passed)
+    runnable(ex)
+    xs = b.arrays
+    length(xs) == length(ex.arguments) || throw(ArgumentError("expected $(length(ex.arguments)) arrays, got $(length(xs))"))
+    moves = nothing
+    for k in eachindex(xs)
+        moves = point_leaf!(ex, k, xs[k], b.at[k], moves)
     end
     for (_, a) in ex.program.writes
-        x = xs[findfirst(==(a), positions)]
+        x = xs[a]
         ex.back[a] = x === ex.pointed[a] || x === ex.referenced[a] ? nothing : x
     end
     retarget!(ex, moves)
 end
 
-# Bind input `x` to argument `k`, as `point!` binds each: one call a leaf,
-# specialized on the leaf's type, a model's hundreds of arrays each checked
-# in a few hundred nanoseconds.
-function point_leaf!(ex::Executable, k::Int, x, moves)
-    if ex.pointable[k] !== nothing && pointable(ex.target, x)
-        here = reinterpret(UInt, pointer(x))
-        again = here == ex.seen[k]
-        ex.seen[k] = here
-        here == ex.at[k] && return moves
+# Bind input `x`, whose first element is at `at`, to argument `k`, as
+# `point!` binds each: one call a leaf, specialized on the leaf's type, a
+# model's hundreds of arrays each checked in a few hundred nanoseconds.
+function point_leaf!(ex::Executable, k::Int, x, at::UInt, moves)
+    if ex.pointable[k] !== nothing && pointable(ex.target, x, at)
+        again = at == ex.seen[k]
+        ex.seen[k] = at
+        at == ex.at[k] && return moves
         (again || !ex.settles[k]) && return point_at!(ex, k, x, moves)
     end
     moves = point_at!(ex, k, ex.arguments[k], moves)

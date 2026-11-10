@@ -90,7 +90,7 @@ function compile(f, @nospecialize(args...); target = default_target((f, args...)
     refuse_held(met, (f, args...), passed)
     ex = prepare(program, f, args...; target, measure)
     capture && capture!(ex)
-    Compiled(f, ex, signature((f, args...)), globals)
+    Compiled(f, ex, signature((f, args...), leaves(program.input_structure)), globals)
 end
 
 # The call `f(args...)`, traced with `f` among its arguments, so that the arrays
@@ -294,11 +294,11 @@ struct Compiled{F}
 end
 
 function (c::Compiled)(@nospecialize(args...))
-    d = difference(c, args)
-    d === nothing || throw(ArgumentError("$(c.f) was compiled for other arguments: $d"))
+    call = (c.f, args...)
+    b = bound(c, call)
     ex = c.executable
-    isempty(ex.program.writes) || refuse_shared(ex, (c.f, args...))
-    point!(ex, c.f, args...)
+    isempty(ex.program.writes) || refuse_shared(ex, b, call)
+    point_each!(ex, b)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
     # The results apart from the buffers the next call overwrites: a number
     # where the program computed a number, else an array, though it have no
@@ -317,25 +317,120 @@ function (c::Compiled)(@nospecialize(args...))
     end
 end
 
-"An input as a call must match it: its element type and its size."
+"""
+An input as a call must match it, its element type and its size, and the
+argument of the program it is.
+"""
 struct InputType
     eltype::Type
     dims::Tuple
+    argument::Int
 end
 
-# The arguments as a call must match them: inputs by type, any other leaf as it is.
-signature(args) = structure_of(x -> is_input(x) ? InputType(eltype(x), size(x)) : x, args)
+# The call `(f, args...)` as a call must match it: each input by its type,
+# with the argument of the program it is, as `positions`, the leaves of the
+# program's input structure, number them; any other leaf as it is.
+function signature(call, positions)
+    i = 0
+    structure_of(call) do x
+        i += 1
+        is_input(x) ? InputType(eltype(x), size(x), positions[i]) : x
+    end
+end
 
-# Where a call differs from the compiled one, in words, or `nothing`: in its
-# arguments, in `f`'s own leaves, or in a global `f` reads.
-function difference(c::Compiled, args)
-    d = difference(c.signature, signature((c.f, args...)))
-    d === nothing || return d
+# The arrays of the call `(f, args...)`, one per argument of the program,
+# found by one walk of its leaves beside the signature, which checks each
+# leaf as it finds it; the call's other leaves and the globals `f` reads
+# are checked against what was traced. A call that differs throws, naming
+# where.
+function bound(c::Compiled, call)
+    s = c.signature
+    n, m = length(s) - 1, length(call) - 1
+    n == m || throw(ArgumentError(compiled_for(c, string("it takes ", n, n == 1 ? " argument" : " arguments", ", not ", m))))
+    b = Passed(length(c.executable.program.arguments))
+    for k in eachindex(s)
+        d = match!(b, s[k], call[k])
+        d === nothing || throw(ArgumentError(compiled_for(c, differs(d, k == 1 ? "f" : "argument $(k - 1)"))))
+    end
     for (g, value) in c.globals
         now = getglobal(g.mod, g.name)
-        isequal(now, value) || return string("the global ", g.name, " is ", shown(now), ", not ", shown(value), " as when traced")
+        isequal(now, value) ||
+            throw(ArgumentError(compiled_for(c, string("the global ", g.name, " is ", shown(now), ", not ", shown(value), " as when traced"))))
+    end
+    b
+end
+
+compiled_for(c, difference) = string(c.f, " was compiled for other arguments: ", difference)
+
+"Where a call differs from its signature: what it has there, what the signature has, and the path to them, innermost first."
+struct Mismatch
+    expected::Any
+    got::Any
+    path::Vector{String}
+end
+
+# The mismatch `d` within `segment` of what holds it.
+within(d::Mismatch, segment) = (push!(d.path, segment); d)
+
+# Mismatch `d` in words, at the argument named `name`.
+differs(d::Mismatch, name) = string(name, join(reverse(d.path)), " is ", describe(signature_of(d.got)), ", not ", describe(d.expected))
+
+# A part of a call as a signature would have it, its inputs no argument's,
+# to describe it.
+signature_of(@nospecialize(x)) = structure_of(y -> is_input(y) ? InputType(eltype(y), size(y), 0) : y, x)
+
+# Leaf by leaf, `x`, a part of a call, against `e`, the signature's part
+# there: each input is placed among `b`'s arrays at its argument, and the
+# first leaf or structure that differs is returned, a `Mismatch`, else
+# `nothing`. A struct matches one of its kind, a vector of other things than
+# numbers one of its length, tuples and named tuples their like, and any
+# other leaf one equal to it. The walk takes both unspecialized, as `leaves`
+# does, reading types by their parameters, a named tuple's names and a
+# vector's elements', and only an input's check is compiled for its type: a
+# model's hundreds of structs and arrays walked in well under a microsecond
+# each, where building the call's structure to compare it took several.
+Base.@nospecializeinfer function match!(b::Passed, @nospecialize(e), @nospecialize(x))
+    if e isa InputType
+        placed!(b, e, x) || return Mismatch(e, x, String[])
+    elseif e isa Tuple
+        x isa Tuple && nfields(x) == nfields(e) || return Mismatch(e, x, String[])
+        for k in 1:nfields(e)
+            d = match!(b, getfield(e, k), getfield(x, k))
+            d === nothing || return within(d, "[$k]")
+        end
+    elseif e isa NamedTuple
+        x isa NamedTuple && typeof(x).parameters[1] === typeof(e).parameters[1] || return Mismatch(e, x, String[])
+        for k in 1:nfields(e)
+            d = match!(b, getfield(e, k), getfield(x, k))
+            d === nothing || return within(d, ".$(keys(e)[k])")
+        end
+    elseif e isa Parts
+        T, parts = typeof(e).parameters[1], e.parts
+        if T <: Vector
+            x isa Vector && !(typeof(x).parameters[1] <: Number) && length(x) == nfields(parts) || return Mismatch(e, x, String[])
+            for k in 1:nfields(parts)
+                d = match!(b, getfield(parts, k), x[k])
+                d === nothing || return within(d, "[$k]")
+            end
+        else
+            Base.typename(typeof(x)) === Base.typename(T) || return Mismatch(e, x, String[])
+            for k in 1:nfields(parts)
+                d = match!(b, getfield(parts, k), getfield(x, k))
+                d === nothing || return within(d, ".$(keys(parts)[k])")
+            end
+        end
+    else
+        isequal(e, x) || return Mismatch(e, x, String[])
     end
     nothing
+end
+
+# Whether `x` is the input `e` describes, placed among `b`'s arrays at its
+# argument if it is: one call a leaf, specialized on the leaf's type.
+function placed!(b::Passed, e::InputType, x)
+    is_input(x) && eltype(x) === e.eltype && size(x) === e.dims || return false
+    place!(b, e.argument, x)
+    true
 end
 
 shown(x) = sprint(show, x; context = :limit => true)
@@ -344,58 +439,29 @@ shown(x) = sprint(show, x; context = :limit => true)
 # program reads each array as one of its own, which the function itself,
 # run on the same arrays, would not, as `f!(x, x)` writing its first
 # argument and reading its second reads what it wrote. Which arrays may
-# share memory is Base's `mightalias`, as broadcasting's.
-function refuse_shared(ex::Executable, call)
-    positions, xs = leaves(ex.program.input_structure), leaves(call)
-    for (_, a) in ex.program.writes
-        i = findfirst(==(a), positions)
-        for (j, y) in enumerate(xs)
-            (j == i || positions[j] === nothing || !Base.mightalias(xs[i], y)) && continue
-            paths = leaf_paths(call)
-            throw(ArgumentError(string(paths[j], " shares memory with ", paths[i], ", which ", call[1],
-                " writes: a compiled call reads its arrays apart, so pass arrays that share none")))
-        end
+# share memory is Base's `mightalias`, as broadcasting's. `b` holds the
+# call's arrays.
+function refuse_shared(ex::Executable, b::Passed, call)
+    xs = b.arrays
+    for (_, a) in ex.program.writes, k in eachindex(xs)
+        k == a || !Base.mightalias(xs[a], xs[k]) || refuse_sharing(ex, call, k, a)
     end
 end
 
-# The path of each leaf of the call `(f, args...)`, as `difference` names it,
+# Argument `k` of the call shares memory with argument `a`, which the program writes.
+function refuse_sharing(ex, call, k, a)
+    paths, positions = leaf_paths(call), leaves(ex.program.input_structure)
+    path(j) = paths[findfirst(==(j), positions)]
+    throw(ArgumentError(string(path(k), " shares memory with ", path(a), ", which ", call[1],
+        " writes: a compiled call reads its arrays apart, so pass arrays that share none")))
+end
+
+# The path of each leaf of the call `(f, args...)`, as a difference names it,
 # in the order `leaves` gives them.
 leaf_paths(call) = foldl((out, (k, x)) -> leaf_paths!(out, x, k == 1 ? "f" : "argument $(k - 1)"), enumerate(call); init = String[])
 leaf_paths!(out, x::Tuple, path) = foldl((out, (k, y)) -> leaf_paths!(out, y, "$path[$k]"), enumerate(x); init = out)
 leaf_paths!(out, x::NamedTuple, path) = foldl((out, k) -> leaf_paths!(out, x[k], "$path.$k"), keys(x); init = out)
 leaf_paths!(out, x, path) = nested(x) ? leaf_paths!(out, parts(x), path) : push!(out, path)
-
-# Where the call `got`, `f` and its arguments, differs from `expected`, in
-# words, or `nothing`. The function is `f`, and the arguments are counted after it.
-function difference(expected::Tuple, got::Tuple)
-    n, m = length(expected) - 1, length(got) - 1
-    n == m || return string("it takes ", n, n == 1 ? " argument" : " arguments", ", not ", m)
-    for k in eachindex(expected)
-        d = difference(expected[k], got[k], k == 1 ? "f" : "argument $(k - 1)")
-        d === nothing || return d
-    end
-    nothing
-end
-
-function difference(expected, got, path)
-    e, g = inner(expected), inner(got)
-    if e !== nothing && g !== nothing && kind(expected) == kind(got) && keys(e) == keys(g)
-        for k in keys(e)
-            d = difference(e[k], g[k], expected isa Tuple ? "$path[$k]" : "$path.$k")
-            d === nothing || return d
-        end
-        return nothing
-    end
-    isequal(expected, got) ? nothing : string(path, " is ", describe(got), ", not ", describe(expected))
-end
-
-inner(x::Union{Tuple, NamedTuple}) = x
-inner(x::Parts) = x.parts
-inner(x) = nothing
-
-kind(::Tuple) = Tuple
-kind(::NamedTuple) = NamedTuple
-kind(::Parts{T}) where {T} = Base.typename(T).wrapper
 
 describe(x::InputType) = string("a ", x.eltype, " array of size ", x.dims)
 describe(x::Parts{T}) where {T} = string("a ", nameof(T))

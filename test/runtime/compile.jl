@@ -105,6 +105,14 @@ end
     c = compile((m, x) -> m(x), m, x)
     @test c(other, x) ≈ other(x)
     @test occursin("argument 1.act is the constant sin, not the constant tanh", message(() -> c(Dense(m.w, m.b, sin), x)))
+    # A struct is matched by its kind, a named tuple by its names, and an
+    # array by its element type and size, wherever it is.
+    @test occursin("argument 1 is a named tuple of w, b, act, not a Dense", message(() -> c((w = m.w, b = m.b, act = tanh), x)))
+    @test occursin("argument 1.w is a Float32 array of size (3, 4), not a Float64 array of size (3, 4)",
+        message(() -> c(Dense(Float32.(m.w), m.b, tanh), x)))
+    t = compile((m, x) -> m.act.(m.w * x .+ m.b), (w = m.w, b = m.b, act = tanh), x)
+    @test occursin("argument 1 is a Dense, not a named tuple of w, b, act", message(() -> t(m, x)))
+    @test occursin("argument 1 is a named tuple of b, w, act, not a named tuple of w, b, act", message(() -> t((b = m.b, w = m.w, act = tanh), x)))
     # A struct's gradient is a named tuple of its fields'.
     g = compile((m, x) -> Tempest.withgradient(loss, m, x), m, x)
     value, (gm, gx) = g(other, x)
@@ -271,11 +279,17 @@ end
     c = compile(forward, model, x)
     @test c(other, x) ≈ forward(other, x)
     @test occursin("argument 1.layers is a vector of 3, not a vector of 2", message(() -> c((; layers = [layer(0.1), layer(0.2), layer(0.3)]), x)))
+    @test occursin("argument 1.layers is a tuple of 2, not a vector of 2", message(() -> c((; layers = (layer(0.1), layer(0.2))), x)))
+    @test occursin("argument 1.layers[2].w is a Float64 array of size (3, 4), not a Float64 array of size (3, 3)",
+        message(() -> c((; layers = [layer(0.1), (w = data(3, 4), b = data(3))]), x)))
     # So is a vector of structs, and a vector of arrays.
     stack = [Dense(data(3, 3; scale = 0.3), data(3), tanh), Dense(data(3, 3; scale = 0.6), data(3), tanh)]
     @test compile((ds, x) -> ds[2](ds[1](x)), stack, x)(stack, x) ≈ stack[2](stack[1](x))
     arrays = [data(3), data(3; scale = 0.5)]
-    @test compile((vs, x) -> vs[1] .* x .+ vs[2], arrays, x)(arrays, x) ≈ arrays[1] .* x .+ arrays[2]
+    vs = compile((vs, x) -> vs[1] .* x .+ vs[2], arrays, x)
+    @test vs(arrays, x) ≈ arrays[1] .* x .+ arrays[2]
+    # A vector of numbers is an array, not a vector of arrays.
+    @test occursin("argument 1 is a Float64 array of size (2,), not a vector of 2", message(() -> vs([1.0, 2.0], x)))
     # A vector among the results is built as `map` builds one, and a vector's
     # gradient is a vector of its elements'.
     twice = compile(x -> [x, 2 .* x], x)(x)

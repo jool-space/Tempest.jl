@@ -151,14 +151,15 @@ bindable(::Target, x) = false
 bindable(::CPUTarget, x) = x isa Array
 
 """
-    pointable(target, x) -> Bool
+    pointable(target, x, at) -> Bool
 
-Whether launches built on storage `target` allocated can read array `x`
-where it is instead (see `repoint!`): `x` is storage the target could have
-allocated, as aligned as its kernels assume of what it allocates.
+Whether launches built on storage `target` allocated can read array `x`,
+whose first element is at address `at`, where it is instead (see
+`repoint!`): `x` is storage the target could have allocated, as aligned as
+its kernels assume of what it allocates.
 """
-pointable(::Target, x) = false
-pointable(::CPUTarget, x) = x isa Array
+pointable(::Target, x, at) = false
+pointable(::CPUTarget, x, at) = x isa Array
 
 """
     task_state(target) -> function
