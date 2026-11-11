@@ -147,7 +147,7 @@ function verify_recurrences(p::Plan)
         for r in riders
             rider = riding(graph, live, cycle, r)
             summed = r in g.reductions
-            (rider === nothing || (rider.how === :summed) != summed) &&
+            (rider === nothing || folded(rider.how) != summed) &&
                 invalid(3, value_name(p, r), summed ? ", a fold of " : ", a member of ", kernel_name(p, k), " outside its cycle, does not ride its steps")
             for u in rider.between
                 p.stored[u] || p.owner[u] > 0 || continue

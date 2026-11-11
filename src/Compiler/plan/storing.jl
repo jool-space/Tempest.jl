@@ -37,7 +37,7 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     # how it meets them, and the values between it and the cycle, which its
     # steps compute.
     recurring = recurrences(graph)
-    riders = Dict{Int, Vector{Pair{Int, Symbol}}}()
+    riders = Dict{Int, Vector{Pair{Int, Meeting}}}()
     between = Dict{Int, Set{Int}}()
     # What riding asks of each recurrence, once: asked of each for each value
     # riding, Qwen3.5-4B's 96 took 12 s a plan.
@@ -54,7 +54,7 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
         found === nothing && throw(NotAGroup([r]))
         k, rider = found
         c = first(recurring[k].states)
-        push!(get!(() -> Pair{Int, Symbol}[], riders, c), r => rider.how)
+        push!(get!(() -> Pair{Int, Meeting}[], riders, c), r => rider.how)
         union!(get!(() -> Set{Int}(), between, c), rider.between)
     end
     foreach(b -> union!(recomputed, b), Base.values(between))
@@ -80,12 +80,12 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
         d isa Keyed && d.into !== nothing && foreach(r -> materialized[r] = true, read_values(d.into))
     end
     foreach(v -> materialized[v] = true, store)
-    # A recurrence a sum rides runs a step at a time (see `build_stepped`),
-    # which starts each state from storage: a start recomputed in the
-    # recurrence's kernel, as `tanh.(a)` read once, left the steps nothing to
-    # start from.
+    # A recurrence one of whose folds rides it, a sum, runs a step at a time
+    # (see `folded`, `build_stepped`), which starts each state from storage: a
+    # start recomputed in the recurrence's kernel, as `tanh.(a)` read once,
+    # left the steps nothing to start from.
     for recurrence in recurring, c in recurrence.states
-        any(x -> last(x) === :summed, get(riders, first(recurrence.states), ())) || continue
+        any(((_, how),) -> folded(how), get(riders, first(recurrence.states), ())) || continue
         init = values[c].definition.init
         init isa Read && (materialized[init.value] = true)
     end
@@ -130,7 +130,7 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
             # What rides the steps, and what it computes there, are read
             # within them.
             c = first(cs)
-            within = union(Set(cycle), first.(get(riders, c, Pair{Int, Symbol}[])), get(between, c, Set{Int}()))
+            within = union(Set(cycle), first.(get(riders, c, Pair{Int, Meeting}[])), get(between, c, Set{Int}()))
             outside(w) = any(u -> live[u] && !(u in within), users[w])
             foreach(w -> stored[w] = true, cs)
             for w in cycle

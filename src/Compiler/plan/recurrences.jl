@@ -57,22 +57,88 @@ recurrence_states(graph, members) = [m for m in members if graph.values[m].defin
 carried_from(graph, c) = (graph.values[c].definition.from::Read).value
 
 """
+A sum over a recurrence's steps of what they compute, riding them: each
+step adds its part as the steps run, as a weight's gradient adds each
+step's while its operands are fresh. It is a fold of the recurrence's group,
+complete only after the steps.
+"""
+struct Summed end
+
+"""
+A value along a recurrence's steps, at its axis `axis` there, riding them:
+each step writes its own, as a recurrent network's output at each step. It
+is a member of the recurrence's group.
+"""
+struct Along
+    axis::Int
+end
+
+"""
+A value of a recurrence's last step alone, riding the steps: the last
+writes it, what the steps leave, as the state after a loop. It is a member
+of the recurrence's group that lies along none of its steps (see
+`last_step`).
+"""
+struct AtLast end
+
+"""
+How a value meets a recurrence's steps: along them (`Along`), at their last
+(`AtLast`), or, for a value riding them, summed over them (`Summed`). A union,
+as a group's kinds are (see `GroupKind`): each way says by a method whether
+the group takes the value as a fold or as a member (`folded`), whether the
+steps can compute it so (`fits_steps`), and, to the cover, where it is
+offered and how `explain` words it (`offered`, `ridden`).
+"""
+const Meeting = Union{Summed, Along, AtLast}
+
+Base.show(io::IO, ::Summed) = print(io, "summed")
+Base.show(io::IO, a::Along) = print(io, "along ", a.axis)
+Base.show(io::IO, ::AtLast) = print(io, "at the last")
+
+"""
+Whether a value riding a recurrence's steps is one of its group's folds,
+complete after the steps and read by nothing in the group, rather than a
+member a step writes. Only a run a step at a time computes a recurrence's
+folds (see `build_stepped`).
+"""
+folded(::Summed) = true
+folded(::Union{Along, AtLast}) = false
+
+"""
+    fits_steps(how, graph, cycle, between, r) -> Bool
+
+Whether the steps of a recurrence whose cycle is `cycle` compute value `r`,
+through the values `between`, as `how` says it meets them. A sum adds its
+parts as they come, which a sum does in any order. A member of the group has
+a place among the state's axes, and lies along each of the recurrence's
+lanes, the state's axes that every value of its cycle lies along, which the
+steps run apart: each lane computes its part from its own. One summing across
+them, as a projection of a network's output over its heads, would make of
+the steps a single lane, reading its weights again at every step.
+"""
+fits_steps(::Summed, graph, cycle, between, r) = graph.values[r].definition.fold isa SumFold
+function fits_steps(::Union{Along, AtLast}, graph, cycle, between, r)
+    values = graph.values
+    states = [c for c in cycle if values[c].definition isa Carried]
+    lies = lying(graph, states, sort!([cycle; between; r]))
+    lies === nothing && return false
+    state = values[first(states)]
+    lanes = [q for q in eachindex(state.dims) if q != state.definition.axis && all(c -> lies[c][q] != 0, cycle)]
+    all(u -> all(q -> lies[u][q] != 0, lanes), [between; r])
+end
+
+"""
     riding(graph, live, cycle, r, reaching = reaching_from(graph, cycle)) -> (; between, how) or nothing
 
 Value `r` riding a recurrence's steps: computed at each step from the values
 of its `cycle` there, through `between`, the values `r` reads between it and
-the cycle, which the steps compute with it. How it meets the steps (`how`):
-a sum over them (`:summed`) adds each step's part as the steps run, as a
-weight's gradient adds each step's while its operands are fresh; a value
-along them (`:each`) is written a step at a time, as a recurrent network's
-output at each step; and a value of their last (`:last`) is written at it,
-what the steps leave, as the state after the loop. Each of `between` is a
-map or a fold that only `r` and the others read; nothing where `r` reads no
-value of the cycle, or another reads one of them, or a state is carried from
-one, or a value reads the cycle at another step than its own or the last,
-or along two of its axes, or a fold sums the steps without being `r`, a sum,
-or, of a value along the steps or of their last, one sums across the
-recurrence's lanes.
+the cycle, which the steps compute with it, meeting the steps as `how` says
+(see `Meeting`). Each of `between` is a map or a fold that only `r` and the
+others read; nothing where `r` reads no value of the cycle, or another reads
+one of them, or a state is carried from one, or a value reads the cycle at
+another step than its own or the last, or along two of its axes, or a fold
+sums the steps without being `r`, or the steps cannot compute `r` as it meets
+them (`fits_steps`).
 """
 function riding(graph, live, cycle, r, reaching = reaching_from(graph, cycle))
     values = graph.values
@@ -98,38 +164,26 @@ function riding(graph, live, cycle, r, reaching = reaching_from(graph, cycle))
     all(u -> all(w -> !live[w] || w in set, users[u]), between) || return nothing
     # A state reads the value it is carried from, which no reader counts.
     any(((_, f),) -> f in set, carried) && return nothing
-    # Each value of the cycle and between at its axis along the steps, from
-    # the states', or at their last (`LAST`); `r` reads them along an axis it
-    # sums, a step's at its own, or the last's, not along another.
+    # How each value of the cycle and between meets the steps, from the
+    # states', along them at an axis of its own; `r` meets them along an axis
+    # it sums, a step's along its own, or at the last, not otherwise.
     state = values[first(c for c in cycle if values[c].definition isa Carried)]
     carry = state.definition::Carried
     steps, final = state.dims[carry.axis], carry.reverse ? 0 : state.dims[carry.axis] - 1
-    along = Dict{Int, Int}(c => values[c].definition.axis for c in cycle if values[c].definition isa Carried)
-    for u in sort!([[w for w in cycle if !haskey(along, w)]; between])
+    meets = Dict{Int, Union{Along, AtLast}}(c => Along(values[c].definition.axis) for c in cycle if values[c].definition isa Carried)
+    for u in sort!([[w for w in cycle if !haskey(meets, w)]; between])
         e = values[u].definition
-        k = steps_iteration(e, values[u].dims, along, steps, final)
-        k === nothing && return nothing
-        k == 0 && continue
-        if e isa Reduction && k != LAST
-            k in e.reduced && return nothing
-            k = count(j -> !(j in e.reduced), 1:k)
-        end
-        along[u] = k
+        m = meeting(e, values[u].dims, meets, steps, final)
+        m isa Astray && return nothing
+        m === nothing && continue
+        m = as_value(e, m)
+        m isa Summed && return nothing
+        meets[u] = m
     end
-    k = steps_iteration(d, values[r].dims, along, steps, final)
-    (k === nothing || k == 0) && return nothing
-    how = k == LAST ? :last : d isa Reduction && k in d.reduced ? :summed : :each
-    how === :summed && return d.fold isa SumFold ? (; between, how) : nothing
-    # A value computed in the steps has a place among the state's axes, and
-    # lies along each of the recurrence's lanes, the state's axes that every
-    # value of its cycle lies along, which the steps run apart: each lane
-    # computes its part of it from its own. One summing across them, as a
-    # projection of a network's output over its heads, would make of the
-    # steps a single lane, reading its weights again at every step.
-    lies = lying(graph, [c for c in cycle if values[c].definition isa Carried], sort!([cycle; between; r]))
-    lies === nothing && return nothing
-    lanes = [q for q in eachindex(state.dims) if q != carry.axis && all(c -> lies[c][q] != 0, cycle)]
-    all(u -> all(q -> lies[u][q] != 0, lanes), between) && all(q -> lies[r][q] != 0, lanes) || return nothing
+    m = meeting(d, values[r].dims, meets, steps, final)
+    (m === nothing || m isa Astray) && return nothing
+    how = as_value(d, m)
+    fits_steps(how, graph, cycle, between, r) || return nothing
     (; between, how)
 end
 
@@ -177,28 +231,43 @@ function feeding(graph)
     feeds
 end
 
-# What `steps_iteration` gives a value read at the last of the steps alone.
-const LAST = -1
+"What `meeting` gives a value that reads a recurrence's steps otherwise than one at a time or at the last: no step computes it."
+struct Astray end
 
-# The axis of `d`'s iteration along a recurrence's `steps`, where it reads
-# each value along them, by its axis there in `along`, a step at a time, the
-# whole of the steps along it: 0 where it reads none; `LAST` where it reads
-# each at position `final`, the last step's, or a value read so; nothing
-# where it reads one otherwise, along two axes, or both. A map iterates over
-# its axes, of extents `dims`, a fold over its iteration's.
-function steps_iteration(d, dims, along, steps, final)
+# How `d` meets a recurrence's `steps`, by how each value it reads meets them
+# (`meets`): along them at the axis of its iteration that reads each a step at
+# a time, the whole of the steps along it; at the last, where it reads each
+# at position `final`, the last step's, or a value of the last; nothing where
+# it reads none; astray where it reads one otherwise, along two axes, or
+# both. A map iterates over its axes, of extents `dims`, a fold over its
+# iteration's.
+function meeting(d, dims, meets, steps, final)
     extents = d isa Reduction ? d.iteration : dims
     n = length(extents)
-    k = 0
+    m = nothing
     for o in operands(d)
-        o isa Read && haskey(along, o.value) || continue
-        a = along[o.value]
-        j = a == LAST ? LAST : (e = o.index[a]; e == constant(final) ? LAST : findfirst(i -> e == var(i) && extents[i] == steps, 1:n))
-        j === nothing && return nothing
-        k in (0, j) || return nothing
-        k = j
+        o isa Read && haskey(meets, o.value) || continue
+        j = met_at(meets[o.value], o.index, extents, steps, final)
+        j === nothing && return Astray()
+        m === nothing || m == j || return Astray()
+        m = j
     end
-    k
+    m
+end
+
+# How the value of `d`, meeting the steps as `m` over its iteration, meets
+# them over its own axes: a fold along them at an axis it keeps, along them at
+# that axis among those kept; one summing the axis, a sum over them.
+as_value(d, m) = m
+as_value(d::Reduction, m::Along) = m.axis in d.reduced ? Summed() : Along(count(j -> !(j in d.reduced), 1:m.axis))
+
+# How a read at `index` of a value meeting the steps as `a` meets them.
+met_at(::AtLast, index, extents, steps, final) = AtLast()
+function met_at(a::Along, index, extents, steps, final)
+    e = index[a.axis]
+    e == constant(final) && return AtLast()
+    i = findfirst(i -> e == var(i) && extents[i] == steps, eachindex(extents))
+    i === nothing ? nothing : Along(i)
 end
 
 function recurrence_cycle(graph, cs, fs)
@@ -310,8 +379,8 @@ end
 # its folds, each over its own iteration: as a fold along a scan's axes rides
 # its sweep, each is complete only after the steps, and nothing in the group
 # reads it. `riders` pairs each value riding the steps with how it meets
-# them (see `riding`).
-function recurrence_group(graph, cx::Forming, recurrence::Cycle, riders = Pair{Int, Symbol}[])
+# them (see `Meeting`), which says which it is (`folded`).
+function recurrence_group(graph, cx::Forming, recurrence::Cycle, riders = Pair{Int, Meeting}[])
     values = graph.values
     cs, fs, cycle = recurrence.states, recurrence.from, recurrence.values
     c = first(cs)
@@ -323,8 +392,8 @@ function recurrence_group(graph, cx::Forming, recurrence::Cycle, riders = Pair{I
     allunique([cs; fs]) || throw(ArgumentError("a recurrence's state carried from another state is not supported yet"))
     # The states, then the rest in the graph's order, which a step computes
     # them in: an LSTM's hidden state one step on reads its cell's.
-    sums = [r for (r, how) in riders if how === :summed]
-    stepped = [r for (r, how) in riders if how !== :summed]
+    sums = [r for (r, how) in riders if folded(how)]
+    stepped = [r for (r, how) in riders if !folded(how)]
     members = [cs; sort!([[w for w in cycle if !(w in cs) && !(w in fs) && isstored(cx, w)]; fs; stepped])]
     (; domain, places) = recurrence_places(graph, members)
     g = Group(RecurrenceKind(), domain)

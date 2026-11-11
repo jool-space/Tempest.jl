@@ -124,7 +124,7 @@ place by its seed (`at`).
 struct Formation
     stored::Vector{Bool}
     fixed::Vector{Vector{Int}}
-    riders::Dict{Int, Vector{Pair{Int, Symbol}}}
+    riders::Dict{Int, Vector{Pair{Int, Meeting}}}
     formed::Vector{Formed}
     taken::Vector{Bool}
     at::Dict{Seed, Int}
@@ -197,7 +197,7 @@ grown(grounds::Grounds, cx::Forming, seed::MapSeed, fixed, riders) = grown_map(g
 
 function grown(grounds::Grounds, cx::Forming, seed::RecurrenceSeed, fixed, riders)
     recurrence = grounds.recurrences[seed.at]
-    g = recurrence_group(grounds.graph, cx, recurrence, get(riders, first(recurrence.states), Pair{Int, Symbol}[]))
+    g = recurrence_group(grounds.graph, cx, recurrence, get(riders, first(recurrence.states), Pair{Int, Meeting}[]))
     # What a recurrence computes at each step is its group's alone: a set
     # fixed apart holding any of it would be a second kernel writing it.
     held = filter(m -> owned(cx, m), members(g))

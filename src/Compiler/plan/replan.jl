@@ -67,7 +67,7 @@ struct Replay
     graph::IndexGraph
     before::Formation
     fixed::Vector{Vector{Int}}
-    riders::Dict{Int, Vector{Pair{Int, Symbol}}}
+    riders::Dict{Int, Vector{Pair{Int, Meeting}}}
     up::Vector{BitVector}
     restored::BitVector
     lost::BitVector
@@ -115,7 +115,7 @@ same_seed(r::Replay, seed::Union{FoldSeed, MapSeed}, f::Formed) = true
 
 function same_seed(r::Replay, seed::RecurrenceSeed, f::Formed)
     c = first(f.group.outputs)
-    get(r.riders, c, Pair{Int, Symbol}[]) == get(r.before.riders, c, Pair{Int, Symbol}[])
+    get(r.riders, c, Pair{Int, Meeting}[]) == get(r.before.riders, c, Pair{Int, Meeting}[])
 end
 
 """

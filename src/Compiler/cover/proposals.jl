@@ -234,12 +234,12 @@ instead, over all of them at once. It is about what its steps compute for
 the value too (`within`), which nothing else reads: a proposal taken with it
 that made a kernel of one of them would make one whose work nothing reads,
 beside the steps computing it. How it meets the steps is `how` (see
-`riding`).
+`Meeting`).
 """
 struct Ride <: Proposal
     value::Int
     within::Vector{Int}
-    how::Symbol
+    how::Meeting
 end
 
 change(q::Ride) = Inputs(; ride = (q.value,))
@@ -252,12 +252,20 @@ function priceable(d::Decider, p::Plan, q::Ride)
 end
 explain(io, q::Ride, c, why) = println(io, "%", q.value, ridden(q.how, c.accepted), why)
 
-ridden(how, accepted) = how === :summed ?
-    (accepted ? " is summed as the steps of the recurrence it reads run" : " is summed after the steps of the recurrence it reads") :
-    how === :each ? (accepted ? " is computed at each step of the recurrence it reads, as the steps run" :
-        " is computed after the steps of the recurrence it reads, from what they store") :
-    (accepted ? " is computed at the last step of the recurrence it reads, as the steps run" :
-        " is computed after the steps of the recurrence it reads, from what the last stores")
+# How `explain` words a ride, taken or not.
+ridden(::Summed, accepted) =
+    accepted ? " is summed as the steps of the recurrence it reads run" : " is summed after the steps of the recurrence it reads"
+ridden(::Along, accepted) = accepted ? " is computed at each step of the recurrence it reads, as the steps run" :
+    " is computed after the steps of the recurrence it reads, from what they store"
+ridden(::AtLast, accepted) = accepted ? " is computed at the last step of the recurrence it reads, as the steps run" :
+    " is computed after the steps of the recurrence it reads, from what the last stores"
+
+# Whether `plan` is offered value `r` riding the steps as `how` says: a sum
+# wherever it is; a member of the steps where a kernel of its own stores it,
+# since only there does riding spare what it reads of the steps their
+# storage.
+offered(::Summed, p::Plan, r) = true
+offered(::Union{Along, AtLast}, p::Plan, r) = p.owner[r] > 0 && p.stored[r]
 
 """
     riding_values(plan) -> values
@@ -269,12 +277,11 @@ the recurrence's cycle through values only they read (see `riding`), each
 once; and of those, the sums over the steps.
 """
 riding_values(p::Plan) = [r for (r, _, _) in rides(p)]
-riding_sums(p::Plan) = [r for (r, _, how) in rides(p) if how === :summed]
+riding_sums(p::Plan) = [r for (r, _, how) in rides(p) if folded(how)]
 
 # Each value of `plan` that could ride the steps of one of its recurrences,
 # with the values the steps would compute for it, which nothing else reads,
-# and how it meets the steps. A value along them or of their last is one a
-# kernel stores; a sum, any.
+# and how it meets the steps, where it is offered (see `offered`).
 function rides(p::Plan)
     graph = p.graph
     values = graph.values
@@ -284,7 +291,7 @@ function rides(p::Plan)
         live[id] || continue
         foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(values[id].definition))
     end
-    found = Tuple{Int, Vector{Int}, Symbol}[]
+    found = Tuple{Int, Vector{Int}, Meeting}[]
     taken = Set{Int}()
     users, feeds = readers(graph), feeding(graph)
     for recurrence in recurrences(graph)
@@ -301,7 +308,7 @@ function rides(p::Plan)
         for r in (maximum(recurrence.from) + 1):length(values)
             p.owner[r] != k && !(r in taken) && reaches[r] && apart(r) || continue
             rider = riding(graph, live, recurrence.values, r, reaching)
-            rider !== nothing && (rider.how === :summed || p.owner[r] > 0 && p.stored[r]) || continue
+            rider !== nothing && offered(rider.how, p, r) || continue
             push!(found, (r, rider.between, rider.how))
             push!(taken, r)
         end

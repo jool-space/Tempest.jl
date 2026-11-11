@@ -412,7 +412,7 @@ end
     # Nothing outside reads the state at any step: it is stored at none.
     @test !planned.stored[state]
     riders = C.rides(planned)
-    @test sort(last.(riders)) == [:each, :last] && isempty(C.riding_sums(planned))
+    @test [typeof(how) for (_, _, how) in riders] == [C.Along, C.AtLast] && isempty(C.riding_sums(planned))
     ridden = C.plan(planned.graph; ride = C.riding_values(planned))
     @test length(ridden.groups) == 1 && sort(C.structure(ridden).stored) == sort(first.(riders))
     @test agree(C.execute(ridden, args...), eager; rtol = 1.0e-12)
@@ -430,12 +430,12 @@ end
         stack(outputs), S
     end
     pp = prepare(trace(projected, args...), args...; build = false).plan
-    @test [(how, pp.graph.values[r].dims) for (r, _, how) in C.rides(pp)] == [(:each, (3, 6)), (:last, (4, 3))]
+    @test [(typeof(how), pp.graph.values[r].dims) for (r, _, how) in C.rides(pp)] == [(C.Along, (3, 6)), (C.AtLast, (4, 3))]
     explained = sprint(C.explain, ridden)
     @test occursin("at each step, riding the steps", explained) && occursin("at the last step, riding the steps", explained)
     # On the CPU the steps run a step at a time, as plans of their own, the
     # state the steps leave written at each, the last write staying.
-    for ride in ([first(r) for r in riders if last(r) === :each], C.riding_values(planned))
+    for ride in ([first(r) for r in riders if last(r) isa C.Along], C.riding_values(planned))
         ex = prepare(p, args...; ride)
         @test count(k -> k isa C.SteppedKernels, ex.kernels) == 1
         @test agree(C.leaves(outputs(execute!(ex))), eager; rtol = 1.0e-12)
