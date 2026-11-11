@@ -1408,8 +1408,12 @@ measured tie decided by the estimate, the neural ODE's gradient sums riding
 or not from one cold preparation to the next, before as after (two sides
 within 5%, the estimate 11 ms for 7.3 measured); products of few columns,
 slower than cuBLAS's from 4 to 64 tokens; and cold preparation with
-measurement, 187 s at 16 tokens and 232 at 64 before the rides, forming
-proposals 65 and 99 of them, timing 6 and 7. A
+measurement, 100, 172 and 137 s at 1, 16 and 64 tokens, where it took 98, 187
+and 232 before the rides: asking each recurrence what rides it by a pass over
+the graph was 65 and 99 s of those at 16 and 64, 1.7 and 1.4 since it is
+found once a plan, and what the 172 hold now is the search itself (the
+phases overlap: the first builds 56, searching ahead 36, the loop 32,
+decisions 34), timing 7. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
