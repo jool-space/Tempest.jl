@@ -298,7 +298,14 @@ end
     # its scores by it: a sum over keys that loads it finds its formula, the
     # condition being false where it fails, and stops at the length; and the
     # scores, stored bare and read only where it holds, are computed only in
-    # the tiles it leaves. The results are those of every step and tile run.
+    # the tiles it leaves. The results are those of every step and tile run,
+    # to within how the tile compiler rounds a step's products, which it
+    # chooses kernel by kernel: the steps a mask leaves are the same sums in
+    # the same order either way, and a step skipped adds the sum's identity.
+    # tileiras 13.4 rounded each product and the two kernels agreed bit for
+    # bit; 13.5 fuses them into the sum except four of the last step's in the
+    # kernel whose step count it knows, 0.02 eps apart normwise, where one
+    # key dropped is 18,000.
     function chosen(q, k, v, len)
         seen = axes(k, 2) .<= reshape(len, 1, 1, 1, :)
         attend(x) = (s = ifelse.(seen, Einops.@einsum(k, x, "d n h b, d (g h) b -> n g h b", h = size(k, 3)) .* 0.25f0, -Inf32);
@@ -316,7 +323,7 @@ end
         bind!(ex, 4 => CuArray(m))
         bind!(every, 4 => CuArray(m))
         o = Array(only(C.leaves(outputs(execute!(ex)))))
-        @test o == Array(only(C.leaves(outputs(execute!(every)))))
+        @test agree([o], [Array(only(C.leaves(outputs(execute!(every)))))]; rtol = 1.0e-6)
         @test agree([o], [interpret(p, q3, k5, v5, m)]; rtol = 1.0e-4)
     end
     # Over a BFloat16s.BFloat16 cache, the probabilities rounded to it
