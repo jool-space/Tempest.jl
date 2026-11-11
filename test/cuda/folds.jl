@@ -1,6 +1,7 @@
 # Folds on cuTile: sizes that take several blocks, whose partial states merge,
-# a fold of the user's with a tuple state under every sketch, and extremes as
-# Base finds them, on tiles and on the floor.
+# a fold of the user's with a tuple state under every sketch, extremes as
+# Base finds them, on tiles and on the floor, and a fold recomputed inside
+# another's sweep, computed once.
 include("../fixtures/programs.jl")
 
 # Sizes that take several blocks: full reductions merge partial states, and
@@ -70,4 +71,30 @@ end
             @test isequal(found_in_floats(outputs(execute!(ex))), found(f(reference)))
         end
     end
+end
+
+# A fold recomputed inside another's sweep that does not move along the
+# other's reduced axis, as a recurrence's step sums a product of its input's
+# column of unit length, the column's norm recomputed inside the product, is
+# computed once, before the other's steps, as the estimate counts it. Before,
+# each step of the product recomputed the norm, its sweep inside the
+# product's: Qwen3.5-4B's delta rule with its keys' norm recomputed so took
+# 4.2 ms a call, its recurrence 4.0 ms alone where it was priced at 261 μs.
+@testset "a fold recomputed inside another's sweep is computed once" begin
+    unit(x) = x ./ sqrt.(sum(abs2, x; dims = 1) .+ 1.0f-6)
+    f(W, x, h) = (for t in axes(x, 2); h = tanh.(transpose(W) * unit(x[:, t]) .+ h); end; h)
+    args = (single(data(256, 64; scale = 0.1)), single(data(256, 4; scale = 0.3)), single(data(64; scale = 0.2)))
+    p = trace(f, args...)
+    target = T.CUDATarget(T.cuTileGenerator())
+    graph = C.rewrite(C.lower(p); rounded = C.rounded_backward(target))
+    folds = [v for (v, x) in enumerate(graph.values) if x.definition isa C.Reduction]
+    ex = prepare(p, map(CuArray, args)...; target, recompute = folds, measure = :none)
+    k = only(k for (k, g) in enumerate(ex.plan.groups) if !isempty(C.recomputed_in(g)))
+    @test occursin("cuTile recurrence", string(ex.kernels[k]))
+    # Loops nest two deep: the steps, and in each the norm's sweep and then
+    # the product's.
+    depth(x) = x isa Expr ? (x.head === :for) + maximum(depth, x.args; init = 0) : 0
+    ext = Base.get_extension(Tempest, :cuTileExt)
+    @test depth(ext.source(only(ex.kernels[k].kernels))) == 2
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 1.0e-4)
 end

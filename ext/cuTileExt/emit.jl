@@ -1055,6 +1055,19 @@ function terms_expressible(c::Context, roots; stats = false)
     true
 end
 
+# Recomputed folds of `roots` that do not move along tile axes `along` (the
+# swept ones by default) are computed once, before the sweep along them, at
+# block indices `indices`, into `scope`: as `positions` counts them, once per
+# block along a swept axis they do not mention.
+Base.@nospecializeinfer function hoist_folds!(k, st, c::Context, @nospecialize(roots), @nospecialize(scope), @nospecialize(indices), along = swept(c.s))
+    axes = reduce(vcat, (c.s.tiling[q].axes for q in along); init = Int[])
+    for t in subterms(roots; known = t -> haskey(scope, t))
+        t isa Recomputed || continue
+        any(q -> mentions(t, q), axes) && continue
+        emit_tiles!(k, st, c, [t], scope, indices...)
+    end
+end
+
 # A recomputed fold at block indices `indices`, as a tile over the tiling. One
 # that reads a tile the kernel holds along its reduced axis is unrolled, each
 # step reading its piece of the tile, as `extract` takes pieces known when the
@@ -1063,6 +1076,8 @@ end
 # piece: as a recurrence's step computes what it reads of its state whole,
 # flash-linear-attention's `v_new` (computing it in each step's lanes instead
 # runs four times as many products, each a quarter the size, 1.5× slower).
+# A fold it recomputes that does not move along its reduced axis is computed
+# once, before its steps (see `hoist_folds!`), as the estimate counts it.
 Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @nospecialize(indices); matrix = nothing)
     e = fold_context(c, t)
     n = length(c.s.tiling)
@@ -1081,6 +1096,9 @@ Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @n
     j = gensym(:j)
     runs = unrolled ? [(st, Int32(i)) for i in 1:steps] : [(steps == 1 ? st : Any[], steps == 1 ? :(Int32(1)) : j)]
     sums = sweep_sums(e, f, t.body, p)
+    roots = unique(step_roots(e, f, t.body, sums))
+    once = Dict{Term, Any}()
+    hoist_folds!(k, st, e, roots, once, (indices..., Int32(1)), (p,))
     shape = Base.setindex(spanned_shape(e, t.body), tp, p)
     # A fold that does not sum, in one step, folds the tile directly.
     direct = sums === nothing && steps == 1
@@ -1089,7 +1107,7 @@ Base.@nospecializeinfer function emit_fold!(k, st, c::Context, t::Recomputed, @n
     for (loop, at) in runs
         pieces = Dict{Term, Any}(r => :($(ct.extract)($x, $(ntuple(q -> q == p ? Int(at) : 1, p)), $(spanned_shape(e, r))))
             for (r, x) in hoisted)
-        names = emit_tiles!(k, loop, e, unique(step_roots(e, f, t.body, sums)), pieces, indices..., at)
+        names = emit_tiles!(k, loop, e, roots, merge!(pieces, once), indices..., at)
         valid = gensym(:valid)
         lanes = ntuple(q -> q == p ? tp : 1, p)
         push!(loop, :($valid = reshape($(ct.arange)($tp), $lanes) .<= Int32($E) - ($at - Int32(1)) * Int32($tp)))

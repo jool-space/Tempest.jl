@@ -317,17 +317,6 @@ function class_steps!(k, loop, c::Context, classes, sums, accumulators, scope, v
     end
 end
 
-# Recomputed folds that do not move along the swept axis are computed once,
-# before the sweep.
-Base.@nospecializeinfer function hoist_folds!(k, st, c::Context, @nospecialize(roots), @nospecialize(scope), @nospecialize(indices))
-    axes = reduce(vcat, (c.s.tiling[q].axes for q in swept(c.s)))
-    for t in subterms(roots; known = t -> haskey(scope, t))
-        t isa Recomputed || continue
-        any(q -> mentions(t, q), axes) && continue
-        emit_tiles!(k, st, c, [t], scope, indices...)
-    end
-end
-
 # Folds that accumulate as sums of terms along tile axis `p`: a sum of a
 # bilinear product, and an exponential fold of `(y, g...)`, whose sums are of each
 # `g` times the weight `exp(y - m)` against the running maximum `m` of `y`
