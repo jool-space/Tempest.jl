@@ -529,12 +529,14 @@ recomputed_in(g; nested = true) =
 generator_plan(d::Decider) = plan(d.graph; recompute = d.pinned, ride = d.rides)
 
 # Whether every kernel of `p` that recomputes fold `v` is claimed by an
-# implementation that recomputes folds on the decider's target.
+# implementation that recomputes folds on the decider's target: among the
+# claims the implementations offer for its group (see `Offered`), which the
+# plan's price is found from too.
 function recomputed_claimed(d::Decider, p::Plan, v)
     recomputing = [i for i in implementations(d.target) if Base.invokelatest(recomputes_folds, i, d.target)]
     all(p.groups) do g
         v in recomputed_in(g) || return true
-        any(i -> !isempty(Base.invokelatest(claims, i, d.target, group_view(p, g))), recomputing)
+        any(((i, _, _, _),) -> i in recomputing, offered!(d, p, g).estimated)
     end
 end
 
