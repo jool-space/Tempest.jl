@@ -1434,7 +1434,16 @@ not close, so the 4B's floor of one item is not timed; preparation is as
 long as before (heat 27.4 and 27.3 s, GPT 154 and 151, four layers of the
 model 137 to 140 on both), and the lanes stay, since without them the four
 layers prepare, where they did not end, but in 161 to 168 s, each ride
-refused by price still a trial searched ahead. A
+refused by price still a trial searched ahead. And a settling round finds
+again only what the record could change (`Offered`, `choose.jl`): what the
+implementations offer for a group, its claims, their estimates and prices
+and each variant's, is of the group, the target and the rates and is kept
+across a preparation's rounds, each group's options grown from the record
+again; the model's rounds after the first take 3.3 and 3.6 s at 16 tokens
+where they took 35 and 34, 8.8 and 3.6 at 64 where 26 and 24 (the 8.8
+pricing once the groups of a plan the first round's times changed), its
+decisions on one record the same line for line, and a second process
+replays them, cross-checked, as it does the corpus's. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
