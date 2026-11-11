@@ -7,7 +7,15 @@
 #
 # PROGRAM names a file here defining `instance(shape)`: the step as a
 # function, its inputs in Float32, which results replace which inputs, and
-# the target; its challengers are in challengers/challengers.jl.
+# the target; its challengers are in challengers/challengers.jl. Or it is the
+# path of a `.jl` file elsewhere that defines the same, a program whose code
+# is not the repository's, recorded under the file's name without challengers;
+# what its file loads is its own, and its environment the caller's (a
+# JULIA_LOAD_PATH stacking what it needs). An instance may also say how it is
+# prepared, keywords to `prepare` (`prepare = (; point = true)` for a program
+# prepared on the caller's arrays as `compile` prepares), and that it has no
+# Float64 reference (`check = false`). Its arrays on the device stay where they
+# are.
 #
 # Tempest's side is a set of scenarios, each a way a program comes to its
 # first result, all of them by default or those `--scenarios` names (none
@@ -223,7 +231,7 @@ end
 # One process of a round: a row for each of its scenarios, with its result
 # or why it failed.
 function session(s::Session, run, reference, directory)
-    program, shape = s.preparations[end].program, s.preparations[end].shape
+    program, shape = program_name(s.preparations[end].program), s.preparations[end].shape
     names = join(scenarios(s), " and ")
     log = joinpath(directory, "logs", "$program-$shape-tempest-$(replace(names, " and " => "+"))-$run-$(stamp()).log")
     mkpath(s.stores)
@@ -270,7 +278,7 @@ end
 
 function challengers(program, shape, directory)
     rows = []
-    for c in CHALLENGERS[program]
+    for c in challengers_of(program)
         log = joinpath(directory, "logs", "$program-$shape-$(c.name)-$(stamp()).log")
         println("challenger ", c.name, " for $program $shape: ", log)
         command = c.command(shape)
@@ -304,33 +312,47 @@ function worker(args)
     for (program, shape, scenario, tuning) in Iterators.partition(rest, 4)
         scenario, tuning = undash(scenario), undash(tuning)
         m = get!(modules, program) do
-            m = Core.eval(Main, :(module $(Symbol(program)) end))
-            Base.include(m, joinpath(HERE, program * ".jl"))
+            m = Core.eval(Main, :(module $(Symbol(program_name(program))) end))
+            Base.include(m, program_file(program))
             Base.include(m, joinpath(HERE, "measure.jl"))
             m
         end
         case = get!(() -> Base.invokelatest(m.instance, Symbol(shape)), cases, (program, shape))
         isempty(tuning) || (ENV["TEMPEST_CACHE"] = mkpath(tuning))
-        kept = reference === nothing || isempty(scenario) ? nothing : joinpath(reference, "$program-$shape.jls")
+        kept = reference === nothing || isempty(scenario) ? nothing : joinpath(reference, "$(program_name(program))-$shape.jls")
         result = Base.invokelatest(() -> m.measure(case; reference = kept, report = scenario == "warm"))
         println("corpus result ", repr(merge((; scenario), result)))
     end
 end
 
-# The program prepared before this one in the after scenarios.
+# A program is a corpus file's name or the path of a file elsewhere: its file,
+# the name it is recorded and logged under, and its challengers.
+by_path(program) = endswith(program, ".jl")
+program_file(program) = by_path(program) ? program : joinpath(HERE, program * ".jl")
+program_name(program) = splitext(basename(program))[1]
+challengers_of(program) = by_path(program) ? [] : CHALLENGERS[program]
+
+# A program as the command names it, its path made absolute.
+function program_given(program)
+    by_path(program) && return isfile(program) ? abspath(program) : error("no file $program")
+    isfile(program_file(program)) && haskey(CHALLENGERS, program) || error("$program is no program of the corpus")
+    program
+end
+
+# The program prepared before this one in the after scenarios, and its shape.
 function before(program, args)
     given = option(args, "--after", program == "heat" ? "node" : "heat")
-    name, shape = occursin(':', given) ? split(given, ':'; limit = 2) : (given, "small")
-    name == program && error("--after names the program itself")
-    (String(name), String(shape))
+    other, shape = occursin(r":[^/]*$", given) ? rsplit(given, ':'; limit = 2) : (given, "small")
+    other = program_given(String(other))
+    program_name(other) == program_name(program) && error("--after names the program itself")
+    (other, String(shape))
 end
 
 function main(args)
     if "--worker" in args
         return worker(args[(findfirst(==("--worker"), args) + 1):end])
     end
-    program = first(args)
-    isfile(joinpath(HERE, program * ".jl")) && haskey(CHALLENGERS, program) || error("$program is no program of the corpus")
+    program = program_given(first(args))
     shape = option(args, "--shape", "small")
     wanted = filter(!isempty, split(option(args, "--scenarios", join(SCENARIOS, ',')), ','))
     foreach(s -> s in SCENARIOS || error("$s is no scenario; the scenarios are $(join(SCENARIOS, ", "))"), wanted)
@@ -338,7 +360,7 @@ function main(args)
     directory = record_directory()
     mkpath(joinpath(directory, "logs"))
     println("record: ", joinpath(directory, "corpus.tsv"))
-    common = (; pass = stamp(), host = gethostname(), program, shape, commit = commit(), device = device_name())
+    common = (; pass = stamp(), host = gethostname(), program = program_name(program), shape, commit = commit(), device = device_name())
     io = open_record(directory)
     tempest(program, shape, wanted, before(program, args), runs, directory) do r
         row!(io, merge(common, (; when = stamp()), r))

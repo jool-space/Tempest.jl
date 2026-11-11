@@ -4,7 +4,10 @@
 using Tempest, CUDACore, Serialization
 using Tempest.Compiler: trace, prepare, bind!, execute!, capture!, replay!, outputs, leaves
 
-device(x::AbstractArray) = CuArray(x)
+# An array of numbers on the device, where it is not already; anything else
+# as it is, the names in a model's configuration say.
+device(x::AbstractArray{<:Number}) = CuArray(x)
+device(x::CuArray) = x
 device(x::Union{Tuple, NamedTuple}) = map(device, x)
 device(x) = x
 
@@ -75,7 +78,9 @@ checked(case) = (c = get(case, :check, true); c isa NamedTuple ? c : c ? case : 
 # the cover's trials among them: under 1% of a cold preparation, the plan
 # built's check of a warm one, so that no time the corpus records is of a
 # plan the verifier would reject.
-prepared(case) = prepare(trace(case.step, case.args...), map(device, case.args)...; target = case.target, replaces = case.replaces, verify = true)
+# The case's own keywords to `prepare`, if it has any, are given too.
+prepared(case) = prepare(trace(case.step, case.args...), map(device, case.args)...; target = case.target, replaces = case.replaces, verify = true,
+    get(case, :prepare, (;))...)
 
 # A plan in a word: a hash of what `explain` says of it and of what runs each
 # kernel, alike where two preparations reached one plan.
