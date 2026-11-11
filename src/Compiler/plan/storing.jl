@@ -206,10 +206,11 @@ end
 function recomputable(p::Plan, users, id, live, results, materialized)
     v = p.graph.values[id]
     v.definition isa Pointwise && p.stored[id] && live[id] && !(id in results) && !materialized[id] || return false
-    # What a recurrence computes is read from it: recomputed outside, its
-    # reader would read the state of each step, which the recurrence stores
-    # only where something outside reads it.
-    p.owner[id] > 0 && p.groups[p.owner[id]].kind isa RecurrenceKind && return false
+    # What a recurrence computes is read from it: its members read it where
+    # a step stored it (see `stepwise`), and recomputed outside, its reader
+    # would read the state of each step, which the recurrence stores only
+    # where something outside reads it.
+    p.owner[id] > 0 && stepwise(p.groups[p.owner[id]].kind) && return false
     groups = Set{Int}()
     pending, seen = [id], Set{Int}()
     while !isempty(pending)

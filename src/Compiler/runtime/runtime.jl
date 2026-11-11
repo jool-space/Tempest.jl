@@ -1011,11 +1011,12 @@ function build_floor(target, p::Plan, g::Group, buffers)
     (FloorRun(launches, [collect(values(spaces)); collect(values(own))]), FloorKernels(ks))
 end
 
-# What a group's floor kernels store: what the plan stores, and for a
-# recurrence every member, its states among them, which its kernel reads
-# from storage at the next step where a claim's would hold them.
+# What a group's floor kernels store: what the plan stores, and for a group
+# whose members read its values where a step stored them (see `stepwise`),
+# a recurrence's, every member, its states among them, which its kernel
+# reads from storage at the next step where a claim's would hold them.
 function floor_stored(p::Plan, g::Group)
-    g.kind isa RecurrenceKind || return p.stored
+    stepwise(g.kind) || return p.stored
     stored = copy(p.stored)
     foreach(m -> stored[m] = true, g.outputs)
     stored
