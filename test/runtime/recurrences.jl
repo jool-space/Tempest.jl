@@ -85,6 +85,18 @@
             ex = prepare(trace(f, map(host, batch_args)...), map(device, batch_args)...; target = T.CUDATarget(T.cuBLASProducts(); precision = :full))
             @test count(k -> k isa C.SteppedKernels, ex.kernels) == loops
             @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), eager; rtol = 1.0e-4)
+            # Run a step at a time, the recurrence is priced at its run timed
+            # whole, as it runs, each step finding in the cache what the one
+            # before brought, and not at its step's kernels' times, each taken
+            # alone with its data in memory (see `run_whole`); the run's name
+            # in the record names the step's kernels.
+            if f === batched
+                target = T.CUDATarget(T.cuBLASProducts(); precision = :full)
+                ex = prepare(trace(f, map(host, batch_args)...), map(device, batch_args)...; target, measure = :close)
+                x = only(x for x in ex.decisions if x !== nothing && occursin(" stepped ", x.choice.key))
+                @test occursin(r" stepped [0-9a-f]{64} [|] ", x.choice.key)
+                @test x.choice.estimate == C.load_record(C.record_path(target))[x.choice.key]
+            end
         end
     end
     # The weights' gradient sums each step's part: pinned to ride the

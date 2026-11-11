@@ -366,8 +366,9 @@ end
 """
     stepped_seconds(d, p, g) -> seconds or nothing
 
-The time of recurrence group `g` run a step at a time: each step's kernels
-at their measured times, else their estimates; nothing where it does not run so.
+The steps' price of recurrence group `g` run a step at a time: each step's
+kernels at their times alone, else their estimates; nothing where it does
+not run so. A run timed whole prices it once there is one (see `run_whole`).
 """
 function stepped_seconds(d::Decider, p::Plan, g::Group)
     sp = stepped_plan(d, p, g)

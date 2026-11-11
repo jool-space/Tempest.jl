@@ -283,9 +283,15 @@ end
 
 # A choice's name in the tuning record: the target's numerics, the claim's
 # record name and the group's canonical form. A recurrence on the floor runs
-# a step at a time where it can.
+# a step at a time where it can, and the run is named by its step's kernels
+# too, the choices their decisions made (see `stepped_plan`): its time is
+# theirs, and a step decided otherwise is another run.
 function choice_key(d::Decider, p::Plan, g::Group, implementation, claim)
-    floor() = g.kind isa RecurrenceKind && stepped_plan(d, p, g) !== nothing ? "stepped" : "floor"
+    function floor()
+        sp = g.kind isa RecurrenceKind ? stepped_plan(d, p, g) : nothing
+        sp === nothing && return "floor"
+        string("stepped ", content_key([x === nothing ? "" : x.choice.key for x in sp.decisions]))
+    end
     name = implementation === nothing ? floor() : Base.invokelatest(record_name, implementation, claim)
     replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
 end
@@ -303,11 +309,35 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_name(implementation), w.factor) for w in work]
     price(w) = (regime, @nospecialize(f)) -> price!(d, regime, product_class(d.target, w.factor), f)
     # A recurrence on the floor runs a step at a time where it can (see
-    # `build_group`), at its step's price.
+    # `build_group`), at its steps' price.
     stepped = implementation === nothing && g.kind isa RecurrenceKind ? stepped_seconds(d, p, g) : nothing
     seconds_of = stepped === nothing ? sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0) : stepped
-    Choice(implementation, claim, seconds_of, key,
+    o = Choice(implementation, claim, seconds_of, key,
         any(l -> l !== nothing && l.borrowed, lines), order, told.variants)
+    stepped === nothing ? o : run_whole(d, p, g, o)
+end
+
+"""
+A recurrence's floor `o`, run a step at a time, priced at its run timed
+whole where the record holds that time, as a decider measuring close calls
+takes it here: pricing the run planned its step and timed the step's
+kernels already, and the run is their launches. Its steps' price (see
+`stepped_seconds`) stands where no time does.
+
+A kernel's time in the record is taken alone, its data in memory (see
+`time_launch`), so that it is one time wherever the kernel runs. A step
+runs among the steps around it, each finding in the cache what the one
+before brought, the weights it reads again, and its kernels' times alone
+overstate the run: the neural ODE's gradient's recurrence, 100 steps of 13
+kernels, priced so at 11.43 ms where it runs in 7.30. The run timed whole
+is one time too, the group's as it runs, as a recurrence's single kernel's
+is, and its key names the step's kernels (see `choice_key`).
+"""
+function run_whole(d::Decider, p::Plan, g::Group, o::Choice)
+    d.measure in (:close, :all) && measure!(d, p, g, o)
+    t = get(d.record, o.key, Inf)
+    isfinite(t) || return o
+    Choice(o.implementation, o.claim, t, o.key, o.borrowed, o.order, o.variants)
 end
 
 """
