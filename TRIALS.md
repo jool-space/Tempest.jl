@@ -575,6 +575,8 @@ under the same key. Also left: the rates the decisions read include the
 applied scalar-function lines, 14 in the GPT step's evidence and 7 in the
 LSTM's, of which 9 and 4 are zero or under 1e-13 s a position, noise a
 recalibration refits; any such refit sends the decisions to the cover.
+Recorded 11 November: the LSTM settles, no claim of it failing to build, the
+small shape preparing in 53.2 s and a second process replaying it in 13.8.
 
 Also left: the decisions kept are never removed. The store of compiled
 kernels beside them is bounded (`JULIA_OBJCACHE_CAPACITY`, 512 MiB by
@@ -1358,7 +1360,29 @@ GB10 a plain loop over the compiled `forward!`, its token a number, takes
 replayed in a row, tokens equal, where main took 44.7 to 45.2 against 38.4
 to 38.5 and 39.2; what still stands between the loop and the graph's
 replays, 1.8%, is that walk and the token read on the host each step, 0.6%
-alone; and a prefill's extent (Sizes are constants, above). A
+alone; and a prefill's extent (Sizes are constants, above). A prefill is
+the same call at T tokens, and three things stand trial with it since 11
+November. A compiled call is built on the arrays it is given and holds no
+copy of them, a buffer made for an argument only when a call first copies
+one in (`prepare`'s `point`, `own!`, `src/Compiler/runtime/runtime.jl`): the
+4B step holds 8.5 MiB of the device beyond its weights and states where it
+held 8,336, and its chunks of 1, 4, 16 and 64 tokens together 1.75 GiB where
+they held 35. Tracing and lowering are about linear in a loop's steps
+(`copyto!` of a range without a view, `src/Compiler/program/updates.jl`;
+`Periods`, `program/roll.jl`; `Pieces`, `index/lower.jl`): `forward!` at 256
+tokens traces in 1.5 s and lowers in 6.7 on grizzle where it took 133.5 and
+135.1, at 1,024 in 5.8 and 27.1, the programs and index graphs the same. And
+the attention's output projection, its softmax's weights summed inside its
+product, builds at 4 tokens (`tile_spans`, `ext/cuTileExt/emit.jl`), where
+their tile was shaped by every axis the scores' index mentions and no claim
+on it built: the chunk's decisions settle, a second process replaying them
+in 47 s where each covered again in 111, and with nothing measured the chunk
+of 16 calls in 60.9 ms where it took 106.9, the delta rule's output
+projections a product claim. What still stands for a prefill: the delta
+rule's recurrence stores its state at every step for a second kernel to read
+back (46.8 ms of a 64-token call's 99, against 21.5 for Vallmo's), on trial
+next; products of few columns, slower than cuBLAS's from 4 to 64 tokens; and
+cold preparation with measurement, 398 s at 16 tokens. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
