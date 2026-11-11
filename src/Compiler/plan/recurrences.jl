@@ -117,12 +117,14 @@ that every value of its cycle lies along: a refusal the search needs, not
 what a ride is. A value summing across the lanes, as a projection of a
 network's output over its heads, makes of the steps one lane, which no claim
 takes and the floor runs as one item; its price refuses it, Qwen3.5-4B's
-layer output riding priced at 1.5e6 s against 0.017. But under `:close`
-`compare` measures a comparison whole once a choice on either side is
-refuted by the record, however far apart the sides are, and a timing has no
-bound, so the cover timed that floor for longer than a preparation lasts.
-The lanes can go when a comparison so far apart is not measured, or a timing
-stops where the other side's time is passed.
+layer output riding priced at 1.5e6 s against 0.017. That floor is no
+longer timed (see `measure_sides!`): without the lanes, the model's first
+four layers at a chunk of 16 prepare, measured, and take the same rides.
+But each ride offered is a trial whose new groups the cover searches ahead,
+timing their close calls, before the trial is priced against the plan it
+changes, and the rides the lanes refuse made those four layers prepare in
+161 to 168 s where they take 135 to 141. The lanes can go when a trial
+priced past that plan is not searched ahead.
 """
 fits_steps(::Summed, graph, cycle, between, r) = graph.values[r].definition.fold isa SumFold
 function fits_steps(::Union{Along, AtLast}, graph, cycle, between, r)

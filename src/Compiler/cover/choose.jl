@@ -492,7 +492,10 @@ end::Tuple{Vector{GroupIdentity}, Set{GroupIdentity}}
 # kernel decides nothing. The log-sum-exp of GPT-2's attention recomputed in
 # the two backward kernels that read it was estimated at 3.5 ms against 5.9
 # for the kernels of the plan that stores it, when those two had been
-# measured at 40 and 13 ms.
+# measured at 40 and 13 ms. A side measured is timed only until it has lost
+# (see `measure_sides!`), and a side that lost so is decided against by what
+# is known of it (see `stopped`); otherwise the measurements decide where
+# they differ beyond the noise, and the estimates where not.
 function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
     tally!(:compared)
     ids_a, ia = identities!(known, a)
@@ -503,19 +506,102 @@ function compare(d::Decider, b::Plan, a::Plan, known = IdDict{Plan, Any}())
     da, db = decided(only_a), decided(only_b)
     ea = sum(x -> x[3].choice.estimate, da; init = 0.0)
     eb = sum(x -> x[3].choice.estimate, db; init = 0.0)
-    if d.measure === :all || (d.measure === :close && (close_call(ea, eb) || any(x -> refuted(d, x[3].choice), [da; db])))
-        build_unmeasured!(d, [(p, g, x.choice) for (p, g, x) in [da; db]])
-        foreach(((p, g, x),) -> measure!(d, p, g, x.choice), [da; db])
-    elseif d.measure === :none && (close_call(ea, eb) || any(x -> refuted(d, x[3].choice), [da; db]))
-        foreach(x -> haskey(d.record, x[3].choice.key) || push!(d.wanted, x[3].choice.key), [da; db])
-    end
+    close = close_call(ea, eb)
+    measured = d.measure === :all || d.measure in (:close, :none) && (close || any(x -> refuted(d, x[3].choice), [da; db]))
+    measured && measure_sides!(d, da, db, close)
     ta = [get(d.record, x[3].choice.key, nothing) for x in da]
     tb = [get(d.record, x[3].choice.key, nothing) for x in db]
     if !any(isnothing, ta) && !any(isnothing, tb)
         ma, mb = sum(ta; init = 0.0), sum(tb; init = 0.0)
-        abs(ma - mb) > d.rates.noise * min(ma, mb) && return Comparison(ma, mb, :measured, (da, db))
+        past(max(ma, mb), min(ma, mb), d.rates.noise) && return Comparison(ma, mb, :measured, (da, db))
+    elseif measured
+        c = stopped(d, da, db, close)
+        c === nothing || return c
     end
     Comparison(ea, eb, :estimated, (da, db))
+end
+
+# Whether time `t` passes time `bound` beyond the noise, as one measurement
+# beats another.
+past(t, bound, noise) = t > (1 + noise) * bound
+
+# What is known of the time a side of a comparison takes, `(plan, group,
+# decision)` each: each group's time where the record holds one, and its
+# estimate where not. The least it can take: each group's time where the
+# record holds one, and where not, in a close call nothing, its estimate
+# ranking nothing there, and otherwise its estimate at the least its error
+# allows.
+known_time(d::Decider, side) = sum(x -> get(d.record, x[3].choice.key, x[3].choice.estimate), side; init = 0.0)
+least_time(d::Decider, side, close) = sum(x -> get(d.record, x[3].choice.key, close ? 0.0 : x[3].choice.estimate / ESTIMATE_ERROR), side; init = 0.0)
+
+"""
+Time the two sides of a comparison, `(plan, group, decision)` each, as far
+as the comparison needs them (under `:all`, whole): the side known to be
+faster first, whole, its time the bound of the other's; then the other's
+groups, the dearest first, until the least it can take (see `least_time`)
+passes that bound beyond the noise. It has lost then, and is timed no
+further. A decider measuring nothing notes, as wanted, what it would have
+timed.
+
+A launch begun cannot be stopped, and one is timed whole, as many times as
+`time_launch` takes it, so that the record holds only times taken alike: the
+bound falls between launches, as whether a group's next is begun. Before its
+first, a group's estimate is all that is known of it. In a close call
+(`close`) that ranks nothing, and a side stops only where the groups it
+has timed pass the bound, which whole it would pass too. Elsewhere the
+comparison is measured because the record refuted an estimate on a side,
+and a group whose own estimate would put its side past the bound even at
+the least its error allows is not begun, as the cover leaves a call that
+far apart to the estimates wherever none is refuted. Qwen3.5-4B's layer
+output riding its delta rule's steps is a floor kernel of one item, priced
+at 1.5e6 s against the 0.017 the plan that does not ride it was measured
+at: timed whole, it ran for longer than the preparation lasts. In a close
+call the estimates of the LSTM's steps' maps run up to 3.3 times their
+times, and a side stopped by its estimates there lost a comparison whose
+times it won, 16.2 μs against 17.2.
+"""
+function measure_sides!(d::Decider, da, db, close)
+    d.measure === :none || build_unmeasured!(d, [(p, g, x.choice) for (p, g, x) in [da; db]])
+    if d.measure === :all
+        foreach(x -> measure_side!(d, x), [da; db])
+        return
+    end
+    ahead, behind = known_time(d, da) <= known_time(d, db) ? (da, db) : (db, da)
+    foreach(x -> measure_side!(d, x), ahead)
+    bound = known_time(d, ahead)
+    for x in sort(filter(x -> !haskey(d.record, x[3].choice.key), behind); by = x -> x[3].choice.estimate, rev = true)
+        if past(least_time(d, behind, close), bound, d.rates.noise)
+            tally!(:stopped)
+            break
+        end
+        measure_side!(d, x)
+    end
+end
+
+# Time the choice of a group on one side of a comparison, `(plan, group,
+# decision)`, or note it wanted by a decider measuring nothing.
+function measure_side!(d::Decider, (p, g, x))
+    d.measure === :none || return measure!(d, p, g, x.choice)
+    haskey(d.record, x.choice.key) || push!(d.wanted, x.choice.key)
+    nothing
+end
+
+# A comparison one side of which was timed no further once it had lost (see
+# `measure_sides!`): the other's time is in the record, and its own least
+# (see `least_time`) passes that beyond the noise. It is decided against by
+# what is known of each side, measured where its groups timed alone pass the
+# other's time, else estimated; nothing where no side lost so.
+function stopped(d::Decider, da, db, close)
+    whole(side) = all(x -> haskey(d.record, x[3].choice.key), side)
+    timed(side) = sum(x -> get(d.record, x[3].choice.key, 0.0), side; init = 0.0)
+    for (side, other) in ((da, db), (db, da))
+        whole(other) && !whole(side) || continue
+        bound = timed(other)
+        past(least_time(d, side, close), bound, d.rates.noise) || continue
+        how = past(timed(side), bound, d.rates.noise) ? :measured : :estimated
+        return Comparison(known_time(d, da), known_time(d, db), how, (da, db))
+    end
+    nothing
 end
 
 # Whether the record holds a time for a choice beyond its estimate's error.

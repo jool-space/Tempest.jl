@@ -41,6 +41,7 @@ const COUNTED = (
     :terms,      # terms built (`built_term`)
     :trials,     # the cover's trials, each a plan of the whole graph unless refused before
     :compared,   # the cover's comparisons of a trial with the plan it changes
+    :stopped,    # comparisons a side of which was timed no further once it had lost (`measure_sides!`)
     :options,    # groups whose claims and estimates were found (`options`)
     :ordered,    # kernels looked at to order them (`order_groups`)
 )

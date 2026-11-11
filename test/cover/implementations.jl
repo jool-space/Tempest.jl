@@ -266,3 +266,43 @@ end
     d.record["best"] = 2.0e-5
     @test C.measured_ranks(d, os) == [1, 2, 3]
 end
+
+# A side of a comparison is timed only until it has lost: the side known to be
+# faster whole, the other no further once the least it can take passes that
+# time beyond the noise; it is then decided against by what is known of it.
+# Measuring nothing, a decider wants what one measuring close calls would time.
+@testset "a comparison's side is timed until it has lost" begin
+    graph = C.lower(trace(x -> sum(x; dims = 1), data(4, 3)))
+    d = C.Decider(T.CPUTarget(), graph; measure = :none)
+    side(groups...) = [(nothing, nothing, C.Decision(C.Choice(nothing, nothing, e, k, false, 0, Any[]), C.Choice[], :estimated, nothing, C.Failure[]))
+        for (k, e) in groups]
+    old = side("old" => 1.0e-5)
+    d.record["old"] = 2.0e-5
+    # Where the record refuted an estimate, a kernel priced past the other
+    # side's time beyond its error is not begun.
+    new = side("cheap" => 1.0e-6, "floor" => 1.0)
+    C.measure_sides!(d, old, new, false)
+    @test isempty(d.wanted)
+    c = C.stopped(d, old, new, false)
+    @test c.how === :estimated && c.old == 2.0e-5 && !C.cheaper(c)
+    # In a close call, where estimates rank nothing, it is.
+    C.measure_sides!(d, old, new, true)
+    @test d.wanted == Set(["cheap", "floor"])
+    @test C.stopped(d, old, new, true) === nothing
+    # One priced within its error of it is begun.
+    empty!(d.wanted)
+    new = side("cheap" => 1.0e-6, "floor" => 2.5e-5)
+    C.measure_sides!(d, old, new, false)
+    @test d.wanted == Set(["cheap", "floor"])
+    @test C.stopped(d, old, new, false) === nothing
+    # Timed past it, the dearest first, the side has lost, and the rest is
+    # not timed, in a close call too.
+    d.record["floor"] = 3.0e-5
+    for close in (false, true)
+        empty!(d.wanted)
+        C.measure_sides!(d, old, new, close)
+        @test isempty(d.wanted)
+        c = C.stopped(d, old, new, close)
+        @test c.how === :measured && !C.cheaper(c)
+    end
+end
