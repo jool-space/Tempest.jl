@@ -65,28 +65,37 @@ checked(case) = (c = get(case, :check, true); c isa NamedTuple ? c : c ? case : 
 # plan the verifier would reject.
 prepared(case) = prepare(trace(case.step, case.args...), map(device, case.args)...; target = case.target, replaces = case.replaces, verify = true)
 
-function measure(case; check)
+"""
+    measure(case; check, report) -> result
+
+Trace `case`'s step, prepare it and execute it once, the seconds to that first
+result; then, with `check`, its agreement with the step run in Float64; then
+the step's milliseconds. With `report`, the profile and the explanation the
+environment names are written last.
+"""
+function measure(case; check, report)
     stand_in = checked(case)
     check &= stand_in !== nothing
     started = time()
-    program = trace(case.step, case.args...)
-    ex = prepare(program, map(device, case.args)...; target = case.target, replaces = case.replaces, verify = true)
+    ex = prepared(case)
     execute!(ex)
     CUDACore.synchronize()
-    prep_s = time() - started
-    println("prepared in ", round(prep_s; digits = 1), " s, ", length(ex.kernels), " kernels")
+    first_s = time() - started
+    println("prepared in ", round(first_s; digits = 1), " s, ", length(ex.kernels), " kernels")
     agrees, worst, first_output = check ? agreement(stand_in === case ? ex : prepared(stand_in), stand_in) : (NaN, "", NaN)
     check && println("agreement with Float64 eager ", agrees, " at ", worst, "; the first output's ", first_output)
     step_ms = step_milliseconds(ex)
     println("step ", step_ms, " ms")
-    path = get(ENV, "TEMPEST_CORPUS_PROFILE", "")
-    isempty(path) || profile(path, ex)
-    path = get(ENV, "TEMPEST_CORPUS_EXPLAIN", "")
-    isempty(path) || open(io -> Tempest.Compiler.explain(io, ex), path, "w")
+    if report
+        path = get(ENV, "TEMPEST_CORPUS_PROFILE", "")
+        isempty(path) || profile(path, ex)
+        path = get(ENV, "TEMPEST_CORPUS_EXPLAIN", "")
+        isempty(path) || open(io -> Tempest.Compiler.explain(io, ex), path, "w")
+    end
     # A device Tempest ships rates for is not calibrated, cold or warm.
     shipped = isempty(Tempest.Compiler.shipped_rates(case.target)) ? "" : "rates shipped for the device"
     note = join(filter(!isempty, [get(case, :note, ""), "plans verified", shipped, check ? "worst at $worst, the first output to $(round(first_output; sigdigits = 2))" : ""]), "; ")
-    (; prep_s, kernels = length(ex.kernels), step_ms, agreement = agrees, precision = case.precision, note)
+    (; first_s, kernels = length(ex.kernels), step_ms, agreement = agrees, precision = case.precision, note)
 end
 
 """
