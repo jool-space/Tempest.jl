@@ -339,6 +339,48 @@ end
     end
 end
 
+# Two claims on every group, the first with a variant the search reaches once
+# the record times the first fastest. Outside any package, its decisions are
+# not kept, and the cover is asked for them directly.
+struct Staged <: C.Implementation end
+C.claims(::Staged, ::T.CPUTarget, g) = (:first, :second)
+C.variants(::Staged, ::T.CPUTarget, g, claim) = claim === :first ? (:wide,) : ()
+C.estimate(::Staged, claim, target, g) = [C.Work(claim === :second ? 1.2e3 : 1.0e3)]
+C.build_claim(::Staged, claim, target, g, buffers, _) = g.reference(target, buffers)
+
+@testset "a cover settling finds again only what the record could change" begin
+    # What the implementations offer for each group is not the record's: a
+    # second cover on what the first wrote grows each group's options from
+    # the record again, as a decider made afresh does, and reaches its
+    # decisions, but finds no group's claims, estimates or variants again.
+    x, w = data(8, 4), data(8, 8)
+    graph = C.lower(trace(mlp, x, w))
+    target = T.CPUTarget(Staged())
+    kept() do
+        d = C.Decider(target, graph)
+        C.reach!(d)
+        for os in values(d.options), o in os
+            C.save_record(C.record_path(target), o.key, o.claim === :first ? 1.0e-6 : 2.0e-6)
+        end
+        function reached(settle)
+            (r, n), counts, _ = C.tallied() do
+                d = C.Decider(target, graph)
+                # A time measured as the cover decided.
+                d.record["a claim measured"] = 1.0e-6
+                r, _, covered = counted(() -> C.covered!(d, nothing; settle).reached)
+                (r, covered)
+            end
+            r, n, counts[:options]
+        end
+        afresh, covers, found = reached(false)
+        settled, covers_settling, found_settling = reached(true)
+        @test (covers, covers_settling) == (1, 2)
+        @test C.differs(afresh, settled) === nothing
+        @test all(x -> any(o -> o.claim === :wide, x.options), afresh.decisions)
+        @test found_settling == found > 0
+    end
+end
+
 @testset "a decisions file cut short, or another's, is not read" begin
     x, w = data(8, 4), data(8, 8)
     kept() do

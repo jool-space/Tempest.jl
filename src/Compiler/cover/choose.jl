@@ -26,6 +26,24 @@ struct Choice
     variants::Vector{Any} # the claims its implementation offers once it measures best (see `Tempest.Compiler.Implement.variants`)
 end
 
+"""
+What the implementations offer for a group: each claim on it, in the
+implementations' order, with its place among its implementation's claims and
+the work it is estimated at; the claims priced as choices, once the rates
+they apply are fitted (see `price_all!`); and each variant of an option
+priced as the search reaches it, with its key, by the option it varies and
+its place among that option's variants. Claims, estimates and prices are of
+the group, the target and the rates, not of the record: a cover that runs
+again on a record written since, settling, finds them as they were found,
+and grows each group's options from the record again (see `search!`).
+"""
+struct Offered
+    estimated::Vector{Tuple{Implementation, Any, Int, Vector{Work}}}
+    claims::Vector{Choice}
+    keys::Dict{Tuple{String, Int}, String}
+    variants::Dict{Tuple{String, Int}, Choice}
+end
+
 "A claim that failed to build: what `explain` calls its implementation, the group it claimed (by `canonical`), and why, in a line."
 struct Failure
     implementation::String
@@ -101,8 +119,11 @@ mutable struct Decider
     # options, how it was made, and the time measured; and each group's decision.
     decided::Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}
     instances::Dict{Any, Decision}
-    # Each group's options (by `group_identity`), found once.
+    # Each group's options (by `group_identity`) as this cover searches
+    # them, grown from the record; and what the implementations offer for
+    # each, found once in the preparation (see `Offered`).
     options::Dict{Any, Vector{Choice}}
+    offered::Dict{Any, Offered}
     # The claims that failed to build, by key.
     failed::Dict{String, Failure}
     # Each recurrence's step planned (by `group_identity`; see `stepped_plan`).
@@ -143,11 +164,13 @@ decider(target, measurable, graph, measure, rates, calibration, calibration_path
         wanted = Set{String}(), resources = Resources(target)) =
     Decider(target, measurable, graph, measure, rates, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), record, record_path,
         Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), resources, Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
-        Dict{Any, Vector{Choice}}(), Dict{String, Failure}(), Dict{Any, Any}(), steps, wanted)
+        Dict{Any, Vector{Choice}}(), Dict{Any, Offered}(), Dict{String, Failure}(), Dict{Any, Any}(), steps, wanted)
 
-# Forget every decision and option, so that the cover plans again from what
-# the decider knows now: the claims that failed to build, and the times it
-# measured, which it does not measure again.
+# Forget every decision and each group's options as searched, so that the
+# cover plans again from what the decider knows now: the claims that failed
+# to build, and the times it measured, which it does not measure again. What
+# the implementations offer for each group (see `Offered`) is not the
+# record's, and is kept.
 function forget_decisions!(d::Decider)
     empty!(d.decided)
     empty!(d.instances)
@@ -244,11 +267,11 @@ function canonical(p::Plan, g::Group)
 end
 
 # A choice's name in the tuning record: the target's numerics, the claim's
-# record name and the group's canonical form.
+# record name and the group's canonical form. A recurrence on the floor runs
+# a step at a time where it can.
 function choice_key(d::Decider, p::Plan, g::Group, implementation, claim)
-    # A recurrence on the floor runs a step at a time where it can.
-    floor = g.kind isa RecurrenceKind && stepped_plan(d, p, g) !== nothing ? "stepped" : "floor"
-    name = implementation === nothing ? floor : Base.invokelatest(record_name, implementation, claim)
+    floor() = g.kind isa RecurrenceKind && stepped_plan(d, p, g) !== nothing ? "stepped" : "floor"
+    name = implementation === nothing ? floor() : Base.invokelatest(record_name, implementation, claim)
     replace(string(numerics(d.target), " ", name, " | ", canonical(p, g)), r"[\t\n]" => " ")
 end
 
@@ -257,8 +280,8 @@ end
 floor_splits(d::Decider) = d.measure === :dry ? (items, positions, adjacent) -> nothing :
     (items, positions, adjacent) -> floor_split(d.target, items, positions, adjacent)
 
-function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, order = 0)
-    work = implementation === nothing ? floor_estimate(p, g, floor_splits(d)) : Base.invokelatest(estimate, implementation, claim, d.target, view)
+function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, order = 0,
+        work = implementation === nothing ? floor_estimate(p, g, floor_splits(d)) : Base.invokelatest(estimate, implementation, claim, d.target, view))
     key = choice_key(d, p, g, implementation, claim)
     memory = memory!(d, implementation === nothing ? :floor : package_name(implementation))
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_name(implementation), w.factor) for w in work]
@@ -282,6 +305,20 @@ through a gather at each shifted position, took 4.5 μs in cuTile and 2.2 on
 the floor.
 """
 function options(d::Decider, p::Plan, g::Group)
+    # A recurrence's options rest on its step planned, which names and
+    # prices its floor, and which the decisions reached keep (see `reached`).
+    g.kind isa RecurrenceKind && stepped_plan(d, p, g)
+    # A recurrence with sums riding its steps runs them only a step at a time.
+    riders = g.kind isa RecurrenceKind && !isempty(g.reductions)
+    os = riders ? Choice[] : filter(o -> !haskey(d.failed, o.key), priced!(d, p, g))
+    (isempty(os) || d.steps > 1 && g.kind isa PointwiseKind) && push!(os, choice(d, p, g, group_view(p, g), nothing, nothing))
+    sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
+end
+
+"What the implementations offer for a group (see `Offered`), found once by its identity."
+offered!(d::Decider, p::Plan, g::Group) = get!(() -> offered(d, p, g), d.offered, group_identity(p, g))
+
+function offered(d::Decider, p::Plan, g::Group)
     tally!(:options)
     view = group_view(p, g)
     # The protocol is called in the latest world here and wherever the
@@ -289,12 +326,19 @@ function options(d::Decider, p::Plan, g::Group)
     # as they load, and were a call to bind the one method a package saw
     # while it precompiled, the cover's code that package cached would be
     # void in every session where another package loaded too.
-    # A recurrence with sums riding its steps runs them only a step at a time.
-    riders = g.kind isa RecurrenceKind && !isempty(g.reductions)
-    os = Choice[choice(d, p, g, view, i, c, k) for i in implementations(d.target) if !riders for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
-    filter!(o -> !haskey(d.failed, o.key), os)
-    (isempty(os) || d.steps > 1 && g.kind isa PointwiseKind) && push!(os, choice(d, p, g, view, nothing, nothing))
-    sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
+    estimated = Tuple{Implementation, Any, Int, Vector{Work}}[(i, c, k, Base.invokelatest(estimate, i, c, d.target, view))
+        for i in implementations(d.target) for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
+    Offered(estimated, Choice[], Dict{Tuple{String, Int}, String}(), Dict{Tuple{String, Int}, Choice}())
+end
+
+# A group's claims priced as choices, once.
+function priced!(d::Decider, p::Plan, g::Group)
+    found = offered!(d, p, g)
+    if length(found.claims) < length(found.estimated)
+        view = group_view(p, g)
+        append!(found.claims, [choice(d, p, g, view, i, c, k, w) for (i, c, k, w) in found.estimated])
+    end
+    found.claims
 end
 
 close_call(a, b) = max(a, b) <= ESTIMATE_ERROR * min(a, b)
@@ -406,14 +450,15 @@ function expand!(d::Decider, p::Plan, g::Group, os::Vector{Choice})
     best = minimum(last, timed)
     isfinite(best) || return false
     from = [o for (o, t) in timed if d.measure === :all || t <= best / (1 - d.rates.noise)]
-    view = group_view(p, g)
+    found = offered!(d, p, g)
     keys = Set(o.key for o in os)
     added = false
-    for o in from, c in o.variants
-        key = choice_key(d, p, g, o.implementation, c)
+    for o in from, (j, c) in enumerate(o.variants)
+        at = (o.key, j)
+        key = get!(() -> choice_key(d, p, g, o.implementation, c), found.keys, at)
         (key in keys || haskey(d.failed, key)) && continue
         push!(keys, key)
-        push!(os, choice(d, p, g, view, o.implementation, c, o.order + 1))
+        push!(os, get!(() -> choice(d, p, g, group_view(p, g), o.implementation, c, o.order + 1), found.variants, at))
         added = true
     end
     added && sort!(os; by = o -> o.estimate)
@@ -424,19 +469,17 @@ end
 # class they apply it in, priced together where the rates file lacks it (see
 # `fit_applied_all!`): the references are built side by side rather than two
 # at a time on first need. A function the table does not name is priced as
-# addition, as `price!` prices it.
+# addition, as `price!` prices it. The claims and their work are those each
+# group's options are priced from (see `Offered`), found once.
 function price_all!(d::Decider, p::Plan)
     measures(d) || return nothing
     needs = Set{Tuple{Symbol, Symbol, Any}}()
     named(@nospecialize(f)) = applied_function(f)
-    for g in p.groups
-        view = group_view(p, g)
-        for i in implementations(d.target), c in Base.invokelatest(claims, i, d.target, view), w in Base.invokelatest(estimate, i, c, d.target, view)
-            class = product_class(d.target, w.factor)
-            foreach(((f, _),) -> push!(needs, (:streamed, :any, named(f))), w.applied)
-            foreach(((f, _),) -> push!(needs, (:swept, class, named(f))), w.swept)
-            foreach(((f, _),) -> push!(needs, (:inner, class, named(f))), w.inner)
-        end
+    for g in p.groups, (_, _, _, work) in offered!(d, p, g).estimated, w in work
+        class = product_class(d.target, w.factor)
+        foreach(((f, _),) -> push!(needs, (:streamed, :any, named(f))), w.applied)
+        foreach(((f, _),) -> push!(needs, (:swept, class, named(f))), w.swept)
+        foreach(((f, _),) -> push!(needs, (:inner, class, named(f))), w.inner)
     end
     key((regime, class, f)) = join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")
     unfitted = [n for n in needs if !haskey(d.applied, n) && !haskey(d.calibration, key(n))]
