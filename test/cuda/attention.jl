@@ -1,8 +1,9 @@
 # Attention on cuTile: generated from its reference as one kernel, its
 # gradient as FlashAttention's backward, also with other features for the
 # values than the queries and keys, and decode over a cache read up to
-# lengths the device holds; and a layer's gradient whose sums recompute the
-# product they read.
+# lengths the device holds; a layer's gradient whose sums recompute the
+# product they read; and a projection of attention's output that recomputes
+# its softmax.
 
 # Attention generated from its reference: one kernel, a fold over keys whose
 # scores and logsumexp are recomputed in it, online or in two passes.
@@ -347,4 +348,36 @@ end
     ex = prepare(p, map(CuArray, (q, k1, v1, n))...; target, recompute = streaming(p, target))
     @test !(only(ex.kernels) isa C.FloorKernels)
     @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, q, k1, v1, n)]; rtol = 1.0e-4)
+end
+
+# Attention's online softmax recomputed inside a projection of its output, as
+# a layer's output projection may read it, its scores stored, as attention
+# over a cache the call writes keeps them. A head's scores are the same
+# across a tile of the head's features, which the projection sums over: its
+# product's sum of the softmax's weights reads them as a matrix of positions
+# and queries. Before, the weights' tile was shaped by the axes the scores'
+# index mentions, the features among them, and no claim on the projection
+# built (tileiras refused to broadcast 32 features to one): Qwen3.5-4B's
+# output projection, 2560 by 4 queries summing 4096 features, at T = 4.
+@testset "attention's online softmax recomputed inside a projection of its output" begin
+    function projected(w, k, v, q, len)
+        s = Einops.@einsum(k, q, "d n h, d (g h) t -> n g h t", h = size(k, 3)) .* 0.125f0
+        s = ifelse.(axes(k, 2) .<= reshape(len, 1, 1, 1, :), s, -Inf32)
+        e = exp.(s .- maximum(s; dims = 1))
+        o = Einops.@einsum(v, e ./ sum(e; dims = 1), "d n h, n g h t -> d (g h) t")
+        (transpose(w) * reshape(o, :, size(o, 3)), s)
+    end
+    w, k, v = single(data(256, 32; scale = 0.1)), single(data(64, 64, 2; scale = 0.2)), single(data(64, 64, 2; scale = 0.3))
+    q, len = single(data(64, 4, 4; scale = 0.1)), Int32[61, 62, 63, 64]
+    p = trace(projected, w, k, v, q, len)
+    target = T.CUDATarget(T.cuTileGenerator())
+    graph = C.rewrite(C.lower(p); rounded = C.rounded_backward(target))
+    online = only(v for (v, x) in enumerate(graph.values) if x.definition isa C.Reduction && x.definition.fold isa C.IR.Relative)
+    ex = prepare(p, map(CuArray, (w, k, v, q, len))...; target, recompute = [online])
+    projection = only(k for (k, g) in enumerate(ex.plan.groups) if online in C.recomputed_in(g))
+    @test ex.decisions[projection].choice.implementation isa T.cuTileGenerator && ex.decisions[projection].how !== :instead
+    @test all(d -> d === nothing || isempty(d.failed), ex.decisions)
+    (y, s), (y′, s′) = map(Array, C.leaves(outputs(execute!(ex)))), interpret(p, w, k, v, q, len)
+    @test agree([y], [y′]; rtol = 1.0e-4)
+    @test isinf.(s) == isinf.(s′) && agree([s[isfinite.(s)]], [s′[isfinite.(s′)]]; rtol = 1.0e-4)
 end

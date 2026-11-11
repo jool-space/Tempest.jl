@@ -838,23 +838,41 @@ function bilinear(c::Context, r)
     bilinear_over(c, fold_of(c, r), c.g.terms[r], p)
 end
 
-# The tile axes a term's loads, positions and recomputed folds span, or
-# nothing if it reads reductions.
-Base.@nospecializeinfer function term_spans(c::Context, @nospecialize(t::Term))
+# The tile axes a term's tile extends along, as the kernel computes it (see
+# `load_tile`): a load read through a view, the groups the view extends
+# along, which leave out a tile axis its address holds across a tile, as a
+# head's index is held across a tile of the head's features; a position, a
+# recomputed fold or a load gathered lane by lane, every axis it mentions. A
+# fold's statistic mentions none. A term's tile, every tile shaped from it
+# (see `spanned_shape`) and the product rule (see `term_spans`) read these
+# alike: an accumulator shaped by the axes a term mentions, Qwen3.5-4B's
+# softmax weights summed inside its output projection's product, held 32
+# copies of each weight along the features where the product rule took them
+# as a matrix of positions and queries, and no claim on the projection built.
+Base.@nospecializeinfer function tile_spans(c::Context, @nospecialize(t::Term))
     spans = fill(false, length(c.s.tiling))
     for s in subterms((t,))
-        s isa Stat && return nothing
-        if s isa Union{Ix, Recomputed} || s isa Load && elementwise(c, s)
+        v = s isa Load && !gathers(s) ? load_view(c, s.value, s.index) : nothing
+        if v !== nothing
+            spans .|= collect(v.spans)
+        elseif s isa Union{Ix, Recomputed, Load}
             for (i, ax) in enumerate(c.s.tiling)
                 any(k -> mentions(s, k), ax.axes) && (spans[i] = true)
             end
-        elseif s isa Load
-            v = load_view(c, s.value, s.index)
-            v === nothing && return nothing
-            spans .|= collect(v.spans)
         end
     end
     spans
+end
+
+# The tile axes a term spans (see `tile_spans`), or nothing if it reads a
+# reduction, or a value at an address no view reads and no gather is asked
+# for, as a product's factor does not.
+Base.@nospecializeinfer function term_spans(c::Context, @nospecialize(t::Term))
+    for s in subterms((t,))
+        s isa Stat && return nothing
+        s isa Load && !elementwise(c, s) && load_view(c, s.value, s.index) === nothing && return nothing
+    end
+    tile_spans(c, t)
 end
 
 # A half-precision factor converted to Float32 enters the matrix product as
@@ -950,9 +968,12 @@ function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE, chosen = la
     fold_context(c, t; lanes = s.tiling[sweep_axis(s)].tile)
 end
 
-# The shape of a term's tile: the tile along each axis it spans, one elsewhere.
-spanned_shape(c::Context, t::Term) =
-    ntuple(q -> any(k -> mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, length(c.s.tiling))
+# The shape of a term's tile: the tile along each axis it spans (see
+# `tile_spans`), one elsewhere.
+function spanned_shape(c::Context, t::Term)
+    spans = tile_spans(c, t)
+    ntuple(q -> spans[q] ? tile(c)[q] : 1, length(c.s.tiling))
+end
 
 # Matrices. A product kernel's term that spans two of its tile axes of more
 # than one lane is also computed as a matrix over them (its plane, the two in
@@ -969,8 +990,10 @@ struct Planar end
 matrix_key(c::Context, t::Term) = Apply(Planar(), (t,), term_eltype(t, c.g))
 
 # The tile axes of more than one lane that `t` spans.
-wide_axes(c::Context, t::Term) =
-    [q for q in eachindex(c.s.tiling) if tile(c)[q] > 1 && any(k -> mentions(t, k), c.s.tiling[q].axes)]
+function wide_axes(c::Context, t::Term)
+    spans = tile_spans(c, t)
+    [q for q in eachindex(c.s.tiling) if tile(c)[q] > 1 && spans[q]]
+end
 
 # The plane of a term a product kernel computes as a matrix; nothing for any
 # other.
@@ -982,7 +1005,7 @@ end
 
 # The shape of `t` over plane `P`: the tile along each of the two it spans,
 # one along the other.
-plane_shape(c::Context, t::Term, P) = map(q -> any(k -> mentions(t, k), c.s.tiling[q].axes) ? tile(c)[q] : 1, P)
+plane_shape(c::Context, t::Term, P) = (spans = tile_spans(c, t); map(q -> spans[q] ? tile(c)[q] : 1, P))
 
 # Term `a`, which spans no wide axis outside plane `P`, over it: its matrix,
 # a number as it is, or its tile reshaped, a tile of one axis or none.
