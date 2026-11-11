@@ -556,6 +556,22 @@ function concurrently(f, xs, target)
 end
 
 """
+    side_by_side(f, xs, target) -> results
+
+`f` of each of `xs` on the threads there are, each task in the calling task's
+state on `target`, the results in the order of `xs`. For work that is of its
+arguments alone and whose results the caller keeps: what implementations
+offer for a group, and what they estimate of a claim. What device objects
+such work makes are kept in tables of the session, as a lowering trial's
+module and an attention library's graph are, and a captured graph that
+launches one is destroyed at exit before any finalizer runs.
+"""
+function side_by_side(f, xs, target)
+    enter = task_state(target)
+    map(fetch_result, [Threads.@spawn((enter(); f(x))) for x in xs])
+end
+
+"""
     elsewhere(f) -> f()
 
 Run `f` on another thread, if there is one, and wait for it while the calling

@@ -318,8 +318,8 @@ function cover(d::Decider)
         i === nothing || claimant(d, p, q, i) !== nothing || return false
         priceable(d, p, q)
     end
-    function priced_plan(p, current, q, i)
-        can_price(p, q, i) || return nothing
+    function priced_plan(p, current, q, i, can = can_price(p, q, i))
+        can || return nothing
         (compare(d, p, current, known), i === nothing ? nothing : claimant(d, p, q, i))
     end
     a = around(base, Proposal[])
@@ -333,6 +333,13 @@ function cover(d::Decider)
     clock = lap!(:cover_keys, clock)
     planned = Dict(k => Threads.@spawn(plan_of(trial(based, Proposal[], Proposal[q]))) for (k, q) in firsts)
     trials = Dict(k => fetch_result(t) for (k, t) in planned)
+    # Whether each trial can be priced, by its key's first proposal as it is
+    # priced below; and what the implementations offer for the groups of
+    # those that can, found side by side as the starting plan's are (see
+    # `offer!`), as a trial is priced by the groups it differs in.
+    pricing = Dict{String, Bool}()
+    foreach(((q, i, k),) -> haskey(pricing, k) || (pricing[k] = can_price(trials[k], q, i)), keyed)
+    offer!(d, [(trials[k], g) for (k, can) in pricing if can for g in trials[k].groups])
     clock = lap!(:cover_trials, clock)
     # The groups by which the trials priced below differ from the starting
     # plan, searched together as the starting plan's are: each stage's kernels
@@ -345,7 +352,7 @@ function cover(d::Decider)
             k in searched && continue
             push!(searched, k)
             p = trials[k]
-            can_price(p, q, i) || continue
+            pricing[k] || continue
             for g in p.groups
                 id = group_identity(p, g)
                 (id in shared || id in seen || haskey(d.decided, canonical(p, g))) && continue
@@ -358,7 +365,7 @@ function cover(d::Decider)
     clock = lap!(:cover_search_ahead, clock)
     ranked = Tuple{Float64, Any, Union{Nothing, Implementation}, String}[]
     for (q, i, k) in keyed
-        x = get!(() -> priced_plan(trials[k], base, q, i), priced, k)
+        x = get!(() -> priced_plan(trials[k], base, q, i, pricing[k]), priced, k)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
     end
     sort!(ranked; by = r -> (-r[1], fixes(r[2])))
@@ -536,7 +543,7 @@ function recomputed_claimed(d::Decider, p::Plan, v)
     recomputing = [i for i in implementations(d.target) if Base.invokelatest(recomputes_folds, i, d.target)]
     all(p.groups) do g
         v in recomputed_in(g) || return true
-        any(((i, _, _, _),) -> i in recomputing, offered!(d, p, g).estimated)
+        any(((i, _, _, _),) -> i in recomputing, offered!(d, p, g).said)
     end
 end
 

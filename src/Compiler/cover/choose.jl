@@ -27,18 +27,33 @@ struct Choice
 end
 
 """
+What an implementation says of its claim on a group: the work the claim is
+estimated at, and the claims it offers once this one measures best (see
+`Tempest.Compiler.Implement.variants`). Of the claim, the target and the group
+alone, and so found side by side (see `side_by_side`).
+"""
+struct Said
+    work::Vector{Work}
+    variants::Vector{Any}
+end
+
+said(target, implementation, claim, view) = Said(Base.invokelatest(estimate, implementation, claim, target, view),
+    Any[Base.invokelatest(variants, implementation, target, view, claim)...])
+
+"""
 What the implementations offer for a group: each claim on it, in the
 implementations' order, with its place among its implementation's claims and
-the work it is estimated at; the claims priced as choices, once the rates
-they apply are fitted (see `price_all!`); and each variant of an option
-priced as the search reaches it, with its key, by the option it varies and
-its place among that option's variants. Claims, estimates and prices are of
-the group, the target and the rates, not of the record: a cover that runs
-again on a record written since, settling, finds them as they were found,
-and grows each group's options from the record again (see `search!`).
+what its implementation says of it (`Said`); the claims priced as choices,
+once the rates they apply are fitted (see `price_all!`); and each variant of
+an option priced as the search reaches it, with its key, by the option it
+varies and its place among that option's variants. Claims, estimates and
+prices are of the group, the target and the rates, not of the record: a
+cover that runs again on a record written since, settling, finds them as
+they were found, and grows each group's options from the record again (see
+`search!`).
 """
 struct Offered
-    estimated::Vector{Tuple{Implementation, Any, Int, Vector{Work}}}
+    said::Vector{Tuple{Implementation, Any, Int, Said}}
     claims::Vector{Choice}
     keys::Dict{Tuple{String, Int}, String}
     variants::Dict{Tuple{String, Int}, Choice}
@@ -281,7 +296,8 @@ floor_splits(d::Decider) = d.measure === :dry ? (items, positions, adjacent) -> 
     (items, positions, adjacent) -> floor_split(d.target, items, positions, adjacent)
 
 function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, order = 0,
-        work = implementation === nothing ? floor_estimate(p, g, floor_splits(d)) : Base.invokelatest(estimate, implementation, claim, d.target, view))
+        told = implementation === nothing ? Said(floor_estimate(p, g, floor_splits(d)), Any[]) : said(d.target, implementation, claim, view))
+    work = told.work
     key = choice_key(d, p, g, implementation, claim)
     memory = memory!(d, implementation === nothing ? :floor : package_name(implementation))
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_name(implementation), w.factor) for w in work]
@@ -291,8 +307,7 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     stepped = implementation === nothing && g.kind isa RecurrenceKind ? stepped_seconds(d, p, g) : nothing
     seconds_of = stepped === nothing ? sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0) : stepped
     Choice(implementation, claim, seconds_of, key,
-        any(l -> l !== nothing && l.borrowed, lines), order,
-        implementation === nothing ? Any[] : Any[Base.invokelatest(variants, implementation, d.target, view, claim)...])
+        any(l -> l !== nothing && l.borrowed, lines), order, told.variants)
 end
 
 """
@@ -318,6 +333,25 @@ end
 "What the implementations offer for a group (see `Offered`), found once by its identity."
 offered!(d::Decider, p::Plan, g::Group) = get!(() -> offered(d, p, g), d.offered, group_identity(p, g))
 
+"""
+What the implementations offer for each of `groups`, `(plan, group)` each,
+found for those it was not found for yet: side by side on the threads there
+are, as a group's claims and estimates are of the group, the target and the
+implementations alone (see `side_by_side`), and kept here, by the caller.
+"""
+function offer!(d::Decider, groups)
+    fresh = Dict{GroupIdentity, Tuple{Plan, Group}}()
+    for (p, g) in groups
+        id = group_identity(p, g)
+        haskey(d.offered, id) || haskey(fresh, id) || (fresh[id] = (p, g))
+    end
+    ids = collect(keys(fresh))
+    for (id, found) in zip(ids, side_by_side(id -> offered(d, fresh[id]...), ids, d.target))
+        d.offered[id] = found
+    end
+    nothing
+end
+
 function offered(d::Decider, p::Plan, g::Group)
     tally!(:options)
     view = group_view(p, g)
@@ -326,17 +360,17 @@ function offered(d::Decider, p::Plan, g::Group)
     # as they load, and were a call to bind the one method a package saw
     # while it precompiled, the cover's code that package cached would be
     # void in every session where another package loaded too.
-    estimated = Tuple{Implementation, Any, Int, Vector{Work}}[(i, c, k, Base.invokelatest(estimate, i, c, d.target, view))
+    told = Tuple{Implementation, Any, Int, Said}[(i, c, k, said(d.target, i, c, view))
         for i in implementations(d.target) for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
-    Offered(estimated, Choice[], Dict{Tuple{String, Int}, String}(), Dict{Tuple{String, Int}, Choice}())
+    Offered(told, Choice[], Dict{Tuple{String, Int}, String}(), Dict{Tuple{String, Int}, Choice}())
 end
 
 # A group's claims priced as choices, once.
 function priced!(d::Decider, p::Plan, g::Group)
     found = offered!(d, p, g)
-    if length(found.claims) < length(found.estimated)
+    if length(found.claims) < length(found.said)
         view = group_view(p, g)
-        append!(found.claims, [choice(d, p, g, view, i, c, k, w) for (i, c, k, w) in found.estimated])
+        append!(found.claims, [choice(d, p, g, view, i, c, k, told) for (i, c, k, told) in found.said])
     end
     found.claims
 end
@@ -407,9 +441,12 @@ end
 Search how `p`'s groups run, all of them at once: each stage's kernels compile
 side by side and are timed one at a time, for every group, rather than group
 by group (see `search!` on groups); each decision then finds its options
-searched. Groups decided already search nothing here.
+searched. Groups decided already search nothing here. What the
+implementations offer for the groups is found first, side by side (see
+`offer!`), measuring or not.
 """
 function search!(d::Decider, p::Plan)
+    offer!(d, [(p, g) for g in p.groups])
     d.measure in (:close, :all) || return nothing
     price_all!(d, p)
     search!(d, [(p, g, options!(d, p, g)) for g in p.groups if !haskey(d.decided, canonical(p, g))])
@@ -436,29 +473,66 @@ function search!(d::Decider, groups)
         elseif d.measure === :none
             foreach(((_, _, o),) -> push!(d.wanted, o.key), pending)
         end
-        any(map(((p, g, os),) -> expand!(d, p, g, os), groups)) || break
+        grown = [growth(d, p, g, os) for (p, g, os) in groups]
+        price_variants!(d, groups, grown)
+        any(map(((p, g, os), new) -> expand!(d, p, g, os, new), groups, grown)) || break
     end
 end
 
-# Grow a group's options by the variants of its best measured option, and of
-# each within the noise of it (of every measured option under `:all`), that
-# were not tried and did not fail to build; whether any were added. A variant's order is past its
-# parent's: it is never an implementation's first claim.
-function expand!(d::Decider, p::Plan, g::Group, os::Vector{Choice})
+# The variants a group's options grow by: those of its best measured option,
+# and of each within the noise of it (of every measured option under `:all`),
+# that were not tried and did not fail to build, each `(option, place,
+# claim)` by the option it varies and its place among that option's variants.
+function growth(d::Decider, p::Plan, g::Group, os::Vector{Choice})
+    grown = Tuple{Choice, Int, Any}[]
     timed = [(o, d.record[o.key]) for o in os if o.implementation !== nothing && haskey(d.record, o.key)]
-    isempty(timed) && return false
+    isempty(timed) && return grown
     best = minimum(last, timed)
-    isfinite(best) || return false
+    isfinite(best) || return grown
     from = [o for (o, t) in timed if d.measure === :all || t <= best / (1 - d.rates.noise)]
     found = offered!(d, p, g)
     keys = Set(o.key for o in os)
-    added = false
     for o in from, (j, c) in enumerate(o.variants)
-        at = (o.key, j)
-        key = get!(() -> choice_key(d, p, g, o.implementation, c), found.keys, at)
+        key = get!(() -> choice_key(d, p, g, o.implementation, c), found.keys, (o.key, j))
         (key in keys || haskey(d.failed, key)) && continue
         push!(keys, key)
-        push!(os, get!(() -> choice(d, p, g, group_view(p, g), o.implementation, c, o.order + 1), found.variants, at))
+        push!(grown, (o, j, c))
+    end
+    grown
+end
+
+# Each variant `grown` holds for `groups` that was not priced before, priced
+# and kept with what the implementations offer for its group (see
+# `Offered`): what its implementation says of it found side by side (see
+# `Said`), then priced here, in the groups' order and each group's, as the
+# rates it applies are fitted on first need.
+function price_variants!(d::Decider, groups, grown)
+    seen = Set{Tuple{GroupIdentity, Tuple{String, Int}}}()
+    unpriced = Tuple{Plan, Group, Choice, Int, Any}[]
+    for ((p, g, _), new) in zip(groups, grown), (o, j, c) in new
+        at = (group_identity(p, g), (o.key, j))
+        haskey(offered!(d, p, g).variants, last(at)) || at in seen || (push!(seen, at); push!(unpriced, (p, g, o, j, c)))
+    end
+    told = side_by_side(((p, g, o, _, c),) -> said(d.target, o.implementation, c, group_view(p, g)), unpriced, d.target)
+    for ((p, g, o, j, c), t) in zip(unpriced, told)
+        offered!(d, p, g).variants[(o.key, j)] = choice(d, p, g, group_view(p, g), o.implementation, c, o.order + 1, t)
+    end
+end
+
+# Grow a group's options by the variants `grown` found for it (see `growth`),
+# priced (see `price_variants!`); whether any were added. Groups alike share
+# their options, and a variant one of them added is not added again. A
+# variant's order is past its parent's: it is never an implementation's
+# first claim.
+function expand!(d::Decider, p::Plan, g::Group, os::Vector{Choice}, grown)
+    found = offered!(d, p, g)
+    keys = Set(o.key for o in os)
+    added = false
+    for (o, j, _) in grown
+        at = (o.key, j)
+        found.keys[at] in keys && continue
+        push!(keys, found.keys[at])
+        push!(os, found.variants[at])
         added = true
     end
     added && sort!(os; by = o -> o.estimate)
@@ -475,7 +549,7 @@ function price_all!(d::Decider, p::Plan)
     measures(d) || return nothing
     needs = Set{Tuple{Symbol, Symbol, Any}}()
     named(@nospecialize(f)) = applied_function(f)
-    for g in p.groups, (_, _, _, work) in offered!(d, p, g).estimated, w in work
+    for g in p.groups, (_, _, _, told) in offered!(d, p, g).said, w in told.work
         class = product_class(d.target, w.factor)
         foreach(((f, _),) -> push!(needs, (:streamed, :any, named(f))), w.applied)
         foreach(((f, _),) -> push!(needs, (:swept, class, named(f))), w.swept)

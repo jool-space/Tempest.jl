@@ -20,7 +20,10 @@ include("groups.jl")
 An implementation realizes groups of a plan as kernels. `claims` returns the
 ways it can realize a group, `estimate` the launches of each, and `build_claim`
 builds them. A target's floor realizes any group, so a plan never depends on
-an implementation.
+an implementation. `claims`, `variants` and `estimate` answer of their
+arguments alone, and the cover asks them for many groups side by side, on the
+threads there are: what they keep between calls, as a trial compilation or a
+library's graph, they keep in a table a lock guards.
 """
 abstract type Implementation end
 
