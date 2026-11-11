@@ -70,7 +70,9 @@ what the steps leave, as the state after the loop. Each of `between` is a
 map or a fold that only `r` and the others read; nothing where `r` reads no
 value of the cycle, or another reads one of them, or a state is carried from
 one, or a value reads the cycle at another step than its own or the last,
-or along two of its axes, or a fold sums the steps without being `r`, a sum.
+or along two of its axes, or a fold sums the steps without being `r`, a sum,
+or, of a value along the steps or of their last, one sums across the
+recurrence's lanes.
 """
 function riding(graph, live, cycle, r, reaching = reaching_from(graph, cycle))
     values = graph.values
@@ -117,10 +119,17 @@ function riding(graph, live, cycle, r, reaching = reaching_from(graph, cycle))
     k = steps_iteration(d, values[r].dims, along, steps, final)
     (k === nothing || k == 0) && return nothing
     how = k == LAST ? :last : d isa Reduction && k in d.reduced ? :summed : :each
-    how === :summed && !(d.fold isa SumFold) && return nothing
-    # A value computed in the steps has a place among the state's axes.
-    how === :summed || lying(graph, [c for c in cycle if values[c].definition isa Carried], sort!([cycle; between; r])) !== nothing ||
-        return nothing
+    how === :summed && return d.fold isa SumFold ? (; between, how) : nothing
+    # A value computed in the steps has a place among the state's axes, and
+    # lies along each of the recurrence's lanes, the state's axes that every
+    # value of its cycle lies along, which the steps run apart: each lane
+    # computes its part of it from its own. One summing across them, as a
+    # projection of a network's output over its heads, would make of the
+    # steps a single lane, reading its weights again at every step.
+    lies = lying(graph, [c for c in cycle if values[c].definition isa Carried], sort!([cycle; between; r]))
+    lies === nothing && return nothing
+    lanes = [q for q in eachindex(state.dims) if q != carry.axis && all(c -> lies[c][q] != 0, cycle)]
+    all(u -> all(q -> lies[u][q] != 0, lanes), between) && all(q -> lies[r][q] != 0, lanes) || return nothing
     (; between, how)
 end
 

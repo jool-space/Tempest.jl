@@ -416,6 +416,21 @@ end
     ridden = C.plan(planned.graph; ride = C.riding_values(planned))
     @test length(ridden.groups) == 1 && sort(C.structure(ridden).stored) == sort(first.(riders))
     @test agree(C.execute(ridden, args...), eager; rtol = 1.0e-12)
+    # A value summing across the steps' lanes, as a projection of each step's
+    # output over them, does not ride: a lane computes only its own part, and
+    # the output it projects rides in its place.
+    P = data(2, 3; scale = 0.5)
+    function projected(S, q, k, v, β)
+        outputs = []
+        for t in axes(q, 2)
+            δ = β[t] .* (v[:, t] .- S' * k[:, t])
+            S = S .+ k[:, t] * δ'
+            push!(outputs, P * (S' * q[:, t]))
+        end
+        stack(outputs), S
+    end
+    pp = prepare(trace(projected, args...), args...; build = false).plan
+    @test [(how, pp.graph.values[r].dims) for (r, _, how) in C.rides(pp)] == [(:each, (3, 6)), (:last, (4, 3))]
     explained = sprint(C.explain, ridden)
     @test occursin("at each step, riding the steps", explained) && occursin("at the last step, riding the steps", explained)
     # On the CPU the steps run a step at a time, as plans of their own, the
