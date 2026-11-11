@@ -66,6 +66,23 @@ function moved!(x::TracedArray)
     end
 end
 
+# The arrays that share the memory of `x`: the array that owns it and every
+# layout made from it that something still holds, each at the node of its
+# contents now.
+function sharing(x::TracedArray)
+    owner = x
+    while owner.layout !== nothing
+        owner = owner.layout.parent
+    end
+    found, pending = TracedArray[], TracedArray[owner]
+    while !isempty(pending)
+        y = pop!(pending)
+        push!(found, y)
+        foreach(r -> r.value === nothing || push!(pending, r.value), y.views)
+    end
+    found
+end
+
 """
     update(x, indices, inputs, v) -> node
 

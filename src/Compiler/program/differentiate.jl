@@ -895,8 +895,13 @@ function withgradient(@nospecialize(f), @nospecialize(args...))
     value isa Number && !(value isa Traced) && (value = Traced(tape, constant!(tape, value)))
     value isa Traced && value.tape === tape && node(value).scalar ||
         throw(ArgumentError("a gradient needs a function that returns a number, got $(typeof(value))"))
-    # A loop the function ran is rolled first, its derivative a loop too.
-    isempty(tape.steps) && roll_all!(tape, start:length(tape.nodes), [value.id; [s.id for (s, _, _) in entered]])
+    # A loop the function ran is rolled first, its derivative a loop too. What
+    # the program holds of the function's nodes after it stays: its value,
+    # what it left in each stand-in, and what it wrote into an array it
+    # closes over, as a layer leaves its state, which the arrays sharing that
+    # memory hold.
+    held = [y.id for x in traced if x isa TracedArray for y in sharing(x)]
+    isempty(tape.steps) && roll_all!(tape, start:length(tape.nodes), [value.id; [s.id for (s, _, _) in entered]; held])
     cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))
     gradients = tangent(stand_ins) do x
         k = findfirst(e -> e[1] === x, entered)

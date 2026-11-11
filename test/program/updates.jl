@@ -78,6 +78,34 @@ end
     mine = copy(m)
     value, (g,) = interpret(trace((m, x) -> T.withgradient(x -> statistics(m, x), x), m, x), mine, x)
     @test value ≈ sum(abs2, x) && g ≈ 2 .* x && mine ≈ 0.9 .* m .+ 0.1 .* vec(sum(x; dims = 2))
+    # A gradient's function runs a loop and leaves its last state in an array
+    # it closes over, as a recurrent layer leaves its state, which nothing
+    # else of the program reads: the loop rolled, the array holds what the
+    # last step computed. Rolling the function's loops kept what its value
+    # and its arguments read, and the array was left at a node of no step.
+    function recur!(s, W, u)
+        h, outputs = s, []
+        for t in axes(u, 2)
+            h = tanh.(W * h .+ u[:, t])
+            push!(outputs, h .* u[:, t])
+        end
+        s .= h
+        sum(abs2, stack(outputs))
+    end
+    function recur(s, W, u)
+        h, loss = s, 0.0
+        for t in axes(u, 2)
+            h = tanh.(W * h .+ u[:, t])
+            loss += sum(abs2, h .* u[:, t])
+        end
+        loss
+    end
+    s, W, u = data(3), data(3, 3; scale = 0.2), data(3, 8; scale = 0.5)
+    p = trace((s, W, u) -> T.withgradient(u -> recur!(s, W, u), u), s, W, u)
+    @test any(n -> n.op isa C.Loop, p.nodes) && p.writes == [3 => 1]
+    mine, theirs = copy(s), copy(s)
+    value, (g,) = interpret(p, mine, W, u)
+    @test value ≈ recur!(theirs, W, u) && mine ≈ theirs && g ≈ only(T.gradient(u -> recur(s, W, u), u))
     # A constant of the program cannot change.
     @test occursin("a constant of the program", message(() -> trace(x -> T.gradient(w -> (w .= 0; sum(x)), data(3)), x)))
 end
