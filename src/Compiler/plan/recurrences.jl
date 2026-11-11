@@ -110,11 +110,19 @@ folded(::Union{Along, AtLast}) = false
 Whether the steps of a recurrence whose cycle is `cycle` compute value `r`,
 through the values `between`, as `how` says it meets them. A sum adds its
 parts as they come, which a sum does in any order. A member of the group has
-a place among the state's axes, and lies along each of the recurrence's
-lanes, the state's axes that every value of its cycle lies along, which the
-steps run apart: each lane computes its part from its own. One summing across
-them, as a projection of a network's output over its heads, would make of
-the steps a single lane, reading its weights again at every step.
+a place among the state's axes.
+
+A member also lies along each of the recurrence's lanes, the state's axes
+that every value of its cycle lies along: a refusal the search needs, not
+what a ride is. A value summing across the lanes, as a projection of a
+network's output over its heads, makes of the steps one lane, which no claim
+takes and the floor runs as one item; its price refuses it, Qwen3.5-4B's
+layer output riding priced at 1.5e6 s against 0.017. But under `:close`
+`compare` measures a comparison whole once a choice on either side is
+refuted by the record, however far apart the sides are, and a timing has no
+bound, so the cover timed that floor for longer than a preparation lasts.
+The lanes can go when a comparison so far apart is not measured, or a timing
+stops where the other side's time is passed.
 """
 fits_steps(::Summed, graph, cycle, between, r) = graph.values[r].definition.fold isa SumFold
 function fits_steps(::Union{Along, AtLast}, graph, cycle, between, r)

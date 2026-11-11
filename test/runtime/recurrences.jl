@@ -417,8 +417,8 @@ end
     @test length(ridden.groups) == 1 && sort(C.structure(ridden).stored) == sort(first.(riders))
     @test agree(C.execute(ridden, args...), eager; rtol = 1.0e-12)
     # A value summing across the steps' lanes, as a projection of each step's
-    # output over them, does not ride: a lane computes only its own part, and
-    # the output it projects rides in its place.
+    # output over them, is not offered to ride while the search needs that
+    # refusal (see `fits_steps`); the output it projects rides in its place.
     P = data(2, 3; scale = 0.5)
     function projected(S, q, k, v, β)
         outputs = []
