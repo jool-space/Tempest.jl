@@ -1443,7 +1443,17 @@ again; the model's rounds after the first take 3.3 and 3.6 s at 16 tokens
 where they took 35 and 34, 8.8 and 3.6 at 64 where 26 and 24 (the 8.8
 pricing once the groups of a plan the first round's times changed), its
 decisions on one record the same line for line, and a second process
-replays them, cross-checked, as it does the corpus's. A
+replays them, cross-checked, as it does the corpus's. Every cold and warm
+second of the model above is of one process preparing the chunks of 1, 16
+and 64 tokens in turn, the later two after another's preparation and not
+from nothing. Each in a process of its own, by the corpus's scenarios
+(`test/corpus/run.jl`, the model a program by path), at ac6cd0c on the
+second GB10, two runs: cold 85 to 92, 226 to 227 and 204 to 208 s; on the
+decisions known, building only the plan's kernels, 36, 44 to 47 and 45;
+warm 33 to 37, 44 and 42 to 46; again in the process 3.0, 4.2 and 5.8; and
+measuring nothing 57, 75 and 75 to 78, for a call of 51.1, 53.5 to 53.9 and
+78.8 to 79.5 ms where the measured plans call in 40.8, 49.1 to 49.3 and
+66.5, a quarter, a tenth and a fifth more. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
