@@ -947,9 +947,12 @@ end
 # Recomputed folds. A fold the kernel recomputes where it reads it extends the
 # tiling by its reduced axis, swept in steps: a product's steps when its body
 # is bilinear in that axis, the kernel's own steps when its body recomputes
-# folds in turn (as much work per step as the kernel's sweep), `INNER_TILE`
-# lanes otherwise, and one step when it fits. A bilinear body accumulates as a
-# product of tiles; any other folds elementwise.
+# folds in turn along that axis (as much work per step as the kernel's
+# sweep), `INNER_TILE` lanes otherwise, and one step when it fits. A fold the
+# body recomputes that does not move along the axis is computed once, before
+# the steps (see `emit_fold!`), and leaves their lanes as they are. A
+# bilinear body accumulates as a product of tiles; any other folds
+# elementwise.
 const INNER_TILE = 128
 
 function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE, chosen = lanes != INNER_TILE)
@@ -964,7 +967,8 @@ function fold_context(c::Context, t::Recomputed; lanes = INNER_TILE, chosen = la
         depth = s.options.inner > 0 ? s.options.inner : product_step(s.precision, term_eltype(product_factor(e, t.body.args[1]), c.g))
         return fold_context(c, t; lanes = depth)
     end
-    any(x -> x isa Recomputed, subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
+    along(x) = x isa Recomputed && any(j -> mentions(x, base + j), eachindex(t.extents))
+    any(along, subterms((t.body,))) && !isempty(swept(s)) && s.tiling[sweep_axis(s)].tile != INNER_TILE || return e
     fold_context(c, t; lanes = s.tiling[sweep_axis(s)].tile)
 end
 

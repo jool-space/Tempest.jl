@@ -76,10 +76,12 @@ end
 # A fold recomputed inside another's sweep that does not move along the
 # other's reduced axis, as a recurrence's step sums a product of its input's
 # column of unit length, the column's norm recomputed inside the product, is
-# computed once, before the other's steps, as the estimate counts it. Before,
-# each step of the product recomputed the norm, its sweep inside the
-# product's: Qwen3.5-4B's delta rule with its keys' norm recomputed so took
-# 4.2 ms a call, its recurrence 4.0 ms alone where it was priced at 261 μs.
+# computed once, before the other's steps, as the estimate counts it, and
+# the other steps as one recomputing nothing does. Before, the product took
+# one feature a step, as the recurrence takes one position, and each step
+# recomputed the norm, its sweep inside the product's: Qwen3.5-4B's delta
+# rule with its keys' norm recomputed so took 4.2 ms a call, its recurrence
+# 4.0 ms alone where it was priced at 261 μs.
 @testset "a fold recomputed inside another's sweep is computed once" begin
     unit(x) = x ./ sqrt.(sum(abs2, x; dims = 1) .+ 1.0f-6)
     f(W, x, h) = (for t in axes(x, 2); h = tanh.(transpose(W) * unit(x[:, t]) .+ h); end; h)
@@ -96,5 +98,9 @@ end
     depth(x) = x isa Expr ? (x.head === :for) + maximum(depth, x.args; init = 0) : 0
     ext = Base.get_extension(Tempest, :cuTileExt)
     @test depth(ext.source(only(ex.kernels[k].kernels))) == 2
+    g = ex.plan.groups[k]
+    c = ext.Context(C.group_view(ex.plan, g), ex.decisions[k].choice.claim.schedule)
+    product = only(unique(t for m in C.members(g) if haskey(g.terms, m) for t in IR.subterms((g.terms[m],)) if t isa IR.Recomputed))
+    @test last(ext.fold_context(c, product).s.tiling).tile == ext.INNER_TILE
     @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, args...)); rtol = 1.0e-4)
 end
