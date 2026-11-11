@@ -2,6 +2,14 @@
 # each scenario of Tempest's latest pass (run.jl), each cell the range of its
 # runs, then each challenger's latest row, with when and where it ran.
 #
+# Tempest's columns: the seconds to the first result, and of them Julia's
+# compilation summed over threads; the step's milliseconds; the kernels
+# compiled and loaded in the preparation, and the plan's; the bytes the plan
+# stores; the deciders that replayed their decisions and those the cover
+# reached, as replayed/covered; the plan, a letter for each plan the table's
+# rows reached, alike where two reached one; the agreement with Float64; and
+# the SM clock.
+#
 #     julia --project=test test/corpus/summarize.jl [RECORD...]
 #
 # reads corpus.tsv in Tempest's scratch space `corpus`, or in TEMPEST_CORPUS,
@@ -59,7 +67,9 @@ end
 
 fixed(digits) = x -> @sprintf("%.*f", digits, x)
 exponent(x) = @sprintf("%.1e", x)
+bytes(x) = Base.format_bytes(round(Int, x))
 column(key, format) = rs -> span(map(r -> number(r, key), rs), format)
+each(f) = rs -> join(unique(filter(!isempty, map(f, rs))), ",")
 
 # The columns of a scenario's line: a title, a width (negative to the left)
 # and the cell of its rows.
@@ -67,8 +77,14 @@ const TABLE = [
     ("scenario", -18, rs -> value(first(rs), "scenario")),
     ("runs", 4, rs -> string(length(rs))),
     ("first s", 11, column("first_s", fixed(1))),
+    ("julia s", 11, column("julia_s", fixed(1))),
     ("step ms", 13, column("step_ms", fixed(3))),
+    ("built", 9, column("built", fixed(0))),
+    ("loaded", 7, column("loaded", fixed(0))),
     ("kernels", 9, column("kernels", fixed(0))),
+    ("stored", 21, column("stored_bytes", bytes)),
+    ("decided", 9, each(r -> isempty(value(r, "replayed")) ? "" : value(r, "replayed") * "/" * value(r, "covered"))),
+    ("plan", 4, each(r -> value(r, "letter"))),
     ("agreement", 15, column("agreement", exponent)),
     ("MHz", 9, column("sm_mhz", fixed(0)))]
 
@@ -88,6 +104,8 @@ function best_challenger(tempest, others)
 end
 
 function table(program, shape, tempest, others)
+    plans = unique(filter(!isempty, map(r -> value(r, "plan"), tempest)))
+    tempest = map(r -> merge(r, Dict("letter" => isempty(value(r, "plan")) ? "" : string('A' + findfirst(==(r["plan"]), plans) - 1))), tempest)
     if isempty(tempest)
         println("\n$program $shape: no pass of Tempest's")
     else

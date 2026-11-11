@@ -2,34 +2,68 @@
 # plain Julia the way a user writes it, run against its challengers by one
 # command, and recorded.
 #
-#     julia --project=test test/corpus/run.jl PROGRAM [--shape small|full] [--scenarios cold,warm] [--runs 2] [--challengers]
+#     julia --project=test test/corpus/run.jl PROGRAM [--shape small|full] [--scenarios cold,warm,...] [--runs 2]
+#         [--after PROGRAM[:SHAPE]] [--challengers]
 #
 # PROGRAM names a file here defining `instance(shape)`: the step as a
 # function, its inputs in Float32, which results replace which inputs, and
 # the target; its challengers are in challengers/challengers.jl.
 #
 # Tempest's side is a set of scenarios, each a way a program comes to its
-# first result, all of them by default or those `--scenarios` names, and the
+# first result, all of them by default or those `--scenarios` names (none
+# where it names none, for the challengers alone), and the
 # set is run `--runs` times (2), each round in processes and stores of its
-# own, so that each scenario's numbers come from as many processes:
+# own, so that each scenario's numbers come from as many processes. A
+# process's stores are a directory of its own: TEMPEST_CACHE, whose `tuning`
+# holds the record of times measured, the rates fitted and the decisions
+# kept, and JULIA_OBJCACHE_PATH in it, the object cache of compiled kernels.
 #
-#   cold    A new process whose stores are empty: TEMPEST_CACHE and
-#           JULIA_OBJCACHE_PATH new directories, so no kernel compiled, no
-#           time recorded and no decision kept. It prepares as the
-#           environment's settings say, by default measuring close calls and
-#           settling what it measured.
-#   warm    A new process on the stores the round's cold process left.
+#   cold              A new process whose stores are empty: no kernel
+#                     compiled, no time recorded and no decision kept. It
+#                     prepares as the environment's settings say, by default
+#                     measuring close calls and settling what it measured, on
+#                     the rates Tempest ships for the device where it ships
+#                     them.
+#   cold-unmeasured   The same with nothing timed (TEMPEST_MEASURE=none).
+#   cold-known        A new process holding the tuning directory the round's
+#                     cold process left, its record and its decisions, with an
+#                     empty object cache: it replays the decisions and builds
+#                     only its plan's kernels.
+#   warm              A new process on everything the round's cold process
+#                     left.
+#   again             The program prepared a second time in the warm process,
+#                     the same instance.
+#   after             A new process with empty stores that prepares another
+#                     program (`--after`: heat at its small shape, or node
+#                     before heat), then this one with TEMPEST_CACHE moved to a
+#                     new directory, so that no time is recorded and no
+#                     decision kept for it. What it shares with the other is
+#                     what a session shares and a store's path does not name:
+#                     Julia's compiled code, the session's tables
+#                     (`forget_session!`'s: kernels resolved by their content,
+#                     packages' identities) and the object cache, which a
+#                     process opens once before Julia 1.14, so that a kernel
+#                     of the other's with the same content loads.
+#   after-unmeasured  The same with nothing timed in either.
 #
-# In each, the process traces the step, prepares it, verifying every plan it
+# Each preparation traces the step, prepares it, verifying every plan it
 # forms, and executes it once: the seconds from the trace to that first
-# result. Then it times the step as replays of a captured graph of a few
-# milliseconds of steps, the minimum over samples (measure.jl). The warm
-# process also takes the step's outputs from the inputs as given and compares
-# them with the step run eagerly in Float64 on the same inputs, widened: the
-# agreement is the largest error of any output relative to that output's
-# largest magnitude, the note saying which output and the first output's.
-# With `--challengers`, each challenger then runs by its own script, through
-# its launcher in challengers/.
+# result, the packages loaded and the instance made before. Of those seconds,
+# Julia's compilation as its cumulative counter reads it, which sums the
+# threads that compile and so may pass the seconds themselves. With them, the
+# kernels compiled and those loaded from the object cache in the preparation,
+# beside the plan's; the bytes the plan stores; the deciders, a recurrence's
+# step's among them, that replayed their decisions and those the cover
+# reached; and a hash of the plan, of what `explain` says of it and what runs
+# each kernel, alike where two preparations reached one plan. Then it takes
+# the step's outputs from the inputs as given and compares them with the step
+# run eagerly in Float64 on the same inputs, widened, computed once a run of
+# this command and kept for its processes: the agreement is the largest error
+# of any output relative to that output's largest magnitude, the note saying
+# which output and the first output's. Last it times the step as replays of a
+# captured graph of a few milliseconds of steps, the minimum over samples
+# (measure.jl). With `--challengers`, each challenger then runs by its own
+# script, through its launcher in challengers/.
 #
 # One row per scenario of each round, and per challenger's run, is appended
 # to corpus.tsv in Tempest's scratch space `corpus`
@@ -58,8 +92,8 @@
 const HERE = @__DIR__
 const PROJECT = dirname(HERE)
 const COLUMNS = ("when", "pass", "host", "program", "shape", "scenario", "side", "commit", "device", "sm_mhz", "precision",
-    "first_s", "step_ms", "kernels", "agreement", "note")
-const SCENARIOS = ("cold", "warm")
+    "first_s", "julia_s", "step_ms", "kernels", "built", "loaded", "stored_bytes", "replayed", "covered", "plan", "agreement", "note")
+const SCENARIOS = ("cold", "cold-unmeasured", "cold-known", "warm", "again", "after", "after-unmeasured")
 
 include(joinpath(HERE, "challengers", "challengers.jl"))
 
@@ -133,60 +167,105 @@ stamp() = string(round(Int, time()))
 ## Tempest's side: the scenarios, each prepared in a process of a round.
 
 """
-One of a round's processes: the scenarios of the preparations it makes in
-turn, each a row, and the directory of the stores it starts on.
+A preparation a process makes: of a program at a shape, recorded under its
+scenario unless that is empty, with TEMPEST_CACHE moved first to `tuning`
+unless that is empty.
 """
-struct Session
-    scenarios::Vector{String}
-    stores::String
+struct Preparation
+    program::String
+    shape::String
+    scenario::String
+    tuning::String
 end
 
-# What a process keeps on disk, in one directory: Tempest's tuning directory
-# and the object cache of compiled kernels inside it (test/fixtures/stores.jl).
-stores_env(dir) = ["TEMPEST_CACHE" => dir, "JULIA_OBJCACHE_PATH" => joinpath(dir, "objcache")]
+"""
+One of a round's processes: the preparations it makes in turn, the directory
+of the stores it starts on, the stores whose tuning directory it is given
+before it starts unless that is empty, and the environment's TEMPEST_MEASURE
+unless that is empty.
+"""
+struct Session
+    preparations::Vector{Preparation}
+    stores::String
+    tuning_of::String
+    measure::String
+end
+
+scenarios(s::Session) = filter(!isempty, map(p -> p.scenario, s.preparations))
+
+# The settings that point a process at its stores (test/fixtures/stores.jl),
+# and what else the session sets.
+function session_env(s::Session)
+    env = ["TEMPEST_CACHE" => s.stores, "JULIA_OBJCACHE_PATH" => joinpath(s.stores, "objcache")]
+    isempty(s.measure) ? env : [env; "TEMPEST_MEASURE" => s.measure]
+end
 
 # The processes of a round for the scenarios wanted, in the order they run:
-# the warm process starts on the stores the cold one left.
-function sessions(wanted, round)
-    "warm" in wanted && !("cold" in wanted) && error("the warm scenario starts on what the cold one leaves: run them together")
-    cold = joinpath(round, "cold")
-    all = [Session(["cold"], cold), Session(["warm"], cold)]
-    filter(s -> any(in(wanted), s.scenarios), all)
+# cold-known starts on the tuning directory the cold process left, before the
+# warm one adds to it, and the warm one on all of it.
+function sessions(program, shape, wanted, other, round)
+    any(in(wanted), ("cold-known", "warm", "again")) && !("cold" in wanted) &&
+        error("cold-known, warm and again start on what cold leaves: run them with it")
+    at(scenario; tuning = "") = Preparation(program, shape, scenario, tuning)
+    before = Preparation(other..., "", "")
+    stores(name) = joinpath(round, name)
+    warm = "again" in wanted ? [at("warm"), at("again")] : [at("warm")]
+    all = [
+        Session([at("cold")], stores("cold"), "", ""),
+        Session([at("cold-known")], stores("cold-known"), stores("cold"), ""),
+        Session(warm, stores("cold"), "", ""),
+        Session([at("cold-unmeasured")], stores("cold-unmeasured"), "", "none"),
+        Session([before, at("after"; tuning = stores("after-own"))], stores("after"), "", ""),
+        Session([before, at("after-unmeasured"; tuning = stores("after-unmeasured-own"))], stores("after-unmeasured"), "", "none")]
+    filter(s -> any(in(wanted), scenarios(s)), all)
 end
 
 # One process of a round: a row for each of its scenarios, with its result
 # or why it failed.
-function session(program, shape, s::Session, run, directory)
-    log = joinpath(directory, "logs", "$program-$shape-tempest-$(join(s.scenarios, '-'))-$run-$(stamp()).log")
-    check = "warm" in s.scenarios && get(ENV, "TEMPEST_CORPUS_CHECK", "1") != "0"
-    flags = check ? ["--check"] : String[]
-    preparations = reduce(vcat, [[program, shape, scenario] for scenario in s.scenarios])
-    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT $(joinpath(HERE, "run.jl")) --worker $flags $preparations`
-    println("tempest $program $shape, $(join(s.scenarios, " and ")), run $run: ", log)
-    status, clock = gpu_job(cmd, log; env = stores_env(s.stores))
+function session(s::Session, run, reference, directory)
+    program, shape = s.preparations[end].program, s.preparations[end].shape
+    names = join(scenarios(s), " and ")
+    log = joinpath(directory, "logs", "$program-$shape-tempest-$(replace(names, " and " => "+"))-$run-$(stamp()).log")
+    mkpath(s.stores)
+    if !isempty(s.tuning_of)
+        given = joinpath(s.tuning_of, "tuning")
+        isdir(given) || return map(scenario -> (; scenario, side = "tempest", note = "no tuning directory left to start on"), scenarios(s))
+        cp(given, joinpath(s.stores, "tuning"))
+    end
+    check = get(ENV, "TEMPEST_CORPUS_CHECK", "1") != "0" ? ["--check", reference] : String[]
+    preparations = reduce(vcat, [[p.program, p.shape, dash(p.scenario), dash(p.tuning)] for p in s.preparations])
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT $(joinpath(HERE, "run.jl")) --worker $check $preparations`
+    println("tempest $program $shape, $names, run $run: ", log)
+    status, clock = gpu_job(cmd, log; env = session_env(s))
     results = Dict{String, Any}()
     for line in filter(l -> startswith(l, "corpus result "), readlines(log))
         r = eval(Meta.parse(line[(length("corpus result ") + 1):end]))
         results[r.scenario] = r
     end
-    map(s.scenarios) do scenario
+    map(scenarios(s)) do scenario
         r = get(results, scenario, nothing)
         r === nothing && return (; scenario, side = "tempest", sm_mhz = clock, note = failure(log, status))
         merge(r, (; side = "tempest", sm_mhz = clock))
     end
 end
 
-# Tempest's rows: each round's processes in turn, in stores of the round's own.
-function tempest(program, shape, wanted, runs, directory)
-    rows = []
+# An empty argument to the worker, and back.
+dash(x) = isempty(x) ? "-" : x
+undash(x) = x == "-" ? "" : x
+
+# Tempest's rows, each given to `record` as its process ends: each round's
+# processes in turn, in stores of the round's own, and the Float64 reference
+# kept for all of them in one directory.
+function tempest(record, program, shape, wanted, other, runs, directory)
+    reference = mktempdir()
     for run in 1:runs
         round = mktempdir()
-        for s in sessions(wanted, round)
-            append!(rows, session(program, shape, s, run, directory))
+        for s in sessions(program, shape, wanted, other, round), r in session(s, run, reference, directory)
+            r.scenario in wanted && record(r)
         end
         rm(round; recursive = true)
     end
-    rows
+    rm(reference; recursive = true)
 end
 
 function challengers(program, shape, directory)
@@ -209,22 +288,41 @@ end
 
 ## The worker: preparations and their measurements, in a process of its own.
 
-# The worker's arguments: `--check`, then each preparation as its program,
-# shape and scenario, in the order it makes them.
+# The worker's arguments: `--check` and the directory its references are kept
+# in, then each preparation as its program, shape, scenario and tuning
+# directory, `-` for one empty, in the order it makes them. A program's file
+# is included once a process, and its instance at a shape made once.
 function worker(args)
-    check = "--check" in args
-    rest = filter(!=("--check"), args)
+    i = findfirst(==("--check"), args)
+    reference = i === nothing ? nothing : args[i + 1]
+    rest = i === nothing ? args : args[[1:(i - 1); (i + 2):end]]
     @eval Main begin
         import cuBLAS, cuTile
         using Tempest, CUDACore
     end
-    for (program, shape, scenario) in Iterators.partition(rest, 3)
-        m = Core.eval(Main, :(module Program end))
-        Base.include(m, joinpath(HERE, program * ".jl"))
-        Base.include(m, joinpath(HERE, "measure.jl"))
-        result = Base.invokelatest(() -> m.measure(m.instance(Symbol(shape)); check, report = scenario == "warm"))
+    modules, cases = Dict{String, Module}(), Dict{Tuple{String, String}, Any}()
+    for (program, shape, scenario, tuning) in Iterators.partition(rest, 4)
+        scenario, tuning = undash(scenario), undash(tuning)
+        m = get!(modules, program) do
+            m = Core.eval(Main, :(module $(Symbol(program)) end))
+            Base.include(m, joinpath(HERE, program * ".jl"))
+            Base.include(m, joinpath(HERE, "measure.jl"))
+            m
+        end
+        case = get!(() -> Base.invokelatest(m.instance, Symbol(shape)), cases, (program, shape))
+        isempty(tuning) || (ENV["TEMPEST_CACHE"] = mkpath(tuning))
+        kept = reference === nothing || isempty(scenario) ? nothing : joinpath(reference, "$program-$shape.jls")
+        result = Base.invokelatest(() -> m.measure(case; reference = kept, report = scenario == "warm"))
         println("corpus result ", repr(merge((; scenario), result)))
     end
+end
+
+# The program prepared before this one in the after scenarios.
+function before(program, args)
+    given = option(args, "--after", program == "heat" ? "node" : "heat")
+    name, shape = occursin(':', given) ? split(given, ':'; limit = 2) : (given, "small")
+    name == program && error("--after names the program itself")
+    (String(name), String(shape))
 end
 
 function main(args)
@@ -234,7 +332,7 @@ function main(args)
     program = first(args)
     isfile(joinpath(HERE, program * ".jl")) && haskey(CHALLENGERS, program) || error("$program is no program of the corpus")
     shape = option(args, "--shape", "small")
-    wanted = split(option(args, "--scenarios", join(SCENARIOS, ',')), ',')
+    wanted = filter(!isempty, split(option(args, "--scenarios", join(SCENARIOS, ',')), ','))
     foreach(s -> s in SCENARIOS || error("$s is no scenario; the scenarios are $(join(SCENARIOS, ", "))"), wanted)
     runs = parse(Int, option(args, "--runs", "2"))
     directory = record_directory()
@@ -242,7 +340,7 @@ function main(args)
     println("record: ", joinpath(directory, "corpus.tsv"))
     common = (; pass = stamp(), host = gethostname(), program, shape, commit = commit(), device = device_name())
     io = open_record(directory)
-    for r in tempest(program, shape, wanted, runs, directory)
+    tempest(program, shape, wanted, before(program, args), runs, directory) do r
         row!(io, merge(common, (; when = stamp()), r))
         println(r)
     end
