@@ -134,6 +134,25 @@ end
     @test bytes(u -> u .+ vcat(u[2:end, :], u[end:end, :])) == bytes(u -> 2 .* u)
 end
 
+# Folds recomputed one inside another multiply their extents in the floor's
+# bytes: six products of 1024 columns inside a recurrence's step are past
+# what an Int holds, and the floor is priced by them all the same.
+@testset "a recurrence's floor counts folds recomputed one inside another" begin
+    function chained(W, x, h)
+        for t in axes(x, 2)
+            h = tanh.(h .+ W * (W * (W * (W * (W * (W * x[:, t]))))))
+        end
+        h
+    end
+    function bytes(n)
+        g = C.lower(trace(chained, fill(0.001, n, n), fill(0.1, n, 3), fill(0.0, n)))
+        p = C.plan(g; recompute = [v for v in eachindex(g.values) if g.values[v].definition isa C.Reduction])
+        only(C.floor_estimate(p, only(k for k in p.groups if k.kind isa C.RecurrenceKind))).bytes
+    end
+    @test bytes(1024) > 1.0e19
+    @test isapprox(bytes(1024) / bytes(64), 16.0^7; rtol = 0.05)
+end
+
 # A claim that fails to build is no option once it has, and the program is
 # planned again: each map of the group it claimed is proposed to be stored
 # apart. This implementation claims products and maps alike as free, and

@@ -94,17 +94,20 @@ end
 
 # A recurrence's floor kernel: an item per position of its parallel axes,
 # loading what each member's term reads at every point it computes the
-# member, a recomputed fold's body at each of its own positions too.
+# member, a recomputed fold's body at each of its own positions too. The
+# bytes are counted in floating point: folds recomputed one inside another
+# multiply their extents, six products of 1024 columns past what an Int
+# holds, and a count wrapped below zero priced the kernel under any other.
 function recurrence_floor_estimate(p::Plan, g::Group)
-    bytes(t::Load) = sizeof(p.graph.values[t.value].eltype)
-    bytes(t::Recomputed) = prod(t.extents; init = 1) * bytes(t.body)
-    bytes(t::Apply) = sum(bytes, t.args; init = 0)
-    bytes(t::Term) = 0
+    bytes(t::Load) = Float64(sizeof(p.graph.values[t.value].eltype))
+    bytes(t::Recomputed) = prod(Float64, t.extents; init = 1.0) * bytes(t.body)
+    bytes(t::Apply) = sum(bytes, t.args; init = 0.0)
+    bytes(t::Term) = 0.0
     (; axis, parallel) = recurrence_axes(p.graph, g)
     places = recurrence_places(p.graph, g.outputs).places
     points(m) = prod(k -> k == axis || any(e -> mentions(e, k), places[m]) ? g.domain[k] : 1, eachindex(g.domain); init = 1)
     items = prod(k -> g.domain[k], parallel; init = 1)
-    [Work(Float64(sum(m -> points(m) * bytes(g.terms[m]), g.outputs)) + group_bytes(p, g); blocks = items / 256)]
+    [Work(sum(m -> points(m) * bytes(g.terms[m]), g.outputs; init = 0.0) + group_bytes(p, g); blocks = items / 256)]
 end
 
 "Bytes a group moves: what it reads from storage once, and what it writes."
