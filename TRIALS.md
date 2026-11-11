@@ -1378,11 +1378,38 @@ their tile was shaped by every axis the scores' index mentions and no claim
 on it built: the chunk's decisions settle, a second process replaying them
 in 47 s where each covered again in 111, and with nothing measured the chunk
 of 16 calls in 60.9 ms where it took 106.9, the delta rule's output
-projections a product claim. What still stands for a prefill: the delta
-rule's recurrence stores its state at every step for a second kernel to read
-back (46.8 ms of a 64-token call's 99, against 21.5 for Vallmo's), on trial
-next; products of few columns, slower than cuBLAS's from 4 to 64 tokens; and
-cold preparation with measurement, 398 s at 16 tokens. A
+projections a product claim. What stood for a prefill then, the delta
+rule's recurrence storing its state at every step for a second kernel to read
+back (46.8 ms of a 64-token call's 99, against 21.5 for Vallmo's), closed the
+same day: a value computed from one step of a recurrence and that step's
+inputs rides the steps, along them or at their last, by the cover's price, as
+a sum over them does (`Meeting`, `src/Compiler/plan/recurrences.jl`), and a
+state is stored only where something outside its group reads it. On grizzle,
+measured, the 4B's chunk of 64 tokens calls in 67.8 ms where it took 99.0,
+of 16 in 50.4 where 55.8, the step in 42.2 and 41.7 (41.9 both in a second
+process), the chunk of 64 storing 698 MiB where it stored 6.68 GiB and
+preparing cold in 141 s where 232; chunks and one token at a time part on the
+3,500-token prompt at decode token 10 before and after, two logits 0.02 to
+0.21 apart at 22. Two faults of main stood behind it: a recurrence's floor
+counted its bytes in an Int that folds recomputed one inside another wrapped
+below zero, a floor cheaper than any kernel (`recurrence_floor_estimate`,
+`src/Compiler/cover/cost.jl`); and cuTile computed a fold recomputed inside
+another at every step of the outer one, a lane a step, where its estimate
+counted it once (`emit_fold!`, `ext/cuTileExt/emit.jl`), a recurrence kernel
+3,967 μs against an estimate of 261, and 359 after. What it cost: a value
+riding along the steps or at their last must lie along each of the
+recurrence's lanes, a refusal the search needs and not what a ride is
+(`fits_steps`), since under `:close` a comparison a record refutes is measured
+whole and a timing has no bound, the 4B's layer output riding priced at
+1.5e6 s and timed all the same; and each ride offered plans its recurrence's
+step again from nothing, the LSTM's cold preparation 162 s where it took 82
+for the same plan, heat's 27.6 where 23.0. What still stands: that search; a
+measured tie decided by the estimate, the neural ODE's gradient sums riding
+or not from one cold preparation to the next, before as after (two sides
+within 5%, the estimate 11 ms for 7.3 measured); products of few columns,
+slower than cuBLAS's from 4 to 64 tokens; and cold preparation with
+measurement, 187 s at 16 tokens and 232 at 64 before the rides, forming
+proposals 65 and 99 of them, timing 6 and 7. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
