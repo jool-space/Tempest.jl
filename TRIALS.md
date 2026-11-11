@@ -1413,7 +1413,28 @@ and 232 before the rides: asking each recurrence what rides it by a pass over
 the graph was 65 and 99 s of those at 16 and 64, 1.7 and 1.4 since it is
 found once a plan, and what the 172 hold now is the search itself (the
 phases overlap: the first builds 56, searching ahead 36, the loop 32,
-decisions 34), timing 7. A
+decisions 34), timing 7. Counted since, by section and settling round
+(`challengers/proposal-cost-2026-11-11`, `attribute.jl`): that loop's 32 s
+came of the chunk of 1 prepared first in the same process and is 7 alone;
+the 16-token chunk's 226 s are a first cover of 135 and two more of 35
+each that build nothing and time one kernel between them, settling's
+rounds, every group's options found and searched again from the record
+(48 of the 64-token chunk's 133), and the rides added one round, not a
+search of their own, their nested step covers under 2 s on the model. On
+the LSTM the cost is one nested cover, 70 s and 96 kernels built: pricing
+the forward recurrence with `h - y` riding its last step plans that step
+measured, and the step's fused kernel, writing one more array, is searched
+as a kernel never seen; the ride is then refused. Its cold preparation has
+two modes on main, 136 to 141 s and 162 to 164, by one measured candidate
+in that cover. A timing has a bound since (`measure_sides!`,
+`src/Compiler/cover/choose.jl`): the side known faster is timed whole and
+the other, its dearest kernel first, until it has lost, a kernel priced
+past the bound beyond its estimate's error never begun where the call was
+not close, so the 4B's floor of one item is not timed; preparation is as
+long as before (heat 27.4 and 27.3 s, GPT 154 and 151, four layers of the
+model 137 to 140 on both), and the lanes stay, since without them the four
+layers prepare, where they did not end, but in 161 to 168 s, each ride
+refused by price still a trial searched ahead. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
