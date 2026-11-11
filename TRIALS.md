@@ -1453,7 +1453,22 @@ decisions known, building only the plan's kernels, 36, 44 to 47 and 45;
 warm 33 to 37, 44 and 42 to 46; again in the process 3.0, 4.2 and 5.8; and
 measuring nothing 57, 75 and 75 to 78, for a call of 51.1, 53.5 to 53.9 and
 78.8 to 79.5 ms where the measured plans call in 40.8, 49.1 to 49.3 and
-66.5, a quarter, a tenth and a fifth more. A
+66.5, a quarter, a tenth and a fifth more. Where a cold preparation's
+seconds go by processor (`challengers/prep-threads-2026-11-11`, `cpu.jl`,
+main 247e483 on the second GB10, 20 cores, 12 threads): the model's chunk
+of 16 measured, 160 s, keeps 2.2 cores busy and the GPT step's 148 s keep
+4.9; Julia compiling on the main thread, 25 s of the model's before the
+cover starts; bursts of kernels compiling in processes of their own, 53
+and 96 s of wall in which those processes average 3 and 6 cores, not yet
+explained; timing on the device 8 and 15 s, serial by nature; and asking
+the implementations what they claim and estimate of each group, 24 to 43%
+of the main thread, the one stretch both large and of its arguments
+alone. That is asked side by side now (`offer!`, `side_by_side`), its
+results returned and kept by the caller as a trial's plan is, with no lock
+on the decider's tables: the model's chunk of 16 prepares cold in 136 to
+137 s measured where 159 to 160 and 70 to 71 unmeasured where 83 to 84,
+the GPT step in 138 where 148 to 149 and 33 to 34 where 40 to 42, the
+decisions on one record the same. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
