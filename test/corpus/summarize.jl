@@ -68,6 +68,7 @@ end
 fixed(digits) = x -> @sprintf("%.*f", digits, x)
 exponent(x) = @sprintf("%.1e", x)
 bytes(x) = Base.format_bytes(round(Int, x))
+unit(x, format, name) = isnan(x) ? "" : format(x) * " " * name
 column(key, format) = rs -> span(map(r -> number(r, key), rs), format)
 each(f) = rs -> join(unique(filter(!isempty, map(f, rs))), ",")
 
@@ -128,8 +129,8 @@ function table(program, shape, tempest, others)
     isempty(others) && return
     println("  challengers, each side's latest run:")
     for r in others
-        @printf("  %-22s %-8s %9s s %10s ms  %s UTC on %s, %s MHz  %s\n", r["side"], value(r, "scenario"), span([number(r, "first_s")], fixed(1)),
-            span([number(r, "step_ms")], fixed(3)), when(r), host(r), value(r, "sm_mhz"), value(r, "note"))
+        @printf("  %-22s %-8s %11s %13s  %s UTC on %s, %s MHz  %s\n", r["side"], value(r, "scenario"), unit(number(r, "first_s"), fixed(1), "s"),
+            unit(number(r, "step_ms"), fixed(3), "ms"), when(r), host(r), value(r, "sm_mhz"), value(r, "note"))
     end
 end
 
