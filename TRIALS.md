@@ -1468,7 +1468,23 @@ results returned and kept by the caller as a trial's plan is, with no lock
 on the decider's tables: the model's chunk of 16 prepares cold in 136 to
 137 s measured where 159 to 160 and 70 to 71 unmeasured where 83 to 84,
 the GPT step in 138 where 148 to 149 and 33 to 34 where 40 to 42, the
-decisions on one record the same. A
+decisions on one record the same. And a recurrence run a step at a time
+is priced at its run timed whole (`run_whole`, `choose.jl`), its key naming
+the step's kernels, where its price was the sum of those kernels' times,
+each taken alone with its data out of the cache: a step runs among steps
+that left the weights it reads in the cache, and the sum stood 28 to 55%
+over the run, the neural ODE's gradient's recurrence at 11.43 ms where it
+runs in 7.30, which made the ride of its gradient sums a close call the
+estimates refused in three cold preparations of six; it is taken in six of
+six now, each price its run's time, with no rule for ties (the lower
+measurement winning was tried: the same step, 63 to 76 s of preparation
+where 44 to 47, more ties taken being more trials). The LSTM takes a ride
+it did not, a gradient sum added as the backward steps run, 30.34 ms a step
+against 30.70 without it over 15 rounds in one process, 12 of them faster;
+its step runs in two modes, near 30.3 and near 31.0, whatever the plan, not
+explained, and its cold preparation is in the upper of its two, 164 s,
+the cover's round after a proposal taken, timing the runs whole 4.9 s of
+it. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
