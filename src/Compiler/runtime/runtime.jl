@@ -106,18 +106,18 @@ end
 
 
 """
-    prepare(program, inputs...; target, measure = :close, replaces = (), by_reference = (), point = false, recompute = (), ride = (), build = true, verify) -> Executable
+    prepare(program, inputs...; target, measure = :none, replaces = (), by_reference = (), point = false, recompute = (), ride = (), build = true, verify) -> Executable
 
 Plan `program` for the shapes and types of `inputs` and build its kernels on
 `target`, chosen from the inputs' array types by default. Close calls between
-claims are timed when `measure` allows and the target can, and kept in the
-tuning record. `measure = :none` times no claim but still uses the times in
-the record; `:close`, the default, times the options whose estimates are
+claims are timed when `measure` asks and the target can, and kept in the
+tuning record. `measure = :none`, the default, times no claim but still uses
+the times in the record; `:close` times the options whose estimates are
 within the close-call factor of the best; `:all` times every option of every
 group and both sides of every comparison. `true` and `false` mean `:close` and
-`:none`. The environment's `TEMPEST_MEASURE` (`none`, `close` or `all`) sets
-the default, as the tests set it to `none`: on a device other jobs share, a
-close call timed is decided by chance.
+`:none`. The environment's `TEMPEST_MEASURE` (`none`, `close` or `all`)
+overrides the default, and `measure` given overrides the environment. On a
+device other jobs share, a close call timed is decided by chance.
 
 What the cover decided, the proposals it took and the claim that runs each
 kernel, is kept beside the tuning record (see `Tempest.Compiler.reach!`),

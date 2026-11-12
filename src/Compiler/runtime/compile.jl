@@ -4,27 +4,49 @@
 public compile, Compiled, Searching
 
 """
-    compile(f, args...; target, measure = :close, capture = true, search = :before) -> Compiled or Searching
+    compile(f, args...; target, measure = :none, search = :before, capture = true) -> Compiled or Searching
 
 `f` traced on `args` and prepared, to be called like `f`: `compile(f, x)(y)`
 computes `f(y)` for any `y` alike `x` in structure, shapes and element types.
 It returns what `f` returns, in arrays of its own, with numbers as numbers,
 and what `f` writes into an argument's arrays it leaves there, as `f` would.
 
-`measure` says which claims are timed when preparing, as for `prepare`:
-`:none` none, `:close` the options whose estimates are close, `:all` every
-option; `true` and `false` mean `:close` and `:none`. The default is
-`TEMPEST_MEASURE`'s where the environment sets it.
+Unless asked, nothing is timed: the first call runs the plan the estimates
+pick, with the times the tuning record holds, and the plan does not change
+after. Two keywords ask for more. `measure` says which claims are timed, as
+for `prepare`: `:none` none, the default; `:close` the options whose
+estimates are close; `:all` every option; `true` and `false` mean `:close`
+and `:none`. `search` says when, where something is timed: `:before`, the
+default, while preparing, so that the first call runs the plan measurement
+picks; `:after`, behind the first result. Where nothing is timed, with
+`measure = :none` or on a target that times nothing, there is nothing to
+search and `search` means nothing, as `measure` means nothing on such a
+target. The environment overrides the defaults, `TEMPEST_MEASURE` (`none`,
+`close` or `all`) and `TEMPEST_SEARCH` (`before` or `after`), and a keyword
+given overrides the environment.
 
-`search` says when they are timed. `:before`, the default: while preparing,
-so that the first call runs the plan measurement picks. `:after`: behind the
-first result, returning a `Searching` that is called as the `Compiled` is.
-`compile` returns with the plan the estimates pick, prepared timing nothing,
+Measuring once serves the preparations after it. A preparation that measures
+close calls keeps the decisions its cover settles, and one that measures
+nothing, in this process or another, replays them: its plan is the measured
+one, with nothing timed. That holds for the same program, the same arguments'
+shapes and types and the same `f` with what it captures, on the same target
+and device, with the same toolchain's record and rates file (a file per
+device and toolchain) still holding the times those decisions rest on, where
+the measuring preparation settled (its covers, up to three, ended on one that
+measured nothing new; `TEMPEST_SETTLE=false` keeps unsettled decisions,
+which are not replayed so) and no claim failed to build in the preparation
+that replays. Decisions reached measuring every option are not replayed by
+one that measures nothing, and none are kept or replayed with
+`TEMPEST_REPLAY=false` (see `prepare`).
+
+With `search = :after`, `compile` returns a `Searching`, called as the
+`Compiled` is, with the plan the estimates pick, prepared timing nothing,
 while a task (a `Tempest.Compiler.Search`) prepares the program again,
 measuring as `measure` says, its decisions settled as a preparation's are.
 It compiles and builds on a thread of its own where Julia has more than
 one; on one, it runs only where a call waits, and holds the calls while it
-compiles. The calls take its timings, one each after its own work, on the
+compiles, and `wait(c)` after the first result takes the whole search at
+once. The calls take its timings, one each after its own work, on the
 calling task: so a claim is timed with none of the program's own work
 beside it, as when preparing, and the search never captures a graph beside
 the caller's work, which CUDA forbids the device's synchronization during.
@@ -34,13 +56,13 @@ plan, captured then, as `compile` captures the first, where it differs. A
 program not called searches no further than its next timing; `wait(c)` takes
 the search's timings until it ends, and changes the plan. The record keeps
 every time taken, so a search cut short loses none, and the decisions it
-settles are kept as it ends: a preparation of the same program in another
-process replays them, its first result is the measured plan, and there is
-nothing to search behind it, so `compile` returns a `Compiled`, as it does
-where the target times nothing. A search that fails leaves the program its
-plan, with a warning. Two plans of a program round alike to the program's
-precision but not to the bit: a step's results may change in their last
-bits from the call that runs the new plan, as between two preparations.
+settles are kept as it ends: a preparation of the same program after it
+replays them, its first result is the measured plan, and there is nothing to
+search behind it, so `compile` returns a `Compiled`, as it does where nothing
+is timed. A search that fails leaves the program its plan, with a warning.
+Two plans of a program round alike to the program's precision but not to
+the bit: a step's results may change in their last bits from the call that
+runs the new plan, as between two preparations.
 
 Which leaves of the arguments are inputs follows `trace`: arrays, also inside
 tuples, named tuples, structs, mutable ones too, and vectors of other things
@@ -113,8 +135,8 @@ The level beneath is in `Tempest.Compiler`: `prepare`, `bind!`, and
 `execute!` or `replay!`, with `point!` binding a call's arrays as `compile`
 does. `c.executable` is the prepared program, and `explain(c)` shows it.
 """
-function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), capture::Bool = true,
-        search::Symbol = :before)
+function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), search::Symbol = searching(),
+        capture::Bool = true)
     search in (:before, :after) || throw(ArgumentError("search is :before or :after, not :$search"))
     passed = argument_arrays((f, args...))
     globals = read_globals(f, args, passed)

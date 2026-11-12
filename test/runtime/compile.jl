@@ -563,6 +563,17 @@ end
     c = compile(x -> 2 .* x, data(4); search = :after, measure = :close)
     @test c isa T.Compiled && wait(c) === c && c(data(4)) == 2 .* data(4)
     @test_throws ArgumentError compile(x -> 2 .* x, data(4); search = :never)
+    # Unless asked, nothing is measured and nothing searched; the environment
+    # sets the defaults, validated alike.
+    withenv("TEMPEST_MEASURE" => nothing, "TEMPEST_SEARCH" => nothing) do
+        @test C.measuring() === :none && C.searching() === :before
+    end
+    withenv("TEMPEST_MEASURE" => "close", "TEMPEST_SEARCH" => "after") do
+        @test C.measuring() === :close && C.searching() === :after
+    end
+    withenv("TEMPEST_SEARCH" => "never") do
+        @test occursin("TEMPEST_SEARCH is before or after", message(() -> compile(x -> 2 .* x, data(4))))
+    end
     # The calls take the other plan between two of them, called until the
     # search has ended, each call a step of the LSTM: a recurrence, its
     # parameters and Adam's moments replaced in place. After as many steps
@@ -761,6 +772,36 @@ if CUDA_FUNCTIONAL
         @test timedwait(() -> lines() > before, 60) === :ok && lines() == before + 1
         @test isapprox(Array(wait(s)(z)), expected; rtol = 1.0e-4)
         @test s.search === nothing && C.ended(search) && !istaskfailed(search.task) && !isready(search.asked)
+    end
+
+    @testset "measured when asked, and the default replays it, on CUDA" begin
+        # Programs no other test here prepares, their options in no record yet.
+        z = CuArray(single(data(40, 72; scale = 0.1)))
+        g = x -> sum(abs2, 3.5f0 .* x; dims = 2)
+        expected = sum(abs2, 3.5f0 .* Array(z); dims = 2)
+        withenv("TEMPEST_VERIFY" => "false", "TEMPEST_CROSSCHECK" => "false", "TEMPEST_MEASURE" => nothing, "TEMPEST_SEARCH" => nothing) do
+            # Asked for nothing, nothing is searched, whatever `search` says:
+            # with nothing measured it means nothing.
+            @test compile(g, z) isa T.Compiled && compile(g, z; search = :after) isa T.Compiled
+            withenv(() -> (@test compile(g, z) isa T.Compiled), "TEMPEST_SEARCH" => "after")
+            # The environment sets the defaults, and a keyword overrides it.
+            withenv("TEMPEST_MEASURE" => "close", "TEMPEST_SEARCH" => "after") do
+                @test compile(g, z; measure = :none) isa T.Compiled
+                s = compile(g, z)
+                @test s isa T.Searching && isapprox(Array(wait(s)(z)), expected; rtol = 1.0e-4)
+            end
+            # Measured once, before the first result: a default preparation of
+            # the same program after it replays the decisions it settled, and
+            # its plan is the measured one.
+            h = x -> sum(abs2, 4.5f0 .* x; dims = 1)
+            measured = compile(h, z; measure = :close)
+            @test measured isa T.Compiled
+            before = C.reached_counts()
+            again = compile(h, z)
+            @test C.reached_counts().replayed == before.replayed + 1 && C.reached_counts().covered == before.covered
+            @test again isa T.Compiled && C.same_choices(again.executable, measured.executable)
+            @test isapprox(Array(again(z)), sum(abs2, 4.5f0 .* Array(z); dims = 1); rtol = 1.0e-4)
+        end
     end
 
     @testset "arguments read where the caller has them, on CUDA" begin

@@ -225,13 +225,25 @@ end
 level(measure::Bool) = measure ? :close : :none
 level(measure::Symbol) = measure
 
-# `prepare`'s default, from the environment: the tests measure nothing unless
-# a test asks, since a time taken beside other jobs on one device decides a
-# close call by chance, and a test of the plan would then pass by chance.
+# `prepare`'s and `compile`'s default of what is measured: nothing, unless the
+# environment's TEMPEST_MEASURE says otherwise, so that a preparation gives
+# the plan the estimates pick, and what the record holds, and nothing after;
+# measuring is asked for. The tests measure nothing unless a test asks, since
+# a time taken beside other jobs on one device decides a close call by
+# chance, and a test of the plan would then pass by chance.
 function measuring()
-    m = Symbol(get(ENV, "TEMPEST_MEASURE", "close"))
+    m = Symbol(get(ENV, "TEMPEST_MEASURE", "none"))
     m in (:none, :close, :all) || throw(ArgumentError("TEMPEST_MEASURE is none, close or all, not $m"))
     m
+end
+
+# `compile`'s default of when a preparation that measures times its claims:
+# before the first result (`:before`), unless the environment's TEMPEST_SEARCH
+# says after it (`:after`). Where nothing is measured it means nothing.
+function searching()
+    s = Symbol(get(ENV, "TEMPEST_SEARCH", "before"))
+    s in (:before, :after) || throw(ArgumentError("TEMPEST_SEARCH is before or after, not $s"))
+    s
 end
 
 "Whether the decider may time claims and fit rates on its target: not when dry."

@@ -82,8 +82,12 @@ struct NotReplayed <: Exception end
 # The environment's settings that the cover does not read, or reads into
 # the decider's `measure`, which the key holds: every other `TEMPEST_`
 # setting is part of the key, as the generator's product tiles are.
-const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_CROSSCHECK", "TEMPEST_MEASURE", "TEMPEST_SETTLE", "TEMPEST_REPLAY",
-    "TEMPEST_RATES", "TEMPEST_CALIBRATE", "TEMPEST_GPU_LOCK")
+# TEMPEST_SEARCH is `compile`'s, when a preparation measures, before the
+# first result or behind it, and the cover never reads it: a search behind
+# the first result reaches what a preparation before it reaches, and each
+# replays what the other kept.
+const UNREAD_SETTINGS = ("TEMPEST_CACHE", "TEMPEST_VERIFY", "TEMPEST_CROSSCHECK", "TEMPEST_MEASURE", "TEMPEST_SEARCH", "TEMPEST_SETTLE",
+    "TEMPEST_REPLAY", "TEMPEST_RATES", "TEMPEST_CALIBRATE", "TEMPEST_GPU_LOCK")
 
 read_settings() = sort!([k => v for (k, v) in ENV if startswith(k, "TEMPEST_") && !(k in UNREAD_SETTINGS) && !startswith(k, "TEMPEST_CORPUS")])
 
