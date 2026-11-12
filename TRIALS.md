@@ -1484,7 +1484,26 @@ against 30.70 without it over 15 rounds in one process, 12 of them faster;
 its step runs in two modes, near 30.3 and near 31.0, whatever the plan, not
 explained, and its cold preparation is in the upper of its two, 164 s,
 the cover's round after a proposal taken, timing the runs whole 4.9 s of
-it. A
+it. The bursts, sampled (`challengers/build-pipeline-2026-11-12`,
+`bursts.jl`, main e269bc2 on tileiras 13.5.37): each lasts as long as its
+slowest compilation, one tileiras process of one thread and the ptxas it
+runs, 2 to 16 s, and those slowest add to 43.3 of the 51.7 s the model's
+chunk of 16 spends in bursts that compile and 97.5 of the GPT step's 103.3;
+most bursts compile nothing. A kernel is loaded or compiled on a thread from
+the moment it is asked for (`cached_kernel`), where no compilation began
+until the stage's last kernel was asked for, 8.2 s of the model's and 3.9
+now, within the spread of the wall. Timing each kernel as it is built,
+while the rest compile, as the owner's autotuner does, is NOT adopted on
+this machine: 80 launches timed idle and under 5, 10 and 20 compilations
+read 1.4 to 1.8, 3.0 and 5.3% slow, the device's clock falling with the
+load on a power budget the processor shares, so a time in the record would
+be of what else ran. Tile variants of a kernel share no inference and a
+shape passed as a constant would be inferred again each, under a second of
+wall. The record and the rates a machine fits are a file per device and
+toolchain (`toolchain`, `record.jl`), a time taken on one tile compiler
+never read for a kernel another built; the shipped rates, fitted on 13.4,
+stand 2.7 times off on Float32 products recomputed and are to be fitted
+again. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
