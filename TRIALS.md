@@ -1553,7 +1553,26 @@ waited for before the first that failed is thrown (`ended_all`), where the
 rest went on compiling beside the timings that followed. A function that
 returns its state as new arrays is another program than one that writes
 it: the GPT step unmeasured, 166 kernels and 1.47 ms where the results
-replace the inputs' storage in 170 and 1.17. A
+replace the inputs' storage in 170 and 1.17. The model with a batch, B
+sequences through one `forward!` each at its own positions (Vallmo's
+branch `tempest`, 213 lines, an engine of 147 where the kernels were 1,311
+and the old model and loop 626), asked three things of Tempest. Its caches
+are written by a loop over the sequences, each its own positions: B
+overwrites by key chained, alike but for the sequence, which are one
+overwrite with one more axis where a key's component keeps each step's
+positions apart (`joined_writes`, `src/Compiler/plan/writes.jl`), one
+kernel a cache at any B. An array of `CartesianIndex{N}` among other
+indices stands for N axes as in Base (`selection`). And a fold by key
+written into the caller's array started from a copy of the whole array: the
+test that its contents are its own storage compared the two buffers as
+objects, and values over one argument each hold a vector of it made apiece
+(`same_storage`), so a write of 2 KiB into a cache of 16 MiB took 106 μs
+and takes 1.9, flat in the cache and in B. Before these, on plans that
+measure nothing, the 4B decodes a token of each sequence in 49.8, 64.0 and
+91.7 ms at B of 1, 4 and 16, 20, 63 and 174 tokens a second, the writes
+24.7 ms of the last; Vallmo's kernels 37.9 at B of 1; and the same file
+untraced on the device, Einops contracting through a copy of each weight,
+about 3 s whatever B. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
