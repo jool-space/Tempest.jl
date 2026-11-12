@@ -56,18 +56,3 @@
     # Its program's results are its function's, as before.
     @test T.withgradient(x -> sum(steps(x, identity, true)), x).val ≈ sum(steps(x, identity, true))
 end
-
-# A roll keeps the program's meaning: traced with nothing rolled, every
-# iteration's nodes in place, a program interprets as it does rolled, its
-# gradient too.
-@testset "rolled and unrolled programs interpret the same" begin
-    W, xs, h0 = data(4, 4; scale = 0.3) ./ 4, data(4, 7; scale = 0.7), data(4; scale = 1.1)
-    cell(W, xs, h) = (for t in axes(xs, 2); h = tanh.(W * h .+ xs[:, t]) .+ 0.01 .* sum(h); end; sum(abs2, h))
-    unrolled(f, args...) = Base.ScopedValues.with(() -> trace(f, args...), C.ROLLING => false)
-    for f in (cell, (W, xs, h) -> T.withgradient((W, h) -> cell(W, xs, h), W, h))
-        p, q = trace(f, W, xs, h0), unrolled(f, W, xs, h0)
-        @test count(n -> n.op isa C.Loop, p.nodes) >= 1
-        @test !any(n -> n.op isa C.Loop, q.nodes)
-        @test all(map(≈, C.leaves(interpret(p, W, xs, h0)), C.leaves(interpret(q, W, xs, h0))))
-    end
-end

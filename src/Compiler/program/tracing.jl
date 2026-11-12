@@ -1468,7 +1468,7 @@ function traced_on(tape, @nospecialize(f), @nospecialize(args...))
         push!(writes, length(results) => k)
     end
     # A loop `f` ran outside any gradient is rolled (see `rolled`).
-    nodes, backward, at = rolled(tape.nodes, tape.backward, 1, results)
+    nodes, backward, at = rolled(tape.nodes, tape.backward, 1, [results; arguments])
     program = Program(nodes, map(a -> at[a], arguments), map(r -> at[r], results), input_structure, output_structure, backward, writes)
     prune(program), tape.met
 end

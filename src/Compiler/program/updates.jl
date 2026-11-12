@@ -66,6 +66,88 @@ function moved!(x::TracedArray)
     end
 end
 
+"""
+    joined_write(tape, x, indices, arrays, values, j, positions) -> node
+
+The contents of node `x` with the writes of a loop's steps made at once, as
+one write: step `s` writes, as `Update(indices)` does, its slice of node
+`values`, the steps its last axis, with the index `j` at `positions[s]`, an
+integer or a range, and each index array `IndexInput(k)` the node `first`
+of `arrays(k)`, an array every step reads or, where `last` of it says so,
+one with the steps its last axis, of which the step reads its slice. The
+positions keep the steps' writes apart. The axes from the first to the last
+whose index differs from step to step are merged into one, which the write
+indexes by the linear index of each element's position along them (see
+`linear_index`); the other axes it indexes as each step does.
+"""
+function joined_write(tape::Tape, x::Int, indices, arrays, values::Int, j, positions)
+    nodes = tape.nodes
+    A, T, P = nodes[x].dims, nodes[x].eltype, length(positions)
+    stepwise(k) = indices[k] isa IndexInput && last(arrays(indices[k].input))
+    # Each index's axes among a step's values, in order.
+    function extent(k)
+        i = indices[k]
+        i isa Integer && return ()
+        i isa IndexInput || return (length(i),)
+        id = first(arrays(i.input))
+        stepwise(k) ? nodes[id].dims[1:(end - 1)] : nodes[id].dims
+    end
+    blocks = [extent(k) for k in eachindex(indices)]
+    a, b = extrema([j; filter(stepwise, eachindex(indices))])
+    inner = Tuple(Iterators.flatten(blocks[a:b]))
+    # The values in the order of the axes the write's index along them
+    # gives: the steps beside the axes merged, before those of the indices
+    # after them.
+    outer = sum(length, blocks[1:(a - 1)]; init = 0)
+    V = nodes[values].dims
+    perm = (1:(outer + length(inner))..., length(V), (outer + length(inner) + 1):(length(V) - 1)...)
+    values = issorted(perm) ? values : record!(tape, Permute(perm), (values,), map(d -> V[d], perm), nodes[values].eltype)
+    written = (V[1:outer]..., prod(inner) * P, V[(outer + length(inner) + 1):(end - 1)]...)
+    nodes[values].dims == written || (values = record!(tape, Reshape(), (values,), written, nodes[values].eltype))
+    nodes[values].eltype === T || (values = record!(tape, Map(Cast{T}()), (values,), written, T))
+    # The other indices as each step has them, their index arrays the write's.
+    others = Int[]
+    renumbered(i) = i isa IndexInput ? (push!(others, first(arrays(i.input))); IndexInput(1 + length(others))) : i
+    head = map(renumbered, indices[1:(a - 1)])
+    tail = map(renumbered, indices[(b + 1):end])
+    # Where only `j` differs and the steps' positions follow one another,
+    # the write is of their range.
+    following = all(r -> r isa Integer || step(r) == 1, positions) && all(s -> first(positions[s + 1]) == last(positions[s]) + 1, 1:(P - 1))
+    if a == b && following
+        return update(TracedArray(tape, x), (head..., first(first(positions)):last(last(positions)), tail...), others, values)
+    end
+    # Else of the axes from `a` to `b` merged, by the linear index of each
+    # element's position along them, its axes in their block, the steps last.
+    before = 0
+    components = map(a:b) do k
+        i, block = indices[k], blocks[k]
+        shape = (ntuple(_ -> 1, before)..., block..., ntuple(_ -> 1, length(inner) - before - length(block))...)
+        before += length(block)
+        k == j && return sliding_index(tape, positions, shape)
+        i isa Integer && return i
+        i isa IndexInput || return Traced(tape, constant!(tape, reshape(collect(i), shape..., 1)))
+        id = first(arrays(i.input))
+        Traced(tape, record!(tape, Reshape(), (id,), (shape..., stepwise(k) ? P : 1), nodes[id].eltype))
+    end
+    linear = linear_index(components, A[a:b])
+    push!(others, record!(tape, Reshape(), (linear.id,), (prod(inner) * P,), node(linear).eltype))
+    merged = TracedArray(tape, record!(tape, Reshape(), (x,), (A[1:(a - 1)]..., prod(A[a:b]), A[(b + 1):end]...), T))
+    w = update(merged, (head..., IndexInput(1 + length(others)), tail...), others, values)
+    record!(tape, Reshape(), (w,), A, T)
+end
+
+# The index `positions[s]` of each step `s` of a joined write, its elements
+# along axes `shape` and the steps last: where each step's starts, stepping
+# evenly over the steps, so that lowering sees its first index and the steps'.
+function sliding_index(tape, positions, shape)
+    P = length(positions)
+    stride = first(positions[2]) - first(positions[1])
+    steps = Traced(tape, record!(tape, Reshape(), (constant!(tape, 0:stride:((P - 1) * stride)),), (ntuple(_ -> 1, length(shape))..., P), Int))
+    start = first(positions)
+    start isa Integer && return steps + start
+    steps + Traced(tape, record!(tape, Reshape(), (constant!(tape, start),), (shape..., 1), Int))
+end
+
 # The arrays that share the memory of `x`: the array that owns it and every
 # layout made from it that something still holds, each at the node of its
 # contents now.
