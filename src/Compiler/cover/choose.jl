@@ -749,12 +749,12 @@ end
 # other's time, else estimated; nothing where no side lost so.
 function stopped(d::Decider, da, db, close)
     whole(side) = all(x -> haskey(d.record, x[3].choice.key), side)
-    timed(side) = sum(x -> get(d.record, x[3].choice.key, 0.0), side; init = 0.0)
+    recorded(side) = sum(x -> get(d.record, x[3].choice.key, 0.0), side; init = 0.0)
     for (side, other) in ((da, db), (db, da))
         whole(other) && !whole(side) || continue
-        bound = timed(other)
+        bound = recorded(other)
         past(least_time(d, side, close), bound, d.rates.noise) || continue
-        how = past(timed(side), bound, d.rates.noise) ? :measured : :estimated
+        how = past(recorded(side), bound, d.rates.noise) ? :measured : :estimated
         return Comparison(known_time(d, da), known_time(d, db), how, (da, db))
     end
     nothing
