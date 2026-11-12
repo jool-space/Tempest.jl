@@ -101,6 +101,7 @@ end
 
 # The node holding `v`, a number, a handle or an array, with element type `T`.
 function converted(tape, v, ::Type{T}) where {T}
+    holds_traced(v) && throw(ArgumentError(HOST_CONTAINER))
     v isa Union{Traced, TracedArray} || return constant!(tape, v isa AbstractArray ? convert(AbstractArray{T}, v) : convert(T, v))
     n = node(v)
     n.eltype === T ? v.id : record!(tape, Map(Cast{T}()), (v.id,), n.dims, T; scalar = n.scalar)

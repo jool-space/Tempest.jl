@@ -130,6 +130,8 @@ Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[])
 Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[])
 
 function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
+    # A loop's step was recorded node by node.
+    op isa Loop || !holds_handle(op) || throw(ArgumentError(HANDLE_AS_DATA))
     isconcretetype(T) || throw(ArgumentError("element type $T of a $(op_name(op)) is not concrete"))
     push!(tape.nodes, Node(op, Tuple(inputs), Tuple(dims), T, scalar))
     length(tape.nodes)
@@ -289,10 +291,19 @@ end
 # layers as a checkpoint's tree gives them, and is looked inside as a tuple
 # is, its length fixed when traced. As with a struct, tracing builds a vector
 # of its own, so a program never pushes into the caller's.
-nested(@nospecialize(x::Vector)) = !(eltype(x) <: Number)
+nested(@nospecialize(x::Vector)) = !(eltype(x) <: Number) || holds_traced(x)
+
+# So is a host array of traced numbers or arrays, a comprehension's say,
+# whatever its type and axes: it organises them for the trace, and is no
+# array of the program (see `HOST_CONTAINER`). Returned, it comes back as
+# Julia's run returns it, an array of numbers or arrays on the host. An array
+# of more axes is opened by its last, each slice an array of one axis fewer.
+nested(@nospecialize(x::AbstractArray)) =
+    holds_traced(x) || !(x isa TracedArray) && !(eltype(x) <: Number) && any(v -> v isa TracedArray, x)
 
 parts(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))
-parts(x::Vector) = Tuple(x)
+parts(x::AbstractVector) = Tuple(x)
+parts(x::AbstractArray) = Tuple(collect(selectdim(x, ndims(x), k)) for k in axes(x, ndims(x)))
 
 # A struct of the kind of `T` with these fields, built as `new` builds one: its
 # constructors never run, since what they check of a number or an array a
@@ -335,6 +346,11 @@ Base.@nospecializeinfer function construct(::Type{T}, @nospecialize(elements::Tu
     end
     v
 end
+
+# A vector or an array of more axes rebuilt from its parts, as `parts` gives
+# them, as Julia's array of their values.
+construct(::Type{T}, @nospecialize(elements::Tuple)) where {T <: AbstractVector} = construct(Vector{eltype(T)}, elements)
+construct(::Type{T}, @nospecialize(slices::Tuple)) where {T <: AbstractArray} = stack(slices)
 
 # The leaves of `x` in order, gathered into one vector: a model's hundreds of
 # arrays walked at each call in time linear in them.

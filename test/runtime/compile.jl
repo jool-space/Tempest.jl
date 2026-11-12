@@ -160,8 +160,11 @@ end
     # A closure is a struct of what it captures, built anew around results.
     shift = compile(x -> (y -> y .+ 2 .* x), x)(x)
     @test shift([1.0, 1.0, 1.0, 1.0]) ≈ 1 .+ 2 .* x
-    # A matrix of traced arrays would hand them out.
-    @test occursin("may hold traced values", message(() -> trace(x -> reshape(Any[x, x], 1, 2), x)))
+    # A matrix of traced arrays is a container of them, as a vector is,
+    # built anew around the results; a dictionary of them is refused.
+    held = compile(x -> reshape(Any[x, 2 .* x], 1, 2), x)(x)
+    @test size(held) == (1, 2) && held[1, 1] ≈ x && held[1, 2] ≈ 2 .* x
+    @test occursin("holding traced values is none of them", message(() -> trace(x -> Dict(:x => x), x)))
 end
 
 @testset "the function's arrays are inputs" begin

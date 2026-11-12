@@ -65,6 +65,30 @@ Traced(tape::Tape, id::Int) = Traced{tape.nodes[id].eltype}(tape, id)
 
 node(x::Union{TracedArray, Traced}) = x.tape.nodes[x.id]
 
+# A handle stands for a value only on its tape, while the program is traced:
+# held by an operation, as a constant's value or captured by a function the
+# program calls, it would be read where it means nothing.
+const HANDLE_AS_DATA = "a traced value would be recorded as data: a function the program calls holds one, captured or \
+    bound, as a broadcast's or a fold's function capturing a traced number or a host array of them does. Pass traced \
+    values as arguments of the broadcast, and arrays the program makes rather than host arrays of traced numbers"
+
+"Whether `x` holds a handle: itself, or among its elements, keys, values or fields."
+holds_handle(@nospecialize(x)) = holds_handle(x, nothing)
+Base.@nospecializeinfer function holds_handle(@nospecialize(x), seen)
+    x isa Union{Traced, TracedArray} && return true
+    T = typeof(x)
+    (isbitstype(T) || x isa Union{AbstractString, Symbol, Module, Type, Tape}) && return false
+    x isa AbstractArray && isbitstype(eltype(x)) && return false
+    if ismutable(x)
+        seen === nothing && (seen = Base.IdSet{Any}())
+        x in seen && return false
+        push!(seen, x)
+    end
+    x isa Union{AbstractArray, Tuple, NamedTuple, AbstractSet} && return any(y -> holds_handle(y, seen), x)
+    x isa AbstractDict && return any(((k, v),) -> holds_handle(k, seen) || holds_handle(v, seen), x)
+    any(k -> isdefined(x, k) && holds_handle(getfield(x, k), seen), 1:fieldcount(T))
+end
+
 Base.size(x::TracedArray) = x.dims
 Base.IndexStyle(::Type{<:TracedArray}) = IndexCartesian()
 Base.show(io::IO, x::TracedArray{T, N}) where {T, N} = print(io, "TracedArray{$T}(%", x.id, ", ", x.dims, ")")
@@ -87,8 +111,36 @@ end
 
 constant!(tape::Tape, x::Number) = record!(tape, Constant(x), (), (), typeof(x); scalar = true)
 function constant!(tape::Tape, x::AbstractArray{<:Number})
+    holds_traced(x) && throw(ArgumentError(HOST_CONTAINER))
     push!(tape.met, x)
     record!(tape, Constant(collect(x)), (), size(x), eltype(x))
+end
+
+# A host array of traced numbers, as a comprehension, `map` over a range or
+# `[a, b]` makes, is trace-time organisation of the numbers it holds, as a
+# vector of traced arrays is (see `nested`): never data, which a handle means
+# nothing as, and never an array the tracer makes of them unasked. An
+# operation that takes an array of numbers, a broadcast with traced arrays, a
+# write, a product, is given an array the program makes.
+const HOST_CONTAINER = "a host array of traced numbers, as a comprehension or `map` over a range makes, holds them \
+    for the trace and is no array of the program: an operation on arrays takes one the program makes, by `stack` of \
+    traced arrays, a reduction along `dims`, or `map` or `mapslices` over slices"
+
+# Julia's generic methods over such an array, a product's say, allocate a
+# host array of traced numbers and fill it with plain ones, which no tape
+# holds.
+Traced(::Number) = throw(ArgumentError(HOST_CONTAINER))
+Traced{T}(::Number) where {T} = throw(ArgumentError(HOST_CONTAINER))
+Traced{T}(x::Traced{T}) where {T} = x
+
+# Whether `x` is a host array some of whose elements are traced numbers.
+# An array of numbers of one plain type holds none, and is not walked: a
+# model's weights, or a device array, which is not read element by element.
+function holds_traced(@nospecialize(x))
+    x isa AbstractArray{<:Number} && !(x isa TracedArray) || return false
+    T = eltype(x)
+    isconcretetype(T) && !(T <: Traced) && return false
+    any(v -> v isa Traced, x)
 end
 
 # A range is the index itself: it stays a range, and lowers to a formula
@@ -264,6 +316,7 @@ end
 struct TracedStyle <: Broadcast.BroadcastStyle end
 Base.BroadcastStyle(::Type{<:TracedArray}) = TracedStyle()
 Base.BroadcastStyle(s::TracedStyle, ::Broadcast.AbstractArrayStyle) = s
+Base.BroadcastStyle(s::TracedStyle, ::Broadcast.Style{Tuple}) = s
 
 # A traced number broadcast with numbers and arrays of no dimensions is
 # computed as Julia computes a number's broadcast. With an array of dimensions
@@ -277,6 +330,8 @@ Base.BroadcastStyle(::Type{<:Traced}) = TracedNumberStyle()
 handle(x::TracedArray) = Traced(x.tape, x.id)
 handle(x::TracedArray, tape) = handle(x)
 handle(x::AbstractArray{<:Number}, tape) = Traced(tape, constant!(tape, x))
+# A tuple of numbers broadcast is a vector of them, as in Base.
+handle(x::Tuple{Vararg{Number}}, tape) = handle(collect(x), tape)
 handle(x, tape) = handle(x)
 handle(x::Traced) = x
 handle(x::Number) = x
@@ -289,6 +344,7 @@ handle(x) = throw(ArgumentError("cannot broadcast a $(typeof(x)) with traced arr
 operand_dims(x::TracedArray) = x.dims
 operand_dims(x::Traced) = node(x).dims
 operand_dims(x::AbstractArray{<:Number}) = size(x)
+operand_dims(x::Tuple{Vararg{Number}}) = (length(x),)
 operand_dims(x) = ()
 
 "The `I`th component of a tuple."
@@ -783,6 +839,7 @@ selection_index(i::AbstractRange{<:Integer}) = i
 # A vector of integers that steps evenly is a range: a formula, not a gather.
 selection_index(i::Vector{<:Integer}) = linear_range(i)
 selection_index(i::AbstractArray{<:Integer}) = i
+selection_index(i::AbstractArray{<:Traced}) = throw(ArgumentError(HOST_CONTAINER))
 selection_index(i) = throw(ArgumentError("unsupported index $(typeof(i)) into a traced array"))
 
 index_array(i) = i
@@ -1227,13 +1284,13 @@ LinearAlgebra.normalize(x::TracedArray{<:Real}, p::Real = 2) = x ./ norm(x, p)
 # rate, a size.
 is_input(leaf) = leaf isa AbstractArray{<:Number}
 
-# A constant among the results, returned as it is, unless it could hold traced
-# values: an array of other things than numbers that is no vector, or a
-# dictionary. A closure over traced values is a struct, and a vector of
-# traced arrays a vector, built anew around the results.
+# A constant among the results, returned as it is, unless it holds traced
+# values where nothing rebuilds them: a dictionary, a set or a `Complex` of
+# them. A closure over traced values is a struct, and a host array of traced
+# numbers or arrays a container, built anew around the results.
 function kept(leaf)
-    holds = leaf isa Union{AbstractArray, AbstractDict}
-    holds && throw(ArgumentError("a program's results are arrays, numbers and constants; a $(typeof(leaf)) may hold traced values"))
+    holds_handle(leaf) && throw(ArgumentError("a program's results are arrays and numbers, in tuples, named tuples, \
+        structs and vectors, and constants; a $(typeof(leaf)) holding traced values is none of them"))
     leaf === nothing ? nothing : Kept(leaf)
 end
 
