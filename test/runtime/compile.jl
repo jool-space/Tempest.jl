@@ -737,9 +737,9 @@ if CUDA_FUNCTIONAL
         # measured close calls replays the decisions it settled: its first
         # result is the measured plan, and there is nothing to search behind
         # it. (A preparation measuring nothing replays those of one measuring
-        # close calls, not every option; one that verifies returns the
-        # cover's decisions, which it holds the replayed to.)
-        withenv("TEMPEST_VERIFY" => "false") do
+        # close calls, not every option; one that verifies or crosschecks
+        # returns the cover's decisions, which it holds the replayed to.)
+        withenv("TEMPEST_VERIFY" => "false", "TEMPEST_CROSSCHECK" => "false") do
             s = compile(f, dw, dx; search = :after, measure = :close)
             @test s isa T.Searching && wait(s) === s
             again = compile(f, dw, dx; search = :after, measure = :close)
