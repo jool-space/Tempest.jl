@@ -576,10 +576,13 @@ function splice_step!(nodes, body::LoopBody, inputs)
     rank(n::Node) = n.scalar ? 0 : length(n.dims)
     shifted = steps > 1 ? shifted_states(body) : falses(nstate)
     at = zeros(Int, length(step.nodes))
+    # Each capture as the loop is given it, once rather than at each step.
+    captured = Dict{Int, Int}()
     carries = Dict{Int, Int}()
     for (k, a) in enumerate(step.arguments)
         n = step.nodes[a]
         outer = nodes[inputs[k]]
+        k > nstate + nscanned && (captured[a] = inputs[k])
         k <= nstate && shifted[k] && continue
         at[a] = if k <= nstate
             # One step: the state is where it starts.
@@ -641,8 +644,14 @@ function splice_step!(nodes, body::LoopBody, inputs)
         end
         op = n.op
         ins = map(i -> at[i], n.inputs)
-        any(i -> i isa IndexInput, op isa Union{Select, Scatter, Update} ? op.indices : ()) &&
-            throw(ArgumentError("a gather or scatter by index arrays in a recurrence's step is not supported yet"))
+        # An array of indices the steps share indexes its axis at each step
+        # alike, the steps an axis more, as a range does: it is read as the
+        # loop is given it. One a step computes would index each step's
+        # slice by its own slice, which a selection does not state.
+        indexing = op isa Union{Select, Scatter, Update} ? [i.input for i in op.indices if i isa IndexInput] : Int[]
+        all(j -> haskey(captured, n.inputs[j]), indexing) ||
+            throw(ArgumentError("a gather or scatter by index arrays a recurrence's step computes is not supported yet"))
+        ins = map((i, j) -> j in indexing ? captured[n.inputs[j]] : i, ins, ntuple(identity, length(ins)))
         at[id] = if op isa Map
             emit!(op, map((i, j) -> broadcast(i, rank(step.nodes[j]), rank(n)), ins, n.inputs), over(n), n.eltype)
         elseif op isa Reduce

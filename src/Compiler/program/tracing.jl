@@ -1012,6 +1012,82 @@ function recurrence(f, scanned, init, zipped)
     end
 end
 
+# Maps over slices: Base's `map` over slices of traced arrays, zipped where
+# there are several, a broadcast over them, `stack` of a function over them
+# and `mapslices`, which each state one. Each is a loop with no state (see
+# `traced_loop`): `f` traced once on a stand-in for a slice of each array, so
+# that the slices are one computation over the axes they are taken along,
+# whatever their count, where `f` run on each slice in turn would trace a
+# computation a slice. An array sliced along several axes is looped over
+# them as one, its last.
+Base.map(f, xs::TracedSlices, more::TracedSlices...) = map_slices(f, (xs, more...))
+Broadcast.broadcasted(f, xs::TracedSlices, more::TracedSlices...) = map_slices(f, (xs, more...))
+
+function map_slices(f, xs)
+    shape = size(first(xs))
+    all(s -> size(s) == shape, xs) || throw(DimensionMismatch("map over slices of sizes $(map(size, xs))"))
+    (; stacked, scalar, result) = sliced_loop(f, map(slicing, xs), shape)
+    # A number at each position is an array of them, as Base's map makes
+    # one; else each position's result, its slice of the stacked results.
+    length(stacked) == 1 && only(scalar) && result isa Traced && return reshape(only(stacked), shape)
+    map(CartesianIndices(shape)) do at
+        t = LinearIndices(shape)[at]
+        k = 0
+        rebuild(result) do _
+            x = stacked[k += 1]
+            x === nothing ? nothing : scalar[k] ? x[t] : x[ntuple(_ -> Colon(), ndims(x) - 1)..., t]
+        end
+    end
+end
+
+# Stacked along new last axes, the slices' results are the loop's own.
+function Base.stack(f, xs::TracedSlices; dims = :)
+    dims isa Colon || return stack(map(f, xs); dims)
+    (; stacked, result) = sliced_loop(f, (slicing(xs),), size(xs))
+    result isa Union{Traced, TracedArray} || throw(ArgumentError("stack over slices of a traced array takes a function returning an array or a number"))
+    reshape(only(stacked), (size(result)..., size(xs)...))
+end
+
+# The array slices `s` are of, and the axes a slice's position runs along, in
+# order; an axis of extent one where `drop = false` keeps one runs along none.
+slicing(s::TracedSlices) = (parent(s), Tuple(d for k in 1:ndims(s) for d in findall(==(k), s.slicemap)))
+
+# Base's: `f` of each slice with a colon at each axis of `dims`, its result
+# along those axes, padded with axes of extent one, and the other axes as the
+# array's.
+function Base.mapslices(f, x::TracedArray; dims)
+    isempty(dims) && return map(f, x)
+    others = Tuple(d for d in 1:ndims(x) if !(d in dims))
+    kept = ndims(x) - length(others)
+    (; stacked, scalar) = sliced_loop(f, ((x, others),), map(d -> size(x, d), others))
+    length(stacked) == 1 && only(stacked) !== nothing ||
+        throw(ArgumentError("mapslices over a traced array takes a function returning an array or a number"))
+    r = only(stacked)
+    own = only(scalar) ? () : size(r)[1:(end - 1)]
+    all(==(1), own[(kept + 1):end]) ||
+        throw(DimensionMismatch("mapslices cannot assign slice f(x) of size $own into output of size $(own[1:kept])"))
+    own = (own[1:min(kept, end)]..., ntuple(_ -> 1, kept - min(kept, length(own)))...)
+    y = reshape(r, (own..., map(d -> size(x, d), others)...))
+    permutedims(y, map(d -> d in dims ? count(e -> e in dims, 1:d) : kept + findfirst(==(d), others), 1:ndims(x)))
+end
+
+"""
+    sliced_loop(f, arrays, shape) -> (; stacked, scalar, result)
+
+`f` of a slice of each of `arrays`, each an array and the axes it is sliced
+along, at each position of `shape`: a loop with no state over those axes as
+one, each array's last, laid out at their positions in order. The results
+stacked along a last axis, as `traced_loop` gives them.
+"""
+function sliced_loop(f, arrays, shape)
+    lined = map(arrays) do (a, along)
+        rest = Tuple(d for d in 1:ndims(a) if !(d in along))
+        y = PermutedDimsArray(a, (rest..., along...))
+        eachslice(reshape(y, (map(d -> size(a, d), rest)..., prod(shape))); dims = length(rest) + 1)
+    end
+    traced_loop((_, slices) -> f(slices...), lined, (), true)
+end
+
 """
     traced_loop(f, scanned, init, zipped; reverse = false) -> (; stacked, scalar, result, steps)
 
@@ -1061,7 +1137,8 @@ function traced_loop(f, scanned, init, zipped; reverse = false)
         leaf isa Union{Number, AbstractArray{<:Number}} && return constant_handle(tape, leaf).id
         throw(ArgumentError("a step of accumulate returns arrays and numbers, got $(typeof(leaf))"))
     end
-    length(outs) == length(held) || throw(ArgumentError("a step of accumulate returns a result of the structure of `init`"))
+    # A loop with no state, a map, returns what its step does.
+    isempty(held) || length(outs) == length(held) || throw(ArgumentError("a step of accumulate returns a result of the structure of `init`"))
     # The step: what reads a stand-in; the rest stays outside, its values
     # the step's captures.
     reads = falses(length(tape.nodes))
