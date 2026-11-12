@@ -1037,7 +1037,17 @@ repoint!(r::FloorRun, value, buffer) = (foreach(l -> repoint!(l, value, buffer),
 
 # Whether fold by key `r` is in the storage of the contents it starts from:
 # `storage` put it over them.
-starts_in_place(graph, r, buffers) = graph.values[r].definition.into isa Read && buffers[graph.values[r].definition.into.value] === buffers[r]
+starts_in_place(graph, r, buffers) = graph.values[r].definition.into isa Read && same_storage(buffers[graph.values[r].definition.into.value], buffers[r])
+
+"""
+    same_storage(a, b)
+
+Whether buffers `a` and `b` are one storage: the same elements at the same
+address, whichever array holds them. Values over one argument's storage each
+hold a vector of the caller's array, made apiece (see `share!`), so that two
+of them are one storage and never one object.
+"""
+same_storage(a, b) = a === b || a !== nothing && b !== nothing && typeof(a) == typeof(b) && length(a) == length(b) && pointer(a) == pointer(b)
 
 # The floor for a group on any target: its scalar kernels, each launched as
 # the target launches one (see `floor_launch`), their folds split as it asks

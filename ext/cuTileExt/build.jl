@@ -862,7 +862,7 @@ end
 function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buffers, _)
     c = Context(g, claim.schedule)
     workspaces = Dict{Any, Workspace}()
-    held = filter(r -> g.values[r].into isa Load && buffers[g.values[r].into.value] === buffers[r], keyed_folds(c))
+    held = filter(r -> g.values[r].into isa Load && Tempest.Compiler.same_storage(buffers[g.values[r].into.value], buffers[r]), keyed_folds(c))
     launch_kernels(schedule_kernels(c, workspaces; held), workspaces, buffers, claim.schedule, target)
 end
 

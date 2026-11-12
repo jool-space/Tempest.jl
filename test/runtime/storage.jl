@@ -60,6 +60,16 @@ function check_appended_in_place(device, target)
         @test Array(outputs(execute!(ex))) == reference
         expected = reference
     end
+    # Prepared as `compile` prepares, on the caller's array, the write starts
+    # from the contents there as well: each value over the array holds a
+    # vector of it of its own, one storage and never one object, and no
+    # kernel passes over the whole cache first. In Float32, which tiles take.
+    Ks, ks = single(K), single(k)
+    singles = trace(appended, Ks, ks, p)
+    ez = prepare(singles, device(Ks), device(ks), device(p); target, replaces = (1 => 1,), point = true)
+    @test all(k -> !(k isa C.FloorKernels) || all(s -> s.items == 24, k.kernels), ez.kernels)
+    @test !any(k -> occursin("initial states", string(k)), ez.kernels)
+    @test Array(outputs(execute!(ez))) == interpret(singles, Ks, ks, p)
 end
 
 # A value the program computes is written over where the write is its last
