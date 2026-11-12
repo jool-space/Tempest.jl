@@ -45,15 +45,23 @@ those applied inside a fold the sweep recomputes, to that fold's tiles, are
 `inner`, at a factor of their own.
 
 A launch whose blocks sweep tiles one after another, waiting for what each
-step loads before the next, states the `steps` a block takes, those of a
-fold it recomputes in steps of its own among them, and the functions the
-steps compute on what they loaded, each with the number of steps it is
-applied in along their chain (`stepped`): a step takes as long as its loads
+step loads before the next, states the `steps` a block takes and the
+functions the steps compute on what they loaded, each with the number of
+steps it is applied in along their chain (`stepped`): a step takes as long as its loads
 and that chain take, however few positions it covers, and a sweep of many
-narrow steps takes that many times as long, whatever bytes it moves. Tempest prices a step on its package's memory and each function on
-the time it measured for it in a step (see `seconds`). A launch that states
-no steps, or one, is priced by its bytes, flops and functions alone, as a
-product's sweep is by its line.
+narrow steps takes that many times as long, whatever bytes it moves.
+Tempest prices a step on its package's memory and each function on the time
+it measured for it in a step (see `seconds`). A launch that states no steps,
+or one, is priced by its bytes, flops and functions alone, as a product's
+sweep is by its line.
+
+A fold a launch recomputes where it reads it, its flops `recomputed`, a
+block sweeps in steps of its own, before the sweep or inside each step the
+fold moves along: a product's steps, among the sweep's, where its body is
+bilinear along its axis, and otherwise `refold_steps` apart, combining its
+body elementwise, which wait on their own loads one after another with the
+rest of the block's work, however the sweep hides its bytes; Tempest prices
+each as a step of the sweep.
 """
 struct Work
     bytes::Float64
@@ -69,11 +77,13 @@ struct Work
     inner::Vector{Pair{Any, Float64}}
     steps::Float64
     stepped::Vector{Pair{Any, Float64}}
+    refold_steps::Float64
 end
 
 Work(bytes; reread = 0.0, passed = 0.0, flops = 0.0, recomputed = 0.0, factor = Float32, blocks = Inf, split = false,
-    applied = Pair{Any, Float64}[], swept = Pair{Any, Float64}[], inner = Pair{Any, Float64}[], steps = 0.0, stepped = Pair{Any, Float64}[]) =
-    Work(bytes, reread, passed, flops, recomputed, factor, blocks, split, applied, swept, inner, steps, stepped)
+    applied = Pair{Any, Float64}[], swept = Pair{Any, Float64}[], inner = Pair{Any, Float64}[], steps = 0.0, stepped = Pair{Any, Float64}[],
+    refold_steps = 0.0) =
+    Work(bytes, reread, passed, flops, recomputed, factor, blocks, split, applied, swept, inner, steps, stepped, refold_steps)
 
 """
     package_of(implementation) -> Symbol

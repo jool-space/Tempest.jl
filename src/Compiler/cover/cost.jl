@@ -74,7 +74,10 @@ function seconds(w::Work, r::Rates, memory::Memory, line, price = (regime, f) ->
     # each step moves (see `Work`).
     stepping = w.steps <= 1 ? 0.0 : memory.latency + w.steps * memory.step + cost(:stepped, w.stepped)
     longest = max(memory_seconds, compute, stepping)
-    longest + OVERLAP * (memory_seconds + compute + stepping - longest)
+    # A fold a block recomputes waits on its own loads, step by step, before
+    # the block goes on (see `Work`): its steps add to the rest.
+    refolding = w.refold_steps * memory.step
+    longest + OVERLAP * (memory_seconds + compute + stepping - longest) + refolding
 end
 
 "The class of products of `T` factors: a half type by name, Float32 by the target's precision."
