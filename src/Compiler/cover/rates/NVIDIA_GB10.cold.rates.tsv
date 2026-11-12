@@ -6,72 +6,72 @@ cuBLAS memory latency	5.0e-7
 cuBLAS memory bandwidth	5.46112e11
 cuDNN memory latency	5.0e-7
 cuDNN memory bandwidth	5.46112e11
-cuTile memory latency	1.7424726986144429e-6
-cuTile memory bandwidth	2.5409896702298984e11
-floor memory latency	2.908445289568695e-6
-floor memory bandwidth	4.2064515140889905e11
-cuBLAS full latency	4.0418464852182016e-6
-cuBLAS full rate	1.9293711931202395e13
-cuBLAS full split	1.9293711931202395e13
-cuBLAS full recompute	1.9293711931202395e13
-cuTile full latency	1.5065840603209627e-6
-cuTile full rate	2.6061765761191157e12
-cuTile full split	1.3177399680305247e12
-cuTile full recompute	2.8104350545810645e11
-cuBLAS Float16 latency	2.159311572171943e-6
-cuBLAS Float16 rate	9.867061858662127e13
-cuBLAS Float16 split	9.867061858662127e13
-cuBLAS Float16 recompute	9.867061858662127e13
-cuTile Float16 latency	1.9500511002444243e-6
-cuTile Float16 rate	7.617804000019631e13
-cuTile Float16 split	1.1915253961636893e13
-cuTile Float16 recompute	5.641235410626466e12
-cuBLAS BFloat16 latency	2.223312537156635e-6
-cuBLAS BFloat16 rate	9.87250442294043e13
-cuBLAS BFloat16 split	9.87250442294043e13
-cuBLAS BFloat16 recompute	9.87250442294043e13
-cuTile BFloat16 latency	1.918097880750846e-6
-cuTile BFloat16 rate	7.622132114024172e13
-cuTile BFloat16 split	1.2098695329290531e13
-cuTile BFloat16 recompute	5.445863594728617e12
-applied streamed any exp	2.8991717880566537e-13
-applied streamed any log	9.002687918063801e-13
-applied streamed any tanh	8.182525837452381e-13
-applied streamed any sqrt	7.823944183499298e-12
-applied streamed any sin	2.2998810755153754e-11
-applied streamed any cos	2.3750305108011238e-11
+cuTile memory latency	1.8361784600618238e-6
+cuTile memory bandwidth	2.4760189490497107e11
+floor memory latency	2.944342535070228e-6
+floor memory bandwidth	4.2516553781553796e11
+cuBLAS full latency	4.0462509718566966e-6
+cuBLAS full rate	1.9081135233523664e13
+cuBLAS full split	1.9081135233523664e13
+cuBLAS full recompute	1.9081135233523664e13
+cuTile full latency	1.8078642872916223e-6
+cuTile full rate	2.802110914372859e12
+cuTile full split	1.3676680242761365e12
+cuTile full recompute	7.121391668544312e11
+cuBLAS Float16 latency	2.1957901838460337e-6
+cuBLAS Float16 rate	9.858002106030061e13
+cuBLAS Float16 split	9.858002106030061e13
+cuBLAS Float16 recompute	9.858002106030061e13
+cuTile Float16 latency	2.01843726571402e-6
+cuTile Float16 rate	7.60916345176259e13
+cuTile Float16 split	1.2225356403711197e13
+cuTile Float16 recompute	5.892114010429455e12
+cuBLAS BFloat16 latency	2.131792359151125e-6
+cuBLAS BFloat16 rate	9.872505145321531e13
+cuBLAS BFloat16 split	9.872505145321531e13
+cuBLAS BFloat16 recompute	9.872505145321531e13
+cuTile BFloat16 latency	1.9871405350227854e-6
+cuTile BFloat16 rate	7.674450424930453e13
+cuTile BFloat16 split	1.2227444106622355e13
+cuTile BFloat16 recompute	5.761749462119467e12
+applied streamed any exp	2.212524868178134e-13
+applied streamed any log	9.460448917308906e-13
+applied streamed any tanh	8.277892260544206e-13
+applied streamed any sqrt	7.869720500264243e-12
+applied streamed any sin	2.3046494400380535e-11
+applied streamed any cos	2.3660659369262316e-11
 applied streamed any abs	0.0
 applied streamed any abs2	0.0
-applied streamed any inv	1.8360137628986584e-11
+applied streamed any inv	1.3025283109036057e-11
 applied streamed any *	0.0
 applied streamed any +	0.0
 applied streamed any -	0.0
-applied streamed any /	1.6984939062852922e-11
-applied streamed any ^	2.1745682945301104e-11
+applied streamed any /	1.714515768941327e-11
+applied streamed any ^	2.1720886374254622e-11
 applied streamed any max	0.0
 applied streamed any min	0.0
 applied streamed any identity	0.0
 applied streamed any Float32	0.0
 applied streamed any BFloat16	0.0
-applied swept full exp	9.819031004942858e-12
-applied swept full log	2.5459290925455846e-11
-applied swept full tanh	1.9538873990976313e-11
-applied swept full sqrt	1.481857310470236e-10
-applied swept full sin	3.7694550605871235e-10
-applied swept full cos	3.8989259390498354e-10
+applied swept full exp	7.797238549267504e-12
+applied swept full log	2.1965023550007956e-11
+applied swept full tanh	1.4144897059198414e-11
+applied swept full sqrt	1.487350485829264e-10
+applied swept full sin	3.639221250739677e-10
+applied swept full cos	3.6575316039733075e-10
 applied swept full abs	0.0
 applied swept full abs2	0.0
-applied swept full inv	3.4643555038571527e-10
+applied swept full inv	2.562866134592223e-10
 applied swept full *	0.0
 applied swept full +	0.0
 applied swept full -	0.0
-applied swept full /	3.1661987268116754e-10
-applied swept full ^	3.4765624060129063e-10
+applied swept full /	3.132705865549479e-10
+applied swept full ^	3.3293913112575346e-10
 applied swept full max	0.0
 applied swept full min	0.0
 applied swept full identity	0.0
 applied swept full Float32	0.0
-applied swept full BFloat16	2.9220584285560847e-12
+applied swept full BFloat16	0.0
 applied inner full exp	0.0
 applied inner full log	0.0
 applied inner full tanh	0.0
@@ -91,104 +91,104 @@ applied inner full min	0.0
 applied inner full identity	0.0
 applied inner full Float32	0.0
 applied inner full BFloat16	0.0
-applied swept Float16 exp	2.014159672381055e-12
-applied swept Float16 log	5.828857362055739e-12
-applied swept Float16 tanh	3.860472705397022e-12
-applied swept Float16 sqrt	2.5558472872833082e-11
-applied swept Float16 sin	4.162597436879745e-11
-applied swept Float16 cos	3.842163132788956e-11
+applied swept Float16 exp	1.953124294240549e-12
+applied swept Float16 log	4.97436467017387e-12
+applied swept Float16 tanh	3.982543461678034e-12
+applied swept Float16 sqrt	2.6321412063823324e-11
+applied swept Float16 sin	4.203796165336282e-11
+applied swept Float16 cos	3.916931189118511e-11
 applied swept Float16 abs	0.0
 applied swept Float16 abs2	0.0
-applied swept Float16 inv	5.854797289345237e-11
-applied swept Float16 *	0.0
-applied swept Float16 +	9.765617134394056e-13
+applied swept Float16 inv	4.402160407035449e-11
+applied swept Float16 *	1.0833738420257255e-12
+applied swept Float16 +	0.0
 applied swept Float16 -	8.850090799095156e-13
-applied swept Float16 /	5.268859740864551e-11
-applied swept Float16 ^	5.851745563806299e-11
-applied swept Float16 max	9.155272026606376e-13
-applied swept Float16 min	9.307858303553296e-13
+applied swept Float16 /	5.235290152783012e-11
+applied swept Float16 ^	5.917358443519039e-11
+applied swept Float16 max	0.0
+applied swept Float16 min	9.765625808011436e-13
 applied swept Float16 identity	0.0
-applied swept Float16 Float32	9.307858303553296e-13
-applied swept Float16 BFloat16	9.307858303553296e-13
-applied inner Float16 exp	4.333498837549854e-12
-applied inner Float16 log	0.0
+applied swept Float16 Float32	9.765625808011436e-13
+applied swept Float16 BFloat16	9.765625808011436e-13
+applied inner Float16 exp	0.0
+applied inner Float16 log	3.4027086703858345e-12
 applied inner Float16 tanh	0.0
-applied inner Float16 sqrt	5.920409995585629e-12
-applied inner Float16 sin	3.967284833983342e-12
-applied inner Float16 cos	4.013060717067418e-12
-applied inner Float16 abs	3.692629535478886e-12
-applied inner Float16 abs2	3.5553018862266583e-12
-applied inner Float16 inv	1.0787960802449703e-11
-applied inner Float16 *	0.0
-applied inner Float16 +	4.470826486802082e-12
-applied inner Float16 -	0.0
-applied inner Float16 /	6.423951648404369e-12
-applied inner Float16 ^	3.952033145182554e-12
+applied inner Float16 sqrt	5.050654339200378e-12
+applied inner Float16 sin	0.0
+applied inner Float16 cos	8.2855181049446e-12
+applied inner Float16 abs	4.455560920213486e-12
+applied inner Float16 abs2	2.9144256452617867e-12
+applied inner Float16 inv	6.851193223855745e-12
+applied inner Float16 *	3.3416672207131626e-12
+applied inner Float16 +	0.0
+applied inner Float16 -	3.4179672980805265e-12
+applied inner Float16 /	7.55309703670548e-12
+applied inner Float16 ^	8.2855181049446e-12
 applied inner Float16 max	0.0
-applied inner Float16 min	0.0
+applied inner Float16 min	4.501343742191466e-12
 applied inner Float16 identity	0.0
 applied inner Float16 Float32	0.0
-applied inner Float16 BFloat16	0.0
-applied swept BFloat16 exp	1.831054405321275e-12
-applied swept BFloat16 log	4.760741280362968e-12
-applied swept BFloat16 tanh	3.784178699561824e-12
-applied swept BFloat16 sqrt	2.6245117190626388e-11
-applied swept BFloat16 sin	4.299926734119275e-11
-applied swept BFloat16 cos	3.8070678554102955e-11
-applied swept BFloat16 abs	8.392331968254396e-13
+applied inner Float16 BFloat16	4.882809434558766e-12
+applied swept BFloat16 exp	1.922607038851165e-12
+applied swept BFloat16 log	4.88281203664398e-12
+applied swept BFloat16 tanh	4.119873713015476e-12
+applied swept BFloat16 sqrt	2.6351929319212708e-11
+applied swept BFloat16 sin	4.313659672516845e-11
+applied swept BFloat16 cos	3.897094626170716e-11
+applied swept BFloat16 abs	0.0
 applied swept BFloat16 abs2	0.0
-applied swept BFloat16 inv	5.827331672758618e-11
-applied swept BFloat16 *	8.087150740743176e-13
-applied swept BFloat16 +	0.0
-applied swept BFloat16 -	8.392331968254396e-13
-applied swept BFloat16 /	5.261230340281031e-11
-applied swept BFloat16 ^	5.850219614300656e-11
-applied swept BFloat16 max	9.155272026606376e-13
-applied swept BFloat16 min	8.544918245201316e-13
+applied swept BFloat16 inv	4.4021607539801444e-11
+applied swept BFloat16 *	9.765625808011436e-13
+applied swept BFloat16 +	9.918212084958355e-13
+applied swept BFloat16 -	0.0
+applied swept BFloat16 /	5.232239121133464e-11
+applied swept BFloat16 ^	5.920410169057977e-11
+applied swept BFloat16 max	6.713865574603517e-13
+applied swept BFloat16 min	0.0
 applied swept BFloat16 identity	0.0
-applied swept BFloat16 Float32	9.460444580500216e-13
+applied swept BFloat16 Float32	9.765625808011436e-13
 applied swept BFloat16 BFloat16	0.0
 applied inner BFloat16 exp	0.0
 applied inner BFloat16 log	0.0
 applied inner BFloat16 tanh	0.0
 applied inner BFloat16 sqrt	0.0
-applied inner BFloat16 sin	3.4027156092797384e-12
+applied inner BFloat16 sin	0.0
 applied inner BFloat16 cos	0.0
 applied inner BFloat16 abs	0.0
 applied inner BFloat16 abs2	0.0
-applied inner BFloat16 inv	5.081178533483666e-12
+applied inner BFloat16 inv	0.0
 applied inner BFloat16 *	0.0
 applied inner BFloat16 +	0.0
 applied inner BFloat16 -	0.0
-applied inner BFloat16 /	4.928592256536746e-12
-applied inner BFloat16 ^	4.394533348328622e-12
+applied inner BFloat16 /	0.0
+applied inner BFloat16 ^	4.40978503712941e-12
 applied inner BFloat16 max	0.0
 applied inner BFloat16 min	0.0
 applied inner BFloat16 identity	0.0
 applied inner BFloat16 Float32	0.0
 applied inner BFloat16 BFloat16	0.0
-cuBLAS tf32 latency	4.045652910568181e-6
-cuBLAS tf32 rate	4.387959233895837e13
-cuBLAS tf32 split	4.387959233895837e13
-cuBLAS tf32 recompute	4.387959233895837e13
-cuTile tf32 latency	1.838846332538386e-6
-cuTile tf32 rate	3.2464723971991895e13
-cuTile tf32 split	1.1973720824910326e13
-cuTile tf32 recompute	2.987038089125644e12
-applied swept tf32 exp	5.859375484806861e-12
-applied swept tf32 log	3.1280516371579026e-12
-applied swept tf32 tanh	6.835938065608005e-12
-applied swept tf32 sqrt	3.419494375156429e-11
-applied swept tf32 sin	4.8934937699196546e-11
-applied swept tf32 cos	5.1925663421825696e-11
+cuBLAS tf32 latency	4.146188429460512e-6
+cuBLAS tf32 rate	4.4716540499903266e13
+cuBLAS tf32 split	4.4716540499903266e13
+cuBLAS tf32 recompute	4.4716540499903266e13
+cuTile tf32 latency	1.874704828821884e-6
+cuTile tf32 rate	3.2360969044966156e13
+cuTile tf32 split	1.2724937921504809e13
+cuTile tf32 recompute	3.1548759325290703e12
+applied swept tf32 exp	5.004881925563254e-12
+applied swept tf32 log	4.196167718850674e-12
+applied swept tf32 tanh	6.912231204081465e-12
+applied swept tf32 sqrt	3.4149171337927164e-11
+applied swept tf32 sin	4.9743651905909125e-11
+applied swept tf32 cos	5.1940915110626484e-11
 applied swept tf32 abs	0.0
 applied swept tf32 abs2	0.0
-applied swept tf32 inv	5.844115989750431e-11
+applied swept tf32 inv	4.3975828187270416e-11
 applied swept tf32 *	0.0
 applied swept tf32 +	0.0
 applied swept tf32 -	0.0
-applied swept tf32 /	5.6167603554313494e-11
-applied swept tf32 ^	5.5664061901494755e-11
+applied swept tf32 /	5.6243896692786954e-11
+applied swept tf32 ^	5.5908199944609827e-11
 applied swept tf32 max	0.0
 applied swept tf32 min	0.0
 applied swept tf32 identity	0.0
@@ -213,28 +213,28 @@ applied inner tf32 min	0.0
 applied inner tf32 identity	0.0
 applied inner tf32 Float32	0.0
 applied inner tf32 BFloat16	0.0
-cuBLAS tf32x3 latency	4.041819141104665e-6
-cuBLAS tf32x3 rate	1.92163653788782e13
-cuBLAS tf32x3 split	1.92163653788782e13
-cuBLAS tf32x3 recompute	1.92163653788782e13
-cuTile tf32x3 latency	1.6592650792229274e-6
-cuTile tf32x3 rate	1.179555872609328e13
-cuTile tf32x3 split	6.267098850877046e12
-cuTile tf32x3 recompute	1.0304038381536714e12
-applied swept tf32x3 exp	0.0
-applied swept tf32x3 log	3.906250323204574e-12
-applied swept tf32x3 tanh	3.0212429780185346e-12
-applied swept tf32x3 sqrt	2.452087144444448e-11
-applied swept tf32x3 sin	3.158569239491982e-11
-applied swept tf32x3 cos	3.150939925644636e-11
+cuBLAS tf32x3 latency	4.1102785817311304e-6
+cuBLAS tf32x3 rate	1.9158760906609906e13
+cuBLAS tf32x3 split	1.9158760906609906e13
+cuBLAS tf32x3 recompute	1.9158760906609906e13
+cuTile tf32x3 latency	1.7244156550401687e-6
+cuTile tf32x3 rate	1.1722386570951146e13
+cuTile tf32x3 split	6.33449526626022e12
+cuTile tf32x3 recompute	9.747922802083948e11
+applied swept tf32x3 exp	2.8381359762352787e-12
+applied swept tf32x3 log	5.844113387665217e-12
+applied swept tf32x3 tanh	4.867554276311026e-12
+applied swept tf32x3 sqrt	2.7221683240874484e-11
+applied swept tf32x3 sin	3.2882689626756445e-11
+applied swept tf32x3 cos	3.410339372011961e-11
 applied swept tf32x3 abs	0.0
 applied swept tf32x3 abs2	0.0
-applied swept tf32x3 inv	5.95703139594228e-11
+applied swept tf32x3 inv	4.580687912314474e-11
 applied swept tf32x3 *	0.0
 applied swept tf32x3 +	0.0
 applied swept tf32x3 -	0.0
-applied swept tf32x3 /	5.233764116541195e-11
-applied swept tf32x3 ^	5.435180083779301e-11
+applied swept tf32x3 /	5.4580694131001195e-11
+applied swept tf32x3 ^	5.712890577269647e-11
 applied swept tf32x3 max	0.0
 applied swept tf32x3 min	0.0
 applied swept tf32x3 identity	0.0
