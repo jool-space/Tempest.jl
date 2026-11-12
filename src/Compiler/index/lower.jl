@@ -130,13 +130,64 @@ end
 # The zero-based index that an array of one-based indices into an axis of
 # `extent` holds at `at`, its index over `d`. A value is read through an
 # indirect term, a gather, whose entries lie in the axis (between a constant
-# array's extremes); an index computed from the position is a formula.
+# array's extremes); an index computed from the position is a formula, and
+# so is one a map computes from others by sums, differences and products by
+# constants (see `formula`).
 function held_index(a::ValueAccess, at, d, values, extent)
+    index = map(e -> substitute(e, at, d), a.index)
+    computed = formula(ValueAccess(a.value, index), values, d)
+    computed === nothing || return add(computed, -1, d)
     data = values[a.value].definition
     lo, hi = data isa ConstantArray && !isempty(data.data) ? extrema(data.data) : (1, extent)
-    index = map(e -> substitute(e, at, d), a.index)
     add(normalize(0, (Indirect(a.value, index, lo, hi) => 1,), d), -1, d)
 end
+
+"""
+    formula(access, values, d) -> Affine or nothing
+
+The integers a value holds where `access` reads it, as a formula over `d`
+in what they are computed from, where a map computes them from integers by
+sums, differences, negations, products by a constant and conversions to
+another integer type: the formula of each, an integer read from a value no
+such map computes as an indirect term, between its type's extremes, or a
+constant array's. Nothing for anything else: a product of two reads, a
+division, a minimum or a choice is no formula, and its value is stored, as
+an index Julia computes is an array. So the index of an index stays in the
+kernel reading by it, as the linear index over axes merged, the Cartesian
+index's or a joined write's, which a kernel of its own stored before.
+"""
+function formula(a::ValueAccess, values, d)
+    v = values[a.value]
+    def = v.definition
+    def isa Pointwise && v.eltype <: Integer || return nothing
+    terms = map(o -> formula_term(access(o, a.index, d), values, d), def.operands)
+    any(isnothing, terms) && return nothing
+    combined(def.f, terms, d)
+end
+
+# A read of a value no map of sums computes is an indirect term: an integer
+# that indexes an array once added to others, within an index's range, so
+# that the formulas' ranges are an index's too, where its type's extremes,
+# scaled, would overflow.
+const INDEX_RANGE = (-typemax(Int32), typemax(Int32))
+function formula_term(a::ValueAccess, values, d)
+    computed = formula(a, values, d)
+    computed === nothing || return computed
+    v = values[a.value]
+    v.eltype <: Integer || return nothing
+    lo, hi = v.definition isa ConstantArray && !isempty(v.definition.data) ? extrema(v.definition.data) : INDEX_RANGE
+    normalize(0, (Indirect(a.value, a.index, Int(lo), Int(hi)) => 1,), d)
+end
+formula_term(a::IndexAccess, values, d) = a.expr
+formula_term(a::LiteralAccess, values, d) = a.value isa Integer ? constant(Int(a.value)) : nothing
+
+combined(::typeof(+), terms, d) = foldl((x, y) -> add(x, y, d), terms)
+combined(::typeof(-), (x,)::Tuple{Affine}, d) = scale(x, -1)
+combined(::typeof(-), (x, y)::Tuple{Affine, Affine}, d) = add(x, scale(y, -1), d)
+combined(::typeof(*), (x, y)::Tuple{Affine, Affine}, d) = isconstant(x) ? mul(y, x.constant, d) : isconstant(y) ? mul(x, y.constant, d) : nothing
+combined(::Cast{T}, (x,)::Tuple{Affine}, d) where {T <: Integer} = x
+combined(::typeof(identity), (x,)::Tuple{Affine}, d) = x
+combined(f, terms, d) = nothing
 held_index(a::IndexAccess, at, d, values, extent) = add(substitute(a.expr, at, d), -1, d)
 held_index(a::LiteralAccess, at, d, values, extent) = constant(Int(a.value) - 1)
 

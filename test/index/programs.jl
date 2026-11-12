@@ -59,3 +59,42 @@ end
     @test_throws BoundsError interpret(p, x, [1, 7])
     @test_throws BoundsError C.interpret(C.lower(p), x, [1, 7])
 end
+
+# An index a program computes from others by sums, differences and products
+# by constants is a formula of theirs, read in the kernel that indexes by it,
+# where a kernel of its own stored it: an offset, a stride, the linear index
+# of Cartesian indices over two and three axes, read and written, and a
+# gather by indices each step of a map computes. A minimum, a clamp, a
+# remainder, a division or a choice is none, and is stored.
+@testset "indices computed by sums are formulas" begin
+    x, i = data(8, 3), Int32[3, 1, 4, 2]
+    K, k = data(4, 2, 16, 3), data(4, 2, 4, 3; scale = 0.3)
+    p = Int32.(mod1.([3, 6, 9, 12] .+ 2 .* (1:3)', 16))
+    K3, a, b, c = data(4, 6, 5, 3), [6, 1, 3], [5, 2, 5], [1, 3, 2]
+    J = [mod1(3b + q, 8) for q in 1:2, b in 1:3]
+    columns = reshape(1:3, 1, :)
+    formulas = [
+        ((x, i) -> x[i .+ 1, :], (x, i)),
+        ((x, i) -> x[2 .* i .- 1, :] .+ x[i .- 1 .+ 1, :], (x, i)),
+        ((x, i) -> (y = copy(x); y[i .+ 1, :] .= 0; y), (x, i)),
+        ((K, p) -> K[:, :, CartesianIndex.(p, columns)], (K, p)),
+        ((K, k, p) -> (K = copy(K); K[:, :, CartesianIndex.(p, columns)] .= k; K), (K, k, p)),
+        ((K3, a, b, c) -> K3[:, CartesianIndex.(a, b, c)], (K3, a, b, c)),
+        ((x, J) -> stack(map((v, j) -> v[j], eachcol(x), eachcol(J))), (x, J)),
+    ]
+    stored = [
+        ((x, i) -> x[clamp.(i .+ 4, 1, 8), :], (x, i)),
+        ((x, i) -> x[mod1.(i .+ 6, 8), :], (x, i)),
+        ((x, i) -> x[(i .- 1) .÷ 2 .+ 1, :], (x, i)),
+        ((x, i) -> x[ifelse.(i .> 2, i, Int32(1)), :], (x, i)),
+    ]
+    for (expected, programs) in ((1, formulas), (2, stored)), (f, args) in programs
+        c = T.compile(f, map(copy, args)...; target = T.CPUTarget(), measure = :none, capture = false)
+        @test length(c.executable.kernels) == expected
+        @test c(map(copy, args)...) ≈ f(map(copy, args)...)
+    end
+    # The gradient of a gather by an offset scatters at the same formula,
+    # prepared as the program interprets it.
+    g(x, i) = T.gradient(x -> sum(abs2, x[i .+ 1, :] .* x[2 .* i, :]), x)[1]
+    @test T.compile(g, x, i; target = T.CPUTarget(), measure = :none, capture = false)(x, i) ≈ interpret(trace(g, x, i), x, i)
+end

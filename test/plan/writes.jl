@@ -24,9 +24,11 @@ joined(g) = count(((_, note),) -> occursin("writes alike", note), g.rewrites)
             g = C.joined_writes(C.lower(program))
             @test agree(C.execute(recomputing(g), K, k, p), filter(!isnothing, C.leaves(interpret(program, K, k, p))))
         end
+        # From three sequences the trace rolls them, a map and one write
+        # (see `joined_write`); two the index level joins.
         g = C.joined_writes(C.lower(trace(appended, K, k, p)))
-        @test keyed(g) == 1 && joined(g) == (B > 1)
-        @test only(C.plan(g).groups).domain == (B > 1 ? (3, 2, 2, B) : (3, 2, 2))
+        @test keyed(g) == 1 && joined(g) == (B == 2)
+        @test prod(only(C.plan(g).groups).domain) == 3 * 2 * 2 * B
     end
     K, k, p = data(3, 8, 2, 6), data(3, 2, 2, 3; scale = 0.3), Int32[1 4 2; 2 5 3]
     # Sequences a step apart other than one, and the writes of the gradient,
@@ -38,7 +40,7 @@ joined(g) = count(((_, note),) -> occursin("writes alike", note), g.rewrites)
     # are stacked into one value over the slices, which the one write reads.
     Ks = single(K[:, :, :, 1:3])
     g = C.joined_writes(C.lower(trace(appended, Ks, k, p)))
-    @test keyed(g) == 1 && count(v -> v.definition isa C.Pointwise, g.values) == 1
+    @test keyed(g) == 1 && length(C.plan(g).groups) == 1
     @test C.execute(recomputing(g), Ks, k, p) == [appended(Ks, k, p)]
     # Writes into one sequence, where a later one may land where an earlier
     # did, stay in their order, as does a write whose contents something

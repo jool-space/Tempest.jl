@@ -278,15 +278,12 @@ function written(nodes, w0, p, periods, x, y, wanted, varies)
     all(k -> isequal((nodes[y + k * p].op::Update).indices, Base.setindex(u.op.indices, i .+ k * d, j)), 1:(periods - 1)) || return nothing
     o = y - w0 + 1
     all(r -> (r - w0) % p + 1 != o || r == y + (periods - 1) * p, wanted) || return nothing
-    # What it writes the step computes; its index arrays are the same at
-    # every step. One each step computes, as `positions[:, b]` is, couples
-    # its axis to the steps': written at once, by linear indices over the
-    # axes merged, which a kernel stores before it writes, where each step
-    # writing its own slice reads them in place (see `joined_writes`).
+    # What it writes the step computes; each index array is the same at
+    # every step, or one the step computes, as `positions[:, b]` is.
     v = u.inputs[2]
     v >= w0 && varies[v - w0 + 1] || return nothing
     next = nodes[y + p].inputs
-    all(k -> u.inputs[k] == next[k] || u.inputs[k] >= w0 && !varies[u.inputs[k] - w0 + 1], 3:length(u.inputs)) || return nothing
+    all(k -> u.inputs[k] == next[k] || u.inputs[k] >= w0, 3:length(u.inputs)) || return nothing
     Written((x, y), o, j, i, d)
 end
 
