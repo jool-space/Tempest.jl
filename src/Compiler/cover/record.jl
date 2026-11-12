@@ -147,10 +147,11 @@ known_rates(target, measure) =
 
 # The basis the times of a shipped file were taken on, which the file states:
 # each launch timed among the launches of a captured graph, its data in memory
-# rather than in the cache (see `time_launch`). A change to how launches are
-# timed changes it, so that the files are written again rather than read on
-# another basis.
-const TIMING_BASIS = 1.0
+# rather than in the cache (see `time_launch`), its buffers holding numbers
+# as a program's are (see `buffers!`; on basis 1 their floats were zeros). A
+# change to how launches are timed changes it, so that the files are written
+# again rather than read on another basis.
+const TIMING_BASIS = 2.0
 
 # What tells the device `target` runs on from another of its name, as pairs of
 # a name and a number, which a shipped rates file states: the rates the device

@@ -119,8 +119,9 @@ const SWEEP_SHAPES = ((256, 512), (512, 2048))
 # the slope of the time over the steps between them: what a step takes,
 # waiting on its loads or moving its bytes, whichever is longer. On GB10 the
 # generator's first claim takes 64 blocks of 32 outputs and steps 32 along
-# the sum, 0.6 to 0.8 μs a step loaded and 1.2 to 2.5 computing a vector's
-# silu in each.
+# the sum, 0.6 to 0.8 μs a step loaded and 0.3 more computing a vector's
+# silu in each, on numbers as a program's are (see `buffers!`): on zeros,
+# whose division runs its slow path, the silu took 1.2 to 2.5.
 const STEPPED_OUTPUTS = 2048
 const STEPPED_SUMS = (8192, 16384)
 

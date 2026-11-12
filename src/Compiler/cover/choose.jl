@@ -777,8 +777,9 @@ end
 refuted(d::Decider, o::Choice) = haskey(d.record, o.key) && !close_call(d.record[o.key], o.estimate)
 
 # Buffers for a group's reads and stored members, shared by every plan the
-# decider considers (they number values alike), filled so that measuring reads
-# nothing undefined.
+# decider considers (they number values alike), holding numbers as a
+# program's are (`held_integers`, `held_floats!`), so that a kernel is timed
+# as it runs on them and measuring reads nothing undefined.
 function buffers!(d::Decider, p::Plan, g::Group)
     n = length(p.graph.values)
     length(d.buffers) < n && append!(d.buffers, fill(nothing, n - length(d.buffers)))
@@ -788,9 +789,38 @@ function buffers!(d::Decider, p::Plan, g::Group)
         def = val.definition
         d.buffers[v] = def isa ConstantArray ? upload(d.target, vec(collect(def.data))) :
             val.eltype <: Integer ? upload(d.target, held_integers(p.graph, v, val.eltype, storage_length(val))) :
+            val.eltype <: AbstractFloat ? held_floats!(allocate(d.target, val.eltype, storage_length(val))) :
             zeroed!(allocate(d.target, val.eltype, storage_length(val)))
     end
     d.buffers
+end
+
+# A kernel's time depends on the numbers it reads where a function takes a
+# path of its own for some of them: a division, `inv` or `sqrt` whose
+# operand is zero, infinite, NaN or subnormal runs its exact slow path, and a
+# kernel that divides in each step of its sweep took 2 to 3.6 times as long
+# on zeros as on a program's numbers (a decoding step's down projection 717
+# μs against 313), while `exp`, `log`, `tanh`, products, sums and the
+# floor's kernels took as long on either; `x^3` took 18% less on ones than
+# on spread numbers. A buffer of floats holds numbers spread from 1 to 2 in
+# its type, as a program's activations and weights are spread, none of them
+# zero, subnormal or infinite, each in the domain of `sqrt`, `log` and
+# `inv`, and a step of a division away from none of those: the golden
+# share's multiples, a period of a prime number of them, copied along the
+# buffer by doubling, so that filling one costs a copy of its bytes.
+const HELD_PERIOD = 4093
+
+function held_floats!(x::AbstractVector{T}) where {T <: AbstractFloat}
+    n = length(x)
+    period = T[T(1 + mod(k * 0.6180339887498949, 1.0)) for k in 1:min(n, HELD_PERIOD)]
+    copyto!(x, 1, period, 1, length(period))
+    k = length(period)
+    while k < n
+        m = min(k, n - k)
+        copyto!(x, k + 1, x, 1, m)
+        k += m
+    end
+    x
 end
 
 # Inferred for no buffer type, which the target's package defines.
