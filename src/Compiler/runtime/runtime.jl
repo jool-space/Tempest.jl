@@ -931,7 +931,7 @@ function explain(io::IO, ex::Executable)
     for (k, d) in enumerate(ex.kernels)
         x = ex.decisions[k]
         println(io, "  kernel ", k, ": ", ex.built ? d : "not built", x === nothing ? "" : string(" (", x, ")"))
-        x === nothing || foreach(f -> println(io, "    a claim of ", f.implementation, " failed to build: ", f.reason), x.failed)
+        x === nothing || foreach(f -> println(io, "    ", f.implementation == label(nothing) ? "the floor" : string("a claim of ", f.implementation), " failed to build: ", f.reason), x.failed)
     end
 end
 
@@ -940,7 +940,7 @@ explain(ex::Executable) = explain(stdout, ex)
 # What runs kernel `k`: an implementation or the floor.
 function runner(ex::Executable, k)
     d = ex.decisions[k]
-    d === nothing || d.choice.implementation === nothing ? "floor" : label(d.choice.implementation)
+    label(d === nothing ? nothing : d.choice.implementation)
 end
 
 function Base.show(io::IO, ex::Executable)

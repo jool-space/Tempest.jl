@@ -12,8 +12,9 @@
 # Two estimates closer than this factor are a close call.
 const ESTIMATE_ERROR = 1.5
 
-"What `explain` calls an implementation: its type."
+"What `explain` calls what runs a group: an implementation, by its type, or the floor (`nothing`)."
 label(i::Implementation) = string(nameof(typeof(i)))
+label(::Nothing) = "floor"
 
 "A way to realize a group: an implementation's claim, or the floor's (`nothing`)."
 struct Choice
@@ -59,7 +60,7 @@ struct Offered
     variants::Dict{Tuple{String, Int}, Choice}
 end
 
-"A claim that failed to build: what `explain` calls its implementation, the group it claimed (by `canonical`), and why, in a line."
+"An option that failed to build: what `explain` calls what runs it (see `label`), the group (by `canonical`), and why, in a line."
 struct Failure
     implementation::String
     group::String
@@ -194,7 +195,9 @@ function forget_decisions!(d::Decider)
     d
 end
 
-# Keep a claim on a group that failed to build.
+# Keep an option on a group that failed to build: a claim, or the floor,
+# which a decider builds to time it as it builds a claim, and which fails
+# where the decider's buffers for it cannot be allocated (see `buffers!`).
 fail!(d::Decider, p::Plan, g::Group, o::Choice, err) = d.failed[o.key] = Failure(label(o.implementation)::String, canonical(p, g), reason(err))
 
 # Why a build failed, in a line: the first of its message's that does not
@@ -429,12 +432,15 @@ options!(d::Decider, p::Plan, g::Group) = get!(() -> options(d, p, g), d.options
 
 # A group's options, searched (see `search!`): searched already, or alike a
 # group that was, the search grows them from the record and measures
-# nothing. Those that failed to build as they were measured are no options:
-# the rest are found and searched again.
+# nothing. Claims that failed to build as they were measured are no options:
+# the rest are found and searched again. The floor, the option of last
+# resort, stays one where it failed so: its time is then infinite (see
+# `build_option!`), and it loses every measurement, a plan that needs it
+# every comparison.
 function searched_options!(d::Decider, p::Plan, g::Group)
     os = options!(d, p, g)
     search!(d, [(p, g, os)])
-    while any(o -> haskey(d.failed, o.key), os)
+    while any(o -> o.implementation !== nothing && haskey(d.failed, o.key), os)
         os = d.options[group_identity(p, g)] = options(d, p, g)
         search!(d, [(p, g, os)])
     end
@@ -885,8 +891,9 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers, r::Resources)
     (build_floor(d.target, p, g, buffers)..., Decision(floor, x.options, :instead, nothing, failures(d, p, g)))
 end
 
-# Build an option to measure it. A claim that fails to build loses every
-# comparison in this preparation; the record keeps only times.
+# Build an option to measure it. An option that fails to build, a claim or
+# the floor, loses every comparison in this preparation; the record keeps
+# only times.
 function build_option!(d::Decider, p::Plan, g::Group, o::Choice)
     try
         first(build_choice!(d, p, g, o))

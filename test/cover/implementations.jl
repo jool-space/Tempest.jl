@@ -252,6 +252,30 @@ C.build_claim(::FailingVariant, claim, target, g, buffers, _) = claim === :varia
     end
 end
 
+# The floor a decider builds to time fails to build where its buffers cannot
+# be allocated: here a map of 2^48 elements, as the GPT step's trials asked
+# for 36 GiB on a device that had less. It is kept as failed, named as the
+# floor, and loses every measurement, its time infinite; it stays its group's
+# option of last resort, chosen where it is the only one.
+@testset "a floor that fails to build" begin
+    n = 2^16
+    x, y, z = rand(Float32, n), rand(Float32, 1, n), rand(Float32, 1, 1, n)
+    p = trace((x, y, z) -> x .* y .* z, x, y, z)
+    withenv("TEMPEST_CACHE" => mktempdir()) do
+        d = C.Decider(T.CPUTarget(), C.lower(p); measure = :none)
+        plan = C.generator_plan(d)
+        g = only(plan.groups)
+        floor = C.choice(d, plan, g, C.group_view(plan, g), nothing, nothing)
+        @test C.build_option!(d, plan, g, floor) === nothing
+        @test d.record[floor.key] == Inf
+        failure = only(C.failures(d, plan, g))
+        @test failure.implementation == "floor" && occursin("OutOfMemoryError", failure.reason)
+        decision = C.decide(d, plan, g)
+        @test decision.choice.implementation === nothing && decision.how === :only && decision.measured == Inf
+        @test decision.failed == [failure]
+    end
+end
+
 # An implementation's own claims are measured where the estimate cannot rank
 # them, within its error of the best; one estimated past the error only once
 # the record refutes the best's estimate, a time past its error.
