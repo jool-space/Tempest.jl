@@ -545,10 +545,11 @@ end
 
 `f` of each of `xs`, in tasks that take turns on the calling thread, each in
 the calling task's state on `target`. Groups and kernels are built this way:
-while one task waits for a compilation running `elsewhere`, the others start
-theirs. Device objects are made on the calling thread, so at exit they are
-finalized after what the caller made from them later (a module unloaded before
-a captured graph that launches it crashes the driver).
+while one task waits for its kernel, compiling on a thread of its own (see
+`cached_kernel`), the others ask for theirs. Device objects are made on the
+calling thread, so at exit they are finalized after what the caller made from
+them later (a module unloaded before a captured graph that launches it
+crashes the driver).
 """
 function concurrently(f, xs, target)
     enter = task_state(target)
@@ -570,14 +571,6 @@ function side_by_side(f, xs, target)
     enter = task_state(target)
     map(fetch_result, [Threads.@spawn((enter(); f(x))) for x in xs])
 end
-
-"""
-    elsewhere(f) -> f()
-
-Run `f` on another thread, if there is one, and wait for it while the calling
-thread's other tasks run. For compilation, which makes no device objects.
-"""
-elsewhere(@nospecialize(f)) = fetch_result(Threads.@spawn f())
 
 function fetch_result(t::Task)
     try

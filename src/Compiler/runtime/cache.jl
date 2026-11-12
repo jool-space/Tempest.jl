@@ -130,14 +130,19 @@ const RESOLVED_KERNELS = SessionTable{String, Task}()
 The kernel under `key`: from the object cache, or compiled by `compile()`, which
 returns `(entry, binary)` and stores it, when the cache has none. This happens
 once per key in a session, so that callers in flight together wait for the
-first. The compilation runs `elsewhere`, and a failure fails every caller.
+first, and a failure fails every caller. The kernel is loaded or compiled on
+a thread from the moment it is asked for, as neither makes a device object:
+the tasks that build a stage's options side by side (`concurrently`) take
+turns on one thread, and a compilation they ran there would begin only once
+the last of them had asked for its kernel, as the GPT step's first stage of
+147 kernels asked for its last 2.8 s in.
 """
 function cached_kernel(@nospecialize(compile), key)
     observe(:kernel, key)
     task = @lock RESOLVED_KERNELS.lock get!(RESOLVED_KERNELS.table, key) do
-        @async begin
+        Threads.@spawn begin
             found = load_kernel(key)
-            found === nothing ? phase(() -> elsewhere(compile), :compile) : found
+            found === nothing ? phase(compile, :compile) : found
         end
     end
     fetch_result(task)
