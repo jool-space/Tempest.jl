@@ -264,7 +264,7 @@ function setup(program::Program; target, measure = measuring(), replaces = (), r
     tables = Tables()
     in_tables(tables) do
         # Each phase marked (see `phase`).
-        lowered = phase(() -> lower(program), :lower)
+        lowered = phase(() -> joined_writes(lower(program)), :lower)
         graph = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
         pairs = replacements(program, replaces)
         input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)

@@ -26,8 +26,8 @@ end
 
 # A write takes the storage of the contents it starts from where nothing reads
 # them after it, and writes only its positions: a cache the step replaces,
-# appended per sequence, three writes each over the last, is where the step
-# leaves it, and no kernel copies it.
+# appended per sequence, three writes alike but for the sequence and so one
+# write over the sequences, is where the step leaves it, and no kernel copies it.
 function appended(K, k, p)
     K = copy(K)
     for b in axes(K, 4)
@@ -40,11 +40,11 @@ function check_appended_in_place(device, target)
     K, k, p = data(4, 16, 2, 3), data(4, 2, 3), Int32[3, 16, 1]
     program = trace(appended, K, k, p)
     ex = prepare(program, device(K), device(k), device(p); target, replaces = (1 => 1,))
-    @test length(ex.storage.donated) == 1 && isempty(ex.storage.staged) && length(ex.storage.overwrites) == 3
+    @test length(ex.storage.donated) == 1 && isempty(ex.storage.staged) && length(ex.storage.overwrites) == 1
     @test pointer(ex.results[1]) == pointer(ex.arguments[1])
-    @test count("written over", sprint(explain, ex)) == 3
-    # Each kernel writes the elements of one sequence's token.
-    @test all(k -> !(k isa C.FloorKernels) || all(s -> s.items == 8, k.kernels), ex.kernels)
+    @test count("written over", sprint(explain, ex)) == 1
+    # The kernel writes the elements of each sequence's token.
+    @test all(k -> !(k isa C.FloorKernels) || all(s -> s.items == 24, k.kernels), ex.kernels)
     @test !any(k -> occursin("initial states", string(k)), ex.kernels)
     # Each write is priced by the elements it writes: into a longer cache it
     # moves no more bytes and takes no longer.
