@@ -1503,7 +1503,32 @@ wall. The record and the rates a machine fits are a file per device and
 toolchain (`toolchain`, `record.jl`), a time taken on one tile compiler
 never read for a kernel another built; the shipped rates, fitted on 13.4,
 stand 2.7 times off on Float32 products recomputed and are to be fitted
-again. A
+again. Fitted again since (three fits on the second GB10: 47 of 48 package
+lines within 10% of each other, 28 function prices zero in one fit and not
+in another, a price being a difference of two timings held to nothing
+under 5%), and no step moved: what the unmeasured plan of the model's chunk
+of 1 gives up, 51.1 ms against 40.6, is 9.1 ms of streamed reductions over
+the weights left at their first tile, a wider one a variant offered only
+once a claim measures best and the estimate the same number whatever the
+tile (32x32 estimated 181 μs and run in 316, 32x128 estimated 181 and run
+in 209), where the time follows the bytes each step of the sweep reads at
+once, level from 128, and a latency a step where the kernel computes its
+vector in the sweep (`challengers/rates-2026-11-12/tiles`); a change of
+the estimate's terms, not made. What compiles slowly, each alone and idle
+(`challengers/slow-compiles-2026-11-12`): tileiras's seconds grow with a
+sweep's count known as it compiles, 0.4 s at 24 steps and 5.8 at 6,288
+where a count read as it runs takes 0.4 and runs 19% slower unaligned;
+short sweeps of large tiles it unrolls whole, 52,000 lines and 13 s, which
+then run 2 to 14 times the winner's time; a little core takes 1.9 times a
+big one's; and no level under the highest both compiles faster and ranks
+kernels alike. The search is a function of the record and the program:
+one record covered twice gives the same trace byte for byte, and six cold
+preparations of the GPT step share 36 or 37 of 38 decisions, parting first
+where an option's time falls either side of the window options grow from
+(5% of the best), by which two of the six never timed the tile that beats
+cuBLAS's 570 μs by 12% in each layer's second projection. A floor a
+decider fails to build is kept as failed and loses every comparison, where
+naming it threw and ended the preparation. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
