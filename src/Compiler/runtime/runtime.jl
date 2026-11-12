@@ -549,11 +549,11 @@ while one task waits for its kernel, compiling on a thread of its own (see
 `cached_kernel`), the others ask for theirs. Device objects are made on the
 calling thread, so at exit they are finalized after what the caller made from
 them later (a module unloaded before a captured graph that launches it
-crashes the driver).
+crashes the driver). It returns once every task has ended (see `ended_all`).
 """
 function concurrently(f, xs, target)
     enter = task_state(target)
-    map(fetch_result, [@async((enter(); f(x))) for x in xs])
+    ended_all([@async((enter(); f(x))) for x in xs])
 end
 
 """
@@ -565,11 +565,21 @@ arguments alone and whose results the caller keeps: what implementations
 offer for a group, and what they estimate of a claim. What device objects
 such work makes are kept in tables of the session, as a lowering trial's
 module and an attention library's graph are, and a captured graph that
-launches one is destroyed at exit before any finalizer runs.
+launches one is destroyed at exit before any finalizer runs. It returns once
+every task has ended (see `ended_all`).
 """
 function side_by_side(f, xs, target)
     enter = task_state(target)
-    map(fetch_result, [Threads.@spawn((enter(); f(x))) for x in xs])
+    ended_all([Threads.@spawn((enter(); f(x))) for x in xs])
+end
+
+# The results of `tasks`, in order, once every one has ended: what the first
+# that failed threw is thrown only then. Thrown at once, the tasks after it
+# would run on unwaited, a group's other kernels compiling beside the timings
+# its stage takes once its builds return.
+function ended_all(tasks)
+    foreach(t -> try wait(t) catch end, tasks)
+    map(fetch_result, tasks)
 end
 
 function fetch_result(t::Task)

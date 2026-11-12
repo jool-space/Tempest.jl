@@ -39,3 +39,16 @@ end
         @test !ex.built && occursin("cuTile", sprint(explain, ex))
     end
 end
+
+@testset "builds side by side end together" begin
+    # A build of several whose first fails returns, throwing what it threw,
+    # only once the others have ended: none runs on beside what the caller
+    # does next, as a group's other kernels compiling beside its stage's
+    # timings would.
+    for run in (C.concurrently, C.side_by_side)
+        ended = Threads.Atomic{Int}(0)
+        build(k) = k == 1 ? error("the first fails") : (sleep(0.05); Threads.atomic_add!(ended, 1))
+        @test occursin("the first fails", message(() -> run(build, 1:4, T.CPUTarget())))
+        @test ended[] == 3
+    end
+end
