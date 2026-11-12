@@ -1589,7 +1589,25 @@ own loop construct, which then runs it in 123 to 129 ms. Tempest's plans
 here measure nothing: at B of 1 the 6 ms are the streamed reductions left
 at their first tile, which the plan that measures takes back to about 41;
 at B of 4 the 14 ms are not accounted for, products of four columns the
-first suspect. A
+first suspect. Reactant's last line, `mapslices(argmax, logits; dims = 1)`,
+Tempest refused, and the refusal was taken as one case of a family, the
+same computation on each slice of an axis, surveyed in 40 spellings
+(`challengers/map-axis-2026-11-12/table.md`): `mapslices` of a function
+returning a number refused, `map` and a broadcast over `eachcol` returning
+handles of the trace in a constant, a wrong answer and no error. A map a
+program states, `mapslices`, `map`, a broadcast or `stack(f, ...)` over
+slices, is traced once on a slice as a loop with no state, which lowering
+already batches over an axis of steps, one kernel at any B; rolling and
+joined writes are the other two ways into that one form and are to be one.
+The second family, a host container of traced values that reaches the
+program, 58 spellings (`containers_table.md` there), 16 of them wrong
+without an error: a comprehension of traced numbers was taken for data,
+its elements being numbers. A host container is the trace's own
+arrangement of what it holds, opened as a vector of traced arrays is and
+returned as the same code returns it untraced, a host array of numbers;
+where it meets an operation that needs an array of the program it is
+refused with what to write instead; and no operation that holds a handle
+can be recorded (`holds_handle`). A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
