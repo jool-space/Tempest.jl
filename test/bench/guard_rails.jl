@@ -1,6 +1,7 @@
-# Device time of the default plan for the guard-rail cases, measured as the
-# earlier Tempest measured them: the minimum over SAMPLES launches of a
-# captured CUDA graph of a few milliseconds of executions.
+# Device time of the plan measuring close calls picks for the guard-rail
+# cases, measured as the earlier Tempest measured them: the minimum over
+# SAMPLES launches of a captured CUDA graph of a few milliseconds of
+# executions.
 #   julia --project=test test/bench/guard_rails.jl [output.tsv]
 using Tempest, CUDACore, cuBLAS, cuTile, Printf
 using Tempest.Compiler: trace, differentiate, interpret, prepare, bind!, execute!, capture!, replay!, outputs
@@ -93,7 +94,7 @@ function main(path = nothing)
     rows = String[]
     for (name, f, args, training) in [map(c -> (c..., false), CASES); map(c -> (c..., true), TRAINING)]
         p = training ? differentiate(trace(f, args...)) : trace(f, args...)
-        ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET)
+        ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET, measure = :close)
         got = map(host, C.leaves(outputs(execute!(ex))))
         ref = C.leaves(interpret(p, args...))
         ok = all(map((g, r) -> isapprox(g, r; rtol = TARGET.precision === :tf32 ? 2.0e-2 : 2.0e-3, atol = 1.0e-3), got, ref))
@@ -128,7 +129,7 @@ elseif !isempty(ARGS) && ARGS[1] == "--cases"
     for name in split(ARGS[2], '|')
         (_, f, args) = only(filter(c -> c[1] == name, [CASES; TRAINING]))
         p = name in map(first, TRAINING) ? differentiate(trace(f, args...)) : trace(f, args...)
-        ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET)
+        ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET, measure = :close)
         times = [device_microseconds(ex) for _ in 1:repeats]
         println(rpad(name, 44), " min ", round(minimum(times); digits = 1), "  all ", join(round.(times; digits = 1), ", "))
     end
@@ -138,6 +139,6 @@ else
     name = ARGS[2]
     (_, f, args) = only(filter(c -> c[1] == name, [CASES; TRAINING]))
     p = name in map(first, TRAINING) ? differentiate(trace(f, args...)) : trace(f, args...)
-    ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET)
+    ex = prepare(p, map(a -> CuArray(a), args)...; target = TARGET, measure = :close)
     println(name, " (", TARGET.precision, "): ", join((round(device_microseconds(ex); digits = 1) for _ in 1:parse(Int, get(ARGS, 3, "5"))), ", "), " μs")
 end

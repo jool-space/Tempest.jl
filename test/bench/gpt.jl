@@ -5,8 +5,8 @@
 # rotary positions and a causal mask, SwiGLU, cross-entropy and Adam.
 #
 # The step is one traced program, the gradient of the loss and Adam, prepared
-# with the parameters and Adam's state replaced by its results in place, and
-# replayed as one captured graph.
+# with the parameters and Adam's state replaced by its results in place,
+# measuring close calls, and replayed as one captured graph.
 #
 #   TEMPEST_GPT_TEXT=~/dev/jool/Tempest/docs/src julia --project=test test/bench/gpt.jl
 #
@@ -171,7 +171,7 @@ function Step(params, batch, c, cfg; target, device)
     program = step_program(params, state, batch, c, cfg)
     # TEMPEST_GPT_PARTITION=0 saves every map the backward reads (TRIALS: store or recompute).
     ex = prepare(program, map_leaves(device, params), map_leaves(device, state), map_leaves(device, batch); target,
-        replaces = (2 => 1, 3 => 2), partition = get(ENV, "TEMPEST_GPT_PARTITION", "1") != "0")
+        replaces = (2 => 1, 3 => 2), partition = get(ENV, "TEMPEST_GPT_PARTITION", "1") != "0", measure = :close)
     Step(program, ex)
 end
 

@@ -5,7 +5,8 @@
 # PathMNISTReactant.jl's benchmarks/{julia,pytorch}/bench_node.*, at 7684532.
 #
 # The step is one traced program, prepared with the parameters and RAdam's
-# state replaced by its results in place, and replayed as one captured graph.
+# state replaced by its results in place, measuring close calls, and replayed
+# as one captured graph.
 #
 #   julia --project=test test/bench/node.jl
 #
@@ -147,7 +148,7 @@ function main()
     traced = @elapsed program = step_program(params, state, pool[1], cfg.steps)
     device(x) = map_leaves(CuArray, x)
     prepared = @elapsed ex = prepare(program, device(params), device(state), device(pool[1]); target,
-        replaces = (2 => 1, 3 => 2))
+        replaces = (2 => 1, 3 => 2), measure = :close)
     @printf("trace %.1f s, prepare %.1f s; %d kernels\n", traced, prepared, length(ex.kernels))
     for (k, g) in zip(ex.kernels, ex.plan.groups)
         k isa C.FloorKernels && println("  on the floor: a $(g.kind) group over ", g.domain, " (", k, ")")

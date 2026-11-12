@@ -28,10 +28,10 @@
 #
 #   cold              A new process whose stores are empty: no kernel
 #                     compiled, no time recorded and no decision kept. It
-#                     prepares as the environment's settings say, by default
-#                     measuring close calls and settling what it measured, on
-#                     the rates Tempest ships for the device where it ships
-#                     them.
+#                     prepares measuring close calls (TEMPEST_MEASURE=close,
+#                     which preparing does only when asked) and settling what
+#                     it measured, on the rates Tempest ships for the device
+#                     where it ships them.
 #   cold-unmeasured   The same with nothing timed (TEMPEST_MEASURE=none).
 #   cold-known        A new process holding the tuning directory the round's
 #                     cold process left, its record and its decisions, with an
@@ -189,8 +189,10 @@ end
 """
 One of a round's processes: the preparations it makes in turn, the directory
 of the stores it starts on, the stores whose tuning directory it is given
-before it starts unless that is empty, and the environment's TEMPEST_MEASURE
-unless that is empty.
+before it starts unless that is empty, and what it measures, the
+environment's TEMPEST_MEASURE: `close` where its scenarios measure, which
+preparing does only when asked, and `none` where they do not, so that a row
+means one thing whatever the caller's environment says.
 """
 struct Session
     preparations::Vector{Preparation}
@@ -202,11 +204,9 @@ end
 scenarios(s::Session) = filter(!isempty, map(p -> p.scenario, s.preparations))
 
 # The settings that point a process at its stores (test/fixtures/stores.jl),
-# and what else the session sets.
-function session_env(s::Session)
-    env = ["TEMPEST_CACHE" => s.stores, "JULIA_OBJCACHE_PATH" => joinpath(s.stores, "objcache")]
-    isempty(s.measure) ? env : [env; "TEMPEST_MEASURE" => s.measure]
-end
+# and what it measures.
+session_env(s::Session) =
+    ["TEMPEST_CACHE" => s.stores, "JULIA_OBJCACHE_PATH" => joinpath(s.stores, "objcache"), "TEMPEST_MEASURE" => s.measure]
 
 # The processes of a round for the scenarios wanted, in the order they run:
 # cold-known starts on the tuning directory the cold process left, before the
@@ -219,11 +219,11 @@ function sessions(program, shape, wanted, other, round)
     stores(name) = joinpath(round, name)
     warm = "again" in wanted ? [at("warm"), at("again")] : [at("warm")]
     all = [
-        Session([at("cold")], stores("cold"), "", ""),
-        Session([at("cold-known")], stores("cold-known"), stores("cold"), ""),
-        Session(warm, stores("cold"), "", ""),
+        Session([at("cold")], stores("cold"), "", "close"),
+        Session([at("cold-known")], stores("cold-known"), stores("cold"), "close"),
+        Session(warm, stores("cold"), "", "close"),
         Session([at("cold-unmeasured")], stores("cold-unmeasured"), "", "none"),
-        Session([before, at("after"; tuning = stores("after-own"))], stores("after"), "", ""),
+        Session([before, at("after"; tuning = stores("after-own"))], stores("after"), "", "close"),
         Session([before, at("after-unmeasured"; tuning = stores("after-unmeasured-own"))], stores("after-unmeasured"), "", "none")]
     filter(s -> any(in(wanted), scenarios(s)), all)
 end

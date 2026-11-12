@@ -1,6 +1,6 @@
-# Wall-clock time of preparing each guard-rail program and of its first
-# execution, in one process, each preparation covering (TEMPEST_REPLAY=false)
-# rather than replaying what an earlier run kept. `--stores DIR` keeps what a
+# Wall-clock time of preparing each guard-rail program, measuring close calls,
+# and of its first execution, in one process, each preparation covering
+# (TEMPEST_REPLAY=false) rather than replaying what an earlier run kept. `--stores DIR` keeps what a
 # run leaves on disk in DIR, the kernels compiled and the record measured: run
 # it twice with the same new DIR for a cold run and then a warm one. Without
 # it, a directory of the run's own, removed after. `--save path` writes the
@@ -40,7 +40,7 @@ function prepare_times()
         t1 = time()
         C.plan(C.lower(p))
         t2 = time()
-        ex = prepare(p, map(CuArray, args)...; target)
+        ex = prepare(p, map(CuArray, args)...; target, measure = :close)
         t3 = time()
         got = map(host, C.leaves(outputs(execute!(ex))))
         CUDACore.synchronize()

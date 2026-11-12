@@ -1,5 +1,5 @@
-# A corpus program compiled with its search behind the first result
-# (`compile`'s `search = :after`), then called until its plan changes and a
+# A corpus program compiled measuring close calls with its search behind the
+# first result (`compile`'s `measure = :close, search = :after`), then called until its plan changes and a
 # few calls after: the seconds from `trace` to the first result and the
 # kernels compiled before it; the calls, and the seconds, until the search
 # ends, its settled decisions kept, and until the change; each call's
@@ -9,9 +9,11 @@
 # timings cost a call beside them. Run it in a new process, cold with an
 # empty cache and warm (with the GB10's rates in TEMPEST_CACHE/tuning where
 # Tempest ships none):
-#   TEMPEST_CACHE=dir JULIA_OBJCACHE_PATH=dir/objcache julia --threads=4 --project=test test/bench/tiers.jl PROGRAM [SHAPE] [--before] [--beside]
-# `--before` compiles with `search = :before`, today's default, and calls as
-# many times. `--wait` calls `wait(c)` after the first result, which takes
+#   TEMPEST_CACHE=dir JULIA_OBJCACHE_PATH=dir/objcache julia --threads=4 --project=test test/bench/tiers.jl PROGRAM [SHAPE] [--before|--defaults] [--beside]
+# `--before` compiles measuring close calls with `search = :before`, the
+# search's default where something is measured, and calls as many times;
+# `--defaults` compiles as `compile` does unless asked, which measures
+# nothing and searches nothing unless the environment says otherwise. `--wait` calls `wait(c)` after the first result, which takes
 # the search's timings until it ends, and prints its seconds. With
 # TEMPEST_CORPUS_EXPLAIN=path, the first plan's `explain` is written there and
 # the searched one's, where the plan changed, to path.searched. The calls are
@@ -53,20 +55,21 @@ function beside(done)
     end
 end
 
-function main(name, shape, before, besides, waiting)
+function main(name, shape, before, defaults, besides, waiting)
     case = Base.invokelatest(m.instance, shape)
     args = map(m.device, case.args)
     counts, started = C.cache_counts(), time()
-    c = compile(case.step, args...; target = case.target, measure = :close, search = before ? :before : :after)
+    c = defaults ? compile(case.step, args...; target = case.target) :
+        compile(case.step, args...; target = case.target, measure = :close, search = before ? :before : :after)
     timed_call(c, args)
     first_s, now = time() - started, C.cache_counts()
     executable(c) = c isa Tempest.Searching ? c.compiled.executable : c.executable
     search = c isa Tempest.Searching ? c.search : nothing
     first_plan = executable(c)
     reached = C.reached_counts()
-    println(name, " ", shape, before ? ", searched before" : ", searched after", ": first result ", round(first_s; digits = 1),
+    println(name, " ", shape, defaults ? ", as compile does unless asked" : before ? ", searched before" : ", searched after", ": first result ", round(first_s; digits = 1),
         " s, ", now.compiled - counts.compiled, " kernels compiled, ", length(first_plan.kernels), " in the plan; deciders covered ",
-        reached.covered, ", replayed ", reached.replayed, search === nothing ? "; nothing to search" : "")
+        reached.covered, ", replayed ", reached.replayed, "; a ", nameof(typeof(c)), search === nothing ? ", nothing to search" : "")
     if waiting
         t = time()
         wait(c)
@@ -119,4 +122,5 @@ function main(name, shape, before, besides, waiting)
     isempty(path) || executable(c) === first_plan || open(io -> C.explain(io, executable(c)), path * ".searched", "w")
 end
 
-main(ARGS[1], Symbol(get(filter(a -> !startswith(a, "--"), ARGS), 2, "small")), "--before" in ARGS, "--beside" in ARGS, "--wait" in ARGS)
+main(ARGS[1], Symbol(get(filter(a -> !startswith(a, "--"), ARGS), 2, "small")), "--before" in ARGS, "--defaults" in ARGS, "--beside" in ARGS,
+    "--wait" in ARGS)
