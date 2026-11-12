@@ -1607,7 +1607,28 @@ arrangement of what it holds, opened as a vector of traced arrays is and
 returned as the same code returns it untraced, a host array of numbers;
 where it meets an operation that needs an array of the program it is
 refused with what to write instead; and no operation that holds a handle
-can be recorded (`holds_handle`). A
+can be recorded (`holds_handle`). A traced number stands for a number
+wherever one may be but where Julia needs a plain one, a branch, a store
+typed plain, a hash, the first two found by Julia itself where it takes the
+value and explained there as branches were (27 spellings, `plain_table.md`);
+a host vector of traced numbers written into an array of the program is
+written as Base's loop writes it, an element a write, joined, two kernels
+at 3 elements and at 64. Rolling was to take the joined writes as a loop
+whose state is only written, and could not state the write: a write's
+indices are an index an axis, and each sequence at its own positions is a
+diagonal over two, said only by merging them and writing at linear
+indices, which the tracer alone could build. That construction is one
+place now (`linear_index`), the tracer's for Cartesian indices and
+lowering's for a gather or a write whose indices differ a step, five
+spellings refused before and one loop each at any B. And a handle that
+outlives its node: a value stored from inside a loop a gradient rolled,
+read after the gradient returned, read the constant the roll left, zeros
+and no error, 10 spellings, and an eager call left traced arrays in what
+it stored, 24; a handle names its node while its function is traced and
+until a roll retires the node, and a read of anything else is an error
+(`named`, a flag on the tape and one retired node), at no cost to a trace
+that can be measured. Rolling itself was sound: interpreted before and
+after, the corpus and 200 seeds agree to rounding. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
