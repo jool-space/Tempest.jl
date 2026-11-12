@@ -585,6 +585,7 @@ function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
         return init === nothing || init === only(fold_init(builtin, eltype(y))) ? r : op.(init, r)
     end
     init === nothing && throw(ArgumentError("reducing a traced array by $op needs `init`, its identity"))
+    holds_handle(op) && throw(ArgumentError(HANDLE_AS_DATA))
     T = promote_type(eltype(y), typeof(init))
     fold(GenericFold(; init = (convert(T, init),), combine = OperatorCombine(op)), T.(y); dims)
 end
@@ -1336,6 +1337,32 @@ const BRANCH = "the traced function branches on a value known only when the prog
     Julia needs a `Bool`: choose between values with `ifelse.(c, a, b)` or by a mask, and fold truth values with \
     `any`, `all` or `count`"
 
+# A traced number stands for a number of its type everywhere a number may be,
+# but where Julia needs a plain one: a branch, which needs a `Bool` (above);
+# a place typed for plain numbers, which a host container is when its element
+# type is one, as `zeros(Float32, n)`, `Float32[…]`, `push!` into a
+# `Vector{Float32}`, a typed field, `Ref` or `Dict` are, and as `[a, 1f0]` is,
+# its traced and plain numbers promoting to the plain type; and a hash, which
+# a `Dict`'s key and a `Set`'s element need. Julia finds each where it is
+# taken, as a `TypeError` or in `hash`, and the trace says what happened.
+plain_needed(T, x) = "a traced $(node(x).eltype), whose value is known only when the program runs, is stored where \
+    Julia needs a plain $T: a host container typed for plain numbers, as `zeros`, `Float32[…]`, `push!` into a \
+    `Vector{Float32}`, a typed field, `Ref` or `Dict` are, and `[a, 1f0]` is, its numbers promoting to the plain type, \
+    cannot hold it. Hold traced numbers where their type is inferred, `[a, b]` of traced numbers alone, `Any[…]` or a \
+    tuple, or make an array of the program: `fill(a, n)`, or `similar(x, n)` written into"
+
+const HASHED = "a traced number, whose value is known only when the program runs, is hashed, as a `Dict`'s key or a \
+    `Set`'s element is: choose by position or by a mask instead, or compare with `==`, which is traced"
+Base.hash(::Traced, ::UInt) = throw(ArgumentError(HASHED))
+
+# The error Julia throws where a traced value stands for a plain one, in the
+# trace's words.
+function plain_error(err)
+    err isa TypeError && err.got isa Traced || return err
+    err.got isa Traced{Bool} && err.expected === Bool && return ArgumentError(BRANCH)
+    ArgumentError(plain_needed(err.expected, err.got))
+end
+
 # `trace`, and the arrays it met as constants, as they were.
 function trace_meeting(@nospecialize(f), @nospecialize(args...))
     tape = Tape()
@@ -1358,12 +1385,12 @@ function trace_meeting(@nospecialize(f), @nospecialize(args...))
     output = try
         f(traced...)
     catch err
-        # Julia has no method for `if` on a number of a package's: a branch on
-        # a traced truth value fails where it is taken, in Julia's words,
-        # which this explains. Thrown while Julia's is handled, it keeps
-        # Julia's, and where the branch is, as its cause.
-        err isa TypeError && err.got isa Traced{Bool} && throw(ArgumentError(BRANCH))
-        rethrow()
+        # Julia has no method for `if` on a number of a package's, nor a
+        # plain number's place for a traced one: each fails where it is
+        # taken, in Julia's words, which this explains. Thrown while Julia's
+        # is handled, it keeps Julia's, and where it was taken, as its cause.
+        explained = plain_error(err)
+        explained === err ? rethrow() : throw(explained)
     end
     copy(Random.default_rng()) == drawn || @warn GLOBAL_DRAW
     results = Int[]

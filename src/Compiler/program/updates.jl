@@ -108,6 +108,7 @@ function converted(tape, v, ::Type{T}) where {T}
 end
 
 function Base.setindex!(x::TracedArray, v, I...)
+    holds_traced(v) && return written_each!(x, v, I)
     y, indices = selection(x, I)
     indices = map(i -> i isa AbstractVector{<:Integer} && !(i isa TracedArray) ? linear_range(i) : i, indices)
     for (k, i) in enumerate(indices)
@@ -150,20 +151,35 @@ const PLAIN_WRITE = "a traced value cannot be written into an array the function
 Base.copyto!(::AbstractArray, ::Broadcast.Broadcasted{TracedStyle}) = throw(ArgumentError(PLAIN_WRITE))
 
 # So is one traced number written into an element of such an array, one of
-# numbers rather than of traced values; a view and a Cartesian index come here
+# plain numbers (see `plain_needed`); a view and a Cartesian index come here
 # through the array's own integer indices.
 function Base.setindex!(y::Array{T}, v::Traced, i::Int) where {T <: Number}
-    v isa T || throw(ArgumentError(PLAIN_WRITE))
+    v isa T || throw(ArgumentError(plain_needed(T, v)))
     invoke(setindex!, Tuple{Array{T}, Any, Int}, y, v, i)
 end
 
 function Base.setindex!(y::Array{T}, v::Traced, i::Int, j::Int, I::Int...) where {T <: Number}
-    v isa T || throw(ArgumentError(PLAIN_WRITE))
+    v isa T || throw(ArgumentError(plain_needed(T, v)))
     invoke(setindex!, Tuple{Array{T}, Any, Int, Int, Vararg{Int}}, y, v, i, j, I...)
+end
+
+# A host array of traced numbers (see `HOST_CONTAINER`) written into a
+# traced array is written as Base's loop writes it, each number at its
+# position: a write of one number a position, the writes alike but for the
+# position, which planning joins into one (see `joined_writes`). Faster
+# still is the array made by array code, which no loop of numbers is.
+function written_each!(x::TracedArray, v, I)
+    J = to_indices(x, I)
+    Base.setindex_shape_check(v, (length(i) for i in J if !(i isa Integer))...)
+    for (at, e) in zip(Iterators.product(map(i -> i isa Integer ? (i,) : i, J)...), v)
+        x[at...] = e
+    end
+    x
 end
 
 function Base.copyto!(dest::TracedArray, src::AbstractArray)
     length(src) <= length(dest) || throw(ArgumentError("destination has fewer elements than required"))
+    holds_traced(src) && return written_each!(dest, src, (1:length(src),))
     length(src) == length(dest) || return copyto!(dest, 1, src, 1, length(src))
     id = converted(dest.tape, src, eltype(dest))
     write!(dest, size(src) == size(dest) ? id : record!(dest.tape, Reshape(), (id,), dest.dims, eltype(dest)))
