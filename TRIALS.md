@@ -1528,7 +1528,32 @@ where an option's time falls either side of the window options grow from
 (5% of the best), by which two of the six never timed the tile that beats
 cuBLAS's 570 μs by 12% in each layer's second projection. A floor a
 decider fails to build is kept as failed and loses every comparison, where
-naming it threw and ended the preparation. A
+naming it threw and ended the preparation. What a preparation does unless
+asked is decided by these: nothing is timed (`measure = :none`), the first
+call runs the plan the estimates pick and the plan does not change after;
+`measure = :close` times the close calls, before the first result
+(`search = :before`) or behind it (`search = :after`), and
+`TEMPEST_MEASURE` and `TEMPEST_SEARCH` set what is done unless a keyword
+says. The measuring was the default until now and stood for 60 to 150 s of
+a cold preparation for 0 to 25% of a step; a preparation that measured and
+settled leaves decisions one that measures nothing replays. The search
+behind the first result (`Search`, `Searching`, `src/Compiler/runtime/`)
+prepares the same trace again on a thread of its own and asks its timings
+of the program's calls, one each after the call's own work (`wait(c)`
+takes the rest), since a timing captures a graph and CUDA forbids a
+synchronization of the device from any task while one is captured; the
+first call after it ends runs the plan it found, the state in the caller's
+arrays. On the first GB10, small shapes, one run each: the LSTM's first
+result in 24 s where 61 and the GPT step's in 32 where 160, 29 and 53
+kernels compiled before it where 192 and 721, the measured plan 61 and 176
+s after, calls meanwhile 6.1 and 2.1 ms at the median and 565 and 981 at
+the slowest. It is not what is done unless asked because calls then vary
+and the plan changes at a call nobody chose. Builds side by side are each
+waited for before the first that failed is thrown (`ended_all`), where the
+rest went on compiling beside the timings that followed. A function that
+returns its state as new arrays is another program than one that writes
+it: the GPT step unmeasured, 166 kernels and 1.47 ms where the results
+replace the inputs' storage in 170 and 1.17. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
