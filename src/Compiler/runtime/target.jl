@@ -183,7 +183,10 @@ pointable(::CPUTarget, x, at) = x isa Array
     task_state(target) -> function
 
 A function that, called first in a new task, gives the task the state on
-`target` of the task that asked for it (for CUDA, its context and stream).
+`target` of the task that asked for it (for CUDA, its context and stream),
+and none where that task has none: a preparation that builds nothing asks
+implementations side by side what they offer (see `side_by_side`), and
+touches no device, as while a package precompiles without one.
 """
 task_state(target) = () -> nothing
 

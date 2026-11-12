@@ -29,6 +29,7 @@ const ALIGNMENT = 128
 Tempest.Compiler.pointable(::CUDATarget, x, at) = x isa CuArray{<:Any, <:Any, CUDACore.DeviceMemory} && at % ALIGNMENT == 0
 
 function Tempest.Compiler.task_state(::CUDATarget)
+    CUDACore.task_local_state() === nothing && return () -> nothing
     context, stream = CUDACore.context(), CUDACore.stream()
     () -> (CUDACore.context!(context); CUDACore.stream!(stream))
 end
