@@ -46,6 +46,32 @@
     @test same(x -> (y = fill!(similar(x, size(x, 2)), 0); y .= x[1, :]; y), x)
 end
 
+# An array of `CartesianIndex{N}` among other indices stands for `N` axes, as
+# in Base: the array with those axes merged, at the linear indices it holds,
+# traced or not, read and written.
+@testset "Cartesian indices among others" begin
+    x, p = data(3, 2, 8, 3), Int32[1 4 2; 2 5 3]
+    same(f, args...) = interpret(trace(f, args...), deepcopy(args)...) == f(deepcopy(args)...)
+    at(p) = CartesianIndex.(p, reshape(axes(p, 2), 1, :))
+    @test same((x, p) -> x[:, :, at(p)], x, p)
+    @test same((x, p) -> x[2, at(p), :], permutedims(x, (2, 3, 4, 1)), p)
+    @test same(x -> x[:, :, [CartesianIndex(1, 2) CartesianIndex(3, 1)]], x)
+    @test same(x -> x[2, [CartesianIndex(1, 2), CartesianIndex(2, 7)], 3], x)
+    @test same(x -> x[:, [CartesianIndex(2), CartesianIndex(1)], 4, :], x)
+    @test same((x, p) -> x[CartesianIndex.(1, 2, p, 3)], x, p)
+    @test same((x, p) -> (y = copy(x); y[:, :, at(p)] .= 7; y), x, p)
+    @test same((x, p) -> (y = zero(x); y[:, :, at(p)] .= x[:, :, 1:2, :]; y), x, p)
+    @test same((x, p) -> (y = copy(x); y[1, :, at(p)] = x[2, :, 3:4, :]; y), x, p)
+    @test same(x -> (y = copy(x); y[1, [CartesianIndex(1, 2), CartesianIndex(2, 7)], 2] .= -1; y), x)
+    @test same((x, p) -> (y = copy(x); view(y, :, 1, at(p)) .+= 1; y), x, p)
+    @test same((x, p) -> (x[:, :, at(p)] .= 0; x), x, p)
+    # Taking the components of indices made from integers leaves no index of
+    # another type: the selection gathers by the integers' linear index.
+    lowered = C.lower(trace((x, p) -> x[:, :, at(p)], x, p))
+    @test !any(v -> v.eltype <: CartesianIndex, lowered.values)
+    @test_throws BoundsError trace(x -> x[:, :, [CartesianIndex(9, 1)]], x)
+end
+
 # A write into an input, or into anything that shares its memory, is a write
 # into the caller's array: what the input holds when the program ends is a
 # result that replaces it, and the interpreter leaves it in the caller's array,

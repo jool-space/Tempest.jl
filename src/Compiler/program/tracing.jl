@@ -648,9 +648,16 @@ cartesian(i::Traced, dims) = record_map(CartesianAt{dims}(), i)
 cartesian(i::TracedArray, dims) = TracedArray(i.tape, cartesian(handle(i), dims).id)
 
 # A Cartesian index is its components. One made from a linear index has them
-# as formulas of it, so that taking them leaves no index of another type.
+# as formulas of it, and one made from integers, as `CartesianIndex.(i, j)`
+# makes them, has them as those integers filled out to its shape, so that
+# taking them leaves no index of another type.
 function Base.getindex(c::Traced{CartesianIndex{N}}, d::Integer) where {N}
     op = node(c).op
+    n = node(c)
+    if op isa Map && op.f isa Type{<:CartesianIndex} && length(n.inputs) == N && all(i -> c.tape.nodes[i].eltype <: Integer, n.inputs)
+        component = cast(Int, Traced(c.tape, n.inputs[d]))
+        return Traced(c.tape, filled(c.tape, component.id, n.dims))
+    end
     op isa Map{<:CartesianAt} || return record_map(Component{d}(), c)
     dims = typeof(op.f).parameters[1]::Dims
     i = Traced(c.tape, only(node(c).inputs)) - 1
@@ -795,22 +802,39 @@ function linear_range(l)
     s != 0 && all(k -> l[k] - l[k - 1] == s, 2:length(l)) ? (first(l):s:last(l)) : l
 end
 
+# The axes of an array an index stands for, as Base counts them: an array of
+# `CartesianIndex{N}` for `N`, any other index for one.
+index_axes(::AbstractArray{CartesianIndex{N}}) where {N} = N
+index_axes(i) = 1
+
+# An index along the axes of extents `dims` as one axis, the linear index
+# into them: an array of Cartesian indices the linear indices it holds.
+merged_index(i::TracedArray{<:CartesianIndex}, dims) = linear_at(i, dims)
+merged_index(i::AbstractArray{<:CartesianIndex}, dims) = linear_range(LinearIndices(dims)[i])
+merged_index(i, dims) = i
+
 """
     selection(x, I) -> (array, indices)
 
-What indexing `x` by `I` selects, and from which array: `x` or, for one
-linear index into an array of several axes, `vec(x)`; by integers, ranges and
-arrays of integers. A linear integer is its Cartesian index, and an array of
-Cartesian indices the linear indices it holds.
+What indexing `x` by `I` selects, and from which array: `x`, or `x` with the
+axes an index stands for together merged into one, a reshape that shares its
+memory; by integers, ranges and arrays of integers, one per axis. As in Base,
+an array of `CartesianIndex{N}` stands for `N` axes and a sole index for all
+of them, each the linear index into its axes: one linear index into an array
+of several axes selects from `vec(x)`, and an array of Cartesian indices
+beside other indices from `x` with the axes it names merged. A sole integer
+is its Cartesian index instead.
 """
 function selection(x::TracedArray, I)
     I = Base.to_indices(x, map(index_array, Tuple(Iterators.flatten(map(index_components, I)))))
-    length(I) == 1 && ndims(x) != 1 || return x, map(selection_index, I)
-    i = only(I)
-    i isa Integer && return (checkbounds(x, i); (x, Tuple(CartesianIndices(x)[i])))
-    i isa TracedArray{<:CartesianIndex} && (i = linear_at(i, size(x)))
-    i isa AbstractArray{<:CartesianIndex} && (i = linear_range(LinearIndices(x)[i]))
-    vec(x), (selection_index(i),)
+    length(I) == 1 && only(I) isa Integer && ndims(x) != 1 && return (checkbounds(x, only(I)); (x, Tuple(CartesianIndices(x)[only(I)])))
+    spans = length(I) == 1 ? [ndims(x)] : Int[index_axes(i) for i in I]
+    # Indices past the array's axes or short of them, those axes of extent
+    # one, merge nothing.
+    sum(spans) == ndims(x) || return x, map(selection_index, I)
+    merged = map((n, l) -> size(x)[(l - n + 1):l], spans, cumsum(spans))
+    y = reshape(x, Tuple(map(prod, merged)))
+    y, map((i, dims) -> selection_index(merged_index(i, dims)), I, Tuple(merged))
 end
 
 # Arrays of integers among a selection's indices as the inputs of its node,
