@@ -335,6 +335,22 @@ function tuple_fold!(b)
     emit!(b, [i == d ? "1" : e for (i, e) in enumerate(a.dims)], rand(b.rng, choices); tied = a.tied)
 end
 
+# A fold of each slice along an axis, as a user spells a map over slices: a
+# map or a broadcast over `eachslice`, or `mapslices` over the other axes; or
+# a comprehension, a host vector of traced numbers, which only Julia's own
+# methods over its elements read, folded whole.
+function slice_fold!(b)
+    a = pick(b, v -> length(v.dims) >= 2)
+    a === nothing && return false
+    d = along(b, a)
+    x = a.name
+    rest = dims_keyword([i for i in eachindex(a.dims) if i != d])
+    f = rand(b.rng, a.tied ? ["sum", "(s -> sum(abs2, s))"] : ["sum", "(s -> sum(abs2, s))", "maximum"])
+    rand(b.rng) < 0.25 && return emit!(b, String[], "sum(abs2, [$f(selectdim($x, $d, k)) for k in axes($x, $d)]) * {0.1}")
+    e = rand(b.rng, ["map($f, eachslice($x; dims = $d))", "$f.(eachslice($x; dims = $d))", "vec(mapslices($f, $x; dims = $rest))"])
+    emit!(b, [a.dims[d]], e; tied = a.tied)
+end
+
 # The log-sum-exp, alone or as a softmax, maybe of a causal mask's scores:
 # the mask keeps each slice's first position, so no slice is all -Inf.
 function logsumexp!(b)
@@ -595,7 +611,7 @@ end
 
 const FAMILY_OPS = Dict(
     :map => [unary!, binary!, position_mask!, value_mask!, index_values!],
-    :fold => [fold!, whole_fold!, tuple_fold!, logsumexp!],
+    :fold => [fold!, whole_fold!, tuple_fold!, logsumexp!, slice_fold!],
     :scan => [scan!, reversed_scan!],
     :layout => [reshape_merge!, reshape_split!, singleton!, permute!, select!, concat!, reverse!],
     :gather => [gather!, gather_linear!, gather_position!],
