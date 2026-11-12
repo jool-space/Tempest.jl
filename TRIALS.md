@@ -1589,7 +1589,22 @@ own loop construct, which then runs it in 123 to 129 ms. Tempest's plans
 here measure nothing: at B of 1 the 6 ms are the streamed reductions left
 at their first tile, which the plan that measures takes back to about 41;
 at B of 4 the 14 ms are not accounted for, products of four columns the
-first suspect. Reactant's last line, `mapslices(argmax, logits; dims = 1)`,
+first suspect. Accounted for since, each kernel of the three plans timed
+alone and matched by what it computes (`challengers/batch4-2026-11-12`,
+the sums within 1.5% of the step at B of 1 and 4): of the 12.6 ms a step
+grows by from 1 sequence to 4, 5.1 are the attention layers' output
+projection, which at 4 alone recomputes the softmax's weighted sum inside
+its product, 800 μs a kernel on an estimate of 104, the recomputed fold
+priced at the product line's recompute rate where each of 20 row tiles
+does its exponentials at a scalar's; 5.1 are the projections whose groups
+carry a norm or an activation, products of 128x4x32 tiles at 389 to 530 μs
+where the bare product by cuBLAS takes 215 to 390, a library product no
+group with a fused prologue or epilogue is offered, and no claim reads
+each weight once for a handful of results a step as the streamed kernel
+does for one; 2.5 are the delta rule's state, B times the bytes in four
+passes, which is also the step's growth from 4 to 16, where the products
+of 16 columns cost less than at 4. The plan that measures did not prepare
+at B of 4 under 64 GB. Reactant's last line, `mapslices(argmax, logits; dims = 1)`,
 Tempest refused, and the refusal was taken as one case of a family, the
 same computation on each slice of an axis, surveyed in 40 spellings
 (`challengers/map-axis-2026-11-12/table.md`): `mapslices` of a function
