@@ -48,8 +48,14 @@ const APPLIED = (
 # The regimes a function is applied in, each priced by its own measurement:
 # streamed, in a kernel that reads and writes its tiles once; swept, in a
 # product's sweep over its factors' tiles; inner, in the sweep of a product
-# that recomputes a fold, over the fold's tiles.
-const REGIMES = (:streamed, :swept, :inner)
+# that recomputes a fold, over the fold's tiles; stepped, in each step of a
+# sweep, along the chain a step computes on what it loaded before the next.
+const REGIMES = (:streamed, :swept, :inner, :stepped)
+
+# The class a regime prices a function for: streamed and stepped, the same
+# for every class, the function's work neither in a product's sweep nor in
+# its tiles; swept and inner, that of the product's factors.
+regime_class(regime, class) = regime in (:streamed, :stepped) ? :any : class
 
 """
 The seconds per position of a scalar function `f` applied in `regime` in a
@@ -58,7 +64,9 @@ rates file. Streamed: the time of a fold over eight applications of the
 function beyond that of the fold alone, per application, the same for every
 class. Swept: the time a product's factor computed by the function adds to
 the product. Inner: the same for a product that recomputes the fold the
-function is applied to. A function priced where other work hides it, or that
+function is applied to. Stepped: the time a matrix-vector product's vector
+computed by the function in each step adds to that product's sweep, per
+step and application, the same for every class. A function priced where other work hides it, or that
 adds less than a timing can tell, measures as nothing, which is what it
 costs there. A function the table does not name costs what addition does.
 """
@@ -75,7 +83,7 @@ Base.@nospecializeinfer function applied_function(@nospecialize(f))
 end
 
 function price_applied!(d::Decider, regime, class, f)
-    regime === :streamed && (class = :any)
+    class = regime_class(regime, class)
     get!(d.applied, (regime, class, f)) do
         i = findfirst(((_, g),) -> g == f, APPLIED)
         i === nothing && return price!(d, regime, class, +)
@@ -89,7 +97,7 @@ end
 # Every function priced in every regime, for the classes `types` make: those
 # the rates file lacks are fitted together.
 function applied!(d::Decider, types = (Float32,))
-    needs = unique((regime, regime === :streamed ? :any : product_class(d.target, T), f) for (_, f) in APPLIED, regime in REGIMES, T in types)
+    needs = unique((regime, regime_class(regime, product_class(d.target, T)), f) for (_, f) in APPLIED, regime in REGIMES, T in types)
     key((regime, class, f)) = join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")
     unfitted = [n for n in needs if measures(d) && !haskey(d.calibration, key(n))]
     isempty(unfitted) || fit_applied_all!(d, unfitted)
@@ -102,6 +110,21 @@ end
 const APPLIED_SHAPE = (4096, 512)
 const APPLIED_TIMES = 8
 const SWEEP_SHAPES = ((256, 512), (512, 2048))
+
+# A matrix-vector product's sweep fits a package's step and the functions a
+# step computes: a half-precision matrix stored along the sum, as a
+# checkpoint stores its weights, of enough outputs that the generator keeps
+# its sum whole rather than splitting it among blocks, and a long sum, which
+# its blocks sweep in many narrow steps, side by side. Two sums, the step
+# the slope of the time over the steps between them: what a step takes,
+# waiting on its loads or moving its bytes, whichever is longer. On GB10 the
+# generator's first claim takes 64 blocks of 32 outputs and steps 32 along
+# the sum, 0.6 to 0.8 μs a step loaded and 1.2 to 2.5 computing a vector's
+# silu in each.
+const STEPPED_OUTPUTS = 2048
+const STEPPED_SUMS = (8192, 16384)
+
+stepped_reference(sum) = (zeros(BFloat16, sum, STEPPED_OUTPUTS), zeros(BFloat16, sum))
 
 # The seconds per position of each of `needs`, triples `(regime, class, f)`,
 # fitted together: the reference programs of all of them are built side by
@@ -141,6 +164,10 @@ function applied_references(regime, class, f)
         chain(x) = foldl((y, _) -> apply_chain(f, y), 1:APPLIED_TIMES; init = x)
         return ((x -> sum(x; dims = 1), (x,), false), (x -> sum(chain(x); dims = 1), (x,), false))
     end
+    if regime === :stepped
+        w, x = stepped_reference(first(STEPPED_SUMS))
+        return (((w, x) -> transpose(w) * x, (w, x), false), ((w, x) -> transpose(w) * BFloat16.(apply_chain(f, Float32.(x))), (w, x), false))
+    end
     T = class in (:Float16, :BFloat16) ? getfield(@__MODULE__, class) : Float32
     if regime === :swept
         a, b = zeros(T, SWEEP_SHAPES[1]), zeros(T, SWEEP_SHAPES[2])
@@ -153,7 +180,8 @@ end
 # Seconds per position from the two references' times: streamed, the time
 # the applications add to the fold, per application; swept or inner, what
 # the function adds to the product of the package that computes it, against
-# that package's product without it, for the package it costs least.
+# that package's product without it, for the package it costs least;
+# stepped, the same per application in a step along the sweep's chain.
 function applied_seconds(regime, f, plain, applied)
     fastest(r) = minimum(first, values(r); init = Inf)
     regime === :streamed && return added_seconds(fastest(applied), fastest(plain)) / (APPLIED_TIMES * prod(APPLIED_SHAPE))
@@ -189,12 +217,11 @@ fold.
 """
 function memory!(d::Decider, package)
     get!(d.memories, package) do
-        measures(d) || return Memory(d.rates.launch, d.rates.cached)
-        key(what) = string(package, " memory ", what)
+        measures(d) || return Memory(d.rates.launch, d.rates.cached, 0.0)
         own = implementations(d.target)
-        haskey(d.calibration, key("bandwidth")) ||
+        fitted_memory(d, package) ||
             fit_memory!(d, Implementation[own..., (i for i in loaded_implementations() if package_name(i) === package && !(i in own))...])
-        Memory(d.calibration[key("latency")], d.calibration[key("bandwidth")])
+        Memory((d.calibration[memory_key(package, what)] for what in MEMORY_RATES)...)
     end
 end
 
@@ -295,21 +322,28 @@ end
 # whether the cover measured a split it would otherwise not.
 const MEMORY_COLUMNS = (16, 256, 1024, 4096)
 
+# What a package's memory is in the rates file, each a line of its own (see `Memory`).
+const MEMORY_RATES = ("latency", "bandwidth", "step")
+memory_key(package, what) = string(package, " memory ", what)
+memory_fitted(d, package, whats) = all(what -> haskey(d.calibration, memory_key(package, what)), whats)
+fitted_memory(d, package) = memory_fitted(d, package, MEMORY_RATES)
+
 """
 Fit the memory of every package of the implementations `among`, by default
-the decider's target's, and of the floor, `:floor`, that has none, from the
-times of its fastest claims on a fold over each column at the reference
-sizes and the bytes the claims move: its bandwidth is the slope of their
+the decider's target's, and of the floor, `:floor`, that has none: its
+latency and bandwidth, where the rates file lacks them, from the times of
+its fastest claims on a fold over each column at the reference sizes and
+the bytes the claims move: its bandwidth is the slope of their
 least-squares line, which the largest folds set, and its latency, a launch's,
 the smallest fold's time less its bytes at that bandwidth, over its
 launches. A package that claims no such fold moves bytes at the device's
-rates.
+rates. Then its step, where the file lacks it (see `fit_step!`).
 """
 function fit_memory!(d::Decider, among = implementations(d.target))
     phase(:calibration) do
-        key(p, what) = string(p, " memory ", what)
-        unfitted = [i for i in among if !haskey(d.calibration, key(package_name(i), "bandwidth"))]
-        floor = !haskey(d.calibration, key(:floor, "bandwidth"))
+        key(p, what) = memory_key(p, what)
+        unfitted = [i for i in among if !memory_fitted(d, package_name(i), ("latency", "bandwidth"))]
+        floor = !memory_fitted(d, :floor, ("latency", "bandwidth"))
         built = concurrently(n -> build_reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n); floor), collect(MEMORY_COLUMNS), d.target)
         folds = [time_reference(d, r::Reference) for r in built]
         for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
@@ -325,6 +359,26 @@ function fit_memory!(d::Decider, among = implementations(d.target))
             keep!(d.calibration, d.calibration_path, key(package, "latency"), latency)
             keep!(d.calibration, d.calibration_path, key(package, "bandwidth"), bandwidth)
         end
+        fit_step!(d, among)
+    end
+end
+
+"""
+Fit the step of every package of the implementations `among`, and of the
+floor, that has none: the slope of its fastest claims' times on a
+matrix-vector product (see `STEPPED_SUMS`) over the steps their sweeps
+take, at the two sums. None where its claims state no steps, as the floor's
+do not, or it claims no such product.
+"""
+function fit_step!(d::Decider, among = implementations(d.target))
+    unfitted = [i for i in among if !memory_fitted(d, package_name(i), ("step",))]
+    floor = !memory_fitted(d, :floor, ("step",))
+    built = concurrently(n -> build_reference(d, unfitted, (w, x) -> transpose(w) * x, stepped_reference(n)...; floor), collect(STEPPED_SUMS), d.target)
+    sweeps = [time_reference(d, r::Reference) for r in built]
+    for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
+        steps = all(sweep -> haskey(sweep, package), sweeps) ? [first(last(sweep[package])).steps for sweep in sweeps] : [0.0, 0.0]
+        step = steps[2] > steps[1] > 1 ? max(0.0, (first(sweeps[2][package]) - first(sweeps[1][package])) / (steps[2] - steps[1])) : 0.0
+        keep!(d.calibration, d.calibration_path, memory_key(package, "step"), step)
     end
 end
 

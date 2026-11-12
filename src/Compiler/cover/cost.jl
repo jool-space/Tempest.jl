@@ -35,10 +35,16 @@ struct Line
     borrowed::Bool
 end
 
-"A package's memory: a launch that moves `bytes` within the cache takes `latency + bytes / bandwidth` seconds."
+"""
+A package's memory: a launch that moves `bytes` within the cache takes
+`latency + bytes / bandwidth` seconds, and one whose blocks sweep `steps`
+tiles one after another at least `latency + steps * step`, a step waiting
+for what it loads.
+"""
 struct Memory
     latency::Float64
     bandwidth::Float64
+    step::Float64
 end
 
 # A launch of fewer blocks than the device runs at once moves its bytes and
@@ -62,7 +68,13 @@ function seconds(w::Work, r::Rates, memory::Memory, line, price = (regime, f) ->
     products = w.flops + w.recomputed == 0 ? 0.0 :
         line.latency + (w.split ? w.flops / line.split + w.recomputed / line.recompute : (w.flops + w.recomputed) / line.rate) / share
     compute = products + elementwise
-    max(memory_seconds, compute) + OVERLAP * min(memory_seconds, compute)
+    # A sweep of many steps waits on each step's loads and on the chain of
+    # functions it computes on them, one step after another, while the
+    # blocks sweep side by side: its time is the steps', however few bytes
+    # each step moves (see `Work`).
+    stepping = w.steps <= 1 ? 0.0 : memory.latency + w.steps * memory.step + cost(:stepped, w.stepped)
+    longest = max(memory_seconds, compute, stepping)
+    longest + OVERLAP * (memory_seconds + compute + stepping - longest)
 end
 
 "The class of products of `T` factors: a half type by name, Float32 by the target's precision."

@@ -259,3 +259,26 @@ applied inner tf32x3 min	0.0
 applied inner tf32x3 identity	0.0
 applied inner tf32x3 Float32	0.0
 applied inner tf32x3 BFloat16	0.0
+cuBLAS memory step	0.0
+cuDNN memory step	0.0
+cuTile memory step	7.342500794038642e-7
+floor memory step	0.0
+applied stepped any exp	0.0
+applied stepped any log	1.5050000001792796e-7
+applied stepped any tanh	1.318749696110899e-7
+applied stepped any sqrt	8.656249974592356e-7
+applied stepped any sin	3.121250529147801e-7
+applied stepped any cos	2.6024997623608215e-7
+applied stepped any abs	0.0
+applied stepped any abs2	0.0
+applied stepped any inv	1.3630000239572837e-6
+applied stepped any *	0.0
+applied stepped any +	0.0
+applied stepped any -	0.0
+applied stepped any /	1.6696250213499297e-6
+applied stepped any ^	1.1262499128861236e-6
+applied stepped any max	0.0
+applied stepped any min	0.0
+applied stepped any identity	0.0
+applied stepped any Float32	0.0
+applied stepped any BFloat16	0.0

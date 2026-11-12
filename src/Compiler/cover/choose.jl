@@ -605,6 +605,7 @@ function price_all!(d::Decider, p::Plan)
         foreach(((f, _),) -> push!(needs, (:streamed, :any, named(f))), w.applied)
         foreach(((f, _),) -> push!(needs, (:swept, class, named(f))), w.swept)
         foreach(((f, _),) -> push!(needs, (:inner, class, named(f))), w.inner)
+        foreach(((f, _),) -> push!(needs, (:stepped, :any, named(f))), w.stepped)
     end
     key((regime, class, f)) = join(("applied", regime, class, APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]), " ")
     unfitted = [n for n in needs if !haskey(d.applied, n) && !haskey(d.calibration, key(n))]

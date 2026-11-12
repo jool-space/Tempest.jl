@@ -963,6 +963,41 @@ function reading_blocks(t, ax, domain)
     n
 end
 
+# The steps a block of schedule `c.s` takes one after another, and the
+# functions they compute, each with the number of steps it is applied in:
+# the sweep's steps, its share of the swept axes' tiles where a split sweep
+# divides them, each applying, once, every function in the terms `roots`
+# that mentions a swept axis, as a step computes its tile of them side by
+# side; and the steps of each fold the terms recompute, over its own axes in
+# the tiles `fold_context` sweeps them in, inside every step of the sweep
+# where the fold moves along it and once before the sweep where not.
+# A product's sweep states none: its line, fitted on products, prices it.
+function sweep_steps(c, roots)
+    c.s.sketch === :product && return (0.0, Pair{Any, Float64}[])
+    counts = Dict{Any, Float64}()
+    axes = [a for ax in c.s.tiling if ax.reduced for a in ax.axes]
+    steps = stepped!(counts, c, roots, axes, Float64(cld(sweeps(c.s), c.s.splits)), 1.0)
+    (steps, sort!(collect(counts); by = p -> string(p.first)))
+end
+
+# The steps of a sweep along `axes` of `n` steps, taken `runs` times, and
+# of the folds its terms recompute, its functions counted into `counts`.
+function stepped!(counts, c, roots, axes, n, runs)
+    steps = n > 1 ? runs * n : 0.0
+    for t in subterms(roots)
+        along = any(a -> mentions(t, a), axes)
+        if t isa Recomputed
+            e = fold_context(c, t)
+            own = length(c.s.tiling)+1:length(e.s.tiling)
+            steps += stepped!(counts, e, (t.body,), [a for q in own for a in e.s.tiling[q].axes],
+                prod(q -> cld(e.s.tiling[q].extent, e.s.tiling[q].tile), own; init = 1), along ? runs * n : runs)
+        elseif t isa Apply && t.f !== tuple && !(t.f isa Weight) && along && n > 1
+            counts[t.f] = get(counts, t.f, 0.0) + runs * n
+        end
+    end
+    steps
+end
+
 # A schedule's launches: each of its kernels, moving the bytes of its
 # arguments over the blocks of its grid, and passing what its workspaces hold
 # (a split sum's parts, a fold's value a later phase reads) to a later one.
@@ -1052,6 +1087,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     end
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
     streaming, swept, inner = applied(c, roots)
+    steps, stepped = sweep_steps(c, roots)
     prior = [b for k in kernels for (_, (_, b)) in k.before]
     main = findfirst(k -> k.name != INITIAL_STATES && !any(b -> b === k, prior), kernels)
     # The elements a fold by key of the group combines, along the axes of the
@@ -1073,7 +1109,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
         passed = sum(a -> a.buffer isa Int ? 0.0 : moved(a), kernel.args; init = 0.0)
         reread = i == main ? sum(a -> a.buffer isa Int ? moved(a) * rereads(a.buffer) : 0.0, kernel.args; init = 0.0) : 0.0
         blocks = prod(kernel.grid; init = 1)
-        i == main ? Work(bytes; reread, passed, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner) :
+        i == main ? Work(bytes; reread, passed, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner, steps, stepped) :
             Work(bytes; passed, blocks)
     end
 end

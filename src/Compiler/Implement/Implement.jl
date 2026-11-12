@@ -43,6 +43,17 @@ inside a product's sweep, to its factors, are `swept`: each step's small tile
 of them stalls the sweep, and they cost many times what they cost streamed;
 those applied inside a fold the sweep recomputes, to that fold's tiles, are
 `inner`, at a factor of their own.
+
+A launch whose blocks sweep tiles one after another, waiting for what each
+step loads before the next, states the `steps` a block takes, those of a
+fold it recomputes in steps of its own among them, and the functions the
+steps compute on what they loaded, each with the number of steps it is
+applied in along their chain (`stepped`): a step takes as long as its loads
+and that chain take, however few positions it covers, and a sweep of many
+narrow steps takes that many times as long, whatever bytes it moves. Tempest prices a step on its package's memory and each function on
+the time it measured for it in a step (see `seconds`). A launch that states
+no steps, or one, is priced by its bytes, flops and functions alone, as a
+product's sweep is by its line.
 """
 struct Work
     bytes::Float64
@@ -56,11 +67,13 @@ struct Work
     applied::Vector{Pair{Any, Float64}}
     swept::Vector{Pair{Any, Float64}}
     inner::Vector{Pair{Any, Float64}}
+    steps::Float64
+    stepped::Vector{Pair{Any, Float64}}
 end
 
 Work(bytes; reread = 0.0, passed = 0.0, flops = 0.0, recomputed = 0.0, factor = Float32, blocks = Inf, split = false,
-    applied = Pair{Any, Float64}[], swept = Pair{Any, Float64}[], inner = Pair{Any, Float64}[]) =
-    Work(bytes, reread, passed, flops, recomputed, factor, blocks, split, applied, swept, inner)
+    applied = Pair{Any, Float64}[], swept = Pair{Any, Float64}[], inner = Pair{Any, Float64}[], steps = 0.0, stepped = Pair{Any, Float64}[]) =
+    Work(bytes, reread, passed, flops, recomputed, factor, blocks, split, applied, swept, inner, steps, stepped)
 
 """
     package_of(implementation) -> Symbol
