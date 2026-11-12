@@ -1572,7 +1572,24 @@ measure nothing, the 4B decodes a token of each sequence in 49.8, 64.0 and
 91.7 ms at B of 1, 4 and 16, 20, 63 and 174 tokens a second, the writes
 24.7 ms of the last; Vallmo's kernels 37.9 at B of 1; and the same file
 untraced on the device, Einops contracting through a copy of each weight,
-about 3 s whatever B. A
+about 3 s whatever B. After them the 4B decodes in 49.6, 62.7 and 68.8 ms
+at B of 1, 4 and 16, 233 tokens a second at 16, the caches written by one
+statement over an array of Cartesian indices as fast as by the loop. The
+challenger, the same file under Reactant 0.2.308 on the first GB10
+(`challengers/vallmo-reactant-2026-11-12`, its preallocation off): it
+runs after 9 lines changed, traced positions having no `CartesianIndex`,
+so a scatter a sequence, and `argmax` over a dimension returning linear
+indices; Einops contracts through its own extension, BFloat16 is a type it
+has, and the states are donated and written in place. It decodes in 43.3,
+48.8 and 72.6 ms at B of 1, 4 and 16, a 64-token chunk in 73 to 76 where
+Tempest's takes 74 to 77, its BFloat16 as far from Float32 as Tempest's
+(0.006 to 0.008 of a state's norm), a shape compiled in 17 to 30 s after
+the process's first 70, the chunk of 64 unrolled in 82 s, or in 10 by its
+own loop construct, which then runs it in 123 to 129 ms. Tempest's plans
+here measure nothing: at B of 1 the 6 ms are the streamed reductions left
+at their first tile, which the plan that measures takes back to about 41;
+at B of 4 the 14 ms are not accounted for, products of four columns the
+first suspect. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
