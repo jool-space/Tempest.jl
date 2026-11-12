@@ -63,27 +63,23 @@ TracedArray(tape::Tape, id::Int) =
     TracedArray{tape.nodes[id].eltype, length(tape.nodes[id].dims)}(tape, id, tape.nodes[id].dims, nothing, WeakRef[])
 Traced(tape::Tape, id::Int) = Traced{tape.nodes[id].eltype}(tape, id)
 
-# A handle names its node only while the node is still what the handle was
-# made for: while its function is traced, and until a roll retires the node.
-# Every use of a handle reads its node's place here, so that one that names
-# nothing any more is refused where it is read, never read as another value.
+# A handle names its node only while its function is traced: a roll leaves
+# the nodes it rolls where they are (see `roll!`), and the trace's end closes
+# the tape. Every use of a handle reads its node's place here, so that one
+# whose trace has ended is refused where it is read, never read as another
+# program's value.
 @inline Base.getproperty(x::Union{TracedArray, Traced}, name::Symbol) = name === :id ? named(x) : getfield(x, name)
 
 @inline function named(x::Union{TracedArray, Traced})
-    stale(x) && throw(ArgumentError(getfield(x, :tape).open ? RETIRED : ENDED))
+    stale(x) && throw(ArgumentError(ENDED))
     getfield(x, :id)
 end
 
-stale(x::Union{TracedArray, Traced}) =
-    (tape = getfield(x, :tape); !tape.open || tape.nodes[getfield(x, :id)].op isa Retired)
+stale(x::Union{TracedArray, Traced}) = !getfield(x, :tape).open
 
 const ENDED = "a traced value was read after the trace that made it ended: the traced function stored it where it \
     outlived the function's run, in a `Ref`, a variable it captures, a global or a container. A traced value stands for \
     one only while its function is traced: return it from the function"
-const RETIRED = "a traced value made in a loop a gradient's function ran was read after the gradient returned: the \
-    function stored it where it outlived the function, in a `Ref`, a variable it captures, a global or a container, and \
-    of the nodes the function made the gradient keeps its value and what it wrote into the arrays it was given or \
-    closes over, the loop rolled into one. Compute the value outside the gradient's function"
 
 node(x::Union{TracedArray, Traced}) = x.tape.nodes[x.id]
 
@@ -1471,7 +1467,8 @@ function traced_on(tape, @nospecialize(f), @nospecialize(args...))
         push!(results, x.id)
         push!(writes, length(results) => k)
     end
-    # A loop `f` ran outside any gradient is rolled (see `roll!`).
-    roll_all!(tape, eachindex(tape.nodes), results)
-    prune(Program(tape.nodes, arguments, results, input_structure, output_structure, tape.backward, writes)), tape.met
+    # A loop `f` ran outside any gradient is rolled (see `rolled`).
+    nodes, backward, at = rolled(tape.nodes, tape.backward, 1, results)
+    program = Program(nodes, map(a -> at[a], arguments), map(r -> at[r], results), input_structure, output_structure, backward, writes)
+    prune(program), tape.met
 end

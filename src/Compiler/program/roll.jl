@@ -224,18 +224,18 @@ function run_start(search::WindowSearch, last, p)
 end
 
 """
-    roll!(tape, range, required) -> Int
+    roll_window(nodes, backward, lo, hi, required) -> (nodes, at, first) or nothing
 
-Rewrite the last window of `tape.nodes[range]` that repeats as a loop, in
-place: the nodes keep their places, those `required` and those read after
-the window defined as before, the rest retired. The window's first place,
-or 0 where no window repeats or its rewrite would not keep them. A window
-of the backward, where a reverse pass recorded it, is not rolled.
+The last window of `nodes[lo:hi]` that repeats, rewritten as a loop: the
+nodes before it as they are, the loop and what it computes once, each value
+read after the window, or `required`, as its step's slice of the loop, then
+the nodes after the window, renumbered. `at` holds each node's new place, or
+0 for a value of the window no node reads any more; `first` the window's
+first place. Nothing where no window repeats. A window of the `backward`,
+where a reverse pass recorded it, is not rolled.
 """
-function roll!(tape::Tape, range, required)
-    nodes = tape.nodes
-    lo, hi = range[begin], range[end]
-    hi - lo + 1 >= 2 * ROLLED_PERIODS || return 0
+function roll_window(nodes::Vector{Node}, backward, lo, hi, required)
+    hi - lo + 1 >= 2 * ROLLED_PERIODS || return nothing
     # The window ends at the last node alike one a period back.
     window = nothing
     search = WindowSearch(nodes, lo, hi)
@@ -244,12 +244,12 @@ function roll!(tape::Tape, range, required)
         window = periodic_window(search, at)
         window === nothing || break
     end
-    window === nothing && return 0
+    window === nothing && return nothing
     (; period, periods) = window
     w0 = window.first
     p = period
     stop = w0 + periods * p - 1
-    any(id -> id in tape.backward, w0:stop) && return 0
+    any(id -> id in backward, w0:stop) && return nothing
     step = w0:(w0 + p - 1)
     # Each step's selection of an array from before the window, by its
     # offset in the step: the index `j` that slides, `i` at the first step
@@ -260,11 +260,11 @@ function roll!(tape::Tape, range, required)
         n = nodes[id]
         j = slid(n.op, nodes[id + p].op)
         j === nothing && continue
-        length(n.inputs) == 1 && only(n.inputs) < w0 || return 0
+        length(n.inputs) == 1 && only(n.inputs) < w0 || return nothing
         selection = (n.op::Select).indices
         i = selection[j]
         d == 0 && (d = (nodes[id + p].op::Select).indices[j] - i)
-        all(k -> isequal((nodes[id + k * p].op::Select).indices, Base.setindex(selection, i + k * d, j)), 1:(periods - 1)) || return 0
+        all(k -> isequal((nodes[id + k * p].op::Select).indices, Base.setindex(selection, i + k * d, j)), 1:(periods - 1)) || return nothing
         scans[o] = (j, i)
     end
     # What the first step reads from before the window: a state where the
@@ -278,10 +278,10 @@ function roll!(tape::Tape, range, required)
         elseif w0 <= y < w0 + p && same_type(nodes[x], nodes[y])
             (x, y) in states || push!(states, (x, y))
         else
-            return 0
+            return nothing
         end
     end
-    any(((x, _),) -> x in captures, states) && return 0
+    any(((x, _),) -> x in captures, states) && return nothing
     # A step's nodes that read neither a state nor a scanned slice are
     # computed once, before the loop.
     varies = falses(p)
@@ -296,7 +296,7 @@ function roll!(tape::Tape, range, required)
     invariant = [w0 + o - 1 for o in 1:p if !varies[o]]
     # The step's results: each state's next, then the values read after.
     carried_from = [y for (_, y) in states]
-    all(y -> varies[y - w0 + 1], carried_from) || return 0
+    all(y -> varies[y - w0 + 1], carried_from) || return nothing
     offsets = Int[y - w0 + 1 for y in carried_from]
     for r in sort!(collect(wanted))
         o = (r - w0) % p + 1
@@ -329,7 +329,6 @@ function roll!(tape::Tape, range, required)
         end
     end
     hoisted = length(hoist)
-    any(r -> r < w0 + hoisted + loops, wanted) && return 0
     # The step's program: the states, the scanned slices, then the captures,
     # as arguments.
     captured = sort!(unique(append!(copy(captures), [place[id] for id in invariant])))
@@ -386,15 +385,23 @@ function roll!(tape::Tape, range, required)
             Node(Map(identity), (place[w0 + o - 1],), n.dims, n.eltype, n.scalar)
         end
     end
-    for id in w0:stop
-        k = id - w0 + 1
-        nodes[id] = k <= hoisted ? hoist[k] : k <= hoisted + loops ? stacked[k - hoisted] : get(selected, id, RETIRED_NODE)
+    # The nodes after the window read each value of it they read at its new
+    # place.
+    rolled = nodes[1:(w0 - 1)]
+    at = zeros(Int, length(nodes))
+    at[1:(w0 - 1)] .= 1:(w0 - 1)
+    append!(rolled, hoist, stacked)
+    for r in sort!(collect(wanted))
+        push!(rolled, selected[r])
+        at[r] = length(rolled)
     end
-    w0
+    for id in (stop + 1):length(nodes)
+        n = nodes[id]
+        push!(rolled, Node(n.op, map(x -> at[x], n.inputs), n.dims, n.eltype, n.scalar))
+        at[id] = length(rolled)
+    end
+    rolled, at, w0
 end
-
-# A node no program reads any more.
-const RETIRED_NODE = Node(Retired(), (), (), Int, true)
 
 """
 Whether a trace rolls the loops its function runs: within `with(ROLLING =>
@@ -403,14 +410,53 @@ in place, which is how a roll is checked: the two interpret the same.
 """
 const ROLLING = Base.ScopedValues.ScopedValue(true)
 
-# Every window of `range` that repeats rolled, the last first.
-function roll_all!(tape::Tape, range, required)
-    ROLLING[] || return tape
-    hi = last(range)
-    while hi >= first(range)
-        w = roll!(tape, first(range):hi, required)
-        w == 0 && break
-        hi = w - 1
+"""
+    rolled(nodes, backward, lo, required) -> (nodes, backward, at)
+
+The nodes with every window of `nodes[lo:end]` that repeats rolled into a
+loop, the last first, as `roll_window` rolls one; the backward among them,
+and `at`, each node's new place, or 0 for one no node reads any more. The
+nodes given are left as they are, so that a handle to one names what it did.
+"""
+function rolled(nodes::Vector{Node}, backward::BitSet, lo, required)
+    at = collect(eachindex(nodes))
+    ROLLING[] || return nodes, backward, at
+    required = collect(Int, required)
+    hi = length(nodes)
+    while hi >= lo
+        window = roll_window(nodes, backward, lo, hi, required)
+        window === nothing && break
+        nodes, moved, w0 = window
+        at = map(i -> i == 0 ? 0 : moved[i], at)
+        required = map(r -> moved[r], required)
+        backward = BitSet(moved[i] for i in backward if moved[i] != 0)
+        hi = w0 - 1
     end
-    tape
+    nodes, backward, at
+end
+
+"""
+    roll!(tape, lo, required) -> place
+
+The loops of `tape.nodes[lo:end]` rolled while the program is traced, as a
+gradient rolls its function's before its reverse pass: the nodes `required`
+and those they read, rolled, appended to the tape, and `place`, which gives
+each node of `required` its place among them. The nodes rolled stay where
+they are, so that a handle the function left to one, in a `Ref` say, names
+what it did; the program keeps them only where something reads them.
+"""
+function roll!(tape::Tape, lo, required)
+    nodes, backward, at = rolled(tape.nodes, tape.backward, lo, required)
+    nodes === tape.nodes && return identity
+    keep = live(nodes, [at[r] for r in required])
+    place = zeros(Int, length(nodes))
+    place[1:(lo - 1)] .= 1:(lo - 1)
+    for id in lo:length(nodes)
+        keep[id] || continue
+        n = nodes[id]
+        push!(tape.nodes, Node(n.op, map(x -> place[x], n.inputs), n.dims, n.eltype, n.scalar))
+        place[id] = length(tape.nodes)
+        id in backward && push!(tape.backward, place[id])
+    end
+    r -> place[at[r]]
 end

@@ -869,7 +869,9 @@ What `f` closes over is a constant to the gradient.
 function withgradient(@nospecialize(f), @nospecialize(args...))
     # The program being traced: an argument's, or, when no argument is traced,
     # as for a layer without weights, the one of the values `f` closes over.
-    traced = filter(x -> x isa Union{Traced, TracedArray}, leaves((args, parts(f))))
+    # A handle an earlier trace left, in a `Ref` `f` closes over say, names
+    # nothing (see `named`): read, it is refused.
+    traced = filter(x -> x isa Union{Traced, TracedArray} && !stale(x), leaves((args, parts(f))))
     if isempty(traced)
         value, gradients... = interpret(differentiate(trace(f, args...)), args...)
         return (val = value, grad = gradients)
@@ -899,10 +901,16 @@ function withgradient(@nospecialize(f), @nospecialize(args...))
     # the program holds of the function's nodes after it stays: its value,
     # what it left in each stand-in, and what it wrote into an array it
     # closes over, as a layer leaves its state, which the arrays sharing that
-    # memory hold. A value the function left only where it outlives it, in a
-    # `Ref` say, the roll retires (see `named`).
-    held = [y.id for x in traced if x isa TracedArray for y in sharing(x)]
-    isempty(tape.steps) && roll_all!(tape, start:length(tape.nodes), [value.id; [s.id for (s, _, _) in entered]; held])
+    # memory hold: these are moved to the rolled nodes, which follow the
+    # function's as they were, so that a value the function left where it
+    # outlives it, in a `Ref` say, is still what it was (see `roll!`).
+    held = [y for x in traced if x isa TracedArray for y in sharing(x)]
+    if isempty(tape.steps)
+        arrays = [first.(entered); held]
+        place = roll!(tape, start, [value.id; map(y -> y.id, arrays)])
+        value = Traced(tape, place(value.id))
+        foreach(y -> y.id = place(y.id), arrays)
+    end
     cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))
     gradients = tangent(stand_ins) do x
         k = findfirst(e -> e[1] === x, entered)

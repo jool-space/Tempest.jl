@@ -9,9 +9,6 @@ struct Argument <: Operation end
 "A stand-in for a recurrence's state or slice while its step is traced; no program keeps one (see `recurrence`)."
 struct Placeholder <: Operation end
 
-"A value a roll replaced by its loop: no program reads one, and a handle to it is stale (see `named`)."
-struct Retired <: Operation end
-
 "A constant: a number filling the node's shape, an array of it, or a range of integers."
 struct Constant{T} <: Operation
     value::T
