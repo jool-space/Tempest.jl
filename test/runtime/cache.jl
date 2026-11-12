@@ -82,6 +82,29 @@ end
     @test path == scratch(depot)
 end
 
+# A target on a device of a name whose kernels a toolchain of a version builds.
+struct BuiltBy <: C.Target
+    version::String
+end
+C.device_name(::BuiltBy) = "Some GPU"
+C.toolchain(t::BuiltBy) = ["Some compiler" => t.version]
+
+@testset "a record per device and toolchain" begin
+    # A kernel's time is of what built it: one toolchain's times are not read
+    # for another's kernels, and each keeps its own rates. A target stating
+    # none names its files by its device alone.
+    withenv("TEMPEST_CACHE" => mktempdir()) do
+        old, new = BuiltBy("13.4"), BuiltBy("13.5")
+        @test C.record_path(old) != C.record_path(new) && C.rates_path(old) != C.rates_path(new)
+        @test basename(C.record_path(new)) == "Some_GPU_Some_compiler_13.5.cold.tsv"
+        @test basename(C.record_path(T.CPUTarget())) == "cpu.cold.tsv"
+        graph = C.lower(trace(x -> 2 .* x, [1.0f0]))
+        C.save_record(C.record_path(old), "a kernel", 1.0e-6)
+        @test C.Decider(old, graph).record["a kernel"] == 1.0e-6
+        @test !haskey(C.Decider(new, graph).record, "a kernel")
+    end
+end
+
 # A target on a device of a name and an identity, for the rates shipped.
 struct NamedDevice <: C.Target
     name::String

@@ -102,6 +102,7 @@ Tempest.Compiler.release
 Tempest.Compiler.recapture
 Tempest.Compiler.retarget!
 Tempest.Compiler.device_name
+Tempest.Compiler.toolchain
 Tempest.Compiler.measurable
 Tempest.Compiler.time_launch
 Tempest.Compiler.device_rates

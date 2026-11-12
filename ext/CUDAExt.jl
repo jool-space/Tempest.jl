@@ -37,6 +37,11 @@ const THREADS = 256
 
 Tempest.Compiler.device_name(::CUDATarget) = CUDACore.name(CUDACore.device())
 
+# The compilers' package holds tileiras and ptxas, which assemble the tile and
+# floor kernels; the driver loads them.
+Tempest.Compiler.toolchain(::CUDATarget) =
+    ["CUDA compiler" => string(pkgversion(CUDACore.CUDA_Compiler_jll)), "CUDA driver" => string(CUDACore.driver_version())]
+
 Tempest.Compiler.measurable(::CUDATarget) = true
 
 # A captured graph. The driver crashes destroying a graph whose kernels'

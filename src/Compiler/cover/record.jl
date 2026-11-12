@@ -1,5 +1,5 @@
 # The tuning record: measured seconds by claim, and the rates file beside it,
-# one of each per device.
+# one of each per device and toolchain.
 
 using Scratch: @get_scratch!
 
@@ -22,8 +22,14 @@ function tuning_directory()
     dir === nothing ? TUNING[] : joinpath(dir, "tuning")
 end
 
-device_file(target, suffix) = (dir = tuning_directory(); dir === nothing ? nothing : joinpath(dir, device_file_name(target, suffix)))
-device_file_name(target, suffix) = replace(device_name(target), r"[^A-Za-z0-9._-]" => "_") * suffix
+# A file of the device `target` runs on and of the toolchain that builds its
+# kernels (see `toolchain`): the times it holds are of kernels built so on
+# that device, and those another toolchain builds are timed into a file of
+# their own, a kernel's time taken on one never read for the other's.
+device_file(target, suffix) = (dir = tuning_directory(); dir === nothing ? nothing : joinpath(dir, basis_file_name(target, suffix)))
+basis_file_name(target, suffix) = file_name(join([device_name(target); [string(k, " ", v) for (k, v) in toolchain(target)]], " ")) * suffix
+device_file_name(target, suffix) = file_name(device_name(target)) * suffix
+file_name(name) = replace(name, r"[^A-Za-z0-9._-]" => "_")
 # Times taken with each launch's data in memory, the cache cleared before it
 # (see `time_launch`), in files named so: the files before them hold times
 # taken from the cache, which are not to be compared with these.
@@ -104,11 +110,11 @@ written(t::Noted) = t.written[]
 unwritten!(t::Noted) = (t.written[] = false; t)
 
 # Rates fitted on devices Tempest knows, shipped with it, a file per device
-# named as a rates file is (`rates_path`), so that a first preparation there
-# prices its plans without calibrating. Rates only price options, and the
-# close calls among them are measured whichever rates priced them, so a file
-# from another version of a package, whose kernels are faster or slower than
-# it says, can make a plan slower, never wrong. test/bench/rates.jl writes
+# named for the device alone (`device_file_name`), so that a first
+# preparation there prices its plans without calibrating. Rates only price
+# options, and the close calls among them are measured whichever rates priced
+# them, so a file from another version of a package, whose kernels are faster
+# or slower than it says, can make a plan slower, never wrong. test/bench/rates.jl writes
 # them, into this file's directory `rates`, found where the package is rather
 # than where it was precompiled.
 shipped_directory() = joinpath(pkgdir(ROOT), "src", "Compiler", "cover", "rates")

@@ -8,7 +8,7 @@
 # target defines them for its type (see CUDAExt).
 
 public Target, CPUTarget, CUDATarget, target_for, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
-    measurable, time_launch, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
+    toolchain, measurable, time_launch, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
@@ -302,6 +302,16 @@ release(::Target, graph) = nothing
 
 "The name of the device `target` runs on, which names its tuning record and its rates file."
 device_name(::CPUTarget) = "cpu"
+
+"""
+    toolchain(target) -> Vector{Pair{String, String}}
+
+What builds the kernels `target` runs, each part by name and version, which
+names its tuning record and its rates file with its device: what they hold
+are times of kernels built so, and a kernel another toolchain builds is
+another kernel to time. Nothing for a target that builds none, as the CPU.
+"""
+toolchain(::Target) = Pair{String, String}[]
 
 "Whether claims on `target` can be timed at preparation; `time_launch` times one."
 measurable(::Target) = false
