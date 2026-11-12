@@ -124,6 +124,7 @@ Tempest.Compiler.dependencies
 Tempest.Compiler.uncached_kernel
 Tempest.Compiler.generated
 Tempest.Compiler.concurrently
+Tempest.Compiler.same_storage
 Tempest.Compiler.SessionTable
 ```
 

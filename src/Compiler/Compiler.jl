@@ -47,8 +47,9 @@ using .Implement: loaded_implementations
 public trace, prepare, bind!, point!, execute!, capture!, replay!, outputs
 
 # What proposals read, until a view of the graph replaces it: the plan, and the
-# views of its groups; and how kernels are built side by side.
-public Plan, group_views, concurrently
+# views of its groups; how kernels are built side by side; and whether two
+# buffers are one storage, which a fold written where it starts is built by.
+public Plan, group_views, concurrently, same_storage
 
 # The compiler's own work, tallied.
 include("work.jl")
