@@ -46,14 +46,57 @@
         @test compiled(single(x)) == Int32.(vec(mapslices(argmax, single(x); dims = 1)))
     end
 
-    # The interpreter runs a loop a step at a time; lowering batches its step
-    # over the steps, which a gather by indices that differ from step to
-    # step does not yet. Closed by batching such a gather as one by the
-    # linear indices of each step's elements.
-    @testset "a gather by indices a step slices or computes" begin
-        x, J = data(4, 3), [1 4 2; 3 3 1]
-        gathered(x, J) = stack(map((v, j) -> v[j], eachcol(x), eachcol(J)))
-        @test agree((interpret(trace(gathered, x, J), x, J),), (gathered(x, J),))
-        @test_broken message(() -> C.lower(trace(gathered, x, J))) == ""
+    # A gather or a write by index arrays each step slices or computes is,
+    # over the steps, one by the linear index each step's elements name in
+    # its slice and the steps together (`batched_indexing!`): one
+    # computation at any number of slices, its gradient a scatter alike.
+    @testset "a gather or a write by indices a step slices or computes" begin
+        for B in (2, 3, 8)
+            x, x3 = data(4, B), data(2, 4, B; scale = 0.5)
+            J = [mod1(3b + k, 4) for k in 1:2, b in 1:B]
+            programs = [
+                ((x, J) -> stack(map((v, j) -> v[j], eachcol(x), eachcol(J))), (x, J)),
+                ((x, J) -> stack(map((v, j) -> v[j] .* sum(v), eachcol(x), eachcol(J))), (x, J)),
+                ((x3, J) -> stack(map((m, j) -> m[:, j], eachslice(x3; dims = 3), eachcol(J))), (x3, J)),
+                ((x3, J) -> stack(map((m, j) -> m[j, :]', eachslice(permutedims(x3, (2, 1, 3)); dims = 3), eachcol(J))), (x3, J)),
+                ((x, J) -> stack(map((v, j) -> (y = copy(v); y[j] .= 0; y), eachcol(x), eachcol(J))), (x, J)),
+            ]
+            for (f, args) in programs
+                p = trace(f, args...)
+                @test count(n -> n.op isa C.Loop, p.nodes) >= 1
+                ex = prepare(p, args...; target = T.CPUTarget())
+                @test agree((outputs(execute!(ex)),), (f(args...),); rtol = 1.0e-12)
+            end
+            gathered(x, J) = sum(abs2, stack(map((v, j) -> v[j] .* sum(v), eachcol(x), eachcol(J))))
+            unrolled(x, J) = sum(abs2, stack([x[J[:, b], b] .* sum(x[:, b]) for b in axes(x, 2)]))
+            @test agree(T.gradient(gathered, x, J)[1:1], T.gradient(unrolled, x, J)[1:1])
+        end
+    end
+end
+
+# The linear index into axes merged into one, from the index along each,
+# which states indices running along several axes together: Cartesian
+# indices read and written over two and three axes, as Base reads and
+# writes them.
+@testset "linear indices over merged axes" begin
+    x = data(3, 4, 5)
+    i, j, k = [3, 1, 2], [4, 4, 1], [2, 5, 5]
+    # On its own, over traced indices that broadcast against each other.
+    merged(x) = (a = C.handle(0 .* x[1, 1:3, 1] .+ i); b = C.handle(0 .* x[1, 1:3, 1] .+ j); c = C.handle(0 .* x[1, 1:3, 1]' .+ k');
+        (C.TracedArray(a.tape, C.linear_index((a, b), (3, 4)).id), C.TracedArray(a.tape, C.linear_index((a, b, c), (3, 4, 5)).id)))
+    @test interpret(trace(merged, x), x) == (LinearIndices((3, 4))[CartesianIndex.(i, j)], LinearIndices(x)[CartesianIndex.(i, j, k')])
+    reads = [
+        (x -> x[CartesianIndex.(i, j), :], (x,)),
+        (x -> x[:, CartesianIndex.(j, k)], (x,)),
+        (x -> x[CartesianIndex.(i, j, k)], (x,)),
+    ]
+    writes = [
+        (x -> (y = copy(x); y[CartesianIndex.(i, j), :] .= 0; y), (x,)),
+        (x -> (y = copy(x); y[:, CartesianIndex.(j, k)] = x[:, 1:3, 1]; y), (x,)),
+        (x -> (y = copy(x); y[CartesianIndex.(i, j, k)] .= -1; y), (x,)),
+    ]
+    for (f, args) in [reads; writes]
+        @test interpret(trace(f, args...), args...) == f(args...)
+        @test outputs(execute!(prepare(trace(f, args...), args...; target = T.CPUTarget()))) == f(args...)
     end
 end

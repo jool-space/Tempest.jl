@@ -566,6 +566,8 @@ function splice_step!(nodes, body::LoopBody, inputs)
     nstate, nscanned = length(body.carried), length(body.sliced)
     over(n::Node) = n.scalar ? (steps,) : (n.dims..., steps)
     emit!(op, ins, dims, T) = (push!(nodes, Node(op, Tuple(ins), Tuple(dims), T, false)); length(nodes))
+    # The same nodes as a tape, for what traced arithmetic records on them.
+    tape = Tape(nodes)
     # A node of rank `r` over the steps, read where a node of rank `rank`
     # broadcasts it: its axes, then axes of extent one, then the steps.
     function broadcast(id, r, rank)
@@ -646,13 +648,14 @@ function splice_step!(nodes, body::LoopBody, inputs)
         ins = map(i -> at[i], n.inputs)
         # An array of indices the steps share indexes its axis at each step
         # alike, the steps an axis more, as a range does: it is read as the
-        # loop is given it. One a step computes would index each step's
-        # slice by its own slice, which a selection does not state.
+        # loop is given it. One a step computes indexes each step's slice by
+        # its own slice (see `batched_indexing!`).
         indexing = op isa Union{Select, Scatter, Update} ? [i.input for i in op.indices if i isa IndexInput] : Int[]
-        all(j -> haskey(captured, n.inputs[j]), indexing) ||
-            throw(ArgumentError("a gather or scatter by index arrays a recurrence's step computes is not supported yet"))
-        ins = map((i, j) -> j in indexing ? captured[n.inputs[j]] : i, ins, ntuple(identity, length(ins)))
-        at[id] = if op isa Map
+        ins = map((i, j) -> j in indexing && haskey(captured, n.inputs[j]) ? captured[n.inputs[j]] : i, ins, ntuple(identity, length(ins)))
+        computed = filter(j -> !haskey(captured, n.inputs[j]), indexing)
+        at[id] = if !isempty(computed)
+            batched_indexing!(tape, n, step.nodes, ins, computed, steps)
+        elseif op isa Map
             emit!(op, map((i, j) -> broadcast(i, rank(step.nodes[j]), rank(n)), ins, n.inputs), over(n), n.eltype)
         elseif op isa Reduce
             r = emit!(op, ins, n.scalar ? (ntuple(_ -> 1, length(step.nodes[only(n.inputs)].dims))..., steps) : over(n), n.eltype)
@@ -700,6 +703,88 @@ function splice_step!(nodes, body::LoopBody, inputs)
         nodes[c] = Node(Carry(next, body.reverse), n.inputs, n.dims, n.eltype, n.scalar)
     end
     [at[r] for r in step.results]
+end
+
+"""
+    batched_indexing!(tape, n, step_nodes, ins, computed, steps) -> Int
+
+Step node `n`, a gather, scatter or write whose index arrays at the inputs
+`computed` each step computes, over the steps: its inputs `ins` over them, an
+array a step computes with the steps its last axis. Each step indexes its own
+slice by its own arrays, which a selection's indices, one per axis taken
+together as every combination, do not state: the axes those arrays index are
+moved beside the steps and merged with them into one, indexed by the linear
+index each step's elements name there (`linear_index`), as an array of
+Cartesian indices indexes the axes it stands for. The result's axes are put
+back in the step's order, the steps last.
+"""
+function batched_indexing!(tape::Tape, n::Node, step_nodes, ins, computed, steps)
+    op = n.op
+    nodes = tape.nodes
+    record(op, inputs, dims, T) = record!(tape, op, inputs, dims, T)
+    m = length(op.indices)
+    # The array indexed, at a step and over the steps: a gather's source, or
+    # the array a write writes into or a scatter makes.
+    A = op isa Select ? step_nodes[n.inputs[1]].dims : n.dims
+    T = n.eltype
+    along = [k for k in 1:m if op.indices[k] isa IndexInput && op.indices[k].input in computed]
+    rest = [k for k in 1:m if !(k in along)]
+    perm = (rest..., along..., m + 1)
+    merged = (A[rest]..., prod(A[along]) * steps)
+    # The axes of each index's block among the step's result, in order.
+    extent(k) = (i = op.indices[k]; i isa Integer ? () : i isa IndexInput ? Tuple(nodes[ins[i.input]].dims[1:(end - (i.input in computed))]) : (length(i),))
+    blocks = [extent(k) for k in 1:m]
+    starts = cumsum([0; length.(blocks)])
+    # The linear index: each computed array, its axes in its block and the
+    # steps last, beside the position of each step.
+    R = sum(length, blocks[along]; init = 0) + 1
+    offset = 0
+    components = map(along) do k
+        b = blocks[k]
+        shape = (ntuple(_ -> 1, offset)..., b..., ntuple(_ -> 1, R - 1 - offset - length(b))..., steps)
+        offset += length(b)
+        j = ins[op.indices[k].input]
+        Traced(tape, record(Reshape(), (j,), shape, nodes[j].eltype))
+    end
+    positions = record!(tape, Constant(1:steps), (), (steps,), Int)
+    push!(components, Traced(tape, record(Reshape(), (positions,), (ntuple(_ -> 1, R - 1)..., steps), Int)))
+    linear = linear_index(components, (A[along]..., steps))
+    # The indices on the merged array: the others as they were, their index
+    # arrays numbered anew after the inputs the operation takes first, then
+    # the linear index.
+    first_inputs = op isa Update ? 2 : 1
+    others = Int[]
+    indices = map(rest) do k
+        i = op.indices[k]
+        i isa IndexInput || return i
+        push!(others, ins[i.input])
+        IndexInput(first_inputs + length(others))
+    end
+    indices = (indices..., IndexInput(first_inputs + length(others) + 1))
+    # The result's axes: each block of the others, then the computed arrays'
+    # and the steps, in the step's order, the steps last.
+    order = [[starts[k] .+ (1:length(blocks[k])) for k in rest]...; [starts[k] .+ (1:length(blocks[k])) for k in along]...]
+    order = Tuple([reduce(vcat, order; init = Int[]); starts[end] + 1])
+    identity_order(o) = o == ntuple(identity, length(o))
+    # Values in the step's order of the result's axes, in the merged order.
+    reordered(id) = identity_order(order) ? id :
+        record(Permute(order), (id,), map(a -> nodes[id].dims[a], order), nodes[id].eltype)
+    # The array indexed over the steps with the axes `along` and the steps
+    # merged, last; and back.
+    merged_array(id) = record(Reshape(), (identity_order(perm) ? id : record(Permute(perm), (id,), map(a -> nodes[id].dims[a], perm), T),), merged, T)
+    function unmerged(id)
+        q = record(Reshape(), (id,), map(a -> (A..., steps)[a], perm), T)
+        identity_order(perm) ? q : record(Permute(Tuple(invperm(collect(perm)))), (q,), (A..., steps), T)
+    end
+    if op isa Select
+        dims = Tuple(d for k in rest for d in blocks[k])
+        r = record(Select(indices), (merged_array(ins[1]), others..., linear.id), (dims..., nodes[linear.id].dims...), T)
+        identity_order(order) ? r : record(Permute(Tuple(invperm(collect(order)))), (r,), (n.dims..., steps), T)
+    elseif op isa Update
+        unmerged(record(Update(indices), (merged_array(ins[1]), reordered(ins[2]), others..., linear.id), merged, T))
+    else
+        unmerged(record(Scatter(indices), (reordered(ins[1]), others..., linear.id), merged, T))
+    end
 end
 
 # Of a loop's states, those no cycle of states runs through: a state reads

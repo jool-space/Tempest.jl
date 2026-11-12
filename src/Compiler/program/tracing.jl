@@ -730,7 +730,28 @@ Base.length(::Traced{CartesianIndex{N}}) where {N} = N
 function linear_at(c::Traced{CartesianIndex{N}}, dims) where {N}
     op = node(c).op
     op isa Map{CartesianAt{dims}} && return Traced(c.tape, only(node(c).inputs))
-    foldl((i, d) -> i + (c[d] - 1) * prod(dims[1:(d - 1)]), 2:length(dims); init = c[1])
+    linear_index(Tuple(c), dims)
+end
+
+"""
+    linear_index(components, extents)
+
+The linear index into axes of `extents` merged into one, as `LinearIndices`
+numbers them, `i₁ + (i₂ - 1)·e₁ + (i₃ - 1)·e₁e₂ + …`, from the index along
+each axis, traced numbers that broadcast against each other. It is how a
+selection or a write states indices that run along several axes together,
+where its indices, one per axis, are taken as every combination: an array
+of Cartesian indices, and in a loop's step over the steps, an index array
+each step computes beside the steps (`batched_indexing!`).
+"""
+function linear_index(components, extents)
+    i = first(components)
+    stride = 1
+    for k in 2:length(components)
+        stride *= extents[k - 1]
+        i = i + (components[k] - 1) * stride
+    end
+    i
 end
 linear_at(c::TracedArray{CartesianIndex{N}}, dims) where {N} = TracedArray(c.tape, linear_at(handle(c), dims).id)
 
