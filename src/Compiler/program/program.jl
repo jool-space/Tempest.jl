@@ -9,6 +9,9 @@ struct Argument <: Operation end
 "A stand-in for a recurrence's state or slice while its step is traced; no program keeps one (see `recurrence`)."
 struct Placeholder <: Operation end
 
+"A value a roll replaced by its loop: no program reads one, and a handle to it is stale (see `named`)."
+struct Retired <: Operation end
+
 "A constant: a number filling the node's shape, an array of it, or a range of integers."
 struct Constant{T} <: Operation
     value::T
@@ -123,11 +126,14 @@ mutable struct Tape
     # The arrays met as constants, as they were: `compile` asks whether one
     # lives in a global.
     met::Vector{Any}
+    # Whether the function is being traced: when its trace ends, a handle to
+    # the tape names nothing (see `named`).
+    open::Bool
 end
 
-Tape() = Tape(Node[], BitSet(), Int[], 0, Any[])
-Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[])
-Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[])
+Tape() = Tape(Node[], BitSet(), Int[], 0, Any[], true)
+Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[], true)
+Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[], true)
 
 function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
     # A loop's step was recorded node by node.

@@ -6,7 +6,7 @@
 # half precision: Tempest sums half-precision values in Float32, closer to
 # Float64 than eager's sums are.
 const MEASURED = [
-    :fwd_interp => Float64, :fwd_cpu => Float64, :fwd_ride => Float64, :grad_fd => Float64, :grad_interp => Float64, :grad_cpu => Float64,
+    :fwd_interp => Float64, :roll => Float64, :fwd_cpu => Float64, :fwd_ride => Float64, :grad_fd => Float64, :grad_interp => Float64, :grad_roll => Float64, :grad_cpu => Float64,
     :grad_ride => Float64, :grad_recompute => Float64, :cuda_fwd => Float32, :cuda_grad => Float32, :cuda_ride => Float32,
     :cuda_repeat => Float32,
 ]
@@ -19,8 +19,8 @@ const TOLERANCE = Dict(Float64 => 1.0e-8, Float32 => 2.0e-3, :grad_fd => 1.0e-4,
 tolerance(stage) = get(TOLERANCE, stage, TOLERANCE[Dict(MEASURED)[stage]])
 
 # The stages in the order they run, those that trace among them.
-const STAGES = [:trace, :fwd_interp, :fwd_cpu, :fwd_ride, :grad_eager, :grad_fd, :grad_trace, :grad_interp, :grad_cpu, :grad_ride,
-    :grad_recompute, :cuda_trace, :cuda_fwd, :cuda_grad_trace, :cuda_grad, :cuda_ride, :cuda_repeat]
+const STAGES = [:trace, :fwd_interp, :roll, :fwd_cpu, :fwd_ride, :grad_eager, :grad_fd, :grad_trace, :grad_interp, :grad_roll,
+    :grad_cpu, :grad_ride, :grad_recompute, :cuda_trace, :cuda_fwd, :cuda_grad_trace, :cuda_grad, :cuda_ride, :cuda_repeat]
 
 # Messages differ in numbers from case to case; the same fault's do not
 # otherwise.

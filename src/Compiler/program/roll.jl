@@ -228,7 +228,7 @@ end
 
 Rewrite the last window of `tape.nodes[range]` that repeats as a loop, in
 place: the nodes keep their places, those `required` and those read after
-the window defined as before, the rest left dead. The window's first place,
+the window defined as before, the rest retired. The window's first place,
 or 0 where no window repeats or its rewrite would not keep them. A window
 of the backward, where a reverse pass recorded it, is not rolled.
 """
@@ -386,16 +386,26 @@ function roll!(tape::Tape, range, required)
             Node(Map(identity), (place[w0 + o - 1],), n.dims, n.eltype, n.scalar)
         end
     end
-    dead = Node(Constant(0), (), (), Int, true)
     for id in w0:stop
         k = id - w0 + 1
-        nodes[id] = k <= hoisted ? hoist[k] : k <= hoisted + loops ? stacked[k - hoisted] : get(selected, id, dead)
+        nodes[id] = k <= hoisted ? hoist[k] : k <= hoisted + loops ? stacked[k - hoisted] : get(selected, id, RETIRED_NODE)
     end
     w0
 end
 
+# A node no program reads any more.
+const RETIRED_NODE = Node(Retired(), (), (), Int, true)
+
+"""
+Whether a trace rolls the loops its function runs: within `with(ROLLING =>
+false)`, a program is its trace as the function ran, every iteration's nodes
+in place, which is how a roll is checked: the two interpret the same.
+"""
+const ROLLING = Base.ScopedValues.ScopedValue(true)
+
 # Every window of `range` that repeats rolled, the last first.
 function roll_all!(tape::Tape, range, required)
+    ROLLING[] || return tape
     hi = last(range)
     while hi >= first(range)
         w = roll!(tape, first(range):hi, required)

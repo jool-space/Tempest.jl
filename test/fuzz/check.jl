@@ -74,6 +74,9 @@ function stage!(out, name, f)
     out[name]
 end
 
+# The program `f` traces to with nothing rolled (see `ROLLING`).
+unrolled(f, args...) = Base.ScopedValues.with(() -> C.trace(f, args...), C.ROLLING => false)
+
 some(rng, xs) = xs[randperm(rng, length(xs))[1:rand(rng, 1:length(xs))]]
 floats(args) = map(a -> a isa AbstractArray{<:AbstractFloat}, args)
 snapshot(x) = x === nothing ? nothing : copy(num(x))
@@ -112,6 +115,9 @@ function stages!(out, case, cuda)
     p === nothing && return
     out[:nodes] = length(p.nodes)
     stage!(out, :fwd_interp, () -> relerr(C.interpret(p, args...), ref))
+    # A roll keeps the program's meaning: traced with nothing rolled, it
+    # interprets the same.
+    out[:trace] isa Integer && out[:trace] > 0 && stage!(out, :roll, () -> relerr(C.interpret(p, args...), C.interpret(unrolled(f, args...), args...)))
     forward = nothing
     stage!(out, :fwd_cpu, function ()
         ex = C.prepare(p, args...)
@@ -146,6 +152,8 @@ function stages!(out, case, cuda)
         if q !== nothing
             reference = C.leaves(eager)
             stage!(out, :grad_interp, () -> leaves_err(C.leaves(C.interpret(q, args...)), reference))
+            out[:grad_trace] isa Integer && out[:grad_trace] > 0 && stage!(out, :grad_roll,
+                () -> leaves_err(C.leaves(C.interpret(q, args...)), C.leaves(C.interpret(unrolled(g, args...), args...))))
             planned = nothing
             stage!(out, :grad_cpu, function ()
                 ex = C.prepare(q, args...)

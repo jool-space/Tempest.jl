@@ -899,7 +899,8 @@ function withgradient(@nospecialize(f), @nospecialize(args...))
     # the program holds of the function's nodes after it stays: its value,
     # what it left in each stand-in, and what it wrote into an array it
     # closes over, as a layer leaves its state, which the arrays sharing that
-    # memory hold.
+    # memory hold. A value the function left only where it outlives it, in a
+    # `Ref` say, the roll retires (see `named`).
     held = [y.id for x in traced if x isa TracedArray for y in sharing(x)]
     isempty(tape.steps) && roll_all!(tape, start:length(tape.nodes), [value.id; [s.id for (s, _, _) in entered]; held])
     cotangents = reverse_pass!(tape, value.id, start:length(tape.nodes))

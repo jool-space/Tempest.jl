@@ -63,6 +63,28 @@ TracedArray(tape::Tape, id::Int) =
     TracedArray{tape.nodes[id].eltype, length(tape.nodes[id].dims)}(tape, id, tape.nodes[id].dims, nothing, WeakRef[])
 Traced(tape::Tape, id::Int) = Traced{tape.nodes[id].eltype}(tape, id)
 
+# A handle names its node only while the node is still what the handle was
+# made for: while its function is traced, and until a roll retires the node.
+# Every use of a handle reads its node's place here, so that one that names
+# nothing any more is refused where it is read, never read as another value.
+@inline Base.getproperty(x::Union{TracedArray, Traced}, name::Symbol) = name === :id ? named(x) : getfield(x, name)
+
+@inline function named(x::Union{TracedArray, Traced})
+    stale(x) && throw(ArgumentError(getfield(x, :tape).open ? RETIRED : ENDED))
+    getfield(x, :id)
+end
+
+stale(x::Union{TracedArray, Traced}) =
+    (tape = getfield(x, :tape); !tape.open || tape.nodes[getfield(x, :id)].op isa Retired)
+
+const ENDED = "a traced value was read after the trace that made it ended: the traced function stored it where it \
+    outlived the function's run, in a `Ref`, a variable it captures, a global or a container. A traced value stands for \
+    one only while its function is traced: return it from the function"
+const RETIRED = "a traced value made in a loop a gradient's function ran was read after the gradient returned: the \
+    function stored it where it outlived the function, in a `Ref`, a variable it captures, a global or a container, and \
+    of the nodes the function made the gradient keeps its value and what it wrote into the arrays it was given or \
+    closes over, the loop rolled into one. Compute the value outside the gradient's function"
+
 node(x::Union{TracedArray, Traced}) = x.tape.nodes[x.id]
 
 # A handle stands for a value only on its tape, while the program is traced:
@@ -91,9 +113,10 @@ end
 
 Base.size(x::TracedArray) = x.dims
 Base.IndexStyle(::Type{<:TracedArray}) = IndexCartesian()
-Base.show(io::IO, x::TracedArray{T, N}) where {T, N} = print(io, "TracedArray{$T}(%", x.id, ", ", x.dims, ")")
+Base.show(io::IO, x::TracedArray{T, N}) where {T, N} =
+    print(io, "TracedArray{$T}(%", getfield(x, :id), ", ", x.dims, stale(x) ? ", stale)" : ")")
 Base.show(io::IO, ::MIME"text/plain", x::TracedArray) = show(io, x)
-Base.show(io::IO, x::Traced{T}) where {T} = print(io, "Traced{$T}(%", x.id, ")")
+Base.show(io::IO, x::Traced{T}) where {T} = print(io, "Traced{$T}(%", getfield(x, :id), stale(x) ? ", stale)" : ")")
 
 function broadcast_dims(@nospecialize(dims...))
     n = maximum(length, dims; init = 0)::Int
@@ -1387,6 +1410,16 @@ end
 # `trace`, and the arrays it met as constants, as they were.
 function trace_meeting(@nospecialize(f), @nospecialize(args...))
     tape = Tape()
+    try
+        traced_on(tape, f, args...)
+    finally
+        # A handle the function left where it outlives the trace names
+        # nothing from here on: nothing untraced reads a traced value.
+        tape.open = false
+    end
+end
+
+function traced_on(tape, @nospecialize(f), @nospecialize(args...))
     arguments = Int[]
     inputs = TracedArray[]
     function stand_in(leaf)
