@@ -13,11 +13,19 @@ struct ArgSpec
     strides::Tuple{Vararg{Int}}
 end
 
-# The elements a view can reach: those of its index space, or, where its axes
-# overlap in memory, those it spans. A value read at a head's offset, `4096h`
-# for `h` the position over 16, is a view whose last axis steps one element at
-# a time over every offset of the heads but the last, 126977 of them for 32.
-reachable(a::ArgSpec) = min(prod(a.sizes; init = 1), 1 + sum(((n, s),) -> (n - 1) * abs(s), zip(a.sizes, a.strides); init = 0))
+# The elements a view can reach: those of its index space, each bringing in
+# up to `run` of its neighbours in memory, the elements moved at once (see
+# `sector_elements`), where its nearest axis steps over them; or, where its
+# axes overlap in memory, those it spans. A value read at a head's offset,
+# `4096h` for `h` the position over 16, is a view whose last axis steps one
+# element at a time over every offset of the heads but the last, 126977 of
+# them for 32. A matrix's every 16th row of Float32, a sector for each
+# element, moves half the matrix: counted by its elements, the sum over it
+# was estimated at 71 μs and took 1161.
+function reachable(a::ArgSpec, run = 1)
+    nearest = minimum((abs(s) for (n, s) in zip(a.sizes, a.strides) if n > 1); init = typemax(Int))
+    min(prod(a.sizes; init = 1) * clamp(nearest, 1, run), 1 + sum(((n, s),) -> (n - 1) * abs(s), zip(a.sizes, a.strides); init = 0))
+end
 
 # A view keeps only the tile axes it spans, in the order of their strides, so
 # loads and stores have the shape and order a hand-written kernel would give

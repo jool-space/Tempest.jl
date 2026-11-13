@@ -180,7 +180,7 @@ function read_bytes(p::Plan, g::Group, found::GroupLoads, v)
     v in found.gathered && return value_bytes(val)
     ts = get(found.loading, v, Load[])
     isempty(ts) && return value_bytes(val)
-    sizeof(val.eltype) * min(storage_length(val), reached_elements(ts, val.dims, Domain(g.domain)))
+    sizeof(val.eltype) * min(storage_length(val), reached_elements(ts, val.dims, Domain(g.domain); run = sector_elements(val.eltype)))
 end
 
 # The floor reads each value a member loads at every point of the domain,

@@ -1084,7 +1084,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     # The whole value each time, a stencil's step was priced at 66.6 μs for
     # the 6.1 it took.
     domain = Domain(g.domain)
-    reached_at(t) = reached_elements((t,), g.values[t.value].dims, domain)
+    reached_at(t) = reached_elements((t,), g.values[t.value].dims, domain; run = sector_elements(g.values[t.value].eltype))
     function rereads(v)
         s.sketch === :product && return 0.0
         n = prod(g.values[v].dims; init = 1)
@@ -1110,10 +1110,10 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     # which it reads.
     function reach_of(v)
         ts = [l for (_, l) in loads_of(v)]
-        isempty(ts) ? typemax(Int) : reached_elements(ts, g.values[v].dims, domain)
+        isempty(ts) ? typemax(Int) : reached_elements(ts, g.values[v].dims, domain; run = sector_elements(g.values[v].eltype))
     end
     elements(k, a) = k.name != INITIAL_STATES && a.buffer isa Int && a.buffer in keyed ? combined(a.buffer) :
-        a.buffer isa Int ? min(reachable(a), reach_of(a.buffer)) : reachable(a)
+        a.buffer isa Int ? min(reachable(a, sector_elements(element(a))), reach_of(a.buffer)) : reachable(a)
     map(enumerate(kernels)) do (i, kernel)
         moved(a) = elements(kernel, a) * sizeof(element(a)) * (i == main && a.buffer isa Int ? share(a.buffer) : 1.0)
         bytes = sum(a -> a.buffer isa Int ? moved(a) : 0.0, kernel.args; init = 0.0)

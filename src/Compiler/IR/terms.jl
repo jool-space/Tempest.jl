@@ -3,7 +3,7 @@
 # literals, index expressions, the kernel's own reductions and the folds it
 # recomputes.
 
-public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, reached_elements, mentions,
+public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, reached_elements, sector_elements, mentions,
     product_factors
 
 abstract type Term end
@@ -191,21 +191,35 @@ end
 loads(t::Term) = [s for s in subterms((t,); nested = true) if s isa Load]
 
 """
-    reached_elements(ts, dims, domain)
+    reached_elements(ts, dims, domain; run = 1)
 
 The elements of a value of `dims` that loads `ts` of it reach over `domain`:
 along each axis, the span of the positions their indices take there, one
-where they are held, as a slice's index is; every element where an index
-mentions a variable past the domain's, as the body of a fold recomputed
-inside does.
+where they are held, as a slice's index is, and no more than the positions
+each index visits, one for each point of the domain's axes it mentions,
+those an index it gathers through mentions among them: a table's rows
+gathered at 64 tokens are 64, wherever in the table they lie. Along the
+first axis, whose elements lie side by side, a position reached brings in
+`run` of them, the elements memory moves at once. Every element where an
+index mentions a variable past the domain's, as the body of a fold
+recomputed inside does.
 """
-function reached_elements(ts, dims, d::Domain)
+function reached_elements(ts, dims, d::Domain; run = 1)
     length(d) < 63 && all(t -> variables(t) < variable_bit(length(d) + 1), ts) || return prod(dims; init = 1)
     prod(eachindex(dims); init = 1) do k
         ranges = [affine_range(t.index[k], d) for t in ts]
-        min(dims[k], maximum(last, ranges) - minimum(first, ranges) + 1)
+        visited = sum(t -> visited_positions(t.index[k], d), ts; init = 0.0) * (k == 1 ? run : 1)
+        Int(min(Float64(dims[k]), Float64(maximum(last, ranges) - minimum(first, ranges) + 1), visited))
     end
 end
+
+"The elements of type `T` memory moves at once: a sector of 32 bytes."
+sector_elements(::Type{T}) where {T} = max(1, 32 ÷ sizeof(T))
+
+# The positions an index takes over domain `d` at most: one for each point
+# of the axes it mentions.
+visited_positions(e, d::Domain) = prod(n -> Float64(d.extents[n]), mentioned_axes(variables(e), length(d)); init = 1.0)
+mentioned_axes(bits::UInt64, n) = (k for k in 1:n if bits & variable_bit(k) != 0)
 
 """
     product_factors(fold, term) -> (x, y) or nothing
