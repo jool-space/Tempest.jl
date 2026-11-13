@@ -2030,6 +2030,61 @@ Tile IR at 4 and 8, and the outputs are in ~/dev/jool/challengers/sm89/:
 tileiras's PTX for the minimal form has no misaligned load and the two tests
 pass on the Ada; whether to report it upstream is open.
 
+**The estimate on a second device: what the GB10 taught it does not all
+hold on the RTX 6000 Ada.** Every law and rate of the estimate was found on
+two GB10s. On the Ada (sm_89, 142 multiprocessors, discrete memory;
+tileiras 13.5.37), main at 84ac6bb and 948a095: the suite fails no
+assertion and asserts no GB10 plan (its 21 errors are the misaligned load
+of the entry above, still present), a decider with no shipped rates never
+reads the GB10's and fits its own on first need (47 s over the corpus's four
+programs), and the 4B's tokens agree with the reference as far as on the
+GB10. What stands trial is `src/Compiler/cover/cost.jl` and `calibrate.jl`
+and the tiles `ext/cuTileExt` claims; the challenger is the plan the same
+code makes measuring close calls on the same device. Unmeasured against
+measured steps on the Ada, one sitting each: heat 0.329 against 0.313 ms,
+the neural ODE 7.19 against 6.44, the LSTM 3.30 against 3.25, the GPT 0.739
+against 0.701, and the 4B's decode at one sequence 18.90 against 13.38, no
+faster than at sixteen (18.63), 5.5 ms of it three families of
+matrix-vector projections kept at their first tile (gate and up 128×32
+where 64×64, 2.6 ms; the 8192-wide 128×32 where 128×64, 1.4; the head, 1.4),
+whose estimates along the steps are flat (50 and 49 μs for tiles that take
+104 and 59). Re-measured there with the scripts that found them: blocks
+adding up to the bandwidth, the 32-byte sector, division's slow path on
+zeros and subnormals, and the memory's bandwidth hold; a constant time per
+step does not (a step's time grows with its bytes and with fewer blocks), a
+step's functions' prices do not add (a silu chain estimated at 664 μs takes
+168), timing beside compiling kernels costs nothing (the GB10's 1.4 to 5.3%
+is its shared power budget), the unlanded run shares do not carry from
+their reference to kernels, and a BF16 tile spills from 16 to 32 KB where
+the GB10 holds 48. On a grid of 232 tiles a device, each timed alone
+(16 to 256 kept rows by steps of 16 to 1024, the 4B's six projections and
+two Float32 controls), main's estimate orders 53% of the pairs more than
+1.25 times apart wrongly on the GB10 and 55% on the Ada; the best tiles are
+the same on both, 16 to 32 kept rows stepping 256 or more, the first claims
+13 to 18% from them on the GB10 and about twice on the Ada, the variants
+offered 1 to 4% and 3 to 25%. A form fitted to each device apart orders
+all but 3% and 6 to 8%: each run a tile's row brings in reaching one sector
+more than its bytes (fixed; fitted it comes to 23 to 49 bytes and orders no
+better), a step taking its latency and its block's bytes at one block's
+rate, blocks past those resident taking further waves, and a tile past what
+a block holds slower a step; a time per row per step adds nothing beside
+the sector. Fits are now kept only where they lie in what the rate can be
+(7223ae0): the Ada's cuTile Float32 recompute fitted negative in every
+calibration, a reference of 5.8 μs being six ticks of that device's 1.024
+μs event clock. Two corrections are made and held, each right on the Ada
+and a loss on the GB10 until the form stands: the libraries' memory fitted
+rather than taken at twice the bandwidth (cuBLAS at 2 to 16 columns over 47
+MB estimated at 64 μs where 25, taking 56 to 60; on the GB10 the 64-token
+chunk then takes 83.8 ms where 58.2, 119 products leaving cuBLAS for
+kernels of the generator's estimated at 29.3 ms together and taking 108.5,
+an optimism cuBLAS's own had hidden), and the floor counting a value its
+terms load once (its bandwidth fitted at 430 GB/s on a memory of 273 and
+1231 on one of 960). Tables, scripts and logs:
+~/dev/jool/challengers/overfit-2026-11-13/ (`m2/` the outcomes, `form/` the
+grid and fits) and devnum-2026-11-13/. Closes when, on each device judged
+alone, the 4B's and the corpus's unmeasured steps are within 5% of their
+measured ones, with the two held corrections in.
+
 Not on the docket: the kernel-author question, how a kernel no implementation
 claims is written by hand in a package. Pallas (a kernel in the same language
 on explicit refs, transparent to tracing, with its own derivative) and Exo
