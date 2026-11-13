@@ -1643,7 +1643,36 @@ it stored, 24; a handle names its node while its function is traced and
 until a roll retires the node, and a read of anything else is an error
 (`named`, a flag on the tape and one retired node), at no cost to a trace
 that can be measured. Rolling itself was sound: interpreted before and
-after, the corpus and 200 seeds agree to rounding. A
+after, the corpus and 200 seeds agree to rounding. Rolling then builds the
+rolled program as new nodes, where it rewrote the window's in place: a
+gradient appends them and the trace's end keeps what a result or a handle
+read reaches, so a value that escaped a rolled loop is its value again (20
+spellings refused the day before), a 3,000-step loop under a gradient
+traces in 143 ms where 490; and it says of each state a loop touches
+whether it is carried and read, a recurrence, or only written where the
+steps keep apart, a map and one write, or none, a map, which rolls from
+two steps where a recurrence needs three (the three were reasoned of
+recurrences and never measured: a write loop of two over 16M elements,
+1,221 μs rolled and 1,819 not). An index a program computes from others by
+sums, differences and multiples is a formula of the kernel that uses it
+(`formula`, `index/lower.jl`), not a value a kernel stores first, a
+Cartesian read or write one kernel where two. With these the pass that
+joined writes after lowering is gone (`plan/writes.jl`, 277 lines). On the
+estimates, which are every plan's unless asked: a kernel timed alone took 2
+to 3.6 times its time in the program wherever its step divides, the 4B's
+down projection 709 μs alone and 313 in the program, by neither the kernel
+nor the addresses but the data, a timing's buffers being zeros and a
+division by zero the device's slow path; a timing's floats are spread from
+1 to 2 now (`held_floats!`), the basis a record names bumped, the rates
+fitted again, a division's price a fourth of what it was. The estimate
+states the steps a block takes one after another and what each computes
+(`Work.steps`, `stepped`), fitted as the other rates are, and ranks a
+kernel's tiles of one kept extent as their times do, 0 of 195 pairs wrong
+where all 234; and a fold recomputed inside another kernel adds the steps
+of its own sweep (`refold_steps`), so that the softmax's sum is no longer
+recomputed in the next projection at B of 4. The 4B decodes in 49.4, 57.5
+and 68.6 ms at B of 1, 4 and 16, where 49.6, 62.5 and 69.3, against the
+challenger's 44.7, 49.5 and 73.3. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
