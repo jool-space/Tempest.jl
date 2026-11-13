@@ -2089,11 +2089,42 @@ claims where 108 to 127 and 161 to 165 where 112; unmeasured plans are as
 they were, which claim stands first being unchanged, though with the first
 claim pinned to 16 rows stepping 256 the unmeasured step moves by what the
 tiles timed alone say, 42.5 to 40.3 ms on the GB10 and 18.2 to 12.9 on the
-Ada. Tables, scripts and logs:
+Ada. A sweep in steps is now priced by the form (07902ab): each run a sector
+more than its bytes, a step its block's loads at one block's rate, a wave
+of blocks at a time, the step's latency, the block's rate and the error
+the form leaves fitted over every tile offered on two matrix-vector
+products, and unmeasured a claim gives way to a variant only past that
+error. The GB10's sweeps fit to no latency at the bandwidth within 1.18,
+the Ada's blocks to 1.0e10 bytes a second within 1.35. Asked of the built
+kernels, a multiprocessor holds one or two stepped blocks on either device,
+not the twelve its threads would allow. Unmeasured, the 4B decodes one
+sequence in 37.56 ms on the GB10 where 42.44 (measured 37.67) and in 11.59
+on the Ada where 18.30 (measured 11.24); at 4 and 16 sequences 47.27 and
+62.27 where 47.26 and 62.33, and 16.18 and 17.01 where 16.23 and 17.02; a
+16- and a 64-token chunk in 44.59 and 57.35 where 45.50 and 58.32, and
+12.43 and 17.55 where 13.88 and 18.99; the corpus's plans are as they were
+on both. The form orders all but 0.5% of the GB10's tile pairs and 9.4% of
+the Ada's, two of the Ada's families standing at 1.11 and 1.72 of their
+best, where a launch keeps fewer blocks than multiprocessors busy. What is
+not yet in: main's prices cancel one another on the GB10, and each made
+honest alone moves a choice the wrong way. A step of a fold recomputed
+apart takes 60 to 70 ns there and is priced at 0.79 μs, which kept the
+generator's product, estimated at 348.8 μs and taking 510 to 515 (523 with
+its runs' sectors counted), from displacing cuBLAS's call at 349 taking
+405; a product's blocks read again what other blocks brought in, and the
+block's rate holds only for what comes from memory (a BFloat16 2048³
+product on the Ada 152 μs so counted, 284 otherwise, taking 149, one block
+resident); a launch of 6 blocks priced on its share of the device, eight
+times its bytes' time, stood in for work recomputed inside it that nothing
+prices (an attention's scores recomputed in its product estimated at 12.8
+μs and taking 155). These, with the two held corrections, land together.
+Tables, scripts and logs:
 ~/dev/jool/challengers/overfit-2026-11-13/ (`m2/` the outcomes, `form/` the
 grid and fits) and devnum-2026-11-13/. Closes when, on each device judged
 alone, the 4B's and the corpus's unmeasured steps are within 5% of their
-measured ones, with the two held corrections in.
+measured ones (the 4B at one sequence is, on both), with products, refolds,
+work recomputed in a launch and the two held corrections priced by the one
+form and the refold's borrowed price gone.
 
 Not on the docket: the kernel-author question, how a kernel no implementation
 claims is written by hand in a package. Pallas (a kernel in the same language
