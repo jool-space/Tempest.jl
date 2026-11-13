@@ -1672,7 +1672,29 @@ where all 234; and a fold recomputed inside another kernel adds the steps
 of its own sweep (`refold_steps`), so that the softmax's sum is no longer
 recomputed in the next projection at B of 4. The 4B decodes in 49.4, 57.5
 and 68.6 ms at B of 1, 4 and 16, where 49.6, 62.5 and 69.3, against the
-challenger's 44.7, 49.5 and 73.3. A
+challenger's 44.7, 49.5 and 73.3. Unmeasured, a claim's variant that
+differs from it in its steps alone and is estimated past the estimate's
+error below it stands in its place (`standing_variants`, the two stated
+works compared, no kind of kernel named): two families of the 1-token
+program take a step of 128 where 32, 43.9 ms where 49.4. The share of the
+device a launch of few blocks reaches was counted twice for one that
+sweeps in steps, its steps a block already the limit (estimates 1.4 to 2
+times the time under 48 blocks, 0.80 to 0.93 after, as above them). A load
+through an index was counted as the whole value it indexes, a row of the
+embedding as its 1.27 GB, 4.7 ms for a kernel of 182 μs: a load visits an
+element a point of the axes its index mentions (`reached_elements`). And
+what four sequences lost was not a product of four columns, which every
+form runs at the memory's rate from 2 to 16, but a product whose factor
+its own kernel computes, a norm or an activation before it, 377 to 515 μs
+fused where the library's product and the factor's kernel take 216 to
+418, and the library refused it, its template's term being the product of
+loads: a library proposes a fold that is its template up to its factors,
+the factors stored (`factors_stored`, `Candidate`'s stored values), 185
+folds of the model. The 4B decodes in 44.0, 51.9 and 66.9 ms at B of 1, 4
+and 16 and a chunk of 64 tokens in 64 to 65 where 74 to 76, the
+challenger's 70.7 to 72.9; what the proposal is taken on unmeasured is two
+estimates that do not yet see the tile nor the factor, within 0.2 to 14 μs
+of each other. A
 `push!` of a traced array into a vector of arrays of another element type
 converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
 stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
