@@ -12,8 +12,9 @@
 # rolled loop scans the array, or the range of it the steps select, as
 # `accumulate` over its slices does, and runs reversed where the index falls.
 
-# The fewest periods a window rolls: two are a step and its copy, cheaper
-# unrolled than as a loop.
+# The fewest periods a recurrence rolls: two are a step and its copy, which
+# unrolled fuse, where a recurrence rolled runs a step at a time. A loop with
+# no state carried is no recurrence, a map over its steps, and rolls from two.
 const ROLLED_PERIODS = 3
 
 # A write's index may slide too, from step to step, as a loop writes each
@@ -45,8 +46,9 @@ sliding(_, _, _) = false
 # constants of one value, as an array the loop captures is copied at each use.
 # Compiled once, whatever the operations' functions: an operation is equal to
 # another when it is the same, as no operation defines its own equality.
-Base.@nospecializeinfer alike_ops(@nospecialize(a), @nospecialize(b)) =
-    typeof(a) === typeof(b) && (a === b || slid(a, b) !== nothing || a isa Constant && isequal(a.value, b.value))
+Base.@nospecializeinfer alike_ops(@nospecialize(a), @nospecialize(b)) = same_ops(a, b) || slid(a, b) !== nothing
+Base.@nospecializeinfer same_ops(@nospecialize(a), @nospecialize(b)) =
+    typeof(a) === typeof(b) && (a === b || a isa Constant && isequal(a.value, b.value))
 
 "Whether nodes `m` and `n`, `p` apart, are the same up to renaming, as a loop's are."
 function alike_nodes(m::Node, n::Node, p)
@@ -68,8 +70,8 @@ function entered(nodes, k, p, first)
         zip(m.inputs, n.inputs))
 end
 
-# A step folds: one of maps alone fuses with the next into a kernel unrolled,
-# and rolled would run a step at a time.
+# A recurrence's step folds: one of maps alone fuses with the next into a
+# kernel unrolled, and rolled would run a step at a time.
 folds(n::Node) = n.op isa Union{Reduce, Contract, Accumulate}
 
 # Or node `k` of a step writes apart from the step before (see `slid`): the
@@ -181,44 +183,52 @@ function Base.iterate(ps::Periods, state = periods_from(ps, ps.last))
 end
 
 """
-    periodic_window(search, last) -> (; first, period, periods) or nothing
+    periodic_windows(search, last) -> [(; first, period, periods, priced)]
 
-The window of `nodes[lo:last]` ending at `last` that repeats with a period,
-over the most nodes, the shortest period among those: each node of it after
-the first period alike its node a period back. Sought from each node down
-from the last of a search, in turn.
+The windows of `nodes[lo:last]` ending at `last` that repeat with a period,
+over the most nodes first, the shortest period first among those: each node
+of one after the first period alike its node a period back, and the first
+reading where the loop starts what each after reads of the step before (see
+`entered`); and whether its steps fold, shift or write apart (see `folds`),
+one of which a recurrence's must to roll. Sought from each node down from the last of a
+search, in turn; which of them rolls is the loop's to say (see
+`rolled_window`).
 """
-function periodic_window(search::WindowSearch, last)
+function periodic_windows(search::WindowSearch, last)
     (; nodes, lo) = search
-    best = nothing
+    found = NamedTuple{(:first, :period, :periods, :priced), Tuple{Int, Int, Int, Bool}}[]
     accepted = Int[]
     n = nodes[last]
     for p in Periods(search, last)
-        (last - lo + 1) ÷ p < ROLLED_PERIODS && break
+        (last - lo + 1) ÷ p < 2 && break
         # Every period is a multiple of one.
         1 in accepted && break
         any(q -> p % q == 0, accepted) && continue
-        alike_nodes(n, nodes[last - p], p) || continue
-        i = run_start(search, last, p)
-        matched = last - i
-        periods = matched ÷ p + 1
-        periods >= 2 || continue
-        push!(accepted, p)
-        all(k -> rollable(nodes[k]), (last - periods * p + 1):last) || continue
-        any(k -> folds(nodes[k]) || shifts(nodes, k, p) || writes_apart(nodes, k, p), (last - p + 1):last) || continue
-        first = last - periods * p + 1
-        # The period before, reading where the loop starts what each step
-        # after reads of the step before, is the loop's first step.
-        if first - p >= lo && all(k -> rollable(nodes[k]) && entered(nodes, k, p, first), (first - p):(first - 1))
-            first -= p
-            periods += 1
+        if alike_nodes(n, nodes[last - p], p)
+            i = run_start(search, last, p)
+            periods = (last - i) ÷ p + 1
+            periods >= 2 || continue
+            push!(accepted, p)
+            all(k -> rollable(nodes[k]), (last - periods * p + 1):last) || continue
+            first = last - periods * p + 1
+            # The period before, reading where the loop starts what each
+            # step after reads of the step before, is the loop's first step.
+            if first - p >= lo && all(k -> rollable(nodes[k]) && entered(nodes, k, p, first), (first - p):(first - 1))
+                first -= p
+                periods += 1
+            end
+        else
+            # Two steps, the second reading the first's values where the
+            # first reads those from before it.
+            first = last - 2p + 1
+            first >= lo && all(k -> rollable(nodes[k]) && rollable(nodes[k + p]) && entered(nodes, k, p, first + p), first:(first + p - 1)) || continue
+            push!(accepted, p)
+            periods = 2
         end
-        periods >= ROLLED_PERIODS || continue
-        if best === nothing || periods * p > best.periods * best.period
-            best = (; first, period = p, periods)
-        end
+        priced = any(k -> folds(nodes[k]) || shifts(nodes, k, p) || writes_apart(nodes, k, p), (last - p + 1):last)
+        push!(found, (; first, period = p, periods, priced))
     end
-    best
+    sort!(found; by = w -> w.periods * w.period, rev = true)
 end
 
 """
@@ -299,16 +309,16 @@ first place. Nothing where no window repeats. A window of the `backward`,
 where a reverse pass recorded it, is not rolled.
 """
 function roll_window(nodes::Vector{Node}, backward, lo, hi, required)
-    hi - lo + 1 >= 2 * ROLLED_PERIODS || return nothing
+    hi - lo + 1 >= 2 || return nothing
     # The window ends at the last node alike one a period back, of those
     # whose loop can be written.
     search = WindowSearch(nodes, lo, hi)
     for at in hi:-1:lo
         rollable(nodes[at]) || continue
-        window = periodic_window(search, at)
-        window === nothing && continue
-        rewritten = rolled_window(nodes, backward, window, required)
-        rewritten === nothing || return rewritten
+        for window in periodic_windows(search, at)
+            rewritten = rolled_window(nodes, backward, window, required)
+            rewritten === nothing || return rewritten
+        end
     end
     nothing
 end
@@ -322,6 +332,11 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
     stop = w0 + periods * p - 1
     any(id -> id in backward, w0:stop) && return nothing
     step = w0:(w0 + p - 1)
+    # Each step's nodes are alike the step before's: a selection or a write
+    # that does not slide from the first step to the second is the first's
+    # at every step, where one that slides slides evenly (see below).
+    all(id -> slid(nodes[id].op, nodes[id + p].op) !== nothing || all(k -> same_ops(nodes[id + k * p].op, nodes[id].op), 1:(periods - 1)), step) ||
+        return nothing
     # Each step's selection of an array from before the window, by its
     # offset in the step: the index `j` that slides, `i` at the first step
     # and `d` further at each next, one `d` for every selection.
@@ -378,6 +393,8 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
     end
     all(o -> !writes_apart(nodes, w0 + p + o - 1, p) || any(w -> w.offset == o, writes), 1:p) || return nothing
     filter!(st -> !any(w -> w.state == st, writes), states)
+    # A state carried is a recurrence, which rolls where it is priced to.
+    isempty(states) || window.periods >= ROLLED_PERIODS && window.priced || return nothing
     # The step's results: each state's next, what each write writes and the
     # index arrays it computes, then the values read after.
     offsets = Int[y - w0 + 1 for (_, y) in states]
@@ -433,6 +450,8 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
     # reads, or a value computed once nothing in the step reads, is none:
     # the gradient of a loop sums one argument's over the steps.
     computed = [w0 + o - 1 for o in 1:p if varies[o] && !haskey(scans, o) && !any(w -> w.offset == o, writes)]
+    # Steps that compute nothing, only select their slices, are no loop's.
+    isempty(computed) && isempty(writes) && return nothing
     read = Set(x for id in computed for x in nodes[id].inputs)
     captured = sort!(unique([filter(x -> x in read, captures); [place[id] for id in invariant if id in read]]))
     arguments = Int[]

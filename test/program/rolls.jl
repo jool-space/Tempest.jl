@@ -22,7 +22,7 @@ end
 
 @testset "a state each step writes apart is a map and one write" begin
     normalized(v) = v ./ sum(v)
-    for B in (3, 5)
+    for B in (2, 3, 5)
         x, W = 3 .+ data(5, B; scale = 0.4), data(6, 5; scale = 0.3)
         # Each slice written as a step computes it, into an array the
         # program makes, an argument, from a product, and a number each.
@@ -53,6 +53,7 @@ end
             end
             H
         end
+        B == 2 && continue
         p = trace(states, W, x)
         @test only(loops(p)).carried == [1]
         @test interpret(p, W, x) ≈ states(W, x)
@@ -73,4 +74,33 @@ end
         z
     end
     @test interpret(trace(read_between, x), x) ≈ read_between(x)
+end
+
+# A loop with no state carried is a map over its steps and rolls from two; a
+# recurrence, whose steps rolled run one at a time where unrolled they fuse,
+# rolls from three whose steps fold, shift or write apart.
+@testset "a map rolls from two steps, a recurrence from three" begin
+    x = data(5, 3; scale = 0.4)
+    pairsum(x) = sum(abs2, x[:, 1]) * sum(abs2, x[:, 2])
+    p = trace(pairsum, x)
+    @test !isempty(loops(p)) && all(l -> isempty(l.carried), loops(p))
+    @test interpret(p, x) ≈ pairsum(x)
+    folded(x, n) = (h = x[:, 1]; for t in 1:n; h = tanh.(h .* sum(x[:, t])); end; sum(h))
+    @test isempty(loops(trace(x -> folded(x, 2), x)))
+    @test only(loops(trace(x -> folded(x, 3), x))).carried == [1]
+    # Selections alike a step apart that do not slide evenly, a view's
+    # contents recorded anew at each write into its parent next to the
+    # steps' slices, are no loop's: the first column twice, then the second.
+    function viewed(x)
+        a = copy(x)
+        v = view(a, :, 1)
+        h = a[:, 1]
+        for t in 2:5
+            h = tanh.(h .* sum(a[:, t]))
+            a[:, t] = h
+        end
+        sum(v) + sum(a) + sum(h)
+    end
+    y = data(5, 6; scale = 0.3)
+    @test interpret(trace(viewed, y), copy(y)) ≈ viewed(copy(y))
 end

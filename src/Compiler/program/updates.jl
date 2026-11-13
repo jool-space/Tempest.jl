@@ -247,9 +247,9 @@ end
 
 # A host array of traced numbers (see `HOST_CONTAINER`) written into a
 # traced array is written as Base's loop writes it, each number at its
-# position: a write of one number a position, the writes alike but for the
-# position, which planning joins into one (see `joined_writes`). Faster
-# still is the array made by array code, which no loop of numbers is.
+# position: a write of one number a position, each a choice of that number
+# at its position and the contents elsewhere, the choices one kernel's.
+# Faster still is the array made by array code, which no loop of numbers is.
 function written_each!(x::TracedArray, v, I)
     J = to_indices(x, I)
     Base.setindex_shape_check(v, (length(i) for i in J if !(i isa Integer))...)

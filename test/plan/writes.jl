@@ -1,5 +1,6 @@
-# Writes alike, joined: a loop writing each slice of an axis at positions of
-# its own is one write over the slices, where no two land at one position.
+# A loop writing each slice of an axis at positions of its own, no two
+# landing at one position, rolls as a map over the slices and one write of
+# what the map computes (see `joined_write`).
 
 # A cache (features, positions, heads, sequences) written at each sequence's
 # own positions, a sequence at a time, as a transformer's step appends its
@@ -13,33 +14,33 @@ function appended(K, k, p; step = 1, shift = 0)
 end
 
 keyed(g) = count(v -> v.definition isa C.Keyed, g.values)
-joined(g) = count(((_, note),) -> occursin("writes alike", note), g.rewrites)
+loops(p) = count(n -> n.op isa C.Loop, p.nodes)
 
-@testset "writes alike but for a position each lands apart at are one" begin
+@testset "a loop's writes each landing apart are a map and one write" begin
     for B in (1, 2, 3, 5)
         K, k = data(3, 8, 2, B), data(3, 2, 2, B; scale = 0.3)
         p = Int32.(mod1.([3, 6] .+ 2 .* (1:B)', 8))
         loss(K, k, p) = sum(abs2, sin.(appended(K, k, p)))
         for program in (trace(appended, K, k, p), differentiate(trace(loss, K, k, p)))
-            g = C.joined_writes(C.lower(program))
+            g = C.lower(program)
             @test agree(C.execute(recomputing(g), K, k, p), filter(!isnothing, C.leaves(interpret(program, K, k, p))))
         end
-        # From three sequences the trace rolls them, a map and one write
-        # (see `joined_write`); two the index level joins.
-        g = C.joined_writes(C.lower(trace(appended, K, k, p)))
-        @test keyed(g) == 1 && joined(g) == (B == 2)
+        # From two sequences the trace rolls them, a map and one write.
+        program = trace(appended, K, k, p)
+        g = C.lower(program)
+        @test keyed(g) == 1 && (loops(program) > 0) == (B > 1)
         @test prod(only(C.plan(g).groups).domain) == 3 * 2 * 2 * B
     end
     K, k, p = data(3, 8, 2, 6), data(3, 2, 2, 3; scale = 0.3), Int32[1 4 2; 2 5 3]
     # Sequences a step apart other than one, and the writes of the gradient,
     # each along the sequences too.
-    g = C.joined_writes(C.lower(trace((K, k, p) -> appended(K, k, p; step = 2, shift = 1), K, k, p)))
+    g = C.lower(trace((K, k, p) -> appended(K, k, p; step = 2, shift = 1), K, k, p))
     @test keyed(g) == 1
     @test agree(C.execute(recomputing(g), K, k, p), [appended(K, k, p; step = 2, shift = 1)])
     # Elements each write converts to the cache's type, a value per slice,
     # are stacked into one value over the slices, which the one write reads.
     Ks = single(K[:, :, :, 1:3])
-    g = C.joined_writes(C.lower(trace(appended, Ks, k, p)))
+    g = C.lower(trace(appended, Ks, k, p))
     @test keyed(g) == 1 && length(C.plan(g).groups) == 1
     @test C.execute(recomputing(g), Ks, k, p) == [appended(Ks, k, p)]
     # Writes into one sequence, where a later one may land where an earlier
@@ -56,8 +57,9 @@ joined(g) = count(((_, note),) -> occursin("writes alike", note), g.rewrites)
         K
     end
     for f in (into_one, read_between)
-        g = C.joined_writes(C.lower(trace(f, K, k, p)))
-        @test keyed(g) == 3 && joined(g) == 0
+        program = trace(f, K, k, p)
+        g = C.lower(program)
+        @test keyed(g) == 3
         @test agree(C.execute(recomputing(g), K, k, p), [f(K, k, p)])
     end
     # So the step a model writes its cache in, a sequence at a time or in
