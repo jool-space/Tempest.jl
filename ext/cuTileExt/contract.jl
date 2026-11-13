@@ -253,16 +253,26 @@ end
 # keeping other blocks; of a claim within them, its other steps of
 # `STEPPED_STEPS`; each within what a block holds (`HELD_BYTES`). Over the
 # two devices' tables, the six tiles of the two stages reach each
-# projection's best within 1.4%, of the 28 the generator expresses.
+# projection's best within 1.4%, of the 28 the generator expresses. A
+# sweep that recomputes a fold none of the group's axes reach, the norm of
+# the column a projection reads, recomputes it in steps of its own once a
+# block, whatever its rows and steps (see `fold_context`, `sweep_steps`),
+# and is offered alike; one whose fold reaches the tile's axes, a
+# log-sum-exp of a product's scores, recomputes a product of tiles, its kept
+# tile the product's columns and its steps the product's depth, and has
+# `RECOMPUTING_TILES` instead.
 const WIDER_STEPS = (64, 128)
 const STEPPED_ROWS = (16, 32)
 const STEPPED_STEP = 256
 const STEPPED_STEPS = (64, 128, 256, 512, 1024)
 
+# Whether each fold the group recomputes reaches none of its axes.
+recomputed_apart(g::GroupView) = all(m -> all(t -> !(t isa Recomputed) || !any(k -> mentions(t, k), eachindex(g.domain)),
+    subterms((g.terms[m],))), members(g))
+
 function stepped_variants(g::GroupView, c::Claim)
     s = c.schedule
-    # A sum that recomputes a product steps at a product's depths already.
-    s.sketch in (:streamed, :split) && !recomputing(g) || return Claim[]
+    s.sketch in (:streamed, :split) && recomputed_apart(g) || return Claim[]
     p = sweep_axis(s)
     k = findfirst(ax -> !ax.reduced && ax.tile > 1, s.tiling)
     k === nothing && return Claim[]
