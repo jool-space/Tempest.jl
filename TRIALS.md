@@ -2079,7 +2079,17 @@ chunk then takes 83.8 ms where 58.2, 119 products leaving cuBLAS for
 kernels of the generator's estimated at 29.3 ms together and taking 108.5,
 an optimism cuBLAS's own had hidden), and the floor counting a value its
 terms load once (its bandwidth fitted at 430 GB/s on a memory of 273 and
-1231 on one of 960). Tables, scripts and logs:
+1231 on one of 960). A sweep in steps is now offered its tiles in two stages, 16 or 32 rows
+stepping 256, then the best rows' other steps from 64 to 1024, none holding
+more than 64 KB of a step (4b07bc5): six tiles that reach each projection's
+best within 1.4% on both tables. Measuring close calls, the 4B then decodes
+one sequence in 37.3 to 37.4 ms on the GB10 where 39.2 to 39.3 (Vallmo's
+hand-written kernels 37.9) and in 11.3 on the Ada where 12.7, timing 211
+claims where 108 to 127 and 161 to 165 where 112; unmeasured plans are as
+they were, which claim stands first being unchanged, though with the first
+claim pinned to 16 rows stepping 256 the unmeasured step moves by what the
+tiles timed alone say, 42.5 to 40.3 ms on the GB10 and 18.2 to 12.9 on the
+Ada. Tables, scripts and logs:
 ~/dev/jool/challengers/overfit-2026-11-13/ (`m2/` the outcomes, `form/` the
 grid and fits) and devnum-2026-11-13/. Closes when, on each device judged
 alone, the 4B's and the corpus's unmeasured steps are within 5% of their
