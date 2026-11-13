@@ -38,26 +38,44 @@ end
 """
 A package's memory: a launch that moves `bytes` within the cache takes
 `latency + bytes / bandwidth` seconds, and one whose blocks sweep `steps`
-tiles one after another at least `latency + steps * step`, a step waiting
-for what it loads.
+tiles one after another at least `latency + waves * steps * (step +
+loaded / block)`, a step waiting for what a block loads in it, `loaded`
+bytes, at the rate one block reaches, `block` bytes a second, in each wave
+of the blocks the device runs at once (see `seconds`). Two such launches'
+estimates are told apart beyond `error`, the factor the fit of their form
+leaves unexplained (see `fit_step!`). A step of a fold a block recomputes
+apart takes `refold` (see `fit_refold!`).
 """
 struct Memory
     latency::Float64
     bandwidth::Float64
     step::Float64
+    block::Float64
+    error::Float64
+    refold::Float64
 end
 
 # A launch of fewer blocks than the device runs at once computes on that
-# share of the device, a block on a multiprocessor. In memory, what its
-# blocks reach is what its steps bring in, where it states them: a block
-# alone waits on a step's loads at a time, and blocks side by side add until
-# the memory's bandwidth (see `stepping`), a matrix-vector product of 10
-# blocks of 32 rows stepping 512 along its sum reaching four fifths of it,
-# of 5 blocks of 128 stepping 128, three fifths, where on that share of the
-# device they had taken 3.5 and 5 times their time. A launch that states no
-# steps moves its bytes on the share as well: a product's sweep, priced by
-# its line, and the floor's items, each sweeping its fold a position at a
-# time.
+# share of the device, a block on a multiprocessor. A launch whose blocks
+# sweep in steps (see `Work`) moves its bytes at the memory's bandwidth, each
+# run of them reaching one sector more than its bytes (see `SECTOR_BYTES`),
+# and no faster than its steps: a block waits on a step's loads at a time,
+# the step's latency and its bytes, each run with its sector, at the rate
+# one block reaches, and the device runs a block on each multiprocessor at
+# once, its blocks in waves of `Rates.blocks`: a multiprocessor holds one
+# or two of the generator's stepped blocks, as tileiras gives each thread
+# 255 registers and stages a block's steps in 13 to 92 KB of shared memory
+# (GB10's built projections), one at the steps that run fastest. Of the
+# 4B's projections and Float32 ones, timed alone at every tile the
+# generator offers, the form ranks 0.5% of the pairs apart by more than
+# 1.25 the wrong way on GB10 and 9.4% on the RTX 6000 Ada, most of them
+# where a launch keeps fewer blocks than multiprocessors busy, which run
+# slower than its steps say. A launch that states no steps moves its bytes
+# on its share of the device: a product's sweep, priced by its line, and
+# the floor's items, each sweeping its fold a position at a time.
+
+"Whether the stepped form prices launch `w` (see `seconds`): one whose blocks sweep more than one step."
+stepped(w::Work) = w.steps > 1
 # Memory time and compute time overlap all but a little: the combination is
 # the larger plus a share of the smaller (XLA's GPU performance model uses
 # 0.05 of the smaller, chosen empirically).
@@ -65,12 +83,14 @@ const OVERLAP = 0.05
 
 function seconds(w::Work, r::Rates, memory::Memory, line, price = (regime, f) -> 0.0)
     share = min(1.0, w.blocks / r.blocks)
-    reach = w.steps > 1 ? 1.0 : share
+    in_steps = stepped(w)
+    sectors = in_steps ? w.steps * w.blocks * sum(((run, b),) -> b / run * SECTOR_BYTES, w.step_runs; init = 0.0) : 0.0
     # What blocks read again, other blocks along the grid read just before:
     # it comes from the cache, at the rate of a launch whose bytes fit it.
     # So do partial results one launch passes to the next, where they fit.
     passed = w.passed / (w.passed <= r.cache ? r.cached : r.bandwidth)
-    memory_seconds = memory.latency + (w.bytes / (w.bytes <= r.cache ? memory.bandwidth : r.bandwidth) + w.reread / r.cached + passed) / reach
+    moved = w.bytes + sectors
+    memory_seconds = memory.latency + (moved / (moved <= r.cache ? memory.bandwidth : r.bandwidth) + w.reread / r.cached + passed) / (in_steps ? 1.0 : share)
     # Elementwise work: each function at its positions, at the seconds per
     # position measured for it on the device, in the regime it is applied in.
     cost(regime, pairs) = sum(((f, n),) -> n * price(regime, f), pairs; init = 0.0)
@@ -80,13 +100,18 @@ function seconds(w::Work, r::Rates, memory::Memory, line, price = (regime, f) ->
     compute = products + elementwise
     # A sweep of many steps waits on each step's loads and on the chain of
     # functions it computes on them, one step after another, while the
-    # blocks sweep side by side: its time is the steps', however few bytes
-    # each step moves (see `Work`).
-    stepping = w.steps <= 1 ? 0.0 : memory.latency + w.steps * memory.step + cost(:stepped, w.stepped)
+    # blocks sweep side by side, a wave at a time: its time is the steps',
+    # however few bytes each step moves (see `Work`).
+    loaded = sum(((run, b),) -> b + b / run * SECTOR_BYTES, w.step_runs; init = 0.0)
+    waves = in_steps ? ceil(w.blocks / r.blocks) : 0.0
+    stepping = !in_steps ? 0.0 : memory.latency + waves * w.steps * (memory.step + loaded / memory.block) + cost(:stepped, w.stepped)
     longest = max(memory_seconds, compute, stepping)
     # A fold a block recomputes waits on its own loads, step by step, before
-    # the block goes on (see `Work`): its steps add to the rest.
-    refolding = w.refold_steps * memory.step
+    # the block goes on (see `Work`): its steps add to the rest, each at the
+    # step a sweep took before sweeps were priced by their loads (see
+    # `fit_refold!`), about thirteen times what a refold's step takes on
+    # GB10, standing until recomputed work is priced inside its launch.
+    refolding = w.refold_steps * memory.refold
     longest + OVERLAP * (memory_seconds + compute + stepping - longest) + refolding
 end
 

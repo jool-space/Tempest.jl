@@ -3,7 +3,7 @@
 # literals, index expressions, the kernel's own reductions and the folds it
 # recomputes.
 
-public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, reached_elements, sector_elements, mentions,
+public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, reached_elements, sector_elements, SECTOR_BYTES, mentions,
     mentions_within, product_factors
 
 abstract type Term end
@@ -213,8 +213,11 @@ function reached_elements(ts, dims, d::Domain; run = 1)
     end
 end
 
-"The elements of type `T` memory moves at once: a sector of 32 bytes."
-sector_elements(::Type{T}) where {T} = max(1, 32 ÷ sizeof(T))
+"The bytes memory moves at once: a sector."
+const SECTOR_BYTES = 32
+
+"The elements of type `T` memory moves at once: a sector's (see `SECTOR_BYTES`)."
+sector_elements(::Type{T}) where {T} = max(1, SECTOR_BYTES ÷ sizeof(T))
 
 # The positions an index takes over domain `d` at most: one for each point
 # of the axes it mentions.

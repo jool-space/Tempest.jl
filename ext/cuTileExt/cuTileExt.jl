@@ -547,28 +547,60 @@ end
 # and the indices the keys of its folds by key read; and each fold over other
 # axes than the swept ones reduces whole tile axes. The loads of a fold the
 # group recomputes are over the tiling it extends (`recomputing_fits`). And
-# a sweep's step holds what it loads (see `held_bytes`).
+# a sweep's step holds what it loads (see `step_loads`).
 fits(c) = held_bytes(c) <= HELD_BYTES && (recomputing(c.g) ? recomputing_fits(c) :
     all(l -> loadable(c, l), (l for m in members(c.g) for l in loads(c.g.terms[m]))) &&
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
     all(r -> fold_tiles(c, r) !== nothing, partial_folds(c)))
 
 """
-The bytes a block of a sweep holds of what a step loads, every load of the
+What a block of a sweep holds of what a step loads: each load of the
 group's terms (not of the folds it recomputes, which sweep tiles of their
-own) as its tile; none for a schedule that does not sweep in steps.
+own) with the bytes it reads in one run, contiguous (see `run_bytes`), and
+its tile's bytes; none for a schedule that does not sweep in steps.
 """
-function held_bytes(c)
-    c.s.sketch in (:streamed, :split) || return 0
-    total = 0
+function step_loads(c)
+    found = Tuple{Load, Pair{Float64, Float64}}[]
+    c.s.sketch in (:streamed, :split) || return found
     for t in subterms([c.g.terms[m] for m in members(c.g) if haskey(c.g.terms, m)])
         t isa Load && !gathers(t) && mentions_within(t, length(c.g.domain)) || continue
         v = load_view(c, t.value, t.index)
-        lanes = v isa View ? prod(i -> v.spans[i] ? (v.limits[i] == 0 ? min(c.s.tiling[i].tile, c.s.tiling[i].extent) : min(c.s.tiling[i].tile, v.limits[i])) : 1, eachindex(v.spans); init = 1) :
+        lanes = v isa View ? prod(i -> v.spans[i] ? spanned_lanes(c, v, i) : 1, eachindex(v.spans); init = 1) :
             v isa LocalView ? prod(l -> l[3] != 0 ? l[2] : 1, v.lanes; init = 1) : 0
-        total += lanes * sizeof(c.g.values[t.value].eltype)
+        push!(found, (t, run_bytes(c, t, v) => Float64(lanes * sizeof(c.g.values[t.value].eltype))))
     end
-    total
+    found
+end
+
+# The bytes a block holds of a step's loads (see `step_loads`).
+held_bytes(c) = sum(((_, p),) -> last(p), step_loads(c); init = 0.0)
+
+# The lanes of a view's tile along tile axis `i` it spans.
+spanned_lanes(c, v::View, i) = v.limits[i] == 0 ? min(c.s.tiling[i].tile, c.s.tiling[i].extent) : min(c.s.tiling[i].tile, v.limits[i])
+
+# The bytes a load of view `v` reads at a time, contiguous: along the tile
+# axis it steps one element at a time, its lanes, and where they cover that
+# axis whole, on along the axis whose stride the run so far is. A step of
+# 32 columns of a half-precision matrix stored along its sum reads each of
+# its rows in runs of 64 bytes. Unbounded where the view does not span the
+# value's elements side by side, bound by the grid, a position per block,
+# whose neighbours the blocks beside it read, and for a view of other kinds.
+function run_bytes(c, t::Load, v)
+    v isa View || return Inf
+    unit = findfirst(i -> v.spans[i] && v.strides[i] == 1, eachindex(v.spans))
+    unit === nothing && return Inf
+    run, grown = 1, true
+    while grown
+        grown = false
+        for i in eachindex(v.spans)
+            v.spans[i] && v.strides[i] == run || continue
+            n = spanned_lanes(c, v, i)
+            run *= n
+            grown = n == (v.limits[i] == 0 ? c.s.tiling[i].extent : min(c.s.tiling[i].extent, v.limits[i])) && n > 1
+            break
+        end
+    end
+    Float64(run * sizeof(c.g.values[t.value].eltype))
 end
 
 # What a block holds of a step, the toolchain's: tileiras holds a step's
@@ -1129,6 +1161,8 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     element(a) = a.buffer isa Int ? g.values[a.buffer].eltype : workspaces[a.buffer].eltype
     streaming, swept, inner = applied(c, roots)
     steps, stepped, refold_steps = sweep_steps(c, roots)
+    # What a block loads at each step: the loads along the sweep.
+    step_runs = steps > 1 ? [p for (t, p) in step_loads(c) if any(a -> mentions(t, a), swept_axes)] : Pair{Float64, Float64}[]
     prior = [b for k in kernels for (_, (_, b)) in k.before]
     main = findfirst(k -> k.name != INITIAL_STATES && !any(b -> b === k, prior), kernels)
     # The elements a fold by key of the group combines, along the axes of the
@@ -1150,8 +1184,8 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
         passed = sum(a -> a.buffer isa Int ? 0.0 : moved(a), kernel.args; init = 0.0)
         reread = i == main ? sum(a -> a.buffer isa Int ? moved(a) * rereads(a.buffer) : 0.0, kernel.args; init = 0.0) : 0.0
         blocks = prod(kernel.grid; init = 1)
-        i == main ? Work(bytes; reread, passed, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner, steps, stepped,
-            refold_steps) :
+        i == main ? Work(bytes; reread, passed, flops, recomputed, factor, blocks, split = s.splits > 1, applied = streaming, swept, inner, steps,
+            step_runs, stepped, refold_steps) :
             Work(bytes; passed, blocks)
     end
 end

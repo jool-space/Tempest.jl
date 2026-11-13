@@ -203,8 +203,8 @@ end
 @testset "a matrix-vector product searches its step along the sum" begin
     # A matrix stored along its sum times one column is the streamed
     # reduction of the sum, and the cover tries the tiles the generator
-    # offers in stages: the first claim's longer steps and 16 or 32 rows
-    # stepping 256, then the other steps of the best of those rows. Rows
+    # offers in stages: 16 or 32 rows stepping 256, then the other steps of
+    # the best of those rows. Rows
     # enough for 64 blocks, so that the sum streams rather than splits.
     w, x = single(data(512, 4096; scale = 0.1)), single(data(512, 1))
     p = trace((w, x) -> Einops.@einsum(w, x, "k m, k n -> m n"), w, x)
@@ -219,7 +219,7 @@ end
         d = only(d for d in ex.decisions if d !== nothing && d.choice.implementation isa ext.cuTileGenerator)
         rows(o) = (s = o.claim.schedule; s.tiling[findfirst(ax -> !ax.reduced, s.tiling)].tile)
         tried = Set((rows(o), step(o)) for o in d.options if o.implementation isa ext.cuTileGenerator)
-        @test issubset([(64, 32), (64, 64), (64, 128), (16, 256), (32, 256)], tried)
+        @test issubset([(64, 32), (16, 256), (32, 256)], tried)
         @test all(((r, _),) -> r in (16, 32, 64), tried)
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, x)]; rtol = 1.0e-4)
     end
@@ -229,10 +229,10 @@ end
     # A decoding step's down projection: 2560 outputs of weights in
     # BFloat16 kept 32 rows to a block, summing 9216 of the gate's silu
     # times the up projection, which each step computes. Measuring nothing,
-    # the first claim steps 32 along the sum, and the variant stepping 128
-    # moves the same bytes in the same blocks, its estimate past the error
-    # below (314 μs against 190); it stands in the claim's place, beside it
-    # among the options.
+    # the first claim steps 32 along the sum, and the tile of the
+    # generator's offer estimated best stands beside it among the options:
+    # no variant the generator offers of it is estimated below it by more
+    # than the error of the form that prices both.
     w = BFloat16s.BFloat16.(data(9216, 2560; scale = 0.01))
     gate, up = single(data(9216, 1)), single(data(9216, 1))
     p = trace((w, gate, up) -> Einops.@einsum(w, gate ./ (1 .+ exp.(-gate)) .* up, "k m, k n -> m n"), w, gate, up)
@@ -245,13 +245,17 @@ end
     withenv("TEMPEST_CACHE" => dir) do
         ex = prepare(p, CuArray(w), CuArray(gate), CuArray(up); target, measure = :none)
         k = only(k for (k, d) in enumerate(ex.decisions) if d !== nothing && d.choice.implementation isa ext.cuTileGenerator)
-        d, view = ex.decisions[k], C.group_view(ex.plan, ex.plan.groups[k])
+        d = ex.decisions[k]
         claim = only(o for o in d.options if o.implementation isa ext.cuTileGenerator && o.order == 1 && o !== d.choice)
         @test d.how === :estimated && d.choice.order == 1
-        @test step(claim) == 32 && step(d.choice) == 128
-        @test !C.close_call(d.choice.estimate, claim.estimate)
-        work(o) = C.said(target, o.implementation, o.claim, view).work
-        @test C.steps_apart(work(claim), work(d.choice))
+        @test step(claim) == 32 && step(d.choice) > 32 && d.choice.estimate < claim.estimate
+        decider = C.Decider(target, ex.plan.graph; measure = :none)
+        g, view = ex.plan.groups[k], C.group_view(ex.plan, ex.plan.groups[k])
+        work(c) = C.said(target, d.choice.implementation, c, view).work
+        @test all(d.choice.variants) do c
+            C.choice(decider, ex.plan, g, view, d.choice.implementation, c).estimate *
+                C.estimate_error(decider, d.choice.implementation, work(d.choice.claim), work(c)) >= d.choice.estimate
+        end
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, gate, up)]; rtol = 1.0e-2)
     end
 end

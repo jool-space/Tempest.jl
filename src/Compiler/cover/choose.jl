@@ -374,55 +374,55 @@ function options(d::Decider, p::Plan, g::Group)
     # A recurrence with sums riding its steps runs them only a step at a time.
     riders = g.kind isa RecurrenceKind && !isempty(g.reductions)
     os = riders ? Choice[] : filter(o -> !haskey(d.failed, o.key), priced!(d, p, g))
-    d.measure in (:close, :all) || append!(os, filter(o -> !haskey(d.failed, o.key), standing_variants(d, p, g, os)))
+    d.measure in (:close, :all) || append!(os, filter(o -> !haskey(d.failed, o.key), standing(d, p, g, os)))
     (isempty(os) || d.steps > 1 && g.kind isa PointwiseKind) && push!(os, choice(d, p, g, group_view(p, g), nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
 
 """
-Unmeasured, an implementation stands by its first claim (see `choose`), or by
-the variant of it estimated best, where that variant's estimate is past the
-estimate's error below the claim's and its work differs from the claim's in
-its steps alone: the same blocks, moving the same bytes and computing the
-same flops, sweeping in steps of another width. Along its steps the estimate
-ranks a claim's tiles as their times do (a decoding step's projections: no
-pair of a kept tile's steps apart by more than the error misranked of 235,
-where 234 were before the steps were priced), and across anything else it was
-not shown to: the blocks a tile of another width keeps busy, a product's
-depth. A claim that sweeps in no steps is priced without them (see `Work`),
-and no variant of it is estimated apart by its steps; its variants are not
-asked for. The variant stands in the claim's place, at its order: the 4B's
-down and output projections at one token, kept 32 rows wide, stepping 128
-columns where they stepped 32, estimated 1.7 and 2.2 times faster and
-running 1.5 and 1.9 times faster.
+Unmeasured, the option estimated best stands (see `choose`), of the claims
+each implementation makes and the variants it offers of them: of each
+implementation's claim estimated best, the variants it offers, and of the
+one that takes its place the variants it offers in turn, as a measured
+cover grows its options by the variants of the option it measured best (see
+`growth`). A variant takes the place of the claim before it where its
+estimate is lower by more than the estimate's error (see `estimate_error`).
+The variant found stands at the first claim's order, beside the claims
+among the options.
 """
-function standing_variants(d::Decider, p::Plan, g::Group, os)
-    found = offered!(d, p, g)
+function standing(d::Decider, p::Plan, g::Group, os)
     view = group_view(p, g)
-    standing = Choice[]
-    for o in os
-        o.order == 1 && o.implementation !== nothing && !isempty(o.variants) || continue
-        work = only(told.work for (i, c, k, told) in found.said if i === o.implementation && k == o.order)
-        swept(work) || continue
-        best = o
-        for c in o.variants
-            told = said(d.target, o.implementation, c, view)
-            swept(told.work) && steps_apart(work, told.work) || continue
-            v = choice(d, p, g, view, o.implementation, c, o.order, told)
-            v.estimate < best.estimate && !close_call(v.estimate, o.estimate) && (best = v)
+    found = Choice[]
+    for i in unique(o.implementation for o in os if o.implementation !== nothing)
+        best = argmin(o -> o.estimate, (o for o in os if o.implementation === i))
+        work = said(d.target, i, best.claim, view).work
+        seen = Set(o.key for o in os)
+        from = best
+        while true
+            for c in from.variants
+                told = said(d.target, i, c, view)
+                v = choice(d, p, g, view, i, c, 1, told)
+                v.key in seen && continue
+                push!(seen, v.key)
+                v.estimate * estimate_error(d, i, work, told.work) < best.estimate && ((best, work) = (v, told.work))
+            end
+            best === from && break
+            from = best
         end
-        best === o || push!(standing, best)
+        any(o -> o === best, os) || push!(found, best)
     end
-    standing
+    found
 end
 
-# Whether a claim sweeps in steps its estimate prices (see `Work`).
-swept(work::Vector{Work}) = any(w -> w.steps > 1, work)
-
-# Whether two claims' launches differ in their steps alone (see `Work`).
-steps_apart(a::Vector{Work}, b::Vector{Work}) = length(a) == length(b) && all(map(a, b) do x, y
-    (x.blocks, x.bytes, x.reread, x.passed, x.flops, x.recomputed, x.split) == (y.blocks, y.bytes, y.reread, y.passed, y.flops, y.recomputed, y.split)
-end)
+"""
+The factor within which the estimates of two claims of `implementation`,
+launches `a` and `b`, are not told apart: where the stepped form prices
+every launch of both (see `stepped`), the error its fit leaves on the
+package's memory (see `fit_step!`); otherwise `ESTIMATE_ERROR`, until the
+form that prices them is fitted over what the package offers.
+"""
+estimate_error(d::Decider, implementation, a::Vector{Work}, b::Vector{Work}) =
+    all(stepped, a) && all(stepped, b) ? memory!(d, package_name(implementation)).error : ESTIMATE_ERROR
 
 "What the implementations offer for a group (see `Offered`), found once by its identity."
 offered!(d::Decider, p::Plan, g::Group) = get!(() -> offered(d, p, g), d.offered, group_identity(p, g))
@@ -667,10 +667,8 @@ function choose(d::Decider, os)
     length(os) == 1 && return (1, :only, get(d.record, best.key, nothing))
     isempty(measured_ranks(d, os)) && return (1, :estimated, get(d.record, best.key, nothing))
     ranks = [k for (k, o) in enumerate(os) if haskey(d.record, o.key)]
-    # The best estimate unmeasured, each implementation stands by its first
-    # claim, or the variant of it that stands in its place (see
-    # `standing_variants`): the estimate ranks implementations, not an
-    # implementation's own alternatives but along their steps.
+    # The best estimate unmeasured among the first claims and the variants
+    # that stand beside them (see `standing`).
     1 in ranks || return (findfirst(o -> o.order <= 1, os), :estimated, nothing)
     times = [d.record[os[k].key] for k in ranks]
     k = argmin(times)

@@ -246,14 +246,11 @@ end
 # on GB10 and about twice on the Ada. A sweep's variants are offered in two
 # stages, as a product's tiles are: of a claim outside them (its rows not
 # of `STEPPED_ROWS`, its step not of `STEPPED_STEPS`, or its sum split
-# among blocks), the other rows of `STEPPED_ROWS` stepping `STEPPED_STEP`,
-# its sum whole, and of an unsplit matrix-vector product its longer steps
-# (`WIDER_STEPS`), as they were offered before the rows were and as an
-# unmeasured cover may stand by (see `standing_variants`), the rows offered
-# keeping other blocks; of a claim within them, its other steps of
-# `STEPPED_STEPS`; each within what a block holds (`HELD_BYTES`). Over the
-# two devices' tables, the six tiles of the two stages reach each
-# projection's best within 1.4%, of the 28 the generator expresses. A
+# among blocks), the rows of `STEPPED_ROWS` stepping `STEPPED_STEP`, its
+# sum whole; of a claim within them, its other steps of `STEPPED_STEPS`;
+# each within what a block holds (`HELD_BYTES`). Over the two devices'
+# tables, the tiles of the two stages reach each projection's best within
+# 1.4%, of the 28 the generator expresses. A
 # sweep that recomputes a fold none of the group's axes reach, the norm of
 # the column a projection reads, recomputes it in steps of its own once a
 # block, whatever its rows and steps (see `fold_context`, `sweep_steps`),
@@ -261,7 +258,6 @@ end
 # log-sum-exp of a product's scores, recomputes a product of tiles, its kept
 # tile the product's columns and its steps the product's depth, and has
 # `RECOMPUTING_TILES` instead.
-const WIDER_STEPS = (64, 128)
 const STEPPED_ROWS = (16, 32)
 const STEPPED_STEP = 256
 const STEPPED_STEPS = (64, 128, 256, 512, 1024)
@@ -277,9 +273,8 @@ function stepped_variants(g::GroupView, c::Claim)
     k = findfirst(ax -> !ax.reduced && ax.tile > 1, s.tiling)
     k === nothing && return Claim[]
     rows, step, whole = s.tiling[k].tile, s.tiling[p].tile, s.sketch === :streamed
-    product = all(r -> g.values[r].fold isa SumFold && product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)
     tiles = whole && rows in STEPPED_ROWS && step in STEPPED_STEPS ? [(rows, w) for w in STEPPED_STEPS if w != step] :
-        [[(rows, w) for w in WIDER_STEPS if whole && product && w > step]; [(r, STEPPED_STEP) for r in STEPPED_ROWS if r != rows || !whole]]
+        [(r, STEPPED_STEP) for r in STEPPED_ROWS if r != rows || step != STEPPED_STEP || !whole]
     found = Claim[]
     for (r, w) in tiles
         r <= nextpow(2, s.tiling[k].extent) && cld(s.tiling[p].extent, w) > 1 || continue

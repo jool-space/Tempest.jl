@@ -139,17 +139,16 @@ const APPLIED_SHAPE = (4096, 512)
 const APPLIED_TIMES = 8
 const SWEEP_SHAPES = ((256, 512), (512, 2048))
 
-# A matrix-vector product's sweep fits a package's step and the functions a
-# step computes: a half-precision matrix stored along the sum, as a
-# checkpoint stores its weights, of enough outputs that the generator keeps
-# its sum whole rather than splitting it among blocks, and a long sum, which
-# its blocks sweep in many narrow steps, side by side. Two sums, the step
-# the slope of the time over the steps between them: what a step takes,
-# waiting on its loads or moving its bytes, whichever is longer. On GB10 the
-# generator's first claim takes 64 blocks of 32 outputs and steps 32 along
-# the sum, 0.6 to 0.8 μs a step loaded and 0.3 more computing a vector's
-# silu in each, on numbers as a program's are (see `buffers!`): on zeros,
-# whose division runs its slow path, the silu took 1.2 to 2.5.
+# A matrix-vector product's sweep prices the functions a step computes, and
+# a step of a fold a block recomputes apart (see `fit_refold!`): a
+# half-precision matrix stored along the sum, as a checkpoint stores its
+# weights, of enough outputs that the generator keeps its sum whole rather
+# than splitting it among blocks, and a long sum, which its blocks sweep in
+# many narrow steps, side by side. On GB10 the generator's first claim
+# takes 64 blocks of 32 outputs and steps 32 along the sum, and computed a
+# vector's silu in 0.3 μs a step more than its product alone, on numbers as
+# a program's are (see `buffers!`): on zeros, whose division runs its slow
+# path, the silu took 1.2 to 2.5.
 const STEPPED_OUTPUTS = 2048
 const STEPPED_SUMS = (8192, 16384)
 
@@ -246,7 +245,7 @@ fold.
 """
 function memory!(d::Decider, package)
     get!(d.memories, package) do
-        measures(d) || return Memory(d.rates.launch, d.rates.cached, 0.0)
+        measures(d) || return Memory(d.rates.launch, d.rates.cached, 0.0, d.rates.cached, ESTIMATE_ERROR, 0.0)
         own = implementations(d.target)
         fitted_memory(d, package) ||
             fit_memory!(d, Implementation[own..., (i for i in loaded_implementations() if package_name(i) === package && !(i in own))...])
@@ -258,24 +257,26 @@ end
 A reference program, `f` over arrays like `args`, built: planned as one group,
 with each implementation's first claim on it built on buffers of its own and
 the resources of the decider that times it, for `time_reference` to time as
-claims are, and the floor's kernels too when
-`floor`, as package `:floor`. The first claim is what a package stands by
-unmeasured, but for a variant apart from it by its steps alone (see
-`standing_variants`), and a reference is measured under it, not the fastest
-of its alternatives.
+claims are, and the floor's kernels too when `floor`, as package `:floor`;
+with `offered`, every claim each implementation makes and every variant it
+offers of them, and of those, as far as they reach (see
+`Tempest.Compiler.Implement.variants`). The first claim is what a package
+stands by unmeasured but where its estimate ranks another of its offer
+first (see `standing`), and a reference is measured under it, not the
+fastest of its alternatives.
 """
 struct Reference
     launches::Vector{Tuple{Symbol, Any, Vector{Work}}} # package, launch, estimate
 end
 
-function build_reference(d::Decider, among, f, args...; recomputing = false, floor = false)
+function build_reference(d::Decider, among, f, args...; recomputing = false, floor = false, offered = false)
     graph = lower(trace(f, args...))
     timing = Decider(d.target, graph; measure = :none)
     p = plan(graph; recompute = recomputing ? recomputable_folds(graph) : ())
     g = only(p.groups)
     view = group_view(p, g)
     launches = Tuple{Symbol, Any, Vector{Work}}[]
-    for i in among, c in Iterators.take(Base.invokelatest(claims, i, d.target, view), 1)
+    for i in among, c in (offered ? offer(i, d.target, view) : Iterators.take(Base.invokelatest(claims, i, d.target, view), 1))
         built = Base.invokelatest(build_claim, i, c, d.target, view, buffers!(timing, p, g), resources!(d.resources, i))
         push!(launches, (package_name(i), first(built), Base.invokelatest(estimate, i, c, d.target, view)))
     end
@@ -283,15 +284,33 @@ function build_reference(d::Decider, among, f, args...; recomputing = false, flo
     Reference(launches)
 end
 
-"Each package's fastest launch of a built reference: its seconds, and its launches as the package estimates them."
-function time_reference(d::Decider, r::Reference)
-    fastest = Dict{Symbol, Tuple{Float64, Vector{Work}}}()
-    for (package, launch, work) in r.launches
-        t = d.timer(d.target, launch)
-        t < first(get(fastest, package, (Inf,))) && (fastest[package] = (t, work))
+# Every claim implementation `i` makes on a group and every variant it offers
+# of them, and of those, each once (by `record_name`).
+function offer(i, target, view)
+    found, names = Any[], Set{String}()
+    next = collect(Any, Base.invokelatest(claims, i, target, view))
+    while !isempty(next)
+        c = popfirst!(next)
+        name = Base.invokelatest(record_name, i, c)
+        name in names && continue
+        push!(names, name)
+        push!(found, c)
+        append!(next, Base.invokelatest(variants, i, target, view, c))
     end
-    fastest
+    found
 end
+
+"Each package's launches of a built reference: their seconds, and their launches as the package estimates them."
+function time_launches(d::Decider, r::Reference)
+    timed = Dict{Symbol, Vector{Tuple{Float64, Vector{Work}}}}()
+    for (package, launch, work) in r.launches
+        push!(get!(() -> Tuple{Float64, Vector{Work}}[], timed, package), (d.timer(d.target, launch), work))
+    end
+    timed
+end
+
+"Each package's fastest launch of a built reference: its seconds, and its launches as the package estimates them."
+time_reference(d::Decider, r::Reference) = Dict(package => argmin(first, timed) for (package, timed) in time_launches(d, r))
 
 # Products of factors of these shapes fit a package's line: the small one, too
 # small to split, its latency; the large one its rate; and the middle one,
@@ -357,7 +376,7 @@ end
 const MEMORY_COLUMNS = (16, 256, 1024, 4096)
 
 # What a package's memory is in the rates file, each a line of its own (see `Memory`).
-const MEMORY_RATES = ("latency", "bandwidth", "step")
+const MEMORY_RATES = ("latency", "bandwidth", "step", "block", "error", "refold")
 memory_key(package, what) = string(package, " memory ", what)
 memory_fitted(d, package, whats) = all(what -> haskey(d.calibration, memory_key(package, what)), whats)
 fitted_memory(d, package) = memory_fitted(d, package, MEMORY_RATES)
@@ -371,8 +390,8 @@ the bytes the claims move: its bandwidth is the slope of their
 least-squares line, which the largest folds set, and its latency, a launch's,
 the smallest fold's time less its bytes at that bandwidth, over its
 launches. A package that claims no such fold, or whose fit fails (see
-`keep_fit!`), moves bytes at the device's rates. Then its step, where the
-file lacks it (see `fit_step!`).
+`keep_fit!`), moves bytes at the device's rates. Then its step and its
+refold, where the file lacks them (see `fit_step!` and `fit_refold!`).
 """
 function fit_memory!(d::Decider, among = implementations(d.target))
     phase(:calibration) do
@@ -396,30 +415,100 @@ function fit_memory!(d::Decider, among = implementations(d.target))
             end
         end
         fit_step!(d, among)
+        fit_refold!(d, among)
+    end
+end
+
+# Matrix-vector products of a half-precision matrix stored along the sum fit
+# a package's step (see `fit_step!`): 9216 outputs, a projection's of a
+# decoding step, so that the blocks of every tile offered fill the device a
+# wave or more, summing 2560 and 5120, each moving tens of megabytes, many
+# ticks of the coarsest event clock (the RTX 6000 Ada's, 1.024 μs).
+const STEP_OUTPUTS = 9216
+const STEP_SUMS = (2560, 5120)
+
+"""
+Fit the step of every package of the implementations `among`, and of the
+floor, that has none: its latency and the rate one block reaches (see
+`Memory`), by least squares over every tile the package offers on
+matrix-vector products (see `STEP_SUMS`), timed as claims are, of the
+logarithm of each time against its seconds (see `seconds`). Where the
+tiles cannot bound the block's rate from above, the fit with the block at
+the memory's bandwidth no worse than the best by more than two standard
+errors, the block's rate is none of its own, the memory's bandwidth. The
+form's error is what the fit leaves unexplained: twice the standard error
+of its residuals, as a factor, within which two launches' estimates are
+not told apart (see `standing`). A package whose claims state no steps, as
+the floor's do not, or whose fit fails (see `keep_fit!`), steps in no time,
+a block at the memory's bandwidth, its estimates told apart beyond
+`ESTIMATE_ERROR`.
+"""
+function fit_step!(d::Decider, among = implementations(d.target))
+    rates = ("step", "block", "error")
+    unfitted = [i for i in among if !memory_fitted(d, package_name(i), rates)]
+    floor = !memory_fitted(d, :floor, rates)
+    reference(n) = (zeros(BFloat16, n, STEP_OUTPUTS), zeros(BFloat16, n))
+    built = concurrently(n -> build_reference(d, unfitted, (w, x) -> transpose(w) * x, reference(n)...; floor, offered = true),
+        collect(STEP_SUMS), d.target)
+    sweeps = [time_launches(d, r::Reference) for r in built]
+    for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
+        latency, bandwidth = (d.calibration[memory_key(package, what)] for what in ("latency", "bandwidth"))
+        timed = [(t, only(work)) for sweep in sweeps for (t, work) in get(sweep, package, ()) if length(work) == 1 && stepped(only(work))]
+        squares(step, block) = sum(((t, w),) -> log(t / seconds(w, d.rates, Memory(latency, bandwidth, step, block, ESTIMATE_ERROR, 0.0), nothing))^2, timed; init = 0.0)
+        values = step_fit(squares, bandwidth, length(timed))
+        keep_fit!(d, memory_key.(package, rates), values === nothing ? (0.0, bandwidth, ESTIMATE_ERROR) : values,
+            (SECONDS, (RATE[1], bandwidth), (1.0, Inf)), (0.0, bandwidth, ESTIMATE_ERROR))
     end
 end
 
 """
-Fit the step of every package of the implementations `among`, and of the
-floor, that has none: the slope of its fastest claims' times on a
+Fit the refold of every package of the implementations `among`, and of the
+floor, that has none: the slope of its first claims' times on a
 matrix-vector product (see `STEPPED_SUMS`) over the steps their sweeps
-take, at the two sums. None where its claims state no steps, as the floor's
-do not, it claims no such product, or the fit fails (see `keep_fit!`).
+take, at the two sums, what a sweep's step took, its loads and all, as
+sweeps were priced before their loads were (see `fit_step!`). It prices a
+step of a fold a block recomputes apart (see `seconds`), as it did then,
+though on GB10 it is 0.79 μs where such a step takes 60 to 70 ns, until
+work a launch recomputes is priced by the steps it takes. None where its
+claims state no steps, as the floor's do not, it claims no such product,
+or the fit fails (see `keep_fit!`).
 """
-function fit_step!(d::Decider, among = implementations(d.target))
-    unfitted = [i for i in among if !memory_fitted(d, package_name(i), ("step",))]
-    floor = !memory_fitted(d, :floor, ("step",))
+function fit_refold!(d::Decider, among = implementations(d.target))
+    unfitted = [i for i in among if !memory_fitted(d, package_name(i), ("refold",))]
+    floor = !memory_fitted(d, :floor, ("refold",))
     built = concurrently(n -> build_reference(d, unfitted, (w, x) -> transpose(w) * x, stepped_reference(n)...; floor), collect(STEPPED_SUMS), d.target)
     sweeps = [time_reference(d, r::Reference) for r in built]
     for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
         steps = all(sweep -> haskey(sweep, package), sweeps) ? [first(last(sweep[package])).steps for sweep in sweeps] : [0.0, 0.0]
         if steps[2] > steps[1] > 1
-            step = (first(sweeps[2][package]) - first(sweeps[1][package])) / (steps[2] - steps[1])
-            keep_fit!(d, (memory_key(package, "step"),), (step,), (SECONDS,), (0.0,))
+            refold = (first(sweeps[2][package]) - first(sweeps[1][package])) / (steps[2] - steps[1])
+            keep_fit!(d, (memory_key(package, "refold"),), (refold,), (SECONDS,), (0.0,))
         else
-            keep!(d.calibration, d.calibration_path, memory_key(package, "step"), 0.0)
+            keep!(d.calibration, d.calibration_path, memory_key(package, "refold"), 0.0)
         end
     end
+end
+
+# The steps' latencies and blocks' rates a step's fit searches (see
+# `step_fit`): to 4 μs, past what a step of the tables took, 10 ns apart;
+# from a thousandth of the bandwidth to the whole, evenly in its logarithm.
+const STEP_LATENCIES = range(0.0, 4.0e-6; length = 401)
+const BLOCK_SHARES = exp10.(range(-3.0, 0.0; length = 121))
+
+# A step's latency, a block's rate and the fit's error, `(latency, rate,
+# error)`, minimizing `squares(latency, rate)`, a sum of `n` squares of
+# logarithms, over `STEP_LATENCIES` and `BLOCK_SHARES` of `bandwidth`; the
+# rate the bandwidth where the fit at it is within two standard errors of
+# the best, and the error twice the standard error of the fit kept, as a
+# factor (see `fit_step!`); nothing from fewer than three tiles.
+function step_fit(squares, bandwidth, n)
+    n >= 3 || return nothing
+    best(rate) = argmin(last, ((l, squares(l, rate)) for l in STEP_LATENCIES))
+    fits = [(rate, best(rate)...) for rate in bandwidth .* BLOCK_SHARES]
+    rate, latency, least = argmin(last, fits)
+    _, at_bandwidth, whole = last(fits)
+    unbounded = whole - least <= 4 * least / (n - 2)
+    unbounded ? (at_bandwidth, bandwidth, exp(2 * sqrt(whole / (n - 2)))) : (latency, rate, exp(2 * sqrt(least / (n - 2))))
 end
 
 "Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories and the floor's, and the seconds of each scalar function in products of each, now rather than on first need, so that a rates file it writes prices every plan alike wherever it is read. What the rates file lacks is fitted, whatever is shipped for the device (see `shipped_rates`)."

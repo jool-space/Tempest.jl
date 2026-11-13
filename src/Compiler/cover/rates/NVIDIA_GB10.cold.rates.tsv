@@ -10,10 +10,10 @@ cuTile memory latency	1.751637633286956e-6
 cuTile memory bandwidth	2.5398573662778882e11
 floor memory latency	2.916344358446755e-6
 floor memory bandwidth	4.296278741567265e11
-cuBLAS memory step	0.0
-cuDNN memory step	0.0
-cuTile memory step	7.882499630795792e-7
-floor memory step	0.0
+cuBLAS memory refold	0.0
+cuDNN memory refold	0.0
+cuTile memory refold	7.882499630795792e-7
+floor memory refold	0.0
 cuBLAS full latency	4.050995654085979e-6
 cuBLAS full rate	1.8929089343826637e13
 cuBLAS full split	1.8929089343826637e13
@@ -282,3 +282,15 @@ applied inner tf32x3 min	0.0
 applied inner tf32x3 identity	0.0
 applied inner tf32x3 Float32	0.0
 applied inner tf32x3 BFloat16	0.0
+cuBLAS memory step	0.0
+cuBLAS memory block	5.46112e11
+cuBLAS memory error	1.5
+cuDNN memory step	0.0
+cuDNN memory block	5.46112e11
+cuDNN memory error	1.5
+cuTile memory step	0.0
+cuTile memory block	2.5398573662778882e11
+cuTile memory error	1.1762523459636596
+floor memory step	0.0
+floor memory block	4.296278741567265e11
+floor memory error	1.5
