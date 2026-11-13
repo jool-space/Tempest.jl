@@ -191,6 +191,15 @@ C.build(::CostlyLibrary, target, b::C.Binding, _) = (() -> host_product(b), "cos
         @test occursin("host product", text) && occursin("stored apart to be read as its factors", text) == apart
         @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, w, x)))
     end
+    # A factor that reads another product's result is kept a kernel of its
+    # own: left to the partition, it joined that product's kernel as an
+    # epilogue, which the library then claimed no longer. Both products are
+    # the library's, the factor between them the generator's.
+    w2 = data(3, 5; scale = 0.3)
+    p = trace((w1, w2, x) -> w2 * tanh.(w1 * x), w, w2, x)
+    ex = prepare(p, w, w2, x; target)
+    @test count(d -> occursin("host product", string(d)), ex.kernels) == 2 && length(ex.kernels) == 3
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, w, w2, x)))
     # Not worth it, by the library's price: proposed, compared and refused.
     p = trace((w, x) -> w * tanh.(x), w, x)
     ex = prepare(p, w, x; target = T.CPUTarget(CostlyLibrary()))

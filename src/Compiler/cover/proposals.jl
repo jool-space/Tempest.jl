@@ -45,11 +45,20 @@ priceable(::Decider, ::Plan, ::Proposal) = true
 
 """
 An implementation's candidate: sets of values, each to form a group, one
-set or several apart, proposed as one (see `candidates`); and the maps the
-groups read, stored rather than computed where they read them (`stored`),
-as a library's product reads its factors where the program computes them
-in the product's kernel. Proposed together, since neither alone forms the
-groups the implementation claims.
+set or several apart, proposed as one (see `candidates`), which the
+implementation claims; and the maps the groups read, stored rather than
+computed where they read them (`stored`), as a library's product reads its
+factors where the program computes them in the product's kernel, each kept
+a group of its own, which nothing claims (see `claimed`). Proposed
+together, since neither alone forms the groups the implementation claims.
+
+A trial is the plan the partition makes given what the proposals change
+(see `replanned`), and a stored map left to the partition joins a kernel
+that reads what it reads, as an epilogue: the 4B's gated norm, stored for
+cuBLAS's output projection, joined the `in_proj_z` product it reads, which
+cuBLAS then claimed no longer, and the trial took 168.8 μs against 131.8
+where the norm kept apart takes 84. A candidate says what it means, the
+product apart from what computes its factors.
 """
 struct Candidate <: Proposal
     sets::Vector{Vector{Int}}
@@ -58,7 +67,7 @@ end
 
 Candidate(sets) = Candidate(sets, Int[])
 
-change(q::Candidate) = Inputs(; fixed = q.sets, store = q.stored)
+change(q::Candidate) = Inputs(; fixed = [q.sets; [[v] for v in q.stored]], store = q.stored)
 fixes(q::Candidate) = [reduce(vcat, q.sets); q.stored]
 function key_text(io, p::Plan, q::Candidate)
     length(q.sets) > 1 && print(io, " || apart ", join((join(map(v -> "%$v", set), " ") for set in q.sets), " | "))
@@ -74,6 +83,13 @@ function explain(io, q::Candidate, c, why)
     stored = isempty(q.stored) ? "" : string(", ", join(map(v -> "%$v", q.stored), " "), " stored apart to be read as its factors,")
     c.accepted && println(io, what, " from ", label(c.implementation), stored, " replaces the generator's grouping", why)
 end
+
+"""
+The sets a proposal fixes that its implementation claims, each a group of
+its own in its trial: every set it fixes, but for a candidate's kept apart.
+"""
+claimed(q::Proposal) = change(q).fixed
+claimed(q::Candidate) = q.sets
 
 # An implementation's candidate as `candidates` returns it: a set of values,
 # or several sets, or a proposal.

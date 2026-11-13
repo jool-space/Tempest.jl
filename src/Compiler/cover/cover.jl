@@ -547,9 +547,10 @@ function recomputed_claimed(d::Decider, p::Plan, v)
     end
 end
 
-# The implementation that claims the groups a proposal of `i` forms: `i`, or nothing.
+# The implementation that claims the groups a proposal of `i` forms (see
+# `claimed`): `i`, or nothing.
 function claimant(d::Decider, p::Plan, q, i)
-    for set in change(q).fixed
+    for set in claimed(q)
         v = first(set)
         p.owner[v] == 0 && return nothing
         isempty(Base.invokelatest(claims, i, d.target, group_view(p, p.groups[p.owner[v]]))) && return nothing
