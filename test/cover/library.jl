@@ -148,3 +148,52 @@ C.build(::HostLibrary, target, bs::Vector{C.Binding}, _) = (() -> foreach(host_p
         end
     end
 end
+
+# A product with work before it, a factor the program computes where the
+# product reads it: the template's term up to its factors. The library
+# proposes the product alone with the factor stored apart, as it proposes a
+# product with work after it alone; both, and a factor read elsewhere too.
+# A factor that only converts a stored value is read through its conversion,
+# as the template's own does, and is not stored.
+struct CostlyLibrary <: C.Library end
+C.templates(::CostlyLibrary, ::T.CPUTarget) = (PRODUCT,)
+C.estimate(::CostlyLibrary, b, target, g) = [C.Work(1.0e15)]
+C.build(::CostlyLibrary, target, b::C.Binding, _) = (() -> host_product(b), "costly product")
+
+@testset "a library takes a product whose factors are computed before it" begin
+    w, x = data(5, 6; scale = 0.3), data(6, 4)
+    # The factor's map, by its definition: what `candidates` stores.
+    function proposed(f, args...; library = HostLibrary())
+        target = T.CPUTarget(library)
+        d = C.Decider(target, C.lower(trace(f, args...)); measure = :none)
+        p = C.generator_plan(d)
+        qs = C.candidates(library, target, p)
+        [(q.sets, [C.describe(p.graph.values[v].definition) for v in q.stored]) for q in qs]
+    end
+    sets, stored = only(proposed((w, x) -> w * tanh.(x), w, x))
+    @test length(only(sets)) == 1 && stored == ["pointwise(tanh)"]
+    @test isempty(proposed((w, x) -> w * x, w, x))
+    @test only(last.(proposed((w, x) -> tanh.(w * x), w, x))) == String[]
+    @test only(last.(proposed((w, x) -> tanh.(w * tanh.(x)), w, x))) == ["pointwise(tanh)"]
+    # Conversions of stored values are the template's to read, and a factor
+    # computed in one type and converted is stored narrow, as computed.
+    h = BFloat16.(single(x))
+    @test isempty(proposed((w, x) -> Float32.(w) * Float32.(x), single(w), h))
+    @test only(last.(proposed((w, x) -> Float32.(w) * Float32.(BFloat16.(tanh.(Float32.(x)))), single(w), h))) == [string("pointwise(", BFloat16, ")")]
+    target = T.CPUTarget(HostLibrary())
+    # A factor read elsewhere too is stored already, the product bare: the
+    # library claims it where it is, and nothing is proposed.
+    for (f, apart) in (((w, x) -> w * tanh.(x), true), ((w, x) -> tanh.(w * tanh.(x) .+ 1), true),
+            ((w, x) -> (y = tanh.(x); (w * y, sum(y; dims = 1))), false))
+        p = trace(f, w, x)
+        ex = prepare(p, w, x; target)
+        text = sprint(explain, ex)
+        @test occursin("host product", text) && occursin("stored apart to be read as its factors", text) == apart
+        @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, w, x)))
+    end
+    # Not worth it, by the library's price: proposed, compared and refused.
+    p = trace((w, x) -> w * tanh.(x), w, x)
+    ex = prepare(p, w, x; target = T.CPUTarget(CostlyLibrary()))
+    @test !occursin("costly product", sprint(explain, ex))
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(p, w, x)))
+end

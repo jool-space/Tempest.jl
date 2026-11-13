@@ -45,20 +45,34 @@ priceable(::Decider, ::Plan, ::Proposal) = true
 
 """
 An implementation's candidate: sets of values, each to form a group, one
-set or several apart, proposed as one (see `candidates`).
+set or several apart, proposed as one (see `candidates`); and the maps the
+groups read, stored rather than computed where they read them (`stored`),
+as a library's product reads its factors where the program computes them
+in the product's kernel. Proposed together, since neither alone forms the
+groups the implementation claims.
 """
 struct Candidate <: Proposal
     sets::Vector{Vector{Int}}
+    stored::Vector{Int}
 end
 
-change(q::Candidate) = Inputs(; fixed = q.sets)
-fixes(q::Candidate) = reduce(vcat, q.sets)
-key_text(io, ::Plan, q::Candidate) =
+Candidate(sets) = Candidate(sets, Int[])
+
+change(q::Candidate) = Inputs(; fixed = q.sets, store = q.stored)
+fixes(q::Candidate) = [reduce(vcat, q.sets); q.stored]
+function key_text(io, p::Plan, q::Candidate)
     length(q.sets) > 1 && print(io, " || apart ", join((join(map(v -> "%$v", set), " ") for set in q.sets), " | "))
+    for v in q.stored
+        d = p.graph.values[v].definition
+        print(io, " || storing ", describe(d), " ")
+        join(io, (sprint(show_operand, o) for o in operands(d)), ", ")
+    end
+end
 function explain(io, q::Candidate, c, why)
     sets = join((join(map(v -> "%$v", set), " ") for set in q.sets), ", ")
     what = length(q.sets) > 1 ? "candidates " * sets * ", one kernel each," : "candidate " * sets
-    c.accepted && println(io, what, " from ", label(c.implementation), " replaces the generator's grouping", why)
+    stored = isempty(q.stored) ? "" : string(", ", join(map(v -> "%$v", q.stored), " "), " stored apart to be read as its factors,")
+    c.accepted && println(io, what, " from ", label(c.implementation), stored, " replaces the generator's grouping", why)
 end
 
 # An implementation's candidate as `candidates` returns it: a set of values,

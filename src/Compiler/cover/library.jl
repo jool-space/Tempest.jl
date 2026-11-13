@@ -566,30 +566,58 @@ with_buffers(b::Binding, buffers) =
 with_buffers(bs::Vector{Binding}, buffers) = [with_buffers(b, buffers) for b in bs]
 
 # A library proposes, for each template that is one fold, each fold that
-# shares a group with other values, or that a group recomputes, and whose
-# term applies what the template's does to as many loads: the cover plans
-# it as a group of its own, which the library then claims or not. Of a group
-# it does not claim whole, it proposes the most folds that are instances of
-# one template alike, when it supports them as one.
+# computes the template's term up to its factors (see `factors_stored`) and
+# either shares a group with other values, a group recomputes it, or a
+# factor is computed where the fold reads it: the cover plans the fold as a
+# group of its own, its computed factors stored apart, which the library then
+# claims or not. A product with work after it, which another kernel then
+# does, and one with work before it, the factors that work computes stored,
+# are one case: the fold's term is the template's, its factors aside. Folds
+# of a group alike in their template and their factors are proposed together
+# too, for the library to claim as one. Of a group it does not claim whole,
+# it proposes the most folds that are instances of one template alike, when
+# it supports them as one.
 function Implement.candidates(l::Library, target, p::Plan)
-    shapes = Any[]
+    folds = Any[]
     for t in templates(l, target)
         tg = probe_group(t, rewrite_policy(target))
         (tg === nothing || members(tg.group) != tg.group.reductions || length(tg.group.reductions) != 1) && continue
         r = only(tg.group.reductions)
-        push!(shapes, (tg.group.values[r].fold, term_shape(tg.group.terms[r])))
+        push!(folds, (tg.group.values[r].fold, tg.group.terms[r]))
     end
-    isempty(shapes) && return Vector{Int}[]
-    fits(fold, t) = (fold, term_shape(t)) in shapes
-    found = Vector{Int}[]
+    isempty(folds) && return Candidate[]
+    # The factors fold `r` stores to compute a template's term, by the
+    # first template whose term it computes; nothing where it computes none.
+    function stored_for(r)
+        d = p.graph.values[r].definition
+        d isa Reduction || return nothing
+        for (k, (fold, term)) in enumerate(folds)
+            isequal(fold, d.fold) || continue
+            s = factors_stored(term, p.graph, p.stored, d.operand)
+            s === nothing || return (k, s)
+        end
+        nothing
+    end
+    found = Candidate[]
+    propose!(sets, stored) = (q = Candidate(sets, stored); q in found || push!(found, q))
     for g in group_views(p)
         g.kind === :reduction || continue
+        alike = Dict{Any, Vector{Int}}()
         for r in g.reductions
-            length(members(g)) > 1 && fits(g.values[r].fold, g.terms[r]) && push!(found, [r])
+            m = stored_for(r)
+            m === nothing && continue
+            length(members(g)) > 1 || !isempty(last(m)) || continue
+            propose!([[r]], last(m))
+            push!(get!(() -> Int[], alike, m), r)
+        end
+        for ((_, stored), rs) in alike
+            length(rs) > 1 && propose!([sort(rs)], stored)
         end
         roots = [g.terms[m] for m in members(g) if haskey(g.terms, m)]
         for t in subterms(roots; nested = true)
-            t isa Recomputed && fits(g.values[t.value].fold, t.body) && !([t.value] in found) && push!(found, [t.value])
+            t isa Recomputed || continue
+            m = stored_for(t.value)
+            m === nothing || propose!([[t.value]], last(m))
         end
         length(g.reductions) > 1 && isempty(Implement.claims(l, target, g)) || continue
         classes = Dict{Any, Vector{Pair{Int, Binding}}}()
@@ -599,9 +627,74 @@ function Implement.candidates(l::Library, target, p::Plan)
         end
         isempty(classes) && continue
         class = argmax(length, values(classes))
-        length(class) > 1 && supports(l, target, last.(class)) && push!(found, sort(first.(class)))
+        length(class) > 1 && supports(l, target, last.(class)) && propose!([sort(first.(class))], Int[])
     end
     found
+end
+
+"""
+    factors_stored(term, graph, stored, operand) -> maps or nothing
+
+The maps to store for what `operand`, a fold's in `graph` (`stored` as a plan
+stores its values), computes to be a template's fold's `term` read from
+storage: nothing where it is not, up to its factors. The term's functions
+are the operand's maps', conversions aside, either order of a commutative
+function's arguments; each load of the term is a factor, which the operand
+reads stored, or reads through conversions alone from a value stored, or
+computes in a map of its own. A factor computed is stored where its
+element type is narrowest, the reader's side on a tie, as a half-precision
+product converts a factor the program rounded to its type: so a norm or an
+activation before the template's term is a factor computed, as work after
+it is not the fold's. The index of each read is the template's match's to
+compare (see `match_template`) once the fold reads its factors stored.
+"""
+function factors_stored(term::Term, graph, stored, operand::Operand)
+    found = Int[]
+    factors_stored!(found, term, graph, stored, operand) ? unique!(found) : nothing
+end
+
+# A map of `graph` that converts a value the plan does not store.
+function conversion(graph, stored, o)
+    o isa Read && !stored[o.value] || return false
+    d = graph.values[o.value].definition
+    d isa Pointwise && d.f isa Cast
+end
+
+function factors_stored!(found, t::Term, graph, stored, o::Operand)
+    t isa Apply && t.f isa Cast && return factors_stored!(found, only(t.args), graph, stored, o)
+    t isa Load && return factor!(found, graph, stored, o)
+    t isa Lit && return o isa Literal && typeof(o.value) === typeof(t.value)
+    t isa Apply || return false
+    while conversion(graph, stored, o)
+        o = only(graph.values[o.value].definition.operands)
+    end
+    o isa Read && !stored[o.value] || return false
+    d = graph.values[o.value].definition
+    d isa Pointwise && isequal(d.f, t.f) && length(d.operands) == length(t.args) || return false
+    n = length(found)
+    all(((x, y),) -> factors_stored!(found, x, graph, stored, y), zip(t.args, d.operands)) && return true
+    resize!(found, n)
+    length(t.args) == 2 && any(f -> f === t.f, COMMUTATIVE) || return false
+    all(((x, y),) -> factors_stored!(found, x, graph, stored, y), zip(t.args, reverse(d.operands))) && return true
+    resize!(found, n)
+    false
+end
+
+# A factor `o` reads: stored, or through conversions from a value stored,
+# adds nothing; computed by a map, the map along its conversions whose type
+# is narrowest; a fold recomputed, or no read, is no factor.
+function factor!(found, graph, stored, o)
+    chain = Int[]
+    while o isa Read && !stored[o.value]
+        push!(chain, o.value)
+        conversion(graph, stored, o) || break
+        o = only(graph.values[o.value].definition.operands)
+    end
+    o isa Read || return false
+    stored[o.value] && return true
+    graph.values[o.value].definition isa Pointwise || return false
+    push!(found, chain[argmin([sizeof(graph.values[v].eltype) for v in chain])])
+    true
 end
 
 # What a fold's term applies, conversions aside and a quotient a product, and
