@@ -3,6 +3,34 @@
 # in each regime, fitted on first need to reference programs timed as claims
 # are, and kept in the rates file.
 
+# What a fitted rate can be, ends included: seconds, a latency, a step, or
+# what a function adds, no fewer than none; a rate of flops, more than none;
+# a memory's bandwidth, more than none and no more than the memory's peak
+# (`Rates`), to within the noise, as the timer clears the cache before each
+# reference it times (`time_launch`) and the reference reads from memory.
+const SECONDS = (0.0, Inf)
+const RATE = (floatmin(Float64), Inf)
+bandwidths(d) = (floatmin(Float64), (1 + NOISE) * d.rates.bandwidth)
+
+"""
+Keep the rates `values` a fit yields under `keys` in the rates file where
+each lies in its `domains`, what the rate can be; where any does not, the
+fit has failed: it is reported, and `instead`, what the rates' docstrings
+say stands in their absence, is kept in their place, or nothing where
+`instead` is `nothing`. The rates of one fit stand or fall together, as a
+memory's latency is fitted through its bandwidth.
+"""
+function keep_fit!(d::Decider, keys, values, domains, instead)
+    within(value, (low, high)) = isfinite(value) && low <= value <= high
+    if !all(splat(within), zip(values, domains))
+        @warn "The fit of $(join(keys, ", ")) failed: $(join(values, ", ")) outside $(join(domains, ", ")); " *
+            (instead === nothing ? "nothing is kept" : "$(join(instead, ", ")) stands in its place")
+        values = instead
+    end
+    values === nothing || foreach((key, value) -> keep!(d.calibration, d.calibration_path, key, value), keys, values)
+    values
+end
+
 # Whether the rates file holds every rate of a package's line for a class: a
 # file from before a line had its split and recompute rates is fitted again.
 fitted_line(d, package, class) =
@@ -145,8 +173,8 @@ function fit_applied_all!(d::Decider, needs)
         timed = Dict(k => time_reference(d, r::Reference) for (k, r) in zip(keys_, built))
         for (regime, class, f) in needs
             name = APPLIED[findfirst(((_, g),) -> g == f, APPLIED)][1]
-            keep!(d.calibration, d.calibration_path, join(("applied", regime, class, name), " "),
-                applied_seconds(regime, f, timed[(regime, class)], timed[(regime, class, f)]))
+            keep_fit!(d, (join(("applied", regime, class, name), " "),),
+                (applied_seconds(regime, f, timed[(regime, class)], timed[(regime, class, f)]),), (SECONDS,), (0.0,))
         end
         nothing
     end
@@ -281,7 +309,10 @@ each reference shape, timed as claims are, the line through the small and the
 large one's times, the rate at which the middle one computes when it splits
 the sums, and the rate at which the package's claim on `(a * b) * c`, with
 `a * b` recomputed, recomputes it when that claim splits; the line's rate for
-either that does not split.
+either that does not split, or whose fit fails (see `keep_fit!`). A line
+whose rate fails is not kept, and the package borrows one; a latency that
+fails, the small product taking less than its flops at the rate over its
+share of the device, is none.
 """
 function fit!(d::Decider, T, among = implementations(d.target))
     phase(:calibration) do
@@ -305,13 +336,14 @@ function fit!(d::Decider, T, among = implementations(d.target))
             first(work).flops / min(1.0, first(work).blocks / d.rates.blocks), first(work))
         for (package, _) in times[1]
             (t1, f1, _), (t2, f2, middle), (t3, f3, _) = map(fastest -> first_launch(fastest[package]..., package), times)
-            rate = (f3 - f1) / (t3 - t1)
-            latency = t1 - f1 / rate
-            split = middle.split ? f2 / (t2 - latency) : rate
+            fitted = keep_fit!(d, (key(package, "rate"),), ((f3 - f1) / (t3 - t1),), (RATE,), nothing)
+            fitted === nothing && continue
+            rate = only(fitted)
+            latency = only(keep_fit!(d, (key(package, "latency"),), (t1 - f1 / rate,), (SECONDS,), (0.0,)))
+            split = only(keep_fit!(d, (key(package, "split"),), (middle.split ? f2 / (t2 - latency) : rate,), (RATE,), (rate,)))
             t, f, w = haskey(recomputing, package) ? first_launch(recomputing[package]..., package) : (0.0, 0.0, Work(0.0))
             recompute = w.split ? w.recomputed / (t - latency - f / split) : rate
-            foreach(((what, value),) -> keep!(d.calibration, d.calibration_path, key(package, what), value),
-                (("latency", latency), ("rate", rate), ("split", split), ("recompute", recompute)))
+            keep_fit!(d, (key(package, "recompute"),), (recompute,), (RATE,), (rate,))
         end
     end
 end
@@ -338,8 +370,9 @@ its fastest claims on a fold over each column at the reference sizes and
 the bytes the claims move: its bandwidth is the slope of their
 least-squares line, which the largest folds set, and its latency, a launch's,
 the smallest fold's time less its bytes at that bandwidth, over its
-launches. A package that claims no such fold moves bytes at the device's
-rates. Then its step, where the file lacks it (see `fit_step!`).
+launches. A package that claims no such fold, or whose fit fails (see
+`keep_fit!`), moves bytes at the device's rates. Then its step, where the
+file lacks it (see `fit_step!`).
 """
 function fit_memory!(d::Decider, among = implementations(d.target))
     phase(:calibration) do
@@ -348,18 +381,19 @@ function fit_memory!(d::Decider, among = implementations(d.target))
         floor = !memory_fitted(d, :floor, ("latency", "bandwidth"))
         built = concurrently(n -> build_reference(d, unfitted, x -> sum(x; dims = 1), zeros(Float32, 1024, n); floor), collect(MEMORY_COLUMNS), d.target)
         folds = [time_reference(d, r::Reference) for r in built]
+        device = (d.rates.launch, d.rates.cached)
         for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
-            latency, bandwidth = if all(fold -> haskey(fold, package), folds)
+            keys = key.(package, ("latency", "bandwidth"))
+            if all(fold -> haskey(fold, package), folds)
                 bytes = [sum(w -> w.bytes, last(fold[package])) for fold in folds]
                 seconds = [first(fold[package]) for fold in folds]
                 b, s = sum(bytes) / length(bytes), sum(seconds) / length(seconds)
                 per_byte = sum((bytes .- b) .* (seconds .- s)) / sum((bytes .- b) .^ 2)
-                (first(seconds) - first(bytes) * per_byte) / length(last(first(folds)[package])), 1 / per_byte
+                latency = (first(seconds) - first(bytes) * per_byte) / length(last(first(folds)[package]))
+                keep_fit!(d, keys, (latency, 1 / per_byte), (SECONDS, bandwidths(d)), device)
             else
-                d.rates.launch, d.rates.cached
+                foreach((key, value) -> keep!(d.calibration, d.calibration_path, key, value), keys, device)
             end
-            keep!(d.calibration, d.calibration_path, key(package, "latency"), latency)
-            keep!(d.calibration, d.calibration_path, key(package, "bandwidth"), bandwidth)
         end
         fit_step!(d, among)
     end
@@ -370,7 +404,7 @@ Fit the step of every package of the implementations `among`, and of the
 floor, that has none: the slope of its fastest claims' times on a
 matrix-vector product (see `STEPPED_SUMS`) over the steps their sweeps
 take, at the two sums. None where its claims state no steps, as the floor's
-do not, or it claims no such product.
+do not, it claims no such product, or the fit fails (see `keep_fit!`).
 """
 function fit_step!(d::Decider, among = implementations(d.target))
     unfitted = [i for i in among if !memory_fitted(d, package_name(i), ("step",))]
@@ -379,16 +413,20 @@ function fit_step!(d::Decider, among = implementations(d.target))
     sweeps = [time_reference(d, r::Reference) for r in built]
     for package in [unique(map(package_name, unfitted)); floor ? [:floor] : Symbol[]]
         steps = all(sweep -> haskey(sweep, package), sweeps) ? [first(last(sweep[package])).steps for sweep in sweeps] : [0.0, 0.0]
-        step = steps[2] > steps[1] > 1 ? max(0.0, (first(sweeps[2][package]) - first(sweeps[1][package])) / (steps[2] - steps[1])) : 0.0
-        keep!(d.calibration, d.calibration_path, memory_key(package, "step"), step)
+        if steps[2] > steps[1] > 1
+            step = (first(sweeps[2][package]) - first(sweeps[1][package])) / (steps[2] - steps[1])
+            keep_fit!(d, (memory_key(package, "step"),), (step,), (SECONDS,), (0.0,))
+        else
+            keep!(d.calibration, d.calibration_path, memory_key(package, "step"), 0.0)
+        end
     end
 end
 
-"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories, and the seconds of each scalar function in products of each, now rather than on first need, so that a rates file it writes prices every plan alike wherever it is read. What the rates file lacks is fitted, whatever is shipped for the device (see `shipped_rates`)."
+"Fit the lines of every package on `target` for Float32, Float16 and BFloat16 factors, their memories and the floor's, and the seconds of each scalar function in products of each, now rather than on first need, so that a rates file it writes prices every plan alike wherever it is read. What the rates file lacks is fitted, whatever is shipped for the device (see `shipped_rates`)."
 function calibrate!(target)
     d = Decider(target, lower(trace(identity, zeros(Float32, 1))); measure = :none, calibration = Noted(load_record(rates_path(target))))
     packages = unique(map(package_name, implementations(target)))
-    foreach(p -> memory!(d, p), packages)
+    foreach(p -> memory!(d, p), [packages; :floor])
     types = (Float32, Float16, BFloat16)
     foreach(T -> foreach(p -> line!(d, p, T), packages), types)
     applied!(d, types)

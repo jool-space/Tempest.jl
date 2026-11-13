@@ -150,6 +150,22 @@ C.device_identity(t::NamedDevice) = t.identity
     end
 end
 
+@testset "a fit outside what its rates can be" begin
+    # Kept where every rate of the fit lies in its domain; reported where
+    # one does not, and the stand-in kept for all of them, or nothing.
+    graph = C.lower(trace(x -> 2 .* x, [1.0f0]))
+    withenv("TEMPEST_CACHE" => mktempdir()) do
+        d = C.Decider(T.CPUTarget(), graph)
+        @test C.keep_fit!(d, ("a latency", "a rate"), (1.0e-6, 1.0e12), (C.SECONDS, C.RATE), (0.0, 1.0)) == (1.0e-6, 1.0e12)
+        @test d.calibration["a rate"] == 1.0e12
+        @test (@test_logs (:warn, r"a recompute failed") C.keep_fit!(d, ("a recompute",), (-1.07e13,), (C.RATE,), (1.0e12,))) == (1.0e12,)
+        @test d.calibration["a recompute"] == 1.0e12
+        @test (@test_logs (:warn,) C.keep_fit!(d, ("a bandwidth",), (2 * d.rates.bandwidth,), (C.bandwidths(d),), (d.rates.bandwidth,))) == (d.rates.bandwidth,)
+        @test (@test_logs (:warn,) C.keep_fit!(d, ("a step",), (NaN,), (C.SECONDS,), nothing)) === nothing
+        @test !haskey(d.calibration, "a step")
+    end
+end
+
 # What Tempest compiles while it precompiles, which development sessions skip.
 @testset "the precompile workload" begin
     @test T.workload() === nothing
