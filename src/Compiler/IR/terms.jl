@@ -4,7 +4,7 @@
 # recomputes.
 
 public Term, Load, Lit, Ix, Apply, Stat, Recomputed, Cast, term_eltype, subterms, loads, reached_elements, sector_elements, mentions,
-    product_factors
+    mentions_within, product_factors
 
 abstract type Term end
 
@@ -205,7 +205,7 @@ index mentions a variable past the domain's, as the body of a fold
 recomputed inside does.
 """
 function reached_elements(ts, dims, d::Domain; run = 1)
-    length(d) < 63 && all(t -> variables(t) < variable_bit(length(d) + 1), ts) || return prod(dims; init = 1)
+    length(d) < 63 && all(t -> mentions_within(t, length(d)), ts) || return prod(dims; init = 1)
     prod(eachindex(dims); init = 1) do k
         ranges = [affine_range(t.index[k], d) for t in ts]
         visited = sum(t -> visited_positions(t.index[k], d), ts; init = 0.0) * (k == 1 ? run : 1)
@@ -257,6 +257,8 @@ end
 # per term, not once per path: an unrolled loop's gradient, walked as a tree,
 # took longer than ten minutes to emit.
 variable_bit(n::Int) = n < 64 ? UInt64(1) << (n - 1) : UInt64(1) << 63
+"Whether term `t` mentions no axis past the first `n`."
+mentions_within(t, n) = variables(t) < variable_bit(n + 1)
 variables(a::Var) = variable_bit(a.n)
 variables(a::Union{Div, Mod}) = variables(a.e)
 variables(a::Indirect) = mapreduce(variables, |, a.index; init = UInt64(0))

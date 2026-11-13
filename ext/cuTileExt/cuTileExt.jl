@@ -546,11 +546,40 @@ end
 # Whether the generator can load every load of the group under a schedule,
 # and the indices the keys of its folds by key read; and each fold over other
 # axes than the swept ones reduces whole tile axes. The loads of a fold the
-# group recomputes are over the tiling it extends (`recomputing_fits`).
-fits(c) = recomputing(c.g) ? recomputing_fits(c) :
+# group recomputes are over the tiling it extends (`recomputing_fits`). And
+# a sweep's step holds what it loads (see `held_bytes`).
+fits(c) = held_bytes(c) <= HELD_BYTES && (recomputing(c.g) ? recomputing_fits(c) :
     all(l -> loadable(c, l), (l for m in members(c.g) for l in loads(c.g.terms[m]))) &&
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
-    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
+    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c)))
+
+"""
+The bytes a block of a sweep holds of what a step loads, every load of the
+group's terms (not of the folds it recomputes, which sweep tiles of their
+own) as its tile; none for a schedule that does not sweep in steps.
+"""
+function held_bytes(c)
+    c.s.sketch in (:streamed, :split) || return 0
+    total = 0
+    for t in subterms([c.g.terms[m] for m in members(c.g) if haskey(c.g.terms, m)])
+        t isa Load && !gathers(t) && mentions_within(t, length(c.g.domain)) || continue
+        v = load_view(c, t.value, t.index)
+        lanes = v isa View ? prod(i -> v.spans[i] ? (v.limits[i] == 0 ? min(c.s.tiling[i].tile, c.s.tiling[i].extent) : min(c.s.tiling[i].tile, v.limits[i])) : 1, eachindex(v.spans); init = 1) :
+            v isa LocalView ? prod(l -> l[3] != 0 ? l[2] : 1, v.lanes; init = 1) : 0
+        total += lanes * sizeof(c.g.values[t.value].eltype)
+    end
+    total
+end
+
+# What a block holds of a step, the toolchain's: tileiras holds a step's
+# tiles in registers, and past this they spill. A matrix-vector product
+# stepping tiles of 128 KB of a BFloat16 matrix took 1.7 to 8 times as long
+# as its best, on GB10 and on the RTX 6000 Ada alike (where its blocks fill
+# the device), of a Float32 one 1.2 to 1.4 times, and 2 to 4 at 256 KB,
+# where tiles of 64 KB or less ran within 1.1 of it; no best tile on either
+# device held more. A constant of the generator, as the threads of its blocks are,
+# until the built kernel can be asked what it spills.
+const HELD_BYTES = 65536
 
 key_atoms(g::GroupView) = [a for r in g.reductions if g.values[r].keyed for e in g.placement[r] for a in indirect_atoms(e)]
 
@@ -827,11 +856,12 @@ end
 
 """
 The variants of a product claim, its other depths and its split (see
-`product_variants`); of a matrix-vector product's, its longer steps along the
-sum (see `vector_product_variants`).
+`product_variants`); of a sweep in steps, its other rows and steps (see
+`stepped_variants`); of a streamed column, its longer steps (see
+`column_variants`).
 """
 variants(::cuTileGenerator, target::CUDATarget, g::GroupView, c::Claim) =
-    [product_variants(target, g, c); vector_product_variants(g, c); column_variants(g, c)]
+    [product_variants(target, g, c); stepped_variants(g, c); column_variants(g, c)]
 
 # A streamed column, a block per column, whose kernel sweeps the column again
 # after its folds to write what reads them, as a softmax's gradient reads its

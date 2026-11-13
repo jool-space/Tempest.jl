@@ -202,7 +202,9 @@ end
 
 @testset "a matrix-vector product searches its step along the sum" begin
     # A matrix stored along its sum times one column is the streamed
-    # reduction of the sum, and the cover tries its longer steps. Rows
+    # reduction of the sum, and the cover tries the tiles the generator
+    # offers in stages: the first claim's longer steps and 16 or 32 rows
+    # stepping 256, then the other steps of the best of those rows. Rows
     # enough for 64 blocks, so that the sum streams rather than splits.
     w, x = single(data(512, 4096; scale = 0.1)), single(data(512, 1))
     p = trace((w, x) -> Einops.@einsum(w, x, "k m, k n -> m n"), w, x)
@@ -215,7 +217,10 @@ end
     withenv("TEMPEST_CACHE" => dir) do
         ex = prepare(p, CuArray(w), CuArray(x); target, measure = :close)
         d = only(d for d in ex.decisions if d !== nothing && d.choice.implementation isa ext.cuTileGenerator)
-        @test sort([step(o) for o in d.options if o.implementation isa ext.cuTileGenerator]) == [32, 64, 128]
+        rows(o) = (s = o.claim.schedule; s.tiling[findfirst(ax -> !ax.reduced, s.tiling)].tile)
+        tried = Set((rows(o), step(o)) for o in d.options if o.implementation isa ext.cuTileGenerator)
+        @test issubset([(64, 32), (64, 64), (64, 128), (16, 256), (32, 256)], tried)
+        @test all(((r, _),) -> r in (16, 32, 64), tried)
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, x)]; rtol = 1.0e-4)
     end
 end
@@ -277,11 +282,14 @@ end
 @testset "products grouped with a product by a constant" begin
     # Products of one factor with several, grouped as one kernel and the
     # first by a constant zero, which no product claim takes, are a streamed
-    # reduction in the generator's plan, in either of two schedules: a tile
-    # per row of the first factor and head, each reading every other factor
-    # of its head whole; or a tile of two columns, rows and all, each reading
-    # the first factor's head whole, a tile at a time. Each factor is read by
-    # 64 tiles, and the estimate counts the 63 reads after the first.
+    # reduction in the generator's plan: a tile per row of the first factor
+    # and head, each reading every other factor of its head whole, a tile at
+    # a time, the first factor read by 64 tiles, and the estimate counts the
+    # 63 reads after the first. Its refinement, a tile of two columns, rows
+    # and all, each reading the first factor's head whole, would hold more
+    # than 64 KB of what its steps load, past what a block holds (see
+    # `held_bytes`): it took 274 μs where the claim takes 93, and is not
+    # offered.
     q = single(data(64, 128, 16; scale = 0.1))
     states = [single(data(128, 128, 16; scale = 0.01 * k)) for k in 1:4]
     head(q, s) = C.contract(q, s, (1, 4, 3), (4, 2, 3), (1, 2, 3))
@@ -293,7 +301,7 @@ end
     x = C.decide(d, base, g)
     @test all(o -> o.claim.schedule.sketch === :streamed, x.options)
     reread(o) = maximum(w -> w.reread, C.estimate(o.implementation, o.claim, target, C.group_view(base, g)))
-    @test sort(map(reread, x.options)) == [63 * sizeof(q), 63 * sum(sizeof, states)]
+    @test all(o -> reread(o) == 63 * sizeof(q), x.options)
     # cuTile proposes the four products as one group, a product's, the
     # product by zero a kernel of its own. Whether the cover takes it is a
     # tie: timed, the two kernels take 82 to 86 μs and the streamed group 88,

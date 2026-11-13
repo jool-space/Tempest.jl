@@ -236,26 +236,47 @@ end
 
 # A product of a matrix and one column, a matrix-vector product, has no kept
 # axis that only the column reads, so it is not a product (`product_axes`)
-# but the streamed reduction of its sum. That kernel steps 32 along the sum,
-# 64 bytes of each row of a half-precision matrix stored along the sum, as a
-# checkpoint stores its weights: on GB10 it reads such a matrix at 205 GB/s
-# where Vallmo's decode kernel, stepping 128, reads it at 233. Its longer
-# steps are offered as a product's depths are, and measured.
-const VECTOR_PRODUCT_STEPS = (64, 128)
+# but the streamed reduction of its sum, a sweep in steps: a tile of kept
+# rows stepping along the sum, as a sum over a matrix's rows is too. Its
+# first claim keeps 128 rows stepping 32, 64 bytes of each row of a
+# half-precision matrix stored along the sum, as a checkpoint stores its
+# weights. Timed alone, the best tiles of the 4B's projections and of two
+# Float32 ones keep 16 or 32 rows and step 64 to 1024, on GB10 and on the
+# RTX 6000 Ada alike, where the first claim took 1.1 to 1.2 times as long
+# on GB10 and about twice on the Ada. A sweep's variants are offered in two
+# stages, as a product's tiles are: of a claim outside them (its rows not
+# of `STEPPED_ROWS`, its step not of `STEPPED_STEPS`, or its sum split
+# among blocks), the other rows of `STEPPED_ROWS` stepping `STEPPED_STEP`,
+# its sum whole, and of an unsplit matrix-vector product its longer steps
+# (`WIDER_STEPS`), as they were offered before the rows were and as an
+# unmeasured cover may stand by (see `standing_variants`), the rows offered
+# keeping other blocks; of a claim within them, its other steps of
+# `STEPPED_STEPS`; each within what a block holds (`HELD_BYTES`). Over the
+# two devices' tables, the six tiles of the two stages reach each
+# projection's best within 1.4%, of the 28 the generator expresses.
+const WIDER_STEPS = (64, 128)
+const STEPPED_ROWS = (16, 32)
+const STEPPED_STEP = 256
+const STEPPED_STEPS = (64, 128, 256, 512, 1024)
 
-function vector_product_variants(g::GroupView, c::Claim)
+function stepped_variants(g::GroupView, c::Claim)
     s = c.schedule
     # A sum that recomputes a product steps at a product's depths already.
-    s.sketch === :streamed && !recomputing(g) || return Claim[]
-    all(r -> g.values[r].fold isa SumFold && product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions) || return Claim[]
+    s.sketch in (:streamed, :split) && !recomputing(g) || return Claim[]
     p = sweep_axis(s)
-    ax = s.tiling[p]
+    k = findfirst(ax -> !ax.reduced && ax.tile > 1, s.tiling)
+    k === nothing && return Claim[]
+    rows, step, whole = s.tiling[k].tile, s.tiling[p].tile, s.sketch === :streamed
+    product = all(r -> g.values[r].fold isa SumFold && product_factors(g.values[r].fold, g.terms[r]) !== nothing, g.reductions)
+    tiles = whole && rows in STEPPED_ROWS && step in STEPPED_STEPS ? [(rows, w) for w in STEPPED_STEPS if w != step] :
+        [[(rows, w) for w in WIDER_STEPS if whole && product && w > step]; [(r, STEPPED_STEP) for r in STEPPED_ROWS if r != rows || !whole]]
     found = Claim[]
-    for step in VECTOR_PRODUCT_STEPS
-        step > ax.tile && cld(ax.extent, step) > 1 || continue
+    for (r, w) in tiles
+        r <= nextpow(2, s.tiling[k].extent) && cld(s.tiling[p].extent, w) > 1 || continue
         tiling = copy(s.tiling)
-        tiling[p] = TileAxis(ax.axes, ax.extent, step, true, ax.chunk)
-        x = TileSchedule(s.sketch, tiling, s.splits, s.occupancy, s.swizzle, s.precision)
+        tiling[k] = TileAxis(s.tiling[k].axes, s.tiling[k].extent, r, false, s.tiling[k].chunk)
+        tiling[p] = TileAxis(s.tiling[p].axes, s.tiling[p].extent, w, true, s.tiling[p].chunk)
+        x = TileSchedule(:streamed, tiling, 1, whole ? s.occupancy : nothing, s.swizzle, s.precision)
         fits(Context(g, x)) && push!(found, Claim(x))
     end
     found
