@@ -1,10 +1,11 @@
 # The cover on CUDA: claims timed on buffers of their own, choices measured and
 # kept in the tuning record, a search that tries the variants of the option
-# that measures best, a comparison measured where the record refutes an
-# estimate, what a kernel's tiles read again, of a value and of a shifted
-# read's border, and what a view reaches, products proposed apart from a
-# fold among them that is not one, a step's map measured on the floor beside
-# its claim, and the implementations a target names.
+# that measures best, unmeasured a claim's step as the estimate ranks it, a
+# comparison measured where the record refutes an estimate, what a kernel's
+# tiles read again, of a value and of a shifted read's border, and what a view
+# reaches, products proposed apart from a fold among them that is not one, a
+# step's map measured on the floor beside its claim, and the implementations
+# a target names.
 include("../fixtures/programs.jl")
 
 # Claims are timed on buffers of their own, which a kernel reads as data:
@@ -216,6 +217,37 @@ end
         d = only(d for d in ex.decisions if d !== nothing && d.choice.implementation isa ext.cuTileGenerator)
         @test sort([step(o) for o in d.options if o.implementation isa ext.cuTileGenerator]) == [32, 64, 128]
         @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, x)]; rtol = 1.0e-4)
+    end
+end
+
+@testset "unmeasured, a matrix-vector product steps as its estimate ranks" begin
+    # A decoding step's down projection: 2560 outputs of weights in
+    # BFloat16 kept 32 rows to a block, summing 9216 of the gate's silu
+    # times the up projection, which each step computes. Measuring nothing,
+    # the first claim steps 32 along the sum, and the variant stepping 128
+    # moves the same bytes in the same blocks, its estimate past the error
+    # below (314 μs against 190); it stands in the claim's place, beside it
+    # among the options.
+    w = BFloat16s.BFloat16.(data(9216, 2560; scale = 0.01))
+    gate, up = single(data(9216, 1)), single(data(9216, 1))
+    p = trace((w, gate, up) -> Einops.@einsum(w, gate ./ (1 .+ exp.(-gate)) .* up, "k m, k n -> m n"), w, gate, up)
+    target = T.CUDATarget(T.cuTileGenerator())
+    dir = mktempdir()
+    rates = C.rates_path(target)
+    isfile(rates) && (mkpath(joinpath(dir, "tuning")); cp(rates, joinpath(dir, "tuning", basename(rates))))
+    ext = Base.get_extension(Tempest, :cuTileExt)
+    step(o) = (s = o.claim.schedule; s.tiling[ext.sweep_axis(s)].tile)
+    withenv("TEMPEST_CACHE" => dir) do
+        ex = prepare(p, CuArray(w), CuArray(gate), CuArray(up); target, measure = :none)
+        k = only(k for (k, d) in enumerate(ex.decisions) if d !== nothing && d.choice.implementation isa ext.cuTileGenerator)
+        d, view = ex.decisions[k], C.group_view(ex.plan, ex.plan.groups[k])
+        claim = only(o for o in d.options if o.implementation isa ext.cuTileGenerator && o.order == 1 && o !== d.choice)
+        @test d.how === :estimated && d.choice.order == 1
+        @test step(claim) == 32 && step(d.choice) == 128
+        @test !C.close_call(d.choice.estimate, claim.estimate)
+        work(o) = C.said(target, o.implementation, o.claim, view).work
+        @test C.steps_apart(work(claim), work(d.choice))
+        @test agree(C.leaves(outputs(execute!(ex))), [interpret(p, w, gate, up)]; rtol = 1.0e-2)
     end
 end
 

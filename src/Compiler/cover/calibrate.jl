@@ -232,8 +232,9 @@ with each implementation's first claim on it built on buffers of its own and
 the resources of the decider that times it, for `time_reference` to time as
 claims are, and the floor's kernels too when
 `floor`, as package `:floor`. The first claim is what a package stands by
-unmeasured, which a reference is measured under, not the fastest of its
-alternatives.
+unmeasured, but for a variant apart from it by its steps alone (see
+`standing_variants`), and a reference is measured under it, not the fastest
+of its alternatives.
 """
 struct Reference
     launches::Vector{Tuple{Symbol, Any, Vector{Work}}} # package, launch, estimate

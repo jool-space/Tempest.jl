@@ -374,9 +374,55 @@ function options(d::Decider, p::Plan, g::Group)
     # A recurrence with sums riding its steps runs them only a step at a time.
     riders = g.kind isa RecurrenceKind && !isempty(g.reductions)
     os = riders ? Choice[] : filter(o -> !haskey(d.failed, o.key), priced!(d, p, g))
+    d.measure in (:close, :all) || append!(os, filter(o -> !haskey(d.failed, o.key), standing_variants(d, p, g, os)))
     (isempty(os) || d.steps > 1 && g.kind isa PointwiseKind) && push!(os, choice(d, p, g, group_view(p, g), nothing, nothing))
     sort!(os; by = o -> o.estimate) # stable: ties keep the implementations' order
 end
+
+"""
+Unmeasured, an implementation stands by its first claim (see `choose`), or by
+the variant of it estimated best, where that variant's estimate is past the
+estimate's error below the claim's and its work differs from the claim's in
+its steps alone: the same blocks, moving the same bytes and computing the
+same flops, sweeping in steps of another width. Along its steps the estimate
+ranks a claim's tiles as their times do (a decoding step's projections: no
+pair of a kept tile's steps apart by more than the error misranked of 235,
+where 234 were before the steps were priced), and across anything else it was
+not shown to: the blocks a tile of another width keeps busy, a product's
+depth. A claim that sweeps in no steps is priced without them (see `Work`),
+and no variant of it is estimated apart by its steps; its variants are not
+asked for. The variant stands in the claim's place, at its order: the 4B's
+down and output projections at one token, kept 32 rows wide, stepping 128
+columns where they stepped 32, estimated 1.7 and 2.2 times faster and
+running 1.5 and 1.9 times faster.
+"""
+function standing_variants(d::Decider, p::Plan, g::Group, os)
+    found = offered!(d, p, g)
+    view = group_view(p, g)
+    standing = Choice[]
+    for o in os
+        o.order == 1 && o.implementation !== nothing && !isempty(o.variants) || continue
+        work = only(told.work for (i, c, k, told) in found.said if i === o.implementation && k == o.order)
+        swept(work) || continue
+        best = o
+        for c in o.variants
+            told = said(d.target, o.implementation, c, view)
+            swept(told.work) && steps_apart(work, told.work) || continue
+            v = choice(d, p, g, view, o.implementation, c, o.order, told)
+            v.estimate < best.estimate && !close_call(v.estimate, o.estimate) && (best = v)
+        end
+        best === o || push!(standing, best)
+    end
+    standing
+end
+
+# Whether a claim sweeps in steps its estimate prices (see `Work`).
+swept(work::Vector{Work}) = any(w -> w.steps > 1, work)
+
+# Whether two claims' launches differ in their steps alone (see `Work`).
+steps_apart(a::Vector{Work}, b::Vector{Work}) = length(a) == length(b) && all(map(a, b) do x, y
+    (x.blocks, x.bytes, x.reread, x.passed, x.flops, x.recomputed, x.split) == (y.blocks, y.bytes, y.reread, y.passed, y.flops, y.recomputed, y.split)
+end)
 
 "What the implementations offer for a group (see `Offered`), found once by its identity."
 offered!(d::Decider, p::Plan, g::Group) = get!(() -> offered(d, p, g), d.offered, group_identity(p, g))
@@ -622,8 +668,9 @@ function choose(d::Decider, os)
     isempty(measured_ranks(d, os)) && return (1, :estimated, get(d.record, best.key, nothing))
     ranks = [k for (k, o) in enumerate(os) if haskey(d.record, o.key)]
     # The best estimate unmeasured, each implementation stands by its first
-    # claim: the estimate ranks implementations, not an implementation's own
-    # alternatives.
+    # claim, or the variant of it that stands in its place (see
+    # `standing_variants`): the estimate ranks implementations, not an
+    # implementation's own alternatives but along their steps.
     1 in ranks || return (findfirst(o -> o.order <= 1, os), :estimated, nothing)
     times = [d.record[os[k].key] for k in ranks]
     k = argmin(times)
