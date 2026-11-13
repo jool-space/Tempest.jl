@@ -47,8 +47,17 @@ struct Memory
     step::Float64
 end
 
-# A launch of fewer blocks than the device runs at once moves its bytes and
-# computes its products on that share of the device.
+# A launch of fewer blocks than the device runs at once computes on that
+# share of the device, a block on a multiprocessor. In memory, what its
+# blocks reach is what its steps bring in, where it states them: a block
+# alone waits on a step's loads at a time, and blocks side by side add until
+# the memory's bandwidth (see `stepping`), a matrix-vector product of 10
+# blocks of 32 rows stepping 512 along its sum reaching four fifths of it,
+# of 5 blocks of 128 stepping 128, three fifths, where on that share of the
+# device they had taken 3.5 and 5 times their time. A launch that states no
+# steps moves its bytes on the share as well: a product's sweep, priced by
+# its line, and the floor's items, each sweeping its fold a position at a
+# time.
 # Memory time and compute time overlap all but a little: the combination is
 # the larger plus a share of the smaller (XLA's GPU performance model uses
 # 0.05 of the smaller, chosen empirically).
@@ -56,11 +65,12 @@ const OVERLAP = 0.05
 
 function seconds(w::Work, r::Rates, memory::Memory, line, price = (regime, f) -> 0.0)
     share = min(1.0, w.blocks / r.blocks)
+    reach = w.steps > 1 ? 1.0 : share
     # What blocks read again, other blocks along the grid read just before:
     # it comes from the cache, at the rate of a launch whose bytes fit it.
     # So do partial results one launch passes to the next, where they fit.
     passed = w.passed / (w.passed <= r.cache ? r.cached : r.bandwidth)
-    memory_seconds = memory.latency + (w.bytes / (w.bytes <= r.cache ? memory.bandwidth : r.bandwidth) + w.reread / r.cached + passed) / share
+    memory_seconds = memory.latency + (w.bytes / (w.bytes <= r.cache ? memory.bandwidth : r.bandwidth) + w.reread / r.cached + passed) / reach
     # Elementwise work: each function at its positions, at the seconds per
     # position measured for it on the device, in the regime it is applied in.
     cost(regime, pairs) = sum(((f, n),) -> n * price(regime, f), pairs; init = 0.0)
