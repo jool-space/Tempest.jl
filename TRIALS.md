@@ -1055,77 +1055,18 @@ not a copy. Judged by whether each runs with no package loaded, by its
 kernels against the floor and against a hand-written kernel, and by the
 entries it opens. Standing: the scan and the recurrence run on the CPU and
 on cuTile, and a segment sum is a sum by key, on cuTile where its key moves
-only by gathers (both decided below); a convolution through NNlib does not
-trace, since `conv` writes into a typed buffer, and none written as array
-code has been judged. The eager slice (`test/bench/eager_slice.jl`): 113 of
-its 136 cases trace and agree, Base's 59 of 67.
-
-**A neural ODE's training step: a hundred RK4 steps of a small MLP, the
-loop unrolled at trace.** The vector field du/dt = dec(tanh(enc(u))), 32
-dimensions through 256 hidden, batch 128, integrated over [0, 1] by 100
-fixed RK4 steps written as a plain `for` loop; a mean squared error on the
-final state; RAdam at 1e-3. The forward is 400 evaluations of the field,
-each two products of 32 by 256 at batch 128, in a chain where every stage
-reads the last: kernels too small to fill the device, so the step is
-launches and latency, and the trace is 400 times one field's. What stands
-trial: the trace and planning of a long unrolled program
-(`src/Compiler/program/`, `src/Compiler/plan/planner.jl`), the store or
-recompute partition across 400 stage states (`partition.jl`), and the
-cover's kernels for products this small (`src/Compiler/cover/`). The
-chain group for small batched products, probed and not built, is the
-nearest answer Tempest has. Challengers, from PathMNISTReactant.jl at
-7684532 (`benchmarks/julia/bench_node.jl`, `benchmarks/pytorch/bench_node.py`,
-`benchmarks/results/*_node.jsonl`), on an RTX A6000 in TF32: Reactant
-0.2.290 through ReactantNitro, the same plain loop unrolled at trace into one
-XLA program, 10.8 ms a step and 99 s to the first; torch.compile
-`reduce-overhead` 16.1 ms and 6.4 s, `max-autotune` 21.2 ms and 505 s; eager
-PyTorch 127 ms and 0.4 s. Judged on the GB10, with both challengers run
-there by their own scripts, by the step's time and the seconds to the first
-step, cold and warm, with the losses agreeing with the same code run
-eagerly.
-
-The baseline (`test/bench/node.jl`, TF32, 4 November), by RK4 steps: at 1,
-36 kernels, prepared in 17.4 s, 0.103 ms a step; at 10, 361 kernels, 69.0
-s, 0.995 ms; at 30, the preparation had not finished after ten minutes, at
-4.6 GB resident. Losses agree with the interpreter's to 4e-6 and the first
-moments to 3e-4 relative at both. A step is about 36 kernels and 0.1 ms
-per RK4 step, launches of a few microseconds each; the preparation grows
-faster than the program, and the 100 steps of the challengers' program do
-not prepare. Planning alone, its kernels cached: 18.4 s at 10 steps (1301
-values), 99.2 s at 20 (2511), near the 2.5th power of the program; its
-time is the planner's grouping (`group_values`, `try_add!`) and the
-trials it prices (`trial`, `src/Compiler/cover/cover.jl`). At 20 the
-preparation also compiled kernels for 180 s that the 10 steps' cache did
-not hold: the step 1/K is a constant of every kernel, so each K is a
-program of its own, while within one the steps share theirs (253 kernels
-from 33 keys at 7). Counted, planning
-alone at 1, 5, 10 and 20 steps (210, 696, 1301, 2511 values): the cover
-plans the whole graph once per trial, 40, 104, 159 and 269 times, linear in
-the program; each plan calls `try_add!` 202, 2466, 8625 and 31974 times,
-quadratic in it, 3.4% of them adding at 20; and each call costs more as
-the program grows, 0.22 ms at 10 and 0.42 ms at 20. The plans' summed
-time, across threads, is 297 s at 10 and 3645 s at 20, near the fourth
-power; the threads hide part of it in the wall time.
-
-Taken since, 5 November: planning alone 2.1 s at 10 steps, 4.6 s at 20 and
-11.6 s at 40, against 18.4 and 99.2 s. A group's loads are found once per
-plan and its dependencies from the latest value pending (`plan/context.jl`); the
-cover's trials are classed by the groups they change and planned side by
-side (`cover.jl`); and a gradient summed over a value's uses accumulates
-beside each product that adds to it, cuBLAS adding the product to the sum in
-one call, the sum taking its slot in place (`storage.jl`,
-`ext/cuBLASExt.jl`). At 100 steps, the challengers' program: 3602 kernels,
-prepared in 193 s cold and 184 s warm, of which planning is 148 s; 10.9 ms a
-step, against Reactant's 10.8 on the A6000. Open: planning still grows
-faster than the program, by the greedy loop's taken trials, 15 at 100 steps,
-whose dependencies walk every kernel fixed, 0.22 s each at the first and
-0.68 s at the last, and by their pricing. The challengers are not yet run on
-the GB10.
+only by gathers (both decided below); a convolution through NNlib traces,
+agrees with eager and differentiates on the CPU (`test/extensions/nnlib.jl`),
+its kernels not judged on a device, and none written as array code has been
+judged. The corpus (Whole programs against their challengers, below) has
+since seated a neural ODE, an LSTM and a heat equation beside the GPT. The
+eager slice (`test/bench/eager_slice.jl`), 14 November at c6b68b6: 135 of
+its 149 cases trace and agree, NNlib's 62 of 70 and Base's 73 of 79.
 
 **Loops are unrolled: rolled from the tape and stepped, adopted.** A `for`
 loop traced as its iterations, a program as long as its trip count, planned
 and compiled whole: at 100 RK4 steps, 3602 kernels and 148 s of planning
-(above). The rolled loop existed, entered only by
+(the neural ODE's step, decided below). The rolled loop existed, entered only by
 `accumulate(f, eachslice(x); init)`: a `Loop` of the program
 (`src/Compiler/program/program.jl`), lowered by batching its body over an
 axis of steps with one carried definition, planned as a recurrence group,
@@ -1334,8 +1275,9 @@ generate the space, random annotation fills the parameters, an evolutionary
 search with a learned cost model picks, and a database keeps every result;
 tinygrad's BEAM is its smallest form, already taken for products. Judged on
 the GPT step and the guard rails, with the cold cost bounded as the staged
-search bounds it, and on a second device when there is one, where the
-constants are a guess and a search is not.
+search bounds it, and on a second device, where the constants are a guess
+and a search is not: there is one since 9 November, the RTX 6000 Ada (the
+estimate on a second device, below), and the search has not been run on it.
 
 **A model written once.** Qwen3.5-4B's decode and prefill are run today by
 Vallmo (`~/dev/jool/Vallmo`): 1,883 lines of cuTile kernels written by hand
@@ -1710,8 +1652,9 @@ programs trace, plan and agree with Float64, in Float32 and in BFloat16, among
 them a whole model's decode step, its prefill, a suffix prefill over a
 restored state, eight tokens generated greedily and a decode loop of `replay!`
 alone; a chunk of 8 padded positions serves lengths 1 to 8 from one
-preparation; the one refused was the `push!`, which converts now. None of it has run on a device at
-the model's shapes since the script was lost.
+preparation; the one refused was the `push!`, which converts now. None of it had run on a device at
+the model's shapes when this was recorded, the script lost; what has since is
+in the paragraphs after this one.
 
 **Block-scaled quantized products.** A weight in MXFP8, MXFP4 or NVFP4 is
 narrow elements with a scale to each block of 32 or 16 along the axis a
@@ -1767,7 +1710,10 @@ optimizer step). test/bench/gpt.jl's step, 1.19 ms and 70 s cold, against
 the same model under `torch.compile` captured as a graph, 1.31 ms; at GPT-2
 124M's geometry, batch 4, 878 ms and 224 s cold, against 264 ms, and since
 the GPT-2 step's entry 190.7 ms and 188 s cold, against 264.6, then 189.9 ms
-and 186 s, against 264.1. The heat
+and 186 s, against 264.1; torch's 264 is its step with a foreach Adam and
+gradients zeroed and added into, and with Adam fused and the gradients
+written its compiled step's kernels sum to 215 ms (63e59ec on the branch
+`corpus-bf16`, not landed). The heat
 equation on a 256×256 grid, its steps `accumulate`d so that they roll: 1.89
 s at 100 steps and 18.9 s at 1000, against 0.34 and 3.6 ms for a kernel a
 step in CUDA.jl, both recurrences of the gradient on the floor; written as a
@@ -1998,6 +1944,19 @@ challenger if a law cannot be written as a pattern without a general
 predicate over the whole graph, that law named; it closes for the code if
 the patterns match less, or match the same at more lines.
 
+Run, 9 November, on the branch `laws-as-patterns` (five commits from 5bf6e64,
+not merged, the device's suite not run); the verdict is not written. The
+first count holds: the exchanged sums, the relative folds and the statistics
+kept beside them are rules, 196 fixture programs rewrite to the same graphs,
+notes and `explain` text, and test/plan/rewrites.jl passes unchanged. The
+second holds: each application is checked where it is made, 67 on the CPU
+suite and none failing, and a checker draws 200 programs a law, none
+failing, a mutant of the variance's law failing 12 by name. The third
+fails: `rewrites.jl` is 837 lines against 758, the rewrite of the small GPT
+0.30 s against 0.18, and `compose_observes` is no pattern, its condition
+that nothing else that runs reads the fold or the values between a
+predicate over the whole graph; matching axes under renaming stays code.
+
 **A second device: the RTX 6000 Ada faults where tileiras reads a tile
 transposed four deep.** On an RTX 6000 Ada (sm_89, 142 multiprocessors, 96
 MiB of L2, discrete memory; driver 580.178.04 with CUDA_Driver_jll's
@@ -2021,7 +1980,8 @@ each are meant. The grouped kernel also permutes the tiles it loads; its PTX
 is not yet read. Both tests plan alike on the Ada's rates and the GB10's,
 fault on the Ada under either, and run clean on the GB10 (sm_121) under the
 Ada's rates, as does the cuTile.jl form: it is the device's code generation,
-not a plan. Nothing in Tempest works around it. The scripts, the PTX and
+not a plan. Nothing in Tempest works around it. On tileiras 13.5.37, 13
+November, the fault is still met, the suite's 21 errors (the entry below). The scripts, the PTX and
 Tile IR at 4 and 8, and the outputs are in ~/dev/jool/challengers/sm89/:
 `cutile-only.jl` the minimal form, `cutile-ptx.jl` its Tile IR and PTX,
 `probe.jl` Tempest's smallest program that meets it, `(w, d) ->
@@ -2133,6 +2093,82 @@ on explicit refs, transparent to tracing, with its own derivative) and Exo
 to read when it reopens, which is when such a kernel is first wanted.
 
 ## Decided
+
+**A neural ODE's training step: a hundred RK4 steps of a small MLP, the
+loop unrolled at trace: rolled, the challengers' program prepares in
+37 to 39 s where 193 and steps in 6.3 ms where 10.9, adopted.** The vector field du/dt = dec(tanh(enc(u))), 32
+dimensions through 256 hidden, batch 128, integrated over [0, 1] by 100
+fixed RK4 steps written as a plain `for` loop; a mean squared error on the
+final state; RAdam at 1e-3. The forward is 400 evaluations of the field,
+each two products of 32 by 256 at batch 128, in a chain where every stage
+reads the last: kernels too small to fill the device, so the step is
+launches and latency, and the trace is 400 times one field's. What stands
+trial: the trace and planning of a long unrolled program
+(`src/Compiler/program/`, `src/Compiler/plan/planner.jl`), the store or
+recompute partition across 400 stage states (`partition.jl`), and the
+cover's kernels for products this small (`src/Compiler/cover/`). The
+chain group for small batched products, probed and not built, is the
+nearest answer Tempest has. Challengers, from PathMNISTReactant.jl at
+7684532 (`benchmarks/julia/bench_node.jl`, `benchmarks/pytorch/bench_node.py`,
+`benchmarks/results/*_node.jsonl`), on an RTX A6000 in TF32: Reactant
+0.2.290 through ReactantNitro, the same plain loop unrolled at trace into one
+XLA program, 10.8 ms a step and 99 s to the first; torch.compile
+`reduce-overhead` 16.1 ms and 6.4 s, `max-autotune` 21.2 ms and 505 s; eager
+PyTorch 127 ms and 0.4 s. Judged on the GB10, with both challengers run
+there by their own scripts, by the step's time and the seconds to the first
+step, cold and warm, with the losses agreeing with the same code run
+eagerly.
+
+The baseline (`test/bench/node.jl`, TF32, 4 November), by RK4 steps: at 1,
+36 kernels, prepared in 17.4 s, 0.103 ms a step; at 10, 361 kernels, 69.0
+s, 0.995 ms; at 30, the preparation had not finished after ten minutes, at
+4.6 GB resident. Losses agree with the interpreter's to 4e-6 and the first
+moments to 3e-4 relative at both. A step is about 36 kernels and 0.1 ms
+per RK4 step, launches of a few microseconds each; the preparation grows
+faster than the program, and the 100 steps of the challengers' program do
+not prepare. Planning alone, its kernels cached: 18.4 s at 10 steps (1301
+values), 99.2 s at 20 (2511), near the 2.5th power of the program; its
+time is the planner's grouping (`group_values`, `try_add!`) and the
+trials it prices (`trial`, `src/Compiler/cover/cover.jl`). At 20 the
+preparation also compiled kernels for 180 s that the 10 steps' cache did
+not hold: the step 1/K is a constant of every kernel, so each K is a
+program of its own, while within one the steps share theirs (253 kernels
+from 33 keys at 7). Counted, planning
+alone at 1, 5, 10 and 20 steps (210, 696, 1301, 2511 values): the cover
+plans the whole graph once per trial, 40, 104, 159 and 269 times, linear in
+the program; each plan calls `try_add!` 202, 2466, 8625 and 31974 times,
+quadratic in it, 3.4% of them adding at 20; and each call costs more as
+the program grows, 0.22 ms at 10 and 0.42 ms at 20. The plans' summed
+time, across threads, is 297 s at 10 and 3645 s at 20, near the fourth
+power; the threads hide part of it in the wall time.
+
+Taken since, 5 November: planning alone 2.1 s at 10 steps, 4.6 s at 20 and
+11.6 s at 40, against 18.4 and 99.2 s. A group's loads are found once per
+plan and its dependencies from the latest value pending (`plan/context.jl`); the
+cover's trials are classed by the groups they change and planned side by
+side (`cover.jl`); and a gradient summed over a value's uses accumulates
+beside each product that adds to it, cuBLAS adding the product to the sum in
+one call, the sum taking its slot in place (`storage.jl`,
+`ext/cuBLASExt.jl`). At 100 steps, the challengers' program: 3602 kernels,
+prepared in 193 s cold and 184 s warm, of which planning is 148 s; 10.9 ms a
+step, against Reactant's 10.8 on the A6000. Open then: planning still grew
+faster than the program, by the greedy loop's taken trials, 15 at 100 steps,
+whose dependencies walk every kernel fixed, 0.22 s each at the first and
+0.68 s at the last, and by their pricing; and the challengers were not yet
+run on the GB10.
+
+Closed by the rolled loop (Loops are unrolled, in Open): the same plain
+loop rolls from the tape, and the 100 steps are 24 kernels where 3602. On
+the GB10, by the corpus's runner, each scenario in a new process, at
+fbbd619 on tileiras 13.5.37, 12 November
+(`~/dev/jool/challengers/scoreboard-2026-11-11/table-fbbd619-fresh.txt`):
+prepared cold in 36.9 to 38.8 s measuring close calls and in 21.3 to 21.5 s
+measuring nothing, warm in 14.4 to 16.4 s; 6.21 to 6.45 ms a step measured
+and 7.78 to 7.83 unmeasured, agreeing with the step in Float64 to 3.4e-4;
+against Reactant's 9.9 to 11.0 ms and torch `reduce-overhead`'s 11.2, run
+there by their own scripts on 8 November (the corpus's entry). How planning
+grows for a program that stays unrolled is the trial of how preparation
+grows with the program, where 32 unrolled RK4 steps prepare in 7.16 s.
 
 **BFloat16 attention's forward: matrices from one product to the next,
 adopted.** On trial was the product kernel's tiles laid out in the full rank
