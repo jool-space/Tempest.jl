@@ -554,7 +554,11 @@ all-reduce, a shifted read an exchange of edges, a gather by index an
 exchange of all with all. What one array on one device cannot say is an axis
 that is split, which a collection of shards or an array type of a package
 would. Challengers: JAX, where a compiled function takes the sharding its
-committed arrays carry and communication is written by hand (`shard_map`);
+committed arrays carry over a mesh of devices and XLA partitions the
+program, or communication is written by hand (`shard_map`); Reactant, which
+reaches the same through XLA's IFRT runtime (`src/Sharding.jl`, `Mesh`,
+docs/src/tutorials/sharding.md in the local clone at a6fbe468f), not yet
+run by us on several GPUs;
 NCCL.jl 1.0 by hand between steps compiled for a device each, one process
 driving every device (`NCCL.Communicators`), the route that stays whatever
 is decided here; PyTorch's `DistributedDataParallel` and a model placed by a
