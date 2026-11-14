@@ -180,135 +180,22 @@ decisions grow with the program, about 5.5 ms for each of 1,408 options at
 (normalizing affine indices a quarter, its views a tenth); deciding once
 for every kernel alike stands open.
 
-**A trial planned near the plan it changes.** The cover's trials each plan
-the graph with a few of what the planner is given changed, and each formed
-every kernel again: the unrolled RK4 at 32 steps tried 1,734,161 values in
-groups over 248 plans. Forming now reads what is stored and the kernels
-formed so far through a context alone, of five functions (whether a value
-is stored, whether a kernel owns it, whether values depend on a group's
-members, a kernel formed, and the forming of one kernel bracketed); a
-recording context notes what each kernel's forming read, and a plan kept
-with how it formed (`Planned`) is formed again with a change
-(`replanned`), taking each kernel whose noted reads are as they were, asking
-again a dependency walk that what differs leaves in doubt, and forming the
-rest. The cover keeps its starting plan and each plan it takes so, and each
-trial is formed near the plan it changes. Counted
-before timed: a trial forms again a median of 4 or 5 kernels, of 126 to
-514 in the instances counted; with the test suite's packages loaded, a trial that recomputes a fold
-formed again 107 kernels of 254 at 8 RK4 steps, the kernels after it that
-noted its storage or walked through a kernel formed again, until a walk
-noted the question it was asked and the frontier a kernel grows toward
-passed over what depends on its members (36 on average now). The explanations of the
-fuzzer's first 1,000 seeds (forward and gradient, on both targets), the
-corpus, the families and the twelve large instances are identical, every
-trial of them and of the suite compared with the plan formed whole.
-
-What holds a plan formed near another to the plan formed whole is that
-comparison, made where TEMPEST_CROSSCHECK asks, as the suite does of every
-trial its tests form; a preparation that does not ask takes the plan formed
-near as it is. The comparison above was made by a script outside the
-repository, its large instances 8 GPT layers and 16 unrolled RK4 steps at
-most. At 1c24f8f, under TEMPEST_VERIFY and TEMPEST_CROSSCHECK, no trial
-differed in any of: `test/bench/scaling.jl`, dry, at 16 and 32 GPT layers
-(228 trials each, 90,129 and 179,409 kernels taken as formed before) and at
-16 and 32 unrolled RK4 steps (1,100 and 2,140 trials, 153,170 and 503,570
-taken); the corpus's four programs at their small shapes and its GPT at
-GPT-2 124M's geometry, each prepared cold and warm on the GB10; and the
-fuzzer's seeds 20001 to 20400 on the CPU and 20401 to 20460 on the device.
-`test/work.jl` holds the comparison at 8 RK4 steps, where each of 715
-trials takes about 170 kernels as formed before; larger is the bench's, run
-by hand. Open: a test that a read made outside the context is caught, which
-needs a context a test can break.
-
-On grizzle, idle, 12 threads, dry on the CPU target, one run each, 772f16b
-against 4a311a3, the change as it was measured before it was rebased onto
-main, in seconds (exponent over the last doubling):
-
-| | 4 | 8 | 16 | 32 | |
-|---|---|---|---|---|---|
-| RK4 unrolled steps, 772f16b | | 1.98 | 6.46 | 25.9 | 2.00 |
-| RK4 unrolled steps, 4a311a3 | | 1.20 | 2.84 | 7.16 | 1.33 |
-| its cover's trials, 772f16b | | 0.218 | 1.10 | 5.45 | 2.31 |
-| its cover's trials, 4a311a3 | | 0.060 | 0.173 | 0.852 | 2.30 |
-| its cover's loop, 772f16b | | 0.602 | 3.00 | 15.1 | 2.33 |
-| its cover's loop, 4a311a3 | | 0.160 | 0.613 | 1.96 | 1.68 |
-| GPT layers, 772f16b | 2.76 | 5.20 | 10.3 | 23.3 | 1.17 |
-| GPT layers, 4a311a3 | 1.96 | 3.45 | 6.82 | 13.6 | 0.99 |
-| its cover's trials, 772f16b | 0.228 | 0.505 | 1.09 | 2.94 | 1.43 |
-| its cover's trials, 4a311a3 | 0.062 | 0.203 | 0.275 | 0.449 | 0.71 |
-| its cover's loop, 772f16b | 0.871 | 1.60 | 3.62 | 8.72 | 1.27 |
-| its cover's loop, 4a311a3 | 0.195 | 0.414 | 0.848 | 2.01 | 1.24 |
-
-At 32 RK4 steps the values tried are 18,893 (exponent 0.78, where it was
-1.70), and a kept plan of the GPT step at 32 layers holds 26 MB, 7.4 of
-them how it formed. What grows now is what each trial does whole: it takes
-every kernel it does not form again (503,570 kernels taken at 32 steps,
-exponent 1.72) and orders every kernel of its plan (508,217, exponent
-1.71). Of the replanned trials' 18.3 CPU seconds at 32 RK4 steps, deciding
-what is stored takes 6.9, building the plan from its kernels (what each
-writes, their order) 5.4, the passes' forming and taking 4.1, and the maps
-recomputed where read 1.2; the RK4's trials recompute no fold, and at 32
-GPT layers the 5 of 57 that do take 1.0 of 9.3. Deciding storage and
-building the plan only where a trial changes them is what stands, and so
-does deciding, now the largest phase: 7.6 of the 13.6 s at 32 GPT layers
-and 2.15 of 7.16 at 32 RK4 steps, linear in the layers, 99% of it each
-kernel finding its options (claims, estimates, variants) though kernels
-alike already share one decision. Finding them once for each kernel alike,
-its view numbered by first appearance so that no implementation can tell
-two alike kernels apart, is specified and not built.
-
-Two compiled programs called at once from two tasks, which a search behind
-a program's first result makes the ordinary case, shared the cuBLAS
-extension's one handle and one 32 MiB workspace per context. A product's
-call sets the handle's stream and workspace and then multiplies: with the
-tasks on two threads, the first of 100 rounds failed on GB10 and on RTX
-6000 Ada in every run, cuBLAS's internal error on that call and on every
-call after it on the handle, each program called alone included (on one
-thread, none). A handle per task alone turns those loud errors into
-silently wrong results: 780 of 4,000 results wrong, in 99 of 100 rounds
-(GB10, 64 by 64 products summing 131,072, which write 1.5 MB of the
-workspace), the products then running beside each other on the one
-workspace; with a workspace per product, none. So the handle per task must
-not land without the workspace. Graphs recorded of products lease the
-shared workspace and constants, and CUDA.jl orders their launches one
-after the other: none wrong. cuDNN's attention shared one handle per
-context the same way, 33 of 1,000 results wrong in 26 of 50 rounds,
-silently; its workspace being each launch's own already, it now executes
-on its task's handle, CUDA.jl's, and none of 1,000 are wrong in 50 rounds.
-The test runner's workers have one thread, on which two tasks never call at
-once, so these run in a child process with three
-(`test/fixtures/at_once.jl`); a two-task test inside a worker passes on the
-shared handles. What closes cuBLAS's is a handle per task and a workspace
-per executable, landed together, which the tests held as two gaps until
-then and now pass. An implementation is given what one executable's
-launches share as they build (`Tempest.Compiler.Implement.resources`), made
-through the target as the buffers are, once per executable and once per
-decider for the claims it times; cuBLAS's is the workspace and the
-constants one and zero, and a call sets its task's handle to the task's
-stream and then to its executable's workspace. Two programs' products at
-once from three threads, 100 rounds of 20 calls each, 64 by 64 summing
-16,384 (1.4 MB of the workspace written) and 131,072 (1.6 MB), uncaptured
-and captured: none of 4,000 wrong in any of the four, on GB10 and on the
-RTX 6000 Ada; the graphs of two programs lease no memory in common, and 64
-programs prepared and let go, and a decider, hold no workspace once
-collected. The host's side of a product's launch is unchanged within the
-noise (on GB10, alternating, 6.42 and 6.50 μs before and 6.57 and 6.46
-after; the task's handle 23 ns). The cost is memory: 32 MiB per executable
-with a cuBLAS product where there was one per context, and 32 MiB for a
-preparing decider. A cold GPT preparation (the corpus's small shape)
-measured on the device's pool: its decider holds 125.1 MiB once it has
-decided, as on main, where the context's workspace is made while deciding
-and here the decider's; with the executable built beside it, 203.3 MiB
-against 171.3, the executable's own workspace. Letting go of the decider
-found what held it past its end: a graph captured to time a claim and
-released was kept in CUDAExt's table of what graphs launch until the graph
-was collected and the table next cleaned, which the release had already
-used up the occasion for. A program that never captures again kept its last
-timed claims' launches, and with them the decider's trial buffers, 3 of 3
-in a probe on main, cleaning the table freeing none; a released graph is
-now dropped from the table, and none are held. A captured executable let go
-still keeps its buffers until the next graph is captured, on main and here:
-the table is cleaned only as it is written.
+Standing since a trial is planned near the plan it changes (decided below;
+the long form is this file at b850990). What grows now is what each trial
+does whole: it takes every kernel it does not form again (503,570 kernels
+taken at 32 RK4 steps, exponent 1.72) and orders every kernel of its plan.
+Of the replanned trials' 18.3 CPU seconds at 32 RK4 steps, deciding what is
+stored takes 6.9, building the plan from its kernels 5.4, the passes'
+forming and taking 4.1, and the maps recomputed where read 1.2; a kept plan
+of the GPT step at 32 layers holds 26 MB, 7.4 of them how it formed.
+Deciding storage and building the plan only where a trial changes them is
+what stands, and so does deciding, now the largest phase: 7.6 of the 13.6 s
+at 32 GPT layers and 2.15 of 7.16 at 32 RK4 steps, 99% of it each kernel
+finding its options though kernels alike already share one decision. Finding
+them once for each kernel alike, its view numbered by first appearance so
+that no implementation can tell two alike kernels apart, is specified and
+not built. Open besides: a test that a read made outside the context is
+caught, which needs a context a test can break.
 
 **The jury is transformer-shaped.** Every number that has decided a trial
 came from products, reductions, softmax in its spellings, norms and
@@ -1705,6 +1592,55 @@ its factors, the factors stored (`factors_stored`), 185 folds of the model.
 The 4B decodes in 44.0, 51.9 and 66.9 ms at B of 1, 4 and 16 and a chunk of
 64 tokens in 64 to 65 where 74 to 76; what follows is the estimate on a
 second device (Open).
+
+**A trial planned near the plan it changes, adopted.** The cover's trials
+each plan the graph with a few of what the planner is given changed, and
+each formed every kernel again: the unrolled RK4 at 32 steps tried 1,734,161
+values in groups over 248 plans. Forming reads what is stored and the
+kernels formed so far through a context of five functions; a recording
+context notes what each kernel's forming read, and a plan kept with how it
+formed (`Planned`) is formed again with a change (`replanned`), taking each
+kernel whose noted reads are as they were and forming the rest. A trial
+forms again a median of 4 or 5 kernels of 126 to 514. On grizzle, idle, dry
+on the CPU target, 772f16b against 4a311a3: the unrolled RK4 at 8, 16 and 32
+steps prepares in 1.20, 2.84 and 7.16 s where 1.98, 6.46 and 25.9, the
+exponent over the last doubling 1.33 where 2.00; the GPT step at 4, 8, 16
+and 32 layers in 1.96, 3.45, 6.82 and 13.6 s where 2.76, 5.20, 10.3 and
+23.3, 0.99 where 1.17; the cover's trials at 32, 0.852 s where 5.45 and
+0.449 where 2.94; the values tried at 32 RK4 steps 18,893. What holds a plan
+formed near another to the plan formed whole is their comparison where
+TEMPEST_CROSSCHECK asks, as the suite does of every trial: at 1c24f8f no
+trial differed in `test/bench/scaling.jl` at 16 and 32 GPT layers (228
+trials each) and 16 and 32 unrolled RK4 steps (1,100 and 2,140 trials), in
+the corpus's programs cold and warm on the GB10, GPT-2 124M's geometry among
+them, or in the fuzzer's seeds 20001 to 20460; `test/work.jl` holds it at 8
+RK4 steps, 715 trials. What grows since is in How preparation grows with the
+program (Open).
+
+**Two compiled programs called at once: a handle per task and a workspace
+per executable, adopted.** Two programs called from two tasks, which a
+search behind a first result makes the ordinary case, shared the cuBLAS
+extension's one handle and one 32 MiB workspace per context: on two threads
+the first of 100 rounds failed on the GB10 and the RTX 6000 Ada in every
+run, cuBLAS's internal error on that call and every call after. A handle per
+task alone turns those errors into wrong results, 780 of 4,000 in 99 of 100
+rounds, the products running beside each other on one workspace; so the two
+landed together. An implementation is given what one executable's launches
+share as they build (`Tempest.Compiler.Implement.resources`), cuBLAS's the
+workspace and the constants one and zero, and a call sets its task's handle
+to the task's stream and its executable's workspace: none of 4,000 wrong,
+uncaptured and captured, on both devices. cuDNN's attention shared a handle
+the same way, 33 of 1,000 results wrong in 26 of 50 rounds, and executes on
+its task's handle, none wrong. The tests run in a child process with three
+threads (`test/fixtures/at_once.jl`), the runner's workers having one. The
+host's side of a product's launch is unchanged, 6.42 and 6.50 μs before and
+6.57 and 6.46 after. The cost is memory, 32 MiB per executable with a cuBLAS
+product and 32 for a preparing decider: a cold GPT preparation with its
+executable built holds 203.3 MiB against 171.3. A graph captured to time a
+claim and released was kept in CUDAExt's table until the table was next
+cleaned, holding the decider's trial buffers; a released graph is dropped
+from the table. Left: a captured executable let go still keeps its buffers
+until the next graph is captured, the table cleaned only as it is written.
 
 **BFloat16 attention's forward: matrices from one product to the next,
 adopted.** On trial was the product kernel's tiles laid out in the full rank
