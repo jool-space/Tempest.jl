@@ -371,6 +371,24 @@ clearing it (the CPU target, toy sizes), the sum across devices belonging to
 the second. Not yet measured: the three programs written by hand, and more
 than one thread.
 
+The placed model written by hand, 15 November (`placed.jl` there, 241c4ff,
+cuTile and cuBLAS loaded, nothing measured, one thread): twelve residual
+blocks, 1024 wide through 4096, 4096 tokens, the first six's weights on
+device 0 and the last six's on device 1, each half a step compiled for its
+device and waited for, the 16 MB activation crossing between. Forward, the
+whole model on one device takes 61.9 ms and the halves alone 30.5 and 30.4;
+placed, 59.4 ms crossing by NCCL's send and receive (1.70 ms the crossing),
+60.6 by the driver's peer copy (2.46) and 60.8 by the staged copy in chunks
+(3.29), 0.96 to 0.98 of the whole, its result the whole's to the bit. A
+training step, the second half returning the activation's gradient, which
+crosses back and seeds the first half's backward: 179 to 182 ms against the
+whole's 140.6, 1.28 to 1.29 of it, the loss the same to six figures and the
+weights' gradients within 2.2e-4, of which 30 ms is the first half's forward
+run a second time inside its backward, two functions compiled apart sharing
+no stored activation, and the rest the two crossings and the waits. So what
+a plan over both devices has to beat is the whole's time, and by hand a
+placed forward already meets it.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
