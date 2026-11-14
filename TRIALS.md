@@ -531,6 +531,47 @@ standing for an extent rather than an index is the smallest step. Judged by
 one preparation serving every length in a bound, its time per step against
 the kernels prepared for each length, within the noise.
 
+**Every value lives on one device.** A program is prepared for the device
+its task is on: the target is chosen from the arguments' type and nothing
+reads which device an argument is on (`default_target`,
+`src/Compiler/runtime/target.jl`; `task_state` and `device_name`,
+`ext/CUDAExt.jl`), a stored value's slot has no device
+(`src/Compiler/plan/storage.jl`, `storing.jl`), and a step is one captured
+graph. So a model too large for one device does not run, a batch is not
+split over several, and what arguments on two devices do is not known,
+nothing refusing them. On trial is whether several devices need anything in
+a program at all. The proposal: where an argument lives is a fact read as
+its extents are, the device of every other value and kernel is planned, and
+a read across devices is a copy with a price, bytes over a link, so that a
+model whose layers a user put on two devices runs with what the cut between
+them stores copied once each way, the weights never moved; a sum of a loss
+over shards held on several devices gives the summed gradient by the rule
+that a value's gradient sums over its reads, the parameters copied out and
+the gradients reduced back being adjoints, and replicas kept and updated on
+each device being a stored value's price against a copy's; and each
+collective is a primitive over an axis split across devices, a fold an
+all-reduce, a shifted read an exchange of edges, a gather by index an
+exchange of all with all. What one array on one device cannot say is an axis
+that is split, which a collection of shards or an array type of a package
+would. Challengers: JAX, where a compiled function takes the sharding its
+committed arrays carry and communication is written by hand (`shard_map`);
+NCCL.jl 1.0 by hand between steps compiled for a device each, one process
+driving every device (`NCCL.Communicators`), the route that stays whatever
+is decided here; PyTorch's `DistributedDataParallel` and a model placed by a
+device map; and, watched and not built, a load that reduces over devices
+inside a kernel (Tile IR 13.5's multimem view operations, on architectures
+and links none of our machines has). Judged on a machine of three RTX
+A6000s, each against the same program written by hand with NCCL.jl and its
+challenger run by its own script: a model placed over two and three devices,
+its results the one-device program's and its step against the sum of its
+parts with the copies; a GPT's training step with its batch in shards, by
+its time against one device's at the same batch and at the batch times the
+devices; and the heat equation's grid split, its edges exchanged. The next
+measurement is the hand-written three, and with them what arguments on two
+devices do today, whether a collective can be captured in a step's graph,
+and whether more than one thread can drive the devices while a kernel's load
+can hang (the lock it takes against the collector's).
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
