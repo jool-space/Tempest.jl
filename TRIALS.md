@@ -336,6 +336,41 @@ by hand; devices of different kinds in one plan, tiles and rates being a
 device's; and schemes with no step, gradients applied stale. Independent
 copies of a program, one compiled for each device, need nothing.
 
+Recorded 14 and 15 November on trizzle, three RTX A6000s (sm_86, PCIe 3.0,
+no NVLink), one process and one thread driving every device, the scripts and
+outputs in `~/dev/jool/challengers/devices-2026-11-14`. Tempest at 241c4ff
+runs on one of them as on any device, and follows the task's device, not its
+arguments': arguments on another device than the task's, or on two, are
+refused by CUDACore where a kernel takes their address, no pair of these
+devices having access to the other's memory (`can_access_peer` false for
+each, the IOMMU on); where they have, nothing would refuse them. One graph
+holds kernels of two devices by the driver's own capture, begun on one
+device's stream, the other's joining it by waiting on an event of the
+first's, both replayed by one launch; CUDACore's `capture` refuses to change
+device. A copy between devices: the driver's peer copy moves 512 MB at 7.4
+GB/s and is refused under capture, and a plain copy between the two
+addresses fails without access; through page-locked host memory, down on the
+source's stream and up on the destination's, it is two copy nodes of one
+graph at 4.0 GB/s, each leg about 8, and in chunks of 8 MB through two
+buffers, one chunk's upload beside the next's download, 7.7 GB/s live and
+captured with 16 MB pinned (128 nodes; 2 MB chunks 7.9, 32 MB 7.4, more
+buffers or several lanes no faster, both directions at once 6.8 each).
+NCCL.jl 1.0's send and receive move the same bytes at 9.9 GB/s live and 9.7
+captured, a graph a device of three nodes. Its all-reduce of 512 MB takes 76
+ms on two devices and 91 on three, 4 MB 0.69 and 0.89, the pair across the
+two sockets within 3% of the pair on one; captured, a graph a device, it
+gives the same sums in the same time (64 MB in 10.8 and 12.3 ms). A
+communicator's destruction hangs while a graph that captured one of its
+operations is alive, the executable's destruction not enough; with graph and
+executable destroyed first it returns. The cost of a reduction of the
+gradients is of a step's order here, 76 to 91 ms against the GPT-2 step's
+190 on the GB10, so a batch in shards is to be read with gradients
+accumulated on each device, which works today as two compiled functions, one
+adding a small batch's gradient into the caller's array and one applying and
+clearing it (the CPU target, toy sizes), the sum across devices belonging to
+the second. Not yet measured: the three programs written by hand, and more
+than one thread.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
