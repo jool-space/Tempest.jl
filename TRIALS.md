@@ -552,29 +552,52 @@ each device being a stored value's price against a copy's; and each
 collective is a primitive over an axis split across devices, a fold an
 all-reduce, a shifted read an exchange of edges, a gather by index an
 exchange of all with all. What one array on one device cannot say is an axis
-that is split, which a collection of shards or an array type of a package
-would. Challengers: JAX, where a compiled function takes the sharding its
-committed arrays carry over a mesh of devices and XLA partitions the
-program, or communication is written by hand (`shard_map`); Reactant, which
-reaches the same through XLA's IFRT runtime (`src/Sharding.jl`, `Mesh`,
-docs/src/tutorials/sharding.md in the local clone at a6fbe468f), not yet
-run by us on several GPUs;
-NCCL.jl 1.0 by hand between steps compiled for a device each, one process
-driving every device (`NCCL.Communicators`), the route that stays whatever
-is decided here; PyTorch's `DistributedDataParallel` and a model placed by a
-device map; and, watched and not built, a load that reduces over devices
-inside a kernel (Tile IR 13.5's multimem view operations, on architectures
-and links none of our machines has). Judged on a machine of three RTX
-A6000s, each against the same program written by hand with NCCL.jl and its
-challenger run by its own script: a model placed over two and three devices,
-its results the one-device program's and its step against the sum of its
-parts with the copies; a GPT's training step with its batch in shards, by
-its time against one device's at the same batch and at the batch times the
-devices; and the heat equation's grid split, its edges exchanged. The next
-measurement is the hand-written three, and with them what arguments on two
-devices do today, whether a collective can be captured in a step's graph,
-and whether more than one thread can drive the devices while a kernel's load
-can hang (the lock it takes against the collector's).
+that is split; a collection of plain arrays the user placed says it, shards
+of a batch or pieces of a weight, and no array type of Tempest's or of a
+package's is wanted: Tempest is `compile`. Challengers: JAX, where a
+compiled function takes the sharding its committed arrays carry over a mesh
+of devices and XLA partitions the program, or communication is written by
+hand (`shard_map`); Reactant, which reaches the same through XLA's IFRT
+runtime (`src/Sharding.jl`, `Mesh`, docs/src/tutorials/sharding.md in the
+local clone at a6fbe468f), not yet run by us on several GPUs; NCCL.jl 1.0 by
+hand between steps compiled for a device each, one process driving every
+device (`NCCL.Communicators`), the route that stays whatever is decided
+here; PyTorch's `DistributedDataParallel` and a model placed by a device
+map; and, watched and not built, a load that reduces over devices inside a
+kernel (Tile IR 13.5's multimem view operations, on architectures and links
+none of our machines has). Judged on a machine of three RTX A6000s, each
+against the same program written by hand with NCCL.jl and its challenger run
+by its own script: a model placed over two and three devices, its results
+the one-device program's and its step against the sum of its parts with the
+copies; a GPT's training step with its batch in shards, by its time against
+one device's at the same batch and at the batch times the devices; and the
+heat equation's grid split, its edges exchanged. The next measurement is the
+hand-written three, and with them what arguments on two devices do today,
+whether a collective can be captured in a step's graph, and whether more
+than one thread can drive the devices while a kernel's load can hang (the
+lock it takes against the collector's).
+
+What the proposal would cover, by the two changes it is, stated before any
+is built. The first, a device to each kernel and stored value, a read across
+devices a priced copy and a step captured across devices, gives a model
+placed over devices, and a loop over small batches through one, left
+unrolled, their stages overlapping as nothing makes them wait. The second, a
+collection of placed arrays read as one axis split across them, a sum over
+it a reduction across devices, gives with the first a batch in shards, where
+one thing more is asked, replicas of the parameters a compiled step keeps
+from call to call; a layer whose weights are held in pieces, the same
+mechanism on another axis, an activation crossing the link at every block;
+and parameters held in pieces and concatenated where read, whose gain is
+memory, so the copy gathered must be let go. A grid held in pieces asks
+more, a shifted read of their concatenation as an exchange of edges. A
+sequence in pieces under attention is expressible, each piece reading every
+other, and unlikely to pay; a table in pieces indexed by values the program
+computes is doubtful, the device a read goes to being known only as it runs.
+Outside it, named: several machines, an array elsewhere being no array of
+this process, which NCCL.jl between steps compiled for a device each reaches
+by hand; devices of different kinds in one plan, tiles and rates being a
+device's; and schemes with no step, gradients applied stale. Independent
+copies of a program, one compiled for each device, need nothing.
 
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
