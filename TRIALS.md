@@ -218,186 +218,36 @@ since seated a neural ODE, an LSTM and a heat equation beside the GPT. The
 eager slice (`test/bench/eager_slice.jl`), 14 November at c6b68b6: 135 of
 its 149 cases trace and agree, NNlib's 62 of 70 and Base's 73 of 79.
 
-**Loops are unrolled: rolled from the tape and stepped, adopted.** A `for`
-loop traced as its iterations, a program as long as its trip count, planned
-and compiled whole: at 100 RK4 steps, 3602 kernels and 148 s of planning
-(the neural ODE's step, decided below). The rolled loop existed, entered only by
-`accumulate(f, eachslice(x); init)`: a `Loop` of the program
-(`src/Compiler/program/program.jl`), lowered by batching its body over an
-axis of steps with one carried definition, planned as a recurrence group,
-differentiated as the loop reversed, and on cuTile one kernel sweeping the
-steps with the state on chip, else the floor. A plain loop never reached
-it. Challenger: StructuredReactant (AntonOresten/Reactant.jl, branch
-`structured`), which rolls structured `for` and `while` loops from Julia's
-IR through IRStructurizer, without a macro. Taken instead, two pieces and
-no new IR. The tape is rolled where it repeats (`src/Compiler/program/roll.jl`):
-the last window whose nodes each read what the node a period back read, or
-the node a period after that, a period holding a fold, at least three
-periods, is rewritten in place as the loop `accumulate` traces, its first
-step read from where the loop starts; inside `withgradient` before the
-reverse pass, so its derivative is the loop's, and as the trace ends. The
-RK4 loop's tape is periodic up to renaming, 39 nodes a step, the weights
-its captures and the state its one carry. And a recurrence no one kernel
-holds runs a step at a time (`src/Compiler/runtime/stepped.jl`): its
-cycle restricted to one step, the step axis left out of each value and
-read of it, is a graph planned and built as any program, its kernels
-launched once per step and pointed at the step's slices of the
-recurrence's storage, a step's position an argument where the step reads
-it; captured, a graph of the steps' launches. Before, the accumulate form
-of the bench ran its two recurrences on the floor, 102 ms a step at 10 RK4
-steps.
+**A loop's steps: what still unrolls, what a step still costs.** A plain
+loop rolls from the tape and a recurrence no one kernel holds runs a step at
+a time (Loops are unrolled, decided below, with what followed it, each entry
+named "Loops"; the long form is this file at b850990). What stands trial is
+what that left (`src/Compiler/program/roll.jl`,
+`src/Compiler/runtime/stepped.jl`, `src/Compiler/plan/recurrences.jl`).
+Challengers: cuDNN's `nn.LSTM` and the cell as a loop under `torch.compile`,
+a step's work in fewer launches; StructuredReactant, which rolls structured
+loops from Julia's IR. Judged by the LSTM's step against them (the corpus's
+gate, 1.1 times the best) and by what a checker of loops drawn at random
+still finds refused.
 
-On the GB10, `test/bench/node.jl` unchanged, TF32: at 10 RK4 steps, 24
-kernels, 19.6 s to the first result, 0.644 ms a step, against 1.06 ms
-unrolled; at 100, 25 kernels, 18.9 s and 6.80 ms, against 194 s and 10.9
-ms unrolled, Reactant's 99 s and 10.8 ms and torch.compile's 6.4 s and
-16.1 ms on the A6000; at 1000, 19.7 s and 68.8 ms, which unrolled did not
-prepare. Losses agree with the interpreter's to 4e-6 and the first
-moments to 3e-4 at each. A step forward is 12 kernels and one back 12,
-against about 36 unrolled: the weights' gradients are products batched
-over the steps. A window of maps alone is not rolled: unrolled it fuses
-into one kernel (a calibration's chain of eight maps, a polynomial's
-products). Open: a step's own launches are not
-fewer than an unrolled step's; a step reading a value along the steps
-other than by its last axis, or the step's position other than as itself,
-runs on the floor.
+Open, named:
 
-The challengers on the GB10, 5 November, TF32, 100 RK4 steps, each alone on
-the device: torch 2.14.0+cu130 by its own script (`bench_node.py` at
-7684532), eager 50.4 ms a step and 0.43 s to the first, `default` 27.2 ms
-and 56 s, `reduce-overhead` 12.1 ms and 48 s, `max-autotune` 10.9 ms and
-254 s, without its product autotuning ("not enough SMs" on 48). Reactant
-0.2.290 by its own script too (`bench_node.jl` at 7684532), through
-ReactantNitro 0.1.6, the first release with the `compile_options` the script
-passes (its manifest, naming 0.1.5, re-resolved; no version it pinned
-moved): its loop unrolled at trace, as the script has it, 8.53 ms a step and
-48.7 s to the first, 10.3 ms at the highest precision; rolled with
-`@trace for`, as the Reactant end-to-end post writes it, 9.81 ms and 42.9 s.
-Tempest, 6.80 ms and 18.9 s, is the fastest of them at both.
-
-By batch, each stack by its own script with only the batch changed: at
-1024, Tempest 16.2 ms a step, torch `reduce-overhead` 17.1, Reactant 18.6;
-at 8192, Tempest 113, torch 91.9, Reactant 115. Profiled at 8192, neither
-device idles: Tempest's 47 ms after the loops were the parameters'
-gradients, each a sum over the steps of every evaluation's part, read back
-from the 11 GB a step the backward stored, at the device's bandwidth, where
-torch adds each evaluation's part as its backward runs, its operands in the
-cache. Taken, 6 November: a sum over a recurrence's steps of what they
-compute may ride them (`riding`, `src/Compiler/plan/recurrences.jl`), a fold
-of the recurrence's group, as a fold along a scan's axes rides its sweep;
-each step's plan adds its part to the sum in the sum's storage, each
-product into it as it writes (`step_graph`, `src/Compiler/runtime/stepped.jl`),
-and the backward stores nothing only the sums read. Whether a sum rides is
-the cover's choice (`Ride`, `src/Compiler/cover/cover.jl`): a stepped run is
-priced by its step's plan, and measured whole, under a record name of its
-own, where the floor's time of a recurrence as one serial kernel had been
-read back as its. At 128 the four sums are measured and stay after the
-loops, 6.80 ms; at 1024, 16.0 ms; at 8192 the weights' two and the
-encoder's bias ride, 79.0 ms, prepared in 25.5 s to the first result. The
-losses and first moments agree with the interpreter's as before.
-
-Checked against main on other loops, 6 November, TF32, 100 steps, 32
-inputs through 256 hidden: a GRU at batch 64, 4.62 ms against 4.58, its
-nine sums measured or estimated and left after the steps; at 1024, 23.3 ms
-against 24.2, one riding; chunked linear attention's gradient, cuTile's
-one-kernel recurrences both ways, 0.234 ms against 0.230 at 32 chunks, 1.080
-against 1.078 at 128. An LSTM did not plan on main: its hidden state and
-cell, each step reading both, were recurrences of their own, kernels
-depending on each other in a cycle. Taken: states whose cycles read each
-other's are one recurrence's (`recurrences`, `src/Compiler/plan/recurrences.jl`),
-their group's step computing its values in the graph's order, a value a
-state is carried from that the step reads stored, and the stepped run, the
-floor and cuTile's one-kernel recurrence each carrying every state. The LSTM
-at batch 64, 5.53 ms a step; at 1024, 32.6 ms; its gradients agree with the
-interpreter's to 1e-3. Found on the way: the cover had offered to join a
-value of a recurrence's step into a kernel that read it, which then wrote
-it too, two kernels owning it; taken where measurements of a microsecond
-fell its way, the neural ODE's decoder weights had a gradient 39% off in one
-preparation in three. No join takes such a value now.
-
-A loop selecting each step's slice, `xs[:, :, t]`, as most write a
-recurrent network, was unrolled: each step's selection differs from the
-next at one index, and each use of an array the loop captures records a
-copy of it, so no window repeated; at 100 steps the LSTM written so did not
-prepare in 30 minutes. Taken, 6 November (`src/Compiler/program/roll.jl`):
-selections one index apart from step to step are the loop's scanned arrays,
-as `accumulate` over slices has them, the range of the array the steps
-select taken once where they do not select it all, the loop reversed where
-the index falls; constants of one value are alike, computed once before the
-loop; and two states starting from one value, `h, c = h0, h0`, are told
-apart by what the next step reads, where they had been one argument of the
-step and its result wrong. The LSTM as a plain loop, 17.8 s to the first
-result and 5.53 ms a step at batch 64, 19.9 s and 33.2 ms at 1024, as the
-`accumulate` form. A selection stepping by more than one stays unrolled, as
-does a loop of maps alone.
-
-Checked by loops drawn at random, 6 and 7 November: one to three states
-and a number, weights passed or captured, an input's slices forward, back
-or by two, states assigned in turn or at once, read after the loop or
-collected at each step, a second loop after the first; each run eagerly
-in Float64, traced, interpreted and prepared on the CPU, its gradient
-against central differences and prepared again with sums made to ride and
-folds recomputed at random, and on CUDA in Float32 (a checker outside the
-repository). Of some twenty-one thousand drawn, fifteen faults, each taken
-with a test of its own. Wrong results: a state no cycle of states runs
-through read where nothing had been written (on main too, through
-`accumulate`), now its next value one step back; crossing states, one
-whose next value only the other's reads, left without what it is carried
-from (main's forward 9% off); ties of a maximum sharing its cotangent,
-NaN on CUDA where a recomputed sum differed in its last bit, now the
-element `findmax` finds, as Zygote's rule gives it; a step's cuTile
-kernels built on the first step's slices and pointed at the others, less
-aligned than cuTile had compiled them for, a gradient 1.25 off at three
-hidden units; and a product in a cuTile recurrence's step whose factor
-the step computes, its padded lanes a 0/0 the weight's zeros multiplied,
-NaN. Refusals of programs that plan: kernels in a cycle, from states
-crossing or swapping, a join, or a sum offered to ride steps it could not
-(one summing a batch as long as the steps, one reading a second
-recurrence); two states given one value; a name a fold's launch never
-bound. Planning exponential in a term's paths, built, shown, hashed and
-asked what it mentions along each, and folds proposed for recomputing
-found along each path to them: forty maps each reading the last twice
-had taken hours, an unrolled loop's gradient over ten minutes, two
-unrolled loops' over eleven. And the cover's trials writing one
-dictionary from several threads. Four of the fifteen were walks of the
-graph through operands, which leave out what a state is carried from.
-Refused by name, as before: a scan in a recurrence's cycle, 7% of the
-loops drawn; states of two shapes in one recurrence, 2%. Unrolled still:
-a loop whose step slices an input it does not read. Preparing the LSTM
-below takes 1.40 s warm against main's 1.30, its first 1 to 2 s longer.
-Its first state learned as a vector and repeated over the batch had left
-the recurrence to the floor's kernel stepping through it, 1.76 s a
-training step; now spread where the steps start, 5.6 ms.
-
-Checked by programs drawn at random as well (test/fuzz/run.jl), seed 10's
-gradient did not prepare on CUDA: cuTile's estimate priced a kernel's read
-of a sum by key as that kernel's own sum, by the elements it combines along
-the sum's reduced axes taken as axes of the reader's domain, where the sum
-was another kernel's, as a gather's adjoint is wherever the rest of the
-gathered array's gradient is added to it. A reader over fewer axes than the
-sum reduces threw, and one over as many was priced for other elements than
-it reads; such a read is now priced as any read is, by what its loads
-reach. Of seeds 1 to 1000, forward and gradient, 185 programs read a sum
-by key from another kernel, and so does the corpus's GPT step. Six of
-them threw (seeds 10, 228, 268, 326 and 389) and now plan. On the GB10's
-rates no decision of the rest changes; the estimates of 135 of their
-kernels move, by 0.57 to 1.41 times. Timed alone, the 52 that read the sum
-where it lies come nearer their times, 1.46 times off to 1.43 on the
-geometric mean, and the 7 that read it through a gather go further, 1.60
-to 1.88: a gathered read is priced as its whole buffer, as any gathered
-value is, where the wrong price had been smaller. Open, for the estimate:
-the reach of a gather, which would need the index's extent; 916-grad's
-third kernel reads `%29[%2[i1] - 1, i2]`, priced at 10.27 μs (7.35
-before) against 4.11 timed. Open, before and after: seeds 347, 399 and 494
-do not plan on CUDA, cuTile's emitter asked for a view's spec where it has
-none.
-
-The LSTM's training step against torch 2.14.0 on the GB10, 7 November,
-TF32, 32 inputs through 256 hidden, 100 steps, each alone on the device
-and captured as a graph: at batch 64, cuDNN's `nn.LSTM` 2.05 ms, the
-cell as a loop under `torch.compile` 3.42, the loop eager 6.14, Tempest
-5.53; at 1024, 24.8, 20.4, 32.1 and 33.0. Tempest runs a step as about
-ten launches, a split product forward and seven kernels back.
+- A step's own launches are not fewer than an unrolled step's: the LSTM runs
+  a step as about ten launches, a split product forward and seven kernels
+  back, 5.53 ms at batch 64 against cuDNN's 2.05 and torch.compile's 3.42,
+  and 33.0 at 1024 against 24.8 and 20.4 (7 November, TF32, 100 steps).
+- A step reading a value along the steps other than by its last axis, or the
+  step's position other than as itself, runs on the floor.
+- Unrolled still: a selection stepping by more than one, and a loop whose
+  step slices an input it does not read.
+- Refused by name: a scan in a recurrence's cycle, 7% of the loops drawn at
+  random, and states of two shapes in one recurrence, 2%.
+- The estimate does not know the reach of a gather, which would need the
+  index's extent: a kernel reading `%29[%2[i1] - 1, i2]` is priced at 10.27
+  μs against 4.11 timed.
+- As of 7 November the fuzzer's seeds 347, 399 and 494 did not plan on CUDA,
+  cuTile's emitter asked for a view's spec where it has none; not checked
+  since.
 
 **Sizes are constants.** Every extent is fixed at trace (`IR.Domain`,
 `src/Compiler/IR/expressions.jl`), a kernel's grid and tiles are chosen for
@@ -1074,7 +924,7 @@ whose dependencies walk every kernel fixed, 0.22 s each at the first and
 0.68 s at the last, and by their pricing; and the challengers were not yet
 run on the GB10.
 
-Closed by the rolled loop (Loops are unrolled, in Open): the same plain
+Closed by the rolled loop (Loops are unrolled, below): the same plain
 loop rolls from the tape, and the 100 steps are 24 kernels where 3602. On
 the GB10, by the corpus's runner, each scenario in a new process, at
 fbbd619 on tileiras 13.5.37, 12 November
@@ -1641,6 +1491,108 @@ claim and released was kept in CUDAExt's table until the table was next
 cleaned, holding the decider's trial buffers; a released graph is dropped
 from the table. Left: a captured executable let go still keeps its buffers
 until the next graph is captured, the table cleaned only as it is written.
+
+**Loops are unrolled: rolled from the tape and stepped, adopted.** A `for`
+loop traced as its iterations, a program as long as its trip count, planned
+and compiled whole: at 100 RK4 steps, 3602 kernels and 148 s of planning
+(the neural ODE's step, above). The rolled loop existed, entered only by
+`accumulate(f, eachslice(x); init)`: a `Loop` of the program, lowered by
+batching its body over an axis of steps with one carried definition, planned
+as a recurrence group, differentiated as the loop reversed, and on cuTile
+one kernel sweeping the steps, else the floor. Challenger:
+StructuredReactant (the branch `structured` of the owner's Reactant.jl),
+which rolls structured `for` and `while` loops from Julia's IR through
+IRStructurizer, without a macro. Taken instead, two pieces and no new IR.
+The tape is rolled where it repeats (`src/Compiler/program/roll.jl`): the
+last window whose nodes each read what the node a period back read, a period
+holding a fold, at least three periods, becomes the loop `accumulate`
+traces; inside `withgradient` before the reverse pass, and as the trace
+ends. And a recurrence no one kernel holds runs a step at a time
+(`src/Compiler/runtime/stepped.jl`): its cycle restricted to one step is a
+graph planned and built as any program, its kernels launched once per step
+and pointed at the step's slices, captured as a graph of the steps'
+launches. On the GB10, `test/bench/node.jl`, TF32: at 10 RK4 steps, 24
+kernels, 19.6 s to the first result and 0.644 ms a step against 1.06
+unrolled; at 100, 25 kernels, 18.9 s and 6.80 ms against 194 s and 10.9 ms;
+at 1000, 19.7 s and 68.8 ms, which unrolled did not prepare. A step forward
+is 12 kernels and one back 12, against about 36 unrolled. The challengers
+there, 5 November, each alone on the device by its own script: torch 2.14.0
+eager 50.4 ms a step, `reduce-overhead` 12.1 ms and 48 s to the first,
+`max-autotune` 10.9 ms and 254 s; Reactant 0.2.290 unrolled at trace 8.53 ms
+and 48.7 s, rolled with `@trace for` 9.81 ms and 42.9 s.
+
+**Loops: a sum over a recurrence's steps rides them, adopted.** By batch,
+each stack by its own script: at 1024, Tempest 16.2 ms a step, torch
+`reduce-overhead` 17.1, Reactant 18.6; at 8192, Tempest 113, torch 91.9,
+Reactant 115. At 8192 Tempest's 47 ms after the loops were the parameters'
+gradients, each a sum over the steps read back from the 11 GB a step the
+backward stored, where torch adds each evaluation's part as its backward
+runs. A sum over a recurrence's steps of what they compute may ride them
+(`riding`, `src/Compiler/plan/recurrences.jl`), each step's plan adding its
+part into the sum's storage, the backward storing only what the sums read;
+whether it rides is the cover's choice (`Ride`), a stepped run priced by its
+step's plan and measured whole. At 128 the four sums stay after the loops,
+6.80 ms; at 1024, 16.0; at 8192 three ride, 79.0 ms, prepared in 25.5 s.
+Against main on other loops: a GRU at batch 64, 4.62 ms against 4.58, at
+1024 23.3 against 24.2; chunked linear attention's gradient 0.234 against
+0.230 at 32 chunks.
+
+**Loops: states whose cycles read each other's are one recurrence,
+adopted.** An LSTM did not plan on main: its hidden state and cell, each
+step reading both, were recurrences of their own, kernels depending on each
+other in a cycle. They are one recurrence's (`recurrences`,
+`src/Compiler/plan/recurrences.jl`), the stepped run, the floor and cuTile's
+one-kernel recurrence each carrying every state: the LSTM at batch 64, 5.53
+ms a step, at 1024 32.6, its gradients to 1e-3 of the interpreter's. Found
+on the way: the cover had offered to join a value of a recurrence's step
+into a kernel that read it, two kernels then owning it, and the neural ODE's
+decoder weights had a gradient 39% off in one preparation in three; no join
+takes such a value now.
+
+**Loops: a loop selecting each step's slice rolls, adopted.** A loop written
+with `xs[:, :, t]`, as most write a recurrent network, was unrolled, each
+step's selection differing from the next at one index and each use of a
+captured array recording a copy; at 100 steps the LSTM so written did not
+prepare in 30 minutes. Selections one index apart from step to step are the
+loop's scanned arrays, the loop reversed where the index falls; constants of
+one value are alike; and two states starting from one value, `h, c = h0,
+h0`, are told apart by what the next step reads, where they had been one
+argument and the result wrong. The LSTM as a plain loop: 17.8 s to the first
+result and 5.53 ms a step at batch 64, 19.9 s and 33.2 ms at 1024, as the
+`accumulate` form. Since, a loop with no state carried rolls too, from two
+steps (A model written once, above).
+
+**Loops: loops drawn at random, fifteen faults in twenty-one thousand, each
+a test.** 6 and 7 November, a checker outside the repository: one to three
+states and a number, weights passed or captured, an input's slices forward,
+back or by two, states read after the loop or collected, a second loop after
+the first; each eager in Float64, traced, interpreted and prepared on the
+CPU, its gradient against central differences and with sums made to ride and
+folds recomputed at random, and on CUDA in Float32. Wrong results: a state
+no cycle runs through read where nothing was written (on main too); crossing
+states, one left without what it is carried from, main's forward 9% off;
+ties of a maximum sharing its cotangent, NaN on CUDA, now the element
+`findmax` finds; a step's cuTile kernels built on the first step's slices
+and pointed at others less aligned, a gradient 1.25 off; and a product in a
+cuTile recurrence's step whose padded lanes were a 0/0, NaN. Refusals of
+programs that plan: kernels in a cycle, two states given one value, a name a
+fold's launch never bound. Planning exponential in a term's paths: forty
+maps each reading the last twice had taken hours. And the cover's trials
+writing one dictionary from several threads. Four of the fifteen were walks
+of the graph through operands, which leave out what a state is carried from.
+An LSTM's first state learned as a vector and repeated over the batch had
+left the recurrence to the floor, 1.76 s a training step, and is spread
+where the steps start, 5.6 ms.
+
+**Loops: a kernel's read of a sum by key another kernel computes is priced
+as any read, adopted.** The fuzzer's seed 10's gradient did not prepare on
+CUDA: cuTile's estimate priced the read as that kernel's own sum, and a
+reader over fewer axes than the sum reduces threw. Priced by what its loads
+reach: of seeds 1 to 1000, 185 programs read such a sum, as the corpus's GPT
+step does; six threw and now plan; no decision of the rest changes on the
+GB10's rates, the estimates of 135 kernels moving by 0.57 to 1.41 times, the
+52 that read the sum where it lies nearer their times (1.46 times off to
+1.43) and the 7 through a gather further (1.60 to 1.88).
 
 **BFloat16 attention's forward: matrices from one product to the next,
 adopted.** On trial was the product kernel's tiles laid out in the full rank
