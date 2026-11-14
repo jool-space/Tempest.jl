@@ -615,382 +615,76 @@ search bounds it, and on a second device, where the constants are a guess
 and a search is not: there is one since 9 November, the RTX 6000 Ada (the
 estimate on a second device, below), and the search has not been run on it.
 
-**A model written once.** Qwen3.5-4B's decode and prefill are run today by
-Vallmo (`~/dev/jool/Vallmo`): 1,883 lines of cuTile kernels written by hand
+**A model written once.** Qwen3.5-4B's decode and prefill were run by Vallmo
+(`~/dev/jool/Vallmo`): 1,883 lines of cuTile kernels written by hand
 (`src/kernels`, speculative decoding's apart) under a model that calls them.
 On trial is whether the model is array code and nothing else: one
 `forward(weights, states, tokens, positions, length)` in Base's arrays, a
-decode step its case of one token and a prefill its case of T, run eagerly as
-it is, compiled by Tempest and traced by Reactant, from one file that names
-none of them. What of Tempest stands trial with it: `compile`, which writes
-what the program writes into an argument where the caller has it, the
-kernels and copies that use the argument pointed at each call's array
-(`point!`, `src/Compiler/runtime/runtime.jl`), so the model's `forward!`
-writes its states as it does eagerly, with no copy of a cache in or out,
-where it had copied every written array in before each call and back after;
-and a call that walks the 4B call's 541 leaves once, beside the signature,
-into a record of each array and its address that the check for shared
-memory and the binding read (`bound`, `src/Compiler/runtime/compile.jl`),
-about 0.5 ms of the host's a token where four walks took 5, so that on the
-GB10 a plain loop over the compiled `forward!`, its token a number, takes
-39.5 to 39.6 ms a token at extent 512 against 38.1 to 38.3 for the step's
-`replay!` in the same process and 38.8 to 38.9 for `forward!`'s own graph
-replayed in a row, tokens equal, where main took 44.7 to 45.2 against 38.4
-to 38.5 and 39.2; what still stands between the loop and the graph's
-replays, 1.8%, is that walk and the token read on the host each step, 0.6%
-alone; and a prefill's extent (Sizes are constants, above). A prefill is
-the same call at T tokens, and three things stand trial with it since 11
-November. A compiled call is built on the arrays it is given and holds no
-copy of them, a buffer made for an argument only when a call first copies
-one in (`prepare`'s `point`, `own!`, `src/Compiler/runtime/runtime.jl`): the
-4B step holds 8.5 MiB of the device beyond its weights and states where it
-held 8,336, and its chunks of 1, 4, 16 and 64 tokens together 1.75 GiB where
-they held 35. Tracing and lowering are about linear in a loop's steps
-(`copyto!` of a range without a view, `src/Compiler/program/updates.jl`;
-`Periods`, `program/roll.jl`; `Pieces`, `index/lower.jl`): `forward!` at 256
-tokens traces in 1.5 s and lowers in 6.7 on grizzle where it took 133.5 and
-135.1, at 1,024 in 5.8 and 27.1, the programs and index graphs the same. And
-the attention's output projection, its softmax's weights summed inside its
-product, builds at 4 tokens (`tile_spans`, `ext/cuTileExt/emit.jl`), where
-their tile was shaped by every axis the scores' index mentions and no claim
-on it built: the chunk's decisions settle, a second process replaying them
-in 47 s where each covered again in 111, and with nothing measured the chunk
-of 16 calls in 60.9 ms where it took 106.9, the delta rule's output
-projections a product claim. What stood for a prefill then, the delta
-rule's recurrence storing its state at every step for a second kernel to read
-back (46.8 ms of a 64-token call's 99, against 21.5 for Vallmo's), closed the
-same day: a value computed from one step of a recurrence and that step's
-inputs rides the steps, along them or at their last, by the cover's price, as
-a sum over them does (`Meeting`, `src/Compiler/plan/recurrences.jl`), and a
-state is stored only where something outside its group reads it. On grizzle,
-measured, the 4B's chunk of 64 tokens calls in 67.8 ms where it took 99.0,
-of 16 in 50.4 where 55.8, the step in 42.2 and 41.7 (41.9 both in a second
-process), the chunk of 64 storing 698 MiB where it stored 6.68 GiB and
-preparing cold in 141 s where 232; chunks and one token at a time part on the
-3,500-token prompt at decode token 10 before and after, two logits 0.02 to
-0.21 apart at 22. Two faults of main stood behind it: a recurrence's floor
-counted its bytes in an Int that folds recomputed one inside another wrapped
-below zero, a floor cheaper than any kernel (`recurrence_floor_estimate`,
-`src/Compiler/cover/cost.jl`); and cuTile computed a fold recomputed inside
-another at every step of the outer one, a lane a step, where its estimate
-counted it once (`emit_fold!`, `ext/cuTileExt/emit.jl`), a recurrence kernel
-3,967 μs against an estimate of 261, and 359 after. What it cost: a value
-riding along the steps or at their last must lie along each of the
-recurrence's lanes, a refusal the search needs and not what a ride is
-(`fits_steps`), since under `:close` a comparison a record refutes is measured
-whole and a timing has no bound, the 4B's layer output riding priced at
-1.5e6 s and timed all the same; and each ride offered plans its recurrence's
-step again from nothing, the LSTM's cold preparation 162 s where it took 82
-for the same plan, heat's 27.6 where 23.0. What still stands: that search; a
-measured tie decided by the estimate, the neural ODE's gradient sums riding
-or not from one cold preparation to the next, before as after (two sides
-within 5%, the estimate 11 ms for 7.3 measured); products of few columns,
-slower than cuBLAS's from 4 to 64 tokens; and cold preparation with
-measurement, 100, 172 and 137 s at 1, 16 and 64 tokens, where it took 98, 187
-and 232 before the rides: asking each recurrence what rides it by a pass over
-the graph was 65 and 99 s of those at 16 and 64, 1.7 and 1.4 since it is
-found once a plan, and what the 172 hold now is the search itself (the
-phases overlap: the first builds 56, searching ahead 36, the loop 32,
-decisions 34), timing 7. Counted since, by section and settling round
-(`challengers/proposal-cost-2026-11-11`, `attribute.jl`): that loop's 32 s
-came of the chunk of 1 prepared first in the same process and is 7 alone;
-the 16-token chunk's 226 s are a first cover of 135 and two more of 35
-each that build nothing and time one kernel between them, settling's
-rounds, every group's options found and searched again from the record
-(48 of the 64-token chunk's 133), and the rides added one round, not a
-search of their own, their nested step covers under 2 s on the model. On
-the LSTM the cost is one nested cover, 70 s and 96 kernels built: pricing
-the forward recurrence with `h - y` riding its last step plans that step
-measured, and the step's fused kernel, writing one more array, is searched
-as a kernel never seen; the ride is then refused. Its cold preparation has
-two modes on main, 136 to 141 s and 162 to 164, by one measured candidate
-in that cover. A timing has a bound since (`measure_sides!`,
-`src/Compiler/cover/choose.jl`): the side known faster is timed whole and
-the other, its dearest kernel first, until it has lost, a kernel priced
-past the bound beyond its estimate's error never begun where the call was
-not close, so the 4B's floor of one item is not timed; preparation is as
-long as before (heat 27.4 and 27.3 s, GPT 154 and 151, four layers of the
-model 137 to 140 on both), and the lanes stay, since without them the four
-layers prepare, where they did not end, but in 161 to 168 s, each ride
-refused by price still a trial searched ahead. And a settling round finds
-again only what the record could change (`Offered`, `choose.jl`): what the
-implementations offer for a group, its claims, their estimates and prices
-and each variant's, is of the group, the target and the rates and is kept
-across a preparation's rounds, each group's options grown from the record
-again; the model's rounds after the first take 3.3 and 3.6 s at 16 tokens
-where they took 35 and 34, 8.8 and 3.6 at 64 where 26 and 24 (the 8.8
-pricing once the groups of a plan the first round's times changed), its
-decisions on one record the same line for line, and a second process
-replays them, cross-checked, as it does the corpus's. Every cold and warm
-second of the model above is of one process preparing the chunks of 1, 16
-and 64 tokens in turn, the later two after another's preparation and not
-from nothing. Each in a process of its own, by the corpus's scenarios
-(`test/corpus/run.jl`, the model a program by path), at ac6cd0c on the
-second GB10, two runs: cold 85 to 92, 226 to 227 and 204 to 208 s; on the
-decisions known, building only the plan's kernels, 36, 44 to 47 and 45;
-warm 33 to 37, 44 and 42 to 46; again in the process 3.0, 4.2 and 5.8; and
-measuring nothing 57, 75 and 75 to 78, for a call of 51.1, 53.5 to 53.9 and
-78.8 to 79.5 ms where the measured plans call in 40.8, 49.1 to 49.3 and
-66.5, a quarter, a tenth and a fifth more. Where a cold preparation's
-seconds go by processor (`challengers/prep-threads-2026-11-11`, `cpu.jl`,
-main 247e483 on the second GB10, 20 cores, 12 threads): the model's chunk
-of 16 measured, 160 s, keeps 2.2 cores busy and the GPT step's 148 s keep
-4.9; Julia compiling on the main thread, 25 s of the model's before the
-cover starts; bursts of kernels compiling in processes of their own, 53
-and 96 s of wall in which those processes average 3 and 6 cores, not yet
-explained; timing on the device 8 and 15 s, serial by nature; and asking
-the implementations what they claim and estimate of each group, 24 to 43%
-of the main thread, the one stretch both large and of its arguments
-alone. That is asked side by side now (`offer!`, `side_by_side`), its
-results returned and kept by the caller as a trial's plan is, with no lock
-on the decider's tables: the model's chunk of 16 prepares cold in 136 to
-137 s measured where 159 to 160 and 70 to 71 unmeasured where 83 to 84,
-the GPT step in 138 where 148 to 149 and 33 to 34 where 40 to 42, the
-decisions on one record the same. And a recurrence run a step at a time
-is priced at its run timed whole (`run_whole`, `choose.jl`), its key naming
-the step's kernels, where its price was the sum of those kernels' times,
-each taken alone with its data out of the cache: a step runs among steps
-that left the weights it reads in the cache, and the sum stood 28 to 55%
-over the run, the neural ODE's gradient's recurrence at 11.43 ms where it
-runs in 7.30, which made the ride of its gradient sums a close call the
-estimates refused in three cold preparations of six; it is taken in six of
-six now, each price its run's time, with no rule for ties (the lower
-measurement winning was tried: the same step, 63 to 76 s of preparation
-where 44 to 47, more ties taken being more trials). The LSTM takes a ride
-it did not, a gradient sum added as the backward steps run, 30.34 ms a step
-against 30.70 without it over 15 rounds in one process, 12 of them faster;
-its step runs in two modes, near 30.3 and near 31.0, whatever the plan, not
-explained, and its cold preparation is in the upper of its two, 164 s,
-the cover's round after a proposal taken, timing the runs whole 4.9 s of
-it. The bursts, sampled (`challengers/build-pipeline-2026-11-12`,
-`bursts.jl`, main e269bc2 on tileiras 13.5.37): each lasts as long as its
-slowest compilation, one tileiras process of one thread and the ptxas it
-runs, 2 to 16 s, and those slowest add to 43.3 of the 51.7 s the model's
-chunk of 16 spends in bursts that compile and 97.5 of the GPT step's 103.3;
-most bursts compile nothing. A kernel is loaded or compiled on a thread from
-the moment it is asked for (`cached_kernel`), where no compilation began
-until the stage's last kernel was asked for, 8.2 s of the model's and 3.9
-now, within the spread of the wall. Timing each kernel as it is built,
-while the rest compile, as the owner's autotuner does, is NOT adopted on
-this machine: 80 launches timed idle and under 5, 10 and 20 compilations
-read 1.4 to 1.8, 3.0 and 5.3% slow, the device's clock falling with the
-load on a power budget the processor shares, so a time in the record would
-be of what else ran. Tile variants of a kernel share no inference and a
-shape passed as a constant would be inferred again each, under a second of
-wall. The record and the rates a machine fits are a file per device and
-toolchain (`toolchain`, `record.jl`), a time taken on one tile compiler
-never read for a kernel another built; the shipped rates, fitted on 13.4,
-stand 2.7 times off on Float32 products recomputed and are to be fitted
-again. Fitted again since (three fits on the second GB10: 47 of 48 package
-lines within 10% of each other, 28 function prices zero in one fit and not
-in another, a price being a difference of two timings held to nothing
-under 5%), and no step moved: what the unmeasured plan of the model's chunk
-of 1 gives up, 51.1 ms against 40.6, is 9.1 ms of streamed reductions over
-the weights left at their first tile, a wider one a variant offered only
-once a claim measures best and the estimate the same number whatever the
-tile (32x32 estimated 181 μs and run in 316, 32x128 estimated 181 and run
-in 209), where the time follows the bytes each step of the sweep reads at
-once, level from 128, and a latency a step where the kernel computes its
-vector in the sweep (`challengers/rates-2026-11-12/tiles`); a change of
-the estimate's terms, not made. What compiles slowly, each alone and idle
-(`challengers/slow-compiles-2026-11-12`): tileiras's seconds grow with a
-sweep's count known as it compiles, 0.4 s at 24 steps and 5.8 at 6,288
-where a count read as it runs takes 0.4 and runs 19% slower unaligned;
-short sweeps of large tiles it unrolls whole, 52,000 lines and 13 s, which
-then run 2 to 14 times the winner's time; a little core takes 1.9 times a
-big one's; and no level under the highest both compiles faster and ranks
-kernels alike. The search is a function of the record and the program:
-one record covered twice gives the same trace byte for byte, and six cold
-preparations of the GPT step share 36 or 37 of 38 decisions, parting first
-where an option's time falls either side of the window options grow from
-(5% of the best), by which two of the six never timed the tile that beats
-cuBLAS's 570 μs by 12% in each layer's second projection. A floor a
-decider fails to build is kept as failed and loses every comparison, where
-naming it threw and ended the preparation. What a preparation does unless
-asked is decided by these: nothing is timed (`measure = :none`), the first
-call runs the plan the estimates pick and the plan does not change after;
-`measure = :close` times the close calls, before the first result
-(`search = :before`) or behind it (`search = :after`), and
-`TEMPEST_MEASURE` and `TEMPEST_SEARCH` set what is done unless a keyword
-says. The measuring was the default until now and stood for 60 to 150 s of
-a cold preparation for 0 to 25% of a step; a preparation that measured and
-settled leaves decisions one that measures nothing replays. The search
-behind the first result (`Search`, `Searching`, `src/Compiler/runtime/`)
-prepares the same trace again on a thread of its own and asks its timings
-of the program's calls, one each after the call's own work (`wait(c)`
-takes the rest), since a timing captures a graph and CUDA forbids a
-synchronization of the device from any task while one is captured; the
-first call after it ends runs the plan it found, the state in the caller's
-arrays. On the first GB10, small shapes, one run each: the LSTM's first
-result in 24 s where 61 and the GPT step's in 32 where 160, 29 and 53
-kernels compiled before it where 192 and 721, the measured plan 61 and 176
-s after, calls meanwhile 6.1 and 2.1 ms at the median and 565 and 981 at
-the slowest. It is not what is done unless asked because calls then vary
-and the plan changes at a call nobody chose. Builds side by side are each
-waited for before the first that failed is thrown (`ended_all`), where the
-rest went on compiling beside the timings that followed. A function that
-returns its state as new arrays is another program than one that writes
-it: the GPT step unmeasured, 166 kernels and 1.47 ms where the results
-replace the inputs' storage in 170 and 1.17. The model with a batch, B
-sequences through one `forward!` each at its own positions (Vallmo's
-branch `tempest`, 213 lines, an engine of 147 where the kernels were 1,311
-and the old model and loop 626), asked three things of Tempest. Its caches
-are written by a loop over the sequences, each its own positions: B
-overwrites by key chained, alike but for the sequence, which are one
-overwrite with one more axis where a key's component keeps each step's
-positions apart (`joined_writes`, `src/Compiler/plan/writes.jl`), one
-kernel a cache at any B. An array of `CartesianIndex{N}` among other
-indices stands for N axes as in Base (`selection`). And a fold by key
-written into the caller's array started from a copy of the whole array: the
-test that its contents are its own storage compared the two buffers as
-objects, and values over one argument each hold a vector of it made apiece
-(`same_storage`), so a write of 2 KiB into a cache of 16 MiB took 106 μs
-and takes 1.9, flat in the cache and in B. Before these, on plans that
-measure nothing, the 4B decodes a token of each sequence in 49.8, 64.0 and
-91.7 ms at B of 1, 4 and 16, 20, 63 and 174 tokens a second, the writes
-24.7 ms of the last; Vallmo's kernels 37.9 at B of 1; and the same file
-untraced on the device, Einops contracting through a copy of each weight,
-about 3 s whatever B. After them the 4B decodes in 49.6, 62.7 and 68.8 ms
-at B of 1, 4 and 16, 233 tokens a second at 16, the caches written by one
-statement over an array of Cartesian indices as fast as by the loop. The
-challenger, the same file under Reactant 0.2.308 on the first GB10
-(`challengers/vallmo-reactant-2026-11-12`, its preallocation off): it
-runs after 9 lines changed, traced positions having no `CartesianIndex`,
-so a scatter a sequence, and `argmax` over a dimension returning linear
-indices; Einops contracts through its own extension, BFloat16 is a type it
-has, and the states are donated and written in place. It decodes in 43.3,
-48.8 and 72.6 ms at B of 1, 4 and 16, a 64-token chunk in 73 to 76 where
-Tempest's takes 74 to 77, its BFloat16 as far from Float32 as Tempest's
-(0.006 to 0.008 of a state's norm), a shape compiled in 17 to 30 s after
-the process's first 70, the chunk of 64 unrolled in 82 s, or in 10 by its
-own loop construct, which then runs it in 123 to 129 ms. Tempest's plans
-here measure nothing: at B of 1 the 6 ms are the streamed reductions left
-at their first tile, which the plan that measures takes back to about 41;
-at B of 4 the 14 ms are not accounted for, products of four columns the
-first suspect. Accounted for since, each kernel of the three plans timed
-alone and matched by what it computes (`challengers/batch4-2026-11-12`,
-the sums within 1.5% of the step at B of 1 and 4): of the 12.6 ms a step
-grows by from 1 sequence to 4, 5.1 are the attention layers' output
-projection, which at 4 alone recomputes the softmax's weighted sum inside
-its product, 800 μs a kernel on an estimate of 104, the recomputed fold
-priced at the product line's recompute rate where each of 20 row tiles
-does its exponentials at a scalar's; 5.1 are the projections whose groups
-carry a norm or an activation, products of 128x4x32 tiles at 389 to 530 μs
-where the bare product by cuBLAS takes 215 to 390, a library product no
-group with a fused prologue or epilogue is offered, and no claim reads
-each weight once for a handful of results a step as the streamed kernel
-does for one; 2.5 are the delta rule's state, B times the bytes in four
-passes, which is also the step's growth from 4 to 16, where the products
-of 16 columns cost less than at 4. The plan that measures did not prepare
-at B of 4 under 64 GB. Reactant's last line, `mapslices(argmax, logits; dims = 1)`,
-Tempest refused, and the refusal was taken as one case of a family, the
-same computation on each slice of an axis, surveyed in 40 spellings
-(`challengers/map-axis-2026-11-12/table.md`): `mapslices` of a function
-returning a number refused, `map` and a broadcast over `eachcol` returning
-handles of the trace in a constant, a wrong answer and no error. A map a
-program states, `mapslices`, `map`, a broadcast or `stack(f, ...)` over
-slices, is traced once on a slice as a loop with no state, which lowering
-already batches over an axis of steps, one kernel at any B; rolling and
-joined writes are the other two ways into that one form and are to be one.
-The second family, a host container of traced values that reaches the
-program, 58 spellings (`containers_table.md` there), 16 of them wrong
-without an error: a comprehension of traced numbers was taken for data,
-its elements being numbers. A host container is the trace's own
-arrangement of what it holds, opened as a vector of traced arrays is and
-returned as the same code returns it untraced, a host array of numbers;
-where it meets an operation that needs an array of the program it is
-refused with what to write instead; and no operation that holds a handle
-can be recorded (`holds_handle`). A traced number stands for a number
-wherever one may be but where Julia needs a plain one, a branch, a store
-typed plain, a hash, the first two found by Julia itself where it takes the
-value and explained there as branches were (27 spellings, `plain_table.md`);
-a host vector of traced numbers written into an array of the program is
-written as Base's loop writes it, an element a write, joined, two kernels
-at 3 elements and at 64. Rolling was to take the joined writes as a loop
-whose state is only written, and could not state the write: a write's
-indices are an index an axis, and each sequence at its own positions is a
-diagonal over two, said only by merging them and writing at linear
-indices, which the tracer alone could build. That construction is one
-place now (`linear_index`), the tracer's for Cartesian indices and
-lowering's for a gather or a write whose indices differ a step, five
-spellings refused before and one loop each at any B. And a handle that
-outlives its node: a value stored from inside a loop a gradient rolled,
-read after the gradient returned, read the constant the roll left, zeros
-and no error, 10 spellings, and an eager call left traced arrays in what
-it stored, 24; a handle names its node while its function is traced and
-until a roll retires the node, and a read of anything else is an error
-(`named`, a flag on the tape and one retired node), at no cost to a trace
-that can be measured. Rolling itself was sound: interpreted before and
-after, the corpus and 200 seeds agree to rounding. Rolling then builds the
-rolled program as new nodes, where it rewrote the window's in place: a
-gradient appends them and the trace's end keeps what a result or a handle
-read reaches, so a value that escaped a rolled loop is its value again (20
-spellings refused the day before), a 3,000-step loop under a gradient
-traces in 143 ms where 490; and it says of each state a loop touches
-whether it is carried and read, a recurrence, or only written where the
-steps keep apart, a map and one write, or none, a map, which rolls from
-two steps where a recurrence needs three (the three were reasoned of
-recurrences and never measured: a write loop of two over 16M elements,
-1,221 μs rolled and 1,819 not). An index a program computes from others by
-sums, differences and multiples is a formula of the kernel that uses it
-(`formula`, `index/lower.jl`), not a value a kernel stores first, a
-Cartesian read or write one kernel where two. With these the pass that
-joined writes after lowering is gone (`plan/writes.jl`, 277 lines). On the
-estimates, which are every plan's unless asked: a kernel timed alone took 2
-to 3.6 times its time in the program wherever its step divides, the 4B's
-down projection 709 μs alone and 313 in the program, by neither the kernel
-nor the addresses but the data, a timing's buffers being zeros and a
-division by zero the device's slow path; a timing's floats are spread from
-1 to 2 now (`held_floats!`), the basis a record names bumped, the rates
-fitted again, a division's price a fourth of what it was. The estimate
-states the steps a block takes one after another and what each computes
-(`Work.steps`, `stepped`), fitted as the other rates are, and ranks a
-kernel's tiles of one kept extent as their times do, 0 of 195 pairs wrong
-where all 234; and a fold recomputed inside another kernel adds the steps
-of its own sweep (`refold_steps`), so that the softmax's sum is no longer
-recomputed in the next projection at B of 4. The 4B decodes in 49.4, 57.5
-and 68.6 ms at B of 1, 4 and 16, where 49.6, 62.5 and 69.3, against the
-challenger's 44.7, 49.5 and 73.3. Unmeasured, a claim's variant that
-differs from it in its steps alone and is estimated past the estimate's
-error below it stands in its place (`standing_variants`, the two stated
-works compared, no kind of kernel named): two families of the 1-token
-program take a step of 128 where 32, 43.9 ms where 49.4. The share of the
-device a launch of few blocks reaches was counted twice for one that
-sweeps in steps, its steps a block already the limit (estimates 1.4 to 2
-times the time under 48 blocks, 0.80 to 0.93 after, as above them). A load
-through an index was counted as the whole value it indexes, a row of the
-embedding as its 1.27 GB, 4.7 ms for a kernel of 182 μs: a load visits an
-element a point of the axes its index mentions (`reached_elements`). And
-what four sequences lost was not a product of four columns, which every
-form runs at the memory's rate from 2 to 16, but a product whose factor
-its own kernel computes, a norm or an activation before it, 377 to 515 μs
-fused where the library's product and the factor's kernel take 216 to
-418, and the library refused it, its template's term being the product of
-loads: a library proposes a fold that is its template up to its factors,
-the factors stored (`factors_stored`, `Candidate`'s stored values), 185
-folds of the model. The 4B decodes in 44.0, 51.9 and 66.9 ms at B of 1, 4
-and 16 and a chunk of 64 tokens in 64 to 65 where 74 to 76, the
-challenger's 70.7 to 72.9; what the proposal is taken on unmeasured is two
-estimates that do not yet see the tile nor the factor, within 0.2 to 14 μs
-of each other. A
-`push!` of a traced array into a vector of arrays of another element type
-converts it, as Base's does (`TracedArray{T, N}(x)`, `tracing.jl`). Challengers: Vallmo's captured step and its eager prefill,
-stated most plainly at its commit `16b2df6` (a model of 336 lines, an engine
-of 167, kernels of 1,307); the same file under Reactant; the same file eager.
-Judged by tokens equal to Vallmo's on its tiny checkpoint (`test/tiny.jl`) and
-on the 4B in BFloat16; a captured decode step within 1.1 times Vallmo's at
-every length of the cache (the decode entries below hold 39.3 to 43.6 ms
-against 39.7 to 44.9, by a script no repository kept); a prefill against
-Vallmo's; and the lines that remain against those removed. Recorded 10
-November, on the CPU target at toy sizes
-(`~/dev/jool/challengers/vallmo-2026-11-10`, the model 268 lines): 59 of 60
-programs trace, plan and agree with Float64, in Float32 and in BFloat16, among
-them a whole model's decode step, its prefill, a suffix prefill over a
-restored state, eight tokens generated greedily and a decode loop of `replay!`
-alone; a chunk of 8 padded positions serves lengths 1 to 8 from one
-preparation; the one refused was the `push!`, which converts now. None of it had run on a device at
-the model's shapes when this was recorded, the script lost; what has since is
-in the paragraphs after this one.
+decode step its case of one token and a prefill its case of T, run eagerly
+as it is, compiled by Tempest and traced by Reactant, from one file that
+names none of them. What of Tempest stands trial with it is what such a file
+asks: `compile` and the call it returns (`src/Compiler/runtime/compile.jl`,
+`runtime.jl`), the tracer's families of spellings (`src/Compiler/program/`),
+rolling (`program/roll.jl`), the recurrences' rides
+(`src/Compiler/plan/recurrences.jl`), and the search and the estimates a
+preparation decides by (`src/Compiler/cover/`). Challengers: Vallmo's
+captured step and its eager prefill, stated most plainly at its commit
+`16b2df6` (a model of 336 lines, an engine of 167, kernels of 1,307); the
+same file under Reactant; the same file eager. Judged by tokens equal to
+Vallmo's on its tiny checkpoint (`test/tiny.jl`) and on the 4B in BFloat16;
+a captured decode step within 1.1 times Vallmo's at every length of the
+cache (the decode entries below hold 39.3 to 43.6 ms against 39.7 to 44.9,
+by a script no repository kept); a prefill against Vallmo's; and the lines
+that remain against those removed.
+
+Standing. The model with a batch is 213 lines and an engine of 147 (Vallmo's
+branch `tempest`), where the kernels were 1,311 and the old model and loop
+626. On the GB10 at c6b68b6, 13 November, on plans that measure nothing (the
+estimate on a second device, below): the 4B decodes one sequence in 37.56
+ms, measured 37.67, against Vallmo's kernels' 37.9; 4 and 16 sequences in
+47.27 and 62.27; a chunk of 16 and of 64 tokens in 44.59 and 57.35. The same
+file under Reactant 0.2.308, 12 November: 43.3 to 44.7, 48.8 to 49.5 and
+72.6 to 73.3 ms at 1, 4 and 16 sequences, a chunk of 64 tokens in 70.7 to
+76. Chunks and one token at a time part on a 3,500-token prompt at decode
+token 10, two logits 0.02 to 0.21 apart at 22. What the file asked of
+Tempest and what each answer measured is decided below, each entry named "A
+model written once"; the long form, one paragraph of 377 lines, is this file
+at 322c2d0. Its preparation's seconds are in Time to first execution, above.
+
+Open, named:
+
+- A prefill's extent is the prompt's length (Sizes are constants, above); a
+  chunk padded to a fixed extent serves every length up to it.
+- A plain loop over the compiled `forward!` stands 1.8% over the graph's
+  replays, the walk of its 541 leaves and the token read on the host each
+  step.
+- The plan that measures did not prepare at 4 sequences under 64 GB.
+- A value riding a recurrence's steps must lie along each of its lanes
+  (`fits_steps`), a refusal the search needs and not what a ride is; and
+  each ride offered plans its recurrence's step again from nothing, the
+  LSTM's cold preparation 162 s where 82 for the same plan.
+- A measured tie has no rule. The lower measurement winning was tried: the
+  same step, 63 to 76 s of preparation where 44 to 47.
+- Options grow from a window of 5% of the best, and six cold preparations of
+  the GPT step part where an option's time falls either side of it: two of
+  the six never timed the tile that beats cuBLAS's 570 μs by 12% in each
+  layer's second projection.
+- The LSTM's step runs in two modes, near 30.3 and near 31.0 ms, whatever
+  the plan, and its cold preparation in two, 136 to 141 s and 162 to 164, by
+  one measured candidate; neither explained.
+- Timing a kernel while others compile reads 1.4 to 5.3% slow on the GB10,
+  whose clock falls with the load on a power budget the processor shares, so
+  builds and timings stay apart there.
+- What compiles slowly, each alone: tileiras's seconds grow with a sweep's
+  count known as it compiles, 0.4 s at 24 steps and 5.8 at 6,288, where a
+  count read as it runs takes 0.4 and runs 19% slower unaligned; short
+  sweeps of large tiles it unrolls whole, 52,000 lines and 13 s, which then
+  run 2 to 14 times the winner's time; and no level under the highest both
+  compiles faster and ranks kernels alike
+  (`challengers/slow-compiles-2026-11-12`).
+- The search behind a first result (`search = :after`) is not what is done
+  unless asked, since calls then vary and the plan changes at a call nobody
+  chose.
 
 **Block-scaled quantized products.** A weight in MXFP8, MXFP4 or NVFP4 is
 narrow elements with a scale to each block of 32 or 16 along the axis a
@@ -1781,6 +1475,236 @@ preparation, the LSTM's 15.3 s to 21.1. The comparison is a crosscheck of
 its own (TEMPEST_CROSSCHECK), which the tests turn on and nothing else does.
 The corpus prepares with every plan verified, the cover's trials among them:
 0.06 to 0.67 s of a cold preparation, under 1%.
+
+**A model written once: on the CPU at toy sizes, 59 of 60 programs agree.**
+Recorded 10 November (`~/dev/jool/challengers/vallmo-2026-11-10`, the model
+268 lines): 59 of 60 programs trace, plan and agree with Float64, in Float32
+and in BFloat16, among them a whole model's decode step, its prefill, a
+suffix prefill over a restored state, eight tokens generated greedily and a
+decode loop of `replay!` alone; a chunk of 8 padded positions serves lengths
+1 to 8 from one preparation. The one refused was a `push!` of a traced array
+into a vector of arrays of another element type, which converts it now as
+Base's does (`TracedArray{T, N}(x)`, `tracing.jl`).
+
+**A model written once: a compiled call writes into the caller's arrays and
+is built on them, adopted.** `compile` writes what the program writes into
+an argument where the caller has it, the kernels and copies that use the
+argument pointed at each call's array (`point!`,
+`src/Compiler/runtime/runtime.jl`), where it copied every written array in
+before each call and back after; and a call walks the 4B's 541 leaves once
+into a record of each array and its address (`bound`, `compile.jl`), about
+0.5 ms of the host's a token where four walks took 5. A plain loop over the
+compiled `forward!` at extent 512 takes 39.5 to 39.6 ms a token where main
+took 44.7 to 45.2, against 38.1 to 38.3 for the step's `replay!` and 38.8 to
+38.9 for `forward!`'s own graph replayed, tokens equal. A compiled call
+holds no copy of the arrays it is given, a buffer made for an argument only
+when a call first copies one in (`own!`): the 4B step holds 8.5 MiB of the
+device beyond its weights and states where it held 8,336, its chunks of 1,
+4, 16 and 64 tokens together 1.75 GiB where 35. A fold by key written into
+the caller's array started from a copy of the whole array, the test that its
+contents are its own storage comparing two buffers as objects
+(`same_storage`): a write of 2 KiB into a cache of 16 MiB 106 μs to 1.9.
+
+**A model written once: tracing and lowering about linear in a loop's steps,
+adopted.** `copyto!` of a range without a view
+(`src/Compiler/program/updates.jl`), `Periods` (`program/roll.jl`) and
+`Pieces` (`index/lower.jl`): `forward!` at 256 tokens traces in 1.5 s and
+lowers in 6.7 where it took 133.5 and 135.1, at 1,024 in 5.8 and 27.1, the
+programs and index graphs the same.
+
+**A model written once: the attention's output projection builds at 4
+tokens, adopted.** Its softmax's weights are summed inside its product, and
+their tile was shaped by every axis the scores' index mentions, no claim on
+it building (`tile_spans`, `ext/cuTileExt/emit.jl`). The chunk's decisions
+settle, a second process replaying them in 47 s where each covered again in
+111, and with nothing measured the chunk of 16 calls in 60.9 ms where 106.9.
+
+**A model written once: a value of one step of a recurrence rides its steps,
+adopted.** The delta rule's recurrence stored its state at every step for a
+second kernel to read back, 46.8 ms of a 64-token call's 99 against 21.5 for
+Vallmo's. A value computed from one step and that step's inputs rides the
+steps, along them or at their last, by the cover's price, as a sum over them
+does (`Meeting`, `src/Compiler/plan/recurrences.jl`), and a state is stored
+only where something outside its group reads it. Measured, the 4B's chunk of
+64 tokens calls in 67.8 ms where 99.0 and of 16 in 50.4 where 55.8, the
+chunk of 64 storing 698 MiB where 6.68 GiB and preparing cold in 141 s where
+232. Two faults of main stood behind it: a recurrence's floor counted its
+bytes in an Int that nested recomputed folds wrapped below zero, a floor
+cheaper than any kernel (`recurrence_floor_estimate`, `cost.jl`); and cuTile
+computed a fold recomputed inside another at every step of the outer one
+where its estimate counted it once (`emit_fold!`), a recurrence kernel 3,967
+μs against an estimate of 261, and 359 after.
+
+**A model written once: a timing has a bound, and a settling round finds
+again only what the record could change, adopted.** Under `:close` a
+comparison a record refutes was measured whole, the 4B's layer output riding
+priced at 1.5e6 s and timed all the same. The side known faster is timed
+whole and the other, its dearest kernel first, until it has lost, a kernel
+priced past the bound beyond its estimate's error never begun
+(`measure_sides!`, `src/Compiler/cover/choose.jl`); preparation is as long
+as before, heat 27.4 and 27.3 s, the GPT 154 and 151. The 16-token chunk's
+226 s cold were a first cover of 135 and two settling rounds of 35 each that
+built nothing and timed one kernel between them. What the implementations
+offer for a group is of the group, the target and the rates and is kept
+across a preparation's rounds (`Offered`): the rounds after the first take
+3.3 and 3.6 s at 16 tokens where 35 and 34, 8.8 and 3.6 at 64 where 26 and
+24, the decisions the same line for line.
+
+**A model written once: the implementations asked side by side, adopted.**
+Where a cold preparation's seconds go by processor
+(`challengers/prep-threads-2026-11-11`, 20 cores, 12 threads): the model's
+chunk of 16 measured, 160 s, keeps 2.2 cores busy and the GPT step's 148 s
+keep 4.9; asking the implementations what they claim and estimate of each
+group was 24 to 43% of the main thread. It is asked side by side (`offer!`,
+`side_by_side`), with no lock on the decider's tables: the chunk of 16
+prepares cold in 136 to 137 s measured where 159 to 160 and 70 to 71
+unmeasured where 83 to 84, the GPT step in 138 where 148 to 149 and 33 to 34
+where 40 to 42, the decisions on one record the same.
+
+**A model written once: a recurrence run a step at a time is priced at its
+run timed whole, adopted.** Its price was the sum of its step's kernels'
+times, each taken alone with its data out of the cache, 28 to 55% over the
+run: the neural ODE's gradient's recurrence 11.43 ms where it runs in 7.30,
+which made the ride of its gradient sums a close call the estimates refused
+in three cold preparations of six. Priced at the run (`run_whole`,
+`choose.jl`), it is taken in six of six. The LSTM takes a ride it did not, a
+gradient sum added as the backward steps run, 30.34 ms a step against 30.70
+over 15 rounds, 12 of them faster.
+
+**A model written once: a kernel compiles from the moment it is asked for;
+the record a file per device and toolchain, adopted; timing beside
+compiling, not adopted.** The bursts, sampled
+(`challengers/build-pipeline-2026-11-12`, e269bc2 on tileiras 13.5.37): each
+lasts as long as its slowest compilation, one tileiras process of one thread
+and the ptxas it runs, 2 to 16 s, and those slowest add to 43.3 of the 51.7
+s the model's chunk of 16 spends in bursts that compile and 97.5 of the GPT
+step's 103.3. A kernel is loaded or compiled on a thread from the moment it
+is asked for (`cached_kernel`), where none began until the stage's last was
+asked for, 8.2 s of the model's and 3.9 now. Timing each kernel as it is
+built while the rest compile is not adopted on the GB10: 80 launches timed
+idle and under 5, 10 and 20 compilations read 1.4 to 1.8, 3.0 and 5.3% slow.
+The record and the rates a machine fits are a file per device and toolchain
+(`toolchain`, `record.jl`); the shipped rates, fitted on tileiras 13.4,
+stood 2.7 times off on Float32 products recomputed and were fitted again,
+three fits agreeing in 47 of 48 package lines within 10%, and no step moved.
+Builds side by side are each waited for before the first that failed is
+thrown (`ended_all`), and a floor a decider fails to build is kept as failed
+and loses every comparison, where naming it threw.
+
+**A model written once: a preparation measures nothing unless asked,
+adopted.** Nothing is timed (`measure = :none`), the first call runs the
+plan the estimates pick and the plan does not change after; `measure =
+:close` times the close calls, before the first result (`search = :before`)
+or behind it (`search = :after`), and `TEMPEST_MEASURE` and `TEMPEST_SEARCH`
+set what is done unless a keyword says. The measuring was the default and
+stood for 60 to 150 s of a cold preparation for 0 to 25% of a step; a
+preparation that measured and settled leaves decisions one that measures
+nothing replays. The search behind the first result (`Search`, `Searching`)
+prepares the same trace again on a thread of its own and asks its timings of
+the program's calls, one each: the LSTM's first result in 24 s where 61 and
+the GPT step's in 32 where 160, the measured plan 61 and 176 s after, calls
+meanwhile 6.1 and 2.1 ms at the median and 565 and 981 at the slowest. The
+search is a function of the record and the program: one record covered twice
+gives the same trace byte for byte, and six cold preparations of the GPT
+step share 36 or 37 of 38 decisions. A function that returns its state as
+new arrays is another program than one that writes it: the GPT step
+unmeasured, 166 kernels and 1.47 ms where the results replace the inputs'
+storage in 170 and 1.17.
+
+**A model written once: the model with a batch, its writes joined,
+adopted.** B sequences through one `forward!`, each at its own positions.
+Its caches are written by a loop over the sequences: B overwrites by key
+chained, alike but for the sequence, are one overwrite with one more axis,
+one kernel a cache at any B; an array of `CartesianIndex{N}` among other
+indices stands for N axes as in Base (`selection`). On plans that measure
+nothing the 4B decoded a token of each sequence in 49.8, 64.0 and 91.7 ms at
+B of 1, 4 and 16, the writes 24.7 ms of the last, and after them in 49.6,
+62.7 and 68.8, 233 tokens a second at 16; the same file untraced on the
+device takes about 3 s whatever B, Einops contracting through a copy of each
+weight.
+
+**A model written once: the same file under Reactant, the challenger's
+numbers.** Reactant 0.2.308 on the first GB10, its preallocation off
+(`challengers/vallmo-reactant-2026-11-12`): it runs after 9 lines changed,
+traced positions having no `CartesianIndex`, so a scatter a sequence, and
+`argmax` over a dimension returning linear indices; Einops contracts through
+its own extension, BFloat16 is a type it has, and the states are donated and
+written in place. It decodes in 43.3, 48.8 and 72.6 ms at B of 1, 4 and 16
+(44.7, 49.5 and 73.3 in a later sitting), a 64-token chunk in 73 to 76 (70.7
+to 72.9), its BFloat16 as far from Float32 as Tempest's, 0.006 to 0.008 of a
+state's norm; a shape compiles in 17 to 30 s after the process's first 70,
+the chunk of 64 unrolled in 82 s, or in 10 by its own loop construct, which
+then runs it in 123 to 129 ms.
+
+**A model written once: a refusal is one case of a family of spellings, each
+family answered whole, adopted.** Reactant's last line, `mapslices(argmax,
+logits; dims = 1)`, Tempest refused. The same computation on each slice of
+an axis, 40 spellings (`challengers/map-axis-2026-11-12/table.md`), some
+returning handles of the trace in a constant, a wrong answer and no error: a
+map a program states, `mapslices`, `map`, a broadcast or `stack(f, ...)`
+over slices, is traced once on a slice as a loop with no state, one kernel
+at any B. A host container of traced values that reaches the program, 58
+spellings, 16 of them wrong without an error: it is the trace's own
+arrangement of what it holds, opened as a vector of traced arrays is,
+refused with what to write instead where an operation needs an array of the
+program, and no operation that holds a handle can be recorded
+(`holds_handle`). A traced number where Julia needs a plain one, a branch, a
+store typed plain, a hash, 27 spellings, explained where Julia takes the
+value. A write whose indices differ a step, each sequence at its own
+positions a diagonal over two axes, is one construction of linear indices
+for the tracer and for lowering (`linear_index`), five spellings refused
+before. A handle that outlives its node, a value stored from inside a loop a
+gradient rolled reading zeros after, 10 spellings, and an eager call leaving
+traced arrays in what it stored, 24: a handle names its node while its
+function is traced and until a roll retires the node, and a read of anything
+else is an error (`named`). Rolling was sound throughout, the corpus and 200
+seeds agreeing to rounding interpreted before and after.
+
+**A model written once: a roll builds the rolled program as new nodes and
+classifies a loop's states, adopted.** Where it rewrote the window's nodes
+in place, a gradient appends the new ones and the trace's end keeps what a
+result or a handle reaches, so a value that escaped a rolled loop is its
+value again (20 spellings refused the day before), a 3,000-step loop under a
+gradient tracing in 143 ms where 490. Of each state a loop touches it says
+whether it is carried and read, a recurrence, or only written where the
+steps keep apart, a map and one write, or none, a map, which rolls from two
+steps where a recurrence needs three: a write loop of two over 16M elements,
+1,221 μs rolled and 1,819 not. An index a program computes from others by
+sums, differences and multiples is a formula of the kernel that uses it
+(`formula`, `index/lower.jl`), a Cartesian read or write one kernel where
+two. With these the pass that joined writes after lowering is gone
+(`plan/writes.jl`, 277 lines).
+
+**A model written once: the estimates every plan stands on unless asked, six
+corrections, adopted.** A kernel timed alone took 2 to 3.6 times its time in
+the program wherever its step divides, the 4B's down projection 709 μs alone
+and 313 in the program: a timing's buffers were zeros and a division by zero
+the device's slow path; a timing's floats are spread from 1 to 2
+(`held_floats!`), the rates fitted again, a division's price a fourth of
+what it was. The estimate states the steps a block takes one after another
+(`Work.steps`, `stepped`) and ranks a kernel's tiles of one kept extent as
+their times do, 0 of 195 pairs wrong where all 234; a fold recomputed inside
+another kernel adds the steps of its own sweep (`refold_steps`): the 4B
+decodes in 49.4, 57.5 and 68.6 ms at B of 1, 4 and 16 where 49.6, 62.5 and
+69.3. Unmeasured, a claim's variant that differs in its steps alone and is
+estimated past the estimate's error below it stands in its place
+(`standing_variants`), 43.9 ms at one token where 49.4. The share of the
+device a launch of few blocks reaches was counted twice for one that sweeps
+in steps (estimates 1.4 to 2 times the time under 48 blocks, 0.80 to 0.93
+after). A load through an index was counted as the whole value it indexes, a
+row of the embedding as its 1.27 GB, 4.7 ms for a kernel of 182 μs
+(`reached_elements`). What four sequences lost, each kernel of the three
+plans timed alone (`challengers/batch4-2026-11-12`): of the 12.6 ms a step
+grows by from 1 sequence to 4, 5.1 were the attention's output projection
+recomputing the softmax's sum inside its product, 5.1 the projections whose
+groups carry a norm or an activation, and 2.5 the delta rule's state; a
+product whose factor its own kernel computes ran 377 to 515 μs fused where
+the library's product and the factor's kernel take 216 to 418, and the
+library refused it, so a library proposes a fold that is its template up to
+its factors, the factors stored (`factors_stored`), 185 folds of the model.
+The 4B decodes in 44.0, 51.9 and 66.9 ms at B of 1, 4 and 16 and a chunk of
+64 tokens in 64 to 65 where 74 to 76; what follows is the estimate on a
+second device (Open).
 
 **BFloat16 attention's forward: matrices from one product to the next,
 adopted.** On trial was the product kernel's tiles laid out in the full rank
