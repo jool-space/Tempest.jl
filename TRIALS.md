@@ -17,822 +17,90 @@ or the challenger does not fit a stated constraint, named.
 **Time to first execution, cold and warm.** From `using Tempest` to a
 program's first result: cold, in a new process with an empty kernel cache
 and no record; warm, in a new process whose cache holds every kernel and
-whose record holds every time. The GPT step's cold preparation is 142 s
-(the schedules trial's table); `test/bench/prepare.jl` times each
-guard-rail program's trace, plan, build and first execution and counts the
-kernels loaded and compiled, and its totals are the baseline to record
-first. What stands trial: the precompile workloads (`src/precompile.jl`,
-`ext/cuTileExt/precompile.jl`), the kernel cache
+whose record holds every time. What stands trial: the precompile workloads
+(`src/precompile.jl`, `ext/cuTileExt/precompile.jl`), the kernel cache
 (`src/Compiler/runtime/cache.jl`), the cover's measuring of close calls and
-its calibration (`src/Compiler/cover/choose.jl`, `calibrate.jl`), and one
-function compiled per kernel (`generated`). Challengers, by what each
-solved: tinygrad's cache, every compiled kernel and every search result in
-one database keyed by source (`tinygrad/helpers.py`, `diskcache`), for the
-warm case needing nothing but loads; JAX's persistent compilation cache and
-torch.compile's FX graph cache, which key a whole program rather than a
-kernel; and for the cold case, what a precompile workload can hold without
-a device, where cuTile's own compile is the floor. Judged by the seconds to
-the first result, cold and warm, on prepare.jl's programs and the GPT step,
-with the compiled step's time, which must not lose beyond the noise. The
-schedule search's cold cost (decided below) is one part of this.
+its calibration (`src/Compiler/cover/choose.jl`, `calibrate.jl`), the
+decisions a cover keeps (`reached.jl`), and one function compiled per kernel
+(`generated`). Challengers, by what each solved: tinygrad's cache, every
+compiled kernel and every search result in one database keyed by source
+(`tinygrad/helpers.py`, `diskcache`), for the warm case needing nothing but
+loads; JAX's persistent compilation cache and torch.compile's FX graph
+cache, which key a whole program rather than a kernel; and for the cold
+case, what a precompile workload can hold without a device, where cuTile's
+own compile is the floor. Judged by the seconds to the first result, by the
+corpus's runner, each scenario in a new process, with the compiled step's
+time, which must not lose beyond the noise; the corpus's gate is a cold
+preparation under 60 s.
 
-The baseline, each in a new process without the startup file, wall seconds:
-prepare.jl's programs cold 98 and warm 34, the GPT step cold 126 and warm 44
-(its preparation 120 and 37). Warm was 99% Julia compilation: the workloads
-covered only the CPU target, and the launch path compiled a specialization
-per kernel. Cold adds one kernel compiled per second, serialized, and three
-quarters of them are candidates the search times and discards. Taken so
-far: a preparation that builds nothing, so the workloads cover the CUDA
-planning path; no specialization per kernel; every proposal's trial planned
-in parallel; a grouped five-axis attention in the workloads. After them:
-prepare.jl's programs warm 20, the GPT step's preparation warm 19.6 and
-cold 85.6. Still open: the kernels compiled and discarded, and their serial
-compilation.
+Standing, on the GB10 at fbbd619 on tileiras 13.5.37, 12 November
+(`~/dev/jool/challengers/scoreboard-2026-11-11/table-fbbd619-fresh.txt`),
+seconds to the first result for heat, the neural ODE, the LSTM at batch 64,
+test/bench/gpt.jl's step, and Qwen3.5-4B at 1, 16 and 64 tokens. Cold,
+measuring close calls: 27.4 to 27.6, 36.9 to 38.8, 89.0 to 89.7, 70.8 to
+71.2, and 67 to 72, 137 to 139 and 143 to 147. Cold, measuring nothing, the
+default since 59c12f3: 17.6 to 17.9, 21.3 to 21.5, 22.5 to 22.6, 22.7 to
+22.8, and 47 to 48, 69 to 72 and 70. Warm: 12, 14 to 16, 13 to 15, 14 to 15,
+and 36, 43 to 44 and 42 to 46. The baseline was the GPT step cold in 126 s
+and warm in 44. What was taken, and what was measured and left, is decided
+below, each entry named "First execution"; their long form, with its tables
+of phases, is this file at 776a4dc. What 11 and 12 November took, a
+comparison timed only until it has lost, claims asked on threads and a
+preparation that measures nothing unless asked, is recorded in A model
+written once.
 
-Worker processes for compilation (tinygrad's BEAM pool), tried and NOT
-adopted. The premise was wrong: a process compiles kernels in parallel on
-its threads already (16 distinct GPT kernels: 666 ms each in sequence, 92
-ms each on threads); the one-thread run that suggested otherwise was bound
-by calibration's references, built one at a time. A pool of eight warmed
-workers lost on every measurement: the calibrated GPT step with cold
-kernels 60.8 s locally against 69.3 s, 236 ms per kernel through the pool
-against 92 on threads, a worker's first kernel 6 to 9 s. The patch is
-`compile-workers.patch` in the session's scratchpad. What the intervals
-showed instead: compiles arrive in bursts of twelve to sixteen, one group's
-candidates at a time, between stretches of one at a time. Taken: every
-group's measured candidates built at once before any decision
-(`prebuild!`), the calibrated GPT step with cold kernels 65.7 to 51.0 s;
-the harness's cold GPT preparation 85.6 to 71.6 s. What remains cold, on a
-calibrated device: one burst of compiles (about 20 s), the candidates timed
-one at a time, and the warm work; on a fresh device, calibration's
-references built one at a time (about 25 s). Taken next: every function a
-plan applies priced together, the references built side by side
-(`fit_applied_all!`, `price_all!`): one precision's calibration 24.6 s
-against about a minute, prices within the noise of the sequential ones, the
-GPT step's cold preparation 71.6 to 63.0 s.
+Open, named:
 
-Taken next: the staged search of a product's tiles (decided below), the GPT
-step's cold preparation 63.0 to 55.1 s, prepare.jl's programs 68.6 to
-63.2 s. Then measured and closed without a change, each on the cold GPT
-preparation with every compile burst and every timing wrapped. The kernels
-of the groups the search never touches, compiled last: 27 kernels in a
-2.5 s concurrent burst, and compile throughput is the bound, so an earlier
-burst would take as long; 7 of them run on buffers that alias (results
-written in place), whose keys a build on the decider's separate buffers
-cannot serve. Timing the candidates one at a time: 140 launches timed in
-1.2 s. The cover's trials searched together ahead of pricing, rather than
-one group at a time inside each comparison (`trials-batch.patch` with the
-session): the small bursts fell from about 10 s to 4 s, but the batch
-fitted four reference functions and measured ten candidates the
-sequential pricing never reaches, and lost the A/B, 54.5, 54.3, 53.9 s
-against 55.8, 56.3, 54.5. Each group's claims and estimates found once
-rather than by `price_all!` and `options!` each: no change, 55.0, 54.7,
-55.3 against 55.4, 55.1, 54.8; the 2.7 s charged to the second pass was
-Julia compiling the first. Standing, each in a new process: the GPT step's
-preparation warm 37 to 20 s and cold 120 to 55 s; prepare.jl's programs
-warm 27 to 13 s in the process, cold 92 to 63. The cold GPT preparation
-now: compile bursts 12 to 16 s for 130 kernels, of which the search on the
-generator's plan 7 s for 84; timings 1 s; the front end 5.5 s; the device's
-calibration 6.7 s; and about 25 s of CPU work in the cover, planning 81
-trials of the whole graph and compiling the compiler, which the warm
-preparation pays too.
-
-Taken next, the warm floor. The warm GPT preparation's 20 s were 11.7 s of
-Julia compilation, 1214 instances of some 10 ms each, and 8.5 s of work: the
-cover's loop, which plans the whole graph again after each of the 23
-classes it takes and prices 26 proposals again around them, 3.6 s; its
-trials planned side by side, 0.5 s of wall; the search on the generator's
-plan 0.8 s; the build 1.5 s. Of the compilation, three causes, each with
-its number. The second kernel package to load voided the first's cached
-cover code: cuBLAS's CuArray constructor from a Diagonal, reached from
-`upload`, invalidated 333 instances, and the Implementation protocol's
-call sites, bound by inference to the one method a package sees while it
-precompiles, some 60 more. The protocol called in the latest world and the
-upload filled rather than constructed: the cuTile workload's own program
-compiles 1.85 to 0.83 s in a session with both packages (0.19 with cuTile
-alone), the GPT step warm 20.2 to 19.6 s, prepare.jl's programs 13.0 to
-12.3. The tracer specialized on what it traced: its entry points
-unspecialized and a selection's indices data rather than a type parameter,
-the trace's compilation 3.62 to 2.31 s, the GPT step warm 19.6 to 18.1,
-prepare.jl 12.3 to 11.8. The cuBLAS products had no workload: with one,
-the two-package program 0.83 to 0.34 s, the GPT step warm 18.1 to 17.2,
-prepare.jl 11.8 to 10.3. Measured and left: cuTile's integer overlays
-show in Julia 1.13's log as voiding Tempest's tracing code, but tracing
-again after cuTile loads costs 0.03 s. Open, with numbers: the IR's term
-types (`Composed`, `Relative`), on which every visitor specializes, about
-1 s of compilation; `Pointwise{F}` and `Reduction{F}`, 0.35 s, which the
-rewrites dispatch on; the walkers of the arguments' nested structures,
-0.3 s; the build's instances on device types, 3 s, which no workload can
-run; and the cover's loop, 3.6 s of work.
-
-Taken next, the warm preparation of Qwen3.5-4B's decoding step, 5038 nodes
-and 440 kernels: 52 to 59 s in a new process, 31.8 s of it work once Julia
-has compiled. The cover's trials, planned side by side, waited 24 s on two
-of the 23 it plans: the down projection's fold and an attention layer's
-output projection, each recomputed where it is read, planned in 24 and 22 s
-where every other took under a second, on one thread as on twelve. Most of
-it was hashing: a term was hashed by its fields, so each lookup of a term in
-`subterms` hashed its whole subtree, and a projection recomputed puts its
-body in every reader's term. Now `Apply` and `Recomputed` keep a hash
-computed once from their parts' (`src/Compiler/IR/terms.jl`), which the kernel
-cache's text leaves out: that trial 23.0 to 3.6 s; the 4B step's preparation
-in a new process 52.4 and 58.7 to 33.8 and 42.9 s, and 31.8 to 12.2 s once
-compiled, with the same kernels and tokens; the GPT step's warm preparation
-24.8 to 17.9 s, its device time and the guard rails' within the noise. Still
-open: a trial that cannot win, a projection recomputed at every element its
-readers read, is planned whole before it is priced, 3.6 s of the trials'
-wall; and the 4B step's Julia compilation, 20 to 30 s.
-
-Taken next, by the corpus's gate, a cold preparation under 60 s from
-`trace` to the first result. Before, each in a new process, SM clocks 2411
-to 2431 MHz on a machine other jobs shared: node 53.4 s cold and 31.6 warm,
-heat 29.9 and 22.0, the LSTM at batch 64 71.6 and 31.1, the GPT step 78.9
-and 42.3. Where the seconds went, each phase timed with a build that wraps
-them (a patch with the session, not kept), cold and warm, before the three
-changes below and after them, one run each, Julia's compilation summed over
-threads:
-
-| phase | LSTM cold | after | LSTM warm | after | GPT cold | after | GPT warm | after |
-|---|---|---|---|---|---|---|---|---|
-| `using` | 2.8 | 2.8 | 2.8 | 2.7 | 2.7 | 2.7 | 2.7 | 2.7 |
-| trace | 4.5 | 4.8 | 4.9 | 4.3 | 3.4 | 3.4 | 3.5 | 3.7 |
-| lower, rewrite, partition | 2.4 | 2.3 | 2.6 | 2.1 | 2.7 | 2.5 | 2.8 | 2.7 |
-| entering the preparation | 2.1 | 1.2 | 2.3 | 1.1 | 2.1 | 1.2 | 2.1 | 1.2 |
-| cover: the device's calibration | 11.4 | 8.9 | 0 | 0 | 12.1 | 10.0 | 0 | 0 |
-| cover: compile bursts | 31.2 | 30.8 | 0.9 | 0.5 | 22.7 | 21.6 | 1.0 | 0.7 |
-| cover: timing claims | 2.0 | 1.8 | 0 | 0 | 1.5 | 1.4 | 0.5 | 0.5 |
-| cover: the rest, planning and Julia's compilation | 18.9 | 13.3 | 18.4 | 10.9 | 38.5 | 27.2 | 31.0 | 20.9 |
-| build, bind | 0.7 | 0.6 | 3.4 | 3.2 | 2.0 | 1.9 | 4.0 | 3.6 |
-| first execution | 0.0 | 0.0 | 0.6 | 0.5 | 0.0 | 0.0 | 0.4 | 0.3 |
-| total | 74.5 | 64.4 | 34.5 | 23.3 | 87.6 | 71.2 | 48.2 | 35.7 |
-| Julia's compilation | 45.7 | 38.3 | 33.5 | 21.6 | 79.5 | 64.5 | 42.9 | 29.4 |
-| kernels compiled: calibration, options, not in the plan | 28, 141, 125 | 28, 141, 125 | 0 | 0 | 31, 244, 205 | 31, 247, 208 | 0 | 0 |
-
-The GPT's `after` column is before the claims' change; with it, 31, 188
-and 149 kernels, its bursts 19.6 s.
-
-Warm was Julia compiling Tempest's code, 33.5 of the LSTM's 34.5 s, and a
-warm run's `--trace-compile` listed 1928 instances (LSTM) and 2252 (GPT)
-compiled in the session, most of them in the package images already and
-rejected as they loaded. Tempest's image is compiled without cuTile,
-GPUArrays or SparseArrays, which add methods to `reduce`, `prod`,
-`minimum`, `count`, `vcat` and `Base.setindex` as they load; an instance
-whose inference called one of them on a type it could not narrow, a
-`reduce(vcat, map(f, index); init)` over a `Tuple{Vararg{Affine}}` or a
-`[v; x]` that SparseArrays' `vcat` of numbers and vectors now takes, failed
-its edges at load, and with it every instance that called it, the
-generator's `estimate` and `claims` among them: 4908 instances rejected, 1454
-of them Tempest's and its extensions', 1491 under two walkers of an index's
-values alone. Taken: those calls on concrete types, a selection's indices
-asserted where the node is one, concatenation by `push!` and `append!`
-(`IR/expressions.jl`, `plan/planner.jl`, `program/roll.jl` and eleven
-more): 1454 to 606, the instances compiled in a warm run 1928 to 1779 and
-2252 to 2080, the warm preparation by the corpus 31.1 to 23.1 s (LSTM) and
-42.3 to 33.1 (GPT). Still rejected: roots in Base that Tempest's code
-reaches, `convert(::Type{Int32}, ::Integer)` under cuTile's `Int32(::Bool)`
-(193), `unsafe_read!` under KernelAbstractions (293), and Tempest's own
-under ten each; and the instances no device-free workload runs, the
-measuring decider's and the build's.
-
-Cold less warm is the device's calibration, the compile bursts, and timing.
-The bursts overlap: 148 thread-seconds of compilation in 34 s of wall for
-the LSTM, 4.4 kernels at once, 266 in 29 s for the GPT, 9.2, up to twelve
-threads in a burst. No lock serializes them: cuTile's `job_results_lock` is
-held to look a result up and to publish it, the cache's `RESOLVED_LOCK` to
-find a key's task. A burst lasts as long as its slowest kernel, the LSTM's
-slowest 4.5 to 4.8 s each, and the stages run in sequence, 19 bursts
-with kernels for the LSTM and 17 for the GPT; the same 166 kernels took 24
-and 31 s of bursts in two LSTM runs. The calibration's lines and memories
-built their references one shape after another. Taken: built side by side
-and timed one at a time, as the scalar functions' were (`fit!`,
-`fit_memory!`), calibration 11.0 to 8.9 s (LSTM) and 11.4 to 10.0 (GPT).
-
-Of the kernels compiled for options, 125 of 141 (LSTM) and 205 of 244
-(GPT) are not in the plan built: candidates the search times and
-discards. The LSTM's are close calls, every one measured within 1.17 of the
-best estimate. The GPT's included 14 claims of products split four ways,
-estimated 3.0 to 4.4 times the best tile and measured 3 to 8 times, never
-fastest, measured because `measured_ranks` took every claim of the best's
-implementation. Taken: an implementation's own claims past the estimate's
-error of its best measured once the record refutes the best's estimate
-(`refuted`), the GPT's cold preparation 281 kernels to 219, its bursts 22.4
-to 19.6 s; the LSTM's measured options unchanged, 166 kernels.
-
-A cold run's plan differs from another's by its measured close calls, with
-or without these changes: the GPT 182, 178, 182 and 182 kernels in four
-runs, a cuBLAS candidate taken at 17.1 against 18.1 μs and joins ordered
-by their measured gains, and of 70 groups two runs share, 2 to 4 take
-another tile within the noise; the LSTM's recurrence step takes its
-product at 64×64×64 split four ways (5.70 ms a step) in six runs and at
-64×64×32 split eight ways (5.90) in two, one of them without the claims'
-change. Standing, by the corpus, cold and warm, two runs each, SM
-clocks 2405 to 2418 MHz: node 44.8 and 45.7 s cold, 22.0 and 24.2 warm;
-heat 22.7 and 21.2, 15.3 and 14.6; the LSTM 57.7 and 62.6, 22.1 and 23.7;
-the GPT 72.0 and 66.6, 33.9 and 35.4. The steps stand within the noise of
-before's: node 6.54 ms against 6.57, heat 1.28 against 1.28, the GPT 1.18
-against 1.19, the LSTM 5.71 against 5.68, or 5.90 where its step takes the
-other tile.
-
-What remains of the GPT's 67 to 72 s cold: compile bursts about 20 s, which
-fewer candidates or concurrent stages would shorten; calibration 10 s, once
-a device; Julia's compilation of the measuring and building paths, which
-only a workload with a device would hold; the cover's planning. The
-LSTM's 58 to 63 s: bursts 24 to 31 s, most of it waiting on each
-stage's slowest kernel, which cuTile compiles; calibration 9 s; warm 22 s.
-
-The floor, by a system image (PackageCompiler 2.4.5, Julia 1.13.3) holding
-Tempest, its extensions, CUDACore, cuTile, cuBLAS, cuDNN and the array
-packages, compiled with the precompile statements of the GPT step's and the
-LSTM's sessions, cold and warm. Each in a new process, on the shared machine
-under its GPU lock, against the base in the same sitting (instances: those
-Julia compiled in the session, from `--trace-compile`):
-
-| program | base warm, s | image warm, s | instances | Julia's compilation, s |
-|---|---|---|---|---|
-| GPT step | 47.0 | 15.9, 20.2 | 1993 to 242, 227 | 35.0 to 3.8, 4.7 |
-| LSTM | 34.1 | 4.7, 5.6 | 1680 to 132 | 29.9 to 1.6, 1.4 |
-| node, not recorded | 34.5, 31.4 | 9.3, 13.0 | 2161 to 544 | 34.1 to 7.2, 9.3 |
-| heat, not recorded | 20.2, 16.6 | 8.3, 9.0 | 1263 to 452 | 19.6 to 7.6, 8.4 |
-| prepare.jl's programs, not recorded | 39.9, 29.2 | 20.1, 20.6 | 1551 to 831 | 32.2 to 15.0, 15.3 |
-
-`using` falls from 2.7 to 3.5 s to 0.01 s; cold, the GPT step prepares in
-79.7 s and the LSTM in 48.7. On the programs it recorded the image leaves
-the programs' own closures and types; on the others, their shapes, 450 to
-830 instances. The image is not offered, nor a recipe for one: it takes 8.5
-to 11 minutes and 30 GB of memory to build (1530 CPU seconds, a 1.14 GB
-library), again after any change to any package in it, and it does not load
-as built, since KernelAbstractions' OpenCL backend leaves three device
-intrinsics (`julia.opencl.random_keys`, `julia.opencl.random_counters`,
-`julia.gpu.state_getter`) as undefined symbols in the host code; a preloaded
-library defining them stands in, and KernelAbstractions'
-`precompile_workload = false` does not prevent them.
-
-What a warm session compiles, split by what reaches it without a device: the
-same program prepared again in a new process for CUDA without building
-(`build = false`, as cuTile's workload prepares) or prepared and run on the
-CPU. An instance either of those compiles is one a workload without a device
-could hold, missing from the images because no workload's program has this
-program's shapes; the rest are the device paths, the building, binding,
-launching and measuring no workload runs without a device. Seconds of
-Julia's compilation in one warm session, as `--trace-compile` times each
-instance, on the idle twin machine, at 1c3627d and on the branch that
-compiles the compiler's methods once whatever a program's shapes
-(prep-latency at cedaf8e); instances for node and heat, counted on the
-shared machine at 33ebd32 and on the same branch:
-
-| program | tree | all | reached without a device | device paths | of which on device arrays |
-|---|---|---|---|---|---|
-| GPT step | main | 33.0 s | 23.4 s | 9.6 s | 2.8 s |
-| GPT step | branch | 18.0 s | 10.6 s | 7.4 s | 2.1 s |
-| LSTM | main | 22.9 s | 15.7 s | 7.2 s | 2.3 s |
-| LSTM | branch | 17.8 s | 11.0 s | 6.9 s | 2.3 s |
-| node | main | 2114 | 1385 | 729 | 197 |
-| node | branch | 1758 | 1067 | 691 | 185 |
-| heat | main | 1263 | 980 | 283 | 89 |
-| heat | branch | 1119 | 846 | 273 | 87 |
-
-The branch takes 55% of the GPT's seconds reached without a device and 30%
-of the LSTM's, and 23% and 4% of their device paths. The warm sessions
-themselves, there: the GPT step 42.1 s to 25.9 (2053 instances to 1457,
-31.3 s of compilation to 16.5), the LSTM 24.6 to 19.4 (1675 to 1402, 22.3
-to 17.1).
-
-Of the instances compiled again after the images held them, rejected as they
-loaded: 55 (GPT) and 52 (LSTM), counted at 33ebd32; of the 51 and 47 whose
-roots the log names, none has them in Tempest alone, each calling into
-AcceleratedKernels' `mapreduce`, CUDACore's allocation, or Base through
-cuTile's overlays. Loading rejects 3571 instances, 854 of them Tempest's and
-its extensions', with the kernel packages loaded first, as the corpus loads
-them, and 4225, 117 of them Tempest's, with Tempest first, whose code the
-kernel packages then invalidate as they load (a second count, by another
-method: 1436 of Tempest's rejected with the kernel packages first; 420
-rejected and 1478 invalidated with Tempest first). Which a user gets is the
-order of their `using` lines. Measured and left: Tempest's call sites the
-log names typed (`all`, `prod` and `findmin` with `dims`, `findfirst`,
-`convert(String, ...)`, seven files), which took their roots out and raised
-Tempest's rejected instances 885 to 996 (with the statement lists below
-compiled in), since a narrower type routes a value's conversion through
-Base's integer conversions, which cuTile's overlays void. That is Julia's
-doing, in 1.12 and 1.13: a method added to a method table of one's own
-(`Base.Experimental.@overlay`) invalidates compiled code that calls the
-function it overlays on an abstract type, which the overlay never serves.
-Reproduced alone: compile `h(r) = Int64(r[]) + 1` and
-`k(r) = convert(Int32, r[])` for a `Ref{Integer}`, then overlay
-`Int64(x::Bool)` and `Int32(x::Bool)` in a method table of one's own; on
-1.11.9 both stay valid, on 1.12.7 and 1.13.3 both are invalidated. With
-cuTile's integer overlays removed, in a copy outside the checkout, loading
-rejects 2465 rather than 3571, Tempest's 576 rather than 854.
-
-Precompile statements recorded from the sessions, compiled by the extensions
-as they precompile, measured and not adopted. From the GPT's and the LSTM's
-sessions at 33ebd32, the statements naming nothing numbered by a module's
-count and nothing of the program's own: 3753, which cover of the GPT's
-seconds above 8.4 of device paths and 19.1 of its shapes, of the LSTM's 6.5
-and 12.7, and of node's and heat's instances, which they did not record, 571
-and 227 on device paths and 942 and 557 of shapes, for 54 CPU seconds more
-of precompiling the extensions. Kept only where both programs compiled it:
-1180, the GPT's 5.2 and 3.8, the LSTM's 4.1 and 3.6, node's 393 and 323,
-heat's 176 and 168, for 15 CPU seconds. The statements that took the most
-time, to 80% of it: 1283, for 41 CPU seconds, mostly the programs' shapes.
-Closures numbered by their function (`#price!##0#price!##1`) are renamed as
-the function changes; without them the lists cover 5.5 and 3.0 of the GPT's
-device paths, not 8.4 and 5.2. Not adopted, since a list stands in for an
-interface. The device paths dispatch at run time below every entry point (an
-`Executable`'s fields are untyped, its buffers a `Vector{Any}`), so
-precompiling 33 entry points by construction, `execute!`, `replay!`,
-`capture!`, `bind!`, `build_claim` for cuTile's generator and cuBLAS's
-products, `time_launch` for each run, `build_choice`, `prepare`, and
-`upload`, `allocate` and `point_at!` for seven element types, gives the GPT
-step 0.8 s and the LSTM 0.6 (on the branch 0.8 and 0.6; node 23 instances,
-heat 16): a list reaches more only by naming every dispatch it recorded. The
-clean form is a refactor of the runtime: every device operation of a
-prepared program through the Target interface, the kernel packages' building
-and launching written against it (cuTile's module load and `cuLaunchKernel`
-are calls to CUDACore today), buffers taken unspecialized, and a stand-in
-device under the CUDA target, host memory, launches that do nothing, timings
-fixed, for a workload to run every path a session runs. It would reach at
-most the device paths not on device arrays, 6.8 s (GPT) and 4.9 (LSTM), 5.3
-and 4.6 on the branch, node's 532 instances and heat's 194; no workload
-without a device reaches the rest.
-
-Julia keeps ten compiled images of a package
-(`JULIA_MAX_NUM_PRECOMPILE_FILES`), and each environment, each Tempest
-checkout and each set of flags (`--check-bounds`, coverage) needs its own:
-past ten, the one evicted pays a precompile, a minute or more, in its next
-`using`. `using` is 2.7 to 3.5 s on the shared machine: Tempest 0.46, cuBLAS
-0.45, cuTile's extension 0.39, cuBLAS's 0.22, SparseArrays 0.22,
-CUDA_Driver_jll 0.19 (91% of it compiling), GPUArrays 0.18, Pkg 0.15,
-CUDA_Runtime_jll 0.13, CUDACore 0.12, REPL 0.11; Pkg loads for the CUDA
-libraries' lazy artifacts, REPL for GPUCompiler and cuTile. The workloads'
-price at install, on a shared machine: Tempest precompiles in 49 to 101 s
-with its workload and 2.9 s without it, cuDNN's extension in 15 to 28 s and
-2.6.
-
-Julia's compilation in a warm preparation, by whose code it is. Two
-programs are prepared one after the other in one process, without the
-device; what the second compiles after the first is what the compiler
-compiles because the program differs, with the second's own code and any
-operation the first never met. Most of it was Base's generic methods
-compiled for the shapes of the compiler's values: `map`, `get!`, `hash`,
-`isequal`, `sort` and comprehensions over a node's inputs (`NTuple{21,
-Int}` in the LSTM), a definition's operands, a term's arguments, an index's
-`Affine`s and the nested tuples of the structural keys; the closures
-capturing them; and the planner's methods for each function and fold,
-through `Pointwise{F}` and `Reduction{F}`.
-
-Taken, in two kinds. Principles at their place: a `Key` that hashes once
-and compares element by element, for the library's tables and lowering's
-alike nodes; definitions without type parameters, the index interpreter
-taking the function and fold through a barrier; pricing by the rates
-table's own function objects; the walkers of the user's nested arguments
-walking tuples by their fields; `phase` taking its work unspecialized.
-Annotations: `@nospecialize` with `@nospecializeinfer` on the functions
-that take an index, a domain's extents or a selection's indices, and on the
-constructors of a node, a term, a definition and the views; operations
-compared by identity; and the reads, positions and member tables collected
-into the element types the code declares. Held back, on branch
-prep-latency as the measured reference: the parallel structures, `elements`
-and `map_elements` where passes walk operands, arguments and inputs, and
-`key_cmp` beside Base's `cmp`; and cuTile's gathered atoms in typed vectors,
-three lines for the emitter's refactor. Instances newly inferred by the
-second program, and Julia's compilation in the GPT's first preparation
-without the device (loaded machine):
-
-| | GPT after LSTM | LSTM after GPT | node after heat | heat after node | GPT compile, s |
-|---|---|---|---|---|---|
-| main | 14,362 | 8,488 | 8,619 | 3,872 | 26.1, 23.9 |
-| principles | 10,421 | 6,352 | 6,040 | 3,454 | 15.7, 17.2 |
-| and annotations | 10,196 | 6,337 | 5,937 | 3,289 | 13.0, 13.4, 12.6 |
-| and element types (taken) | 8,431 | 6,250 | 5,883 | 3,123 | 11.3 |
-| and parallel structures | 6,923 | 5,600 | 5,169 | 2,677 | 10.1, 9.9, 9.5 |
-
-On the idle twin machine, in one sitting at 1c3627d, trace to first
-result, each in a new process (the configuration with the annotations
-without the element types; Julia's compilation in thread-seconds; the
-instances it compiled):
-
-| | main | with the annotations | with the parallel structures |
-|---|---|---|---|
-| GPT step, warm | 40.4, 41.3 s | 30.3, 31.3 s | 28.6, 26.6 s |
-| its compilation | 29.8, 30.8 s; 1917, 1861 | 20.8, 21.2 s; 1555, 1555 | 18.8, 17.0 s; 1397, 1318 |
-| GPT step, cold | 94.1 s | | 78.3 s |
-| LSTM, warm | 23.9, 25.3 s | 19.4, 20.3 s | 21.9, 19.1 s |
-| its compilation | 21.7, 22.9 s | 17.4, 18.2 s | 20.7, 16.9 s |
-| LSTM, cold | 63.2 s | | 70.8 s |
-
-The cold runs differ in what the cover measured and built besides (367
-kernels against 335 for the GPT, 205 against 223 for the LSTM), and the
-first warm run with the parallel structures compiled 5 of the LSTM's. The
-second preparation in the same process, the work once compiled: 10.7 and
-10.3 s on main, 9.0 and 9.0 with the annotations, 8.8 and 8.6 with the
-parallel structures (GPT), 1.8 to 1.9 in all (LSTM). The steps are the
-same: the GPT's 1.087 ms in all three, the LSTM's 5.27, 5.29 and 5.26.
-
-The plans are the same: `explain` is identical to main's on the four
-corpus programs and on 300 fuzzer seeds, program and gradient, on the CPU
-and planned for CUDA.
-
-`test/specialization.jl` asks that a program of three inputs on 5×6,
-traced, differentiated, prepared and run on the CPU after one of two
-inputs on 3×4 with the same functions and ranks, compile no new instance
-of a method defined under src/Compiler/ that had one after the first;
-program/tracing.jl and runtime/, which meet the user's function and
-arrays, are exempt, as are methods the second program meets first. On main
-it finds 13 (the walkers, `phase`, `alike_ops`, `value_term`); on the
-principles alone 3; with the annotations none. It cannot tell the taken
-configuration from one with the parallel structures: their difference is
-Base's methods on larger programs. It covers no extension, no CUDA planning
-and no operation the pair lacks. It needs Julia 1.12, where every method's
-instances are in one table (`Core.methodtable`); on 1.11 each function has
-its own and none lists them all. It counts what a session compiles, not
-what loading rejects.
-
-The clean form of what remains on program-sized tuples, 2,385 of the
-GPT's 8,431, is one type in IR for a sequence the program sizes,
-immutable, its elements in a field typed `Tuple`, so `===` stays
-structural and its hash and text are the tuple's, compiled once per element
-type whatever the length. It is specified and not built: it fits as a
-refactor of the existing types, in nine steps each gated on byte-identical
-plans and keys, and would take about 2,000 of those instances and about 2 s
-of the GPT's first preparation, for every shape including those no
-workload has run. The stand-in Target specified above takes the
-device paths, 4.6 to 6.8 s a warm session, which the type does not; the
-type makes what a workload holds hold for every shape, so the two compose.
-
-Measured and left. Per-module compiler options on the compiler's modules
-and extensions, warm LSTM on the device, trace to prepared: `@optlevel 1`
-25.2 s, `@optlevel 0` 22.2, `@max_methods 1` 28.7, against 24.0 and 25.5
-without; instances rose to 1,144 to 1,182 against 1,015 to 1,027, the
-step and the work once compiled unchanged. A module's options reach only
-the methods it defines, and most of what is compiled is Base's,
-specialized on Tempest's types. `infer=false`: precompilation fails,
-because a fold's state type is inferred (`fold_types`, `Base.promote_op`).
-`compile=min` on the compiler's modules, dry, one sitting: the GPT's first
-preparation 28.4 s against 31.1, 21.1 s of compilation against 24.9; the
-LSTM's 13.5 against 15.4; the second preparation, Tempest's code now
-interpreted, 10.2 s against 9.7 (GPT) and 0.69 against 0.52 (LSTM). It
-saves 2 to 4 s of compilation at 0.2 to 0.5 s of work. It is an option for
-the user, not taken: Julia lets no submodule turn it off, and the module
-the generated kernels are evaluated into is under the compiler's, so
-CPU-target kernels would run interpreted. It needs the planner in a module
-apart from the one kernels are generated into. The tracer's broadcast
-walkers with `@nospecializeinfer`, tried and reverted: the result of
-`copy` on a traced broadcast stops being concrete, the user's function is
-inferred with the branch that materializes the broadcast live, and
-inference under the user's call grew from 103 instances to 179 in the CPU
-pair. The tracer meets the user's types by design, and the precision of the
-user's inference is worth more than the walkers' instances.
-
-What remains of the GPT's 8,431 after the LSTM. The user's own code under
-tracing, the model's functions on traced arrays and the corpus's harness:
-about 2,900 instances, 1.5 to 2 s. Tracing must compile it, the trace being
-the user's function run on Tempest's types; only an interpreter for the
-traced call would not. An estimate, not built: the GPT step's trace runs
-about a thousand traced operations, each a few dozen statements of the
-user's, at microseconds a statement interpreted, well under a second
-against 1.5 to 2 s, though the Base broadcast and indexing calls it reaches
-are compiled at their dynamic dispatch all the same. The compiler's code on
-program-sized tuples, 2,385, the sequence type's. The compiler's code
-compiled once whatever the shape, 1,610, and cuTile's emitters, 1,401 (565
-by a tile's rank, bounded, so a workload over ranks 1 to 4 holds them): a
-workload's. Pricing by the table's functions, 132, bounded. A system image
-holding these programs' own warm runs leaves 132 instances on the LSTM and
-242 on the GPT.
-
-Taken next, a warm preparation replays the decisions a cover reached
-(`src/Compiler/cover/reached.jl`), as tinygrad keeps its search's results
-beside its kernels and JAX and torch.compile keep a whole program's
-compilation. A preparation keeps the proposals its cover took, in order,
-and each group's decision, under a key that writes out everything a
-decision reads before deciding: the graph with every function and constant
-it holds, the arguments' types and extents, the folds pinned and kept, the
-steps of a recurrence, the target with its device and rates, the
-implementations loaded and their packages, the TEMPEST_ settings but those
-no decision reads, how the decider measures, and Julia's and Tempest's
-identities. Beside them it keeps the record's and the rates file's entries
-the cover read, each with the value it held or its absence. A preparation
-of the same program whose files still hold those values plans the taken
-proposals once, checks each group's text against the kept one, and reads
-each decision back: no trial planned, nothing priced or measured, no kernel
-compiled but the plan's own. An entry read since changed, or a group that
-no longer forms, sends it to the cover; TEMPEST_VERIFY reaches the
-decisions by the cover too and throws where the two differ, and
-TEMPEST_REPLAY=false asks for the cover every time. On the idle GB10, each
-run in a new process, each tree with a kernel cache and record of its own,
-empty before the cold run, which calibrates the device; main at the
-replay's base:
-
-| GPT small | main | replayed |
-|---|---|---|
-| cold preparation | 95.1 s, 346 kernels compiled | 103.3 s, 3 covers, 348 compiled |
-| warm preparation | 38.4 s | 15.5 s, nothing compiled or measured |
-| warm, TEMPEST_REPLAY=false | | 37.8 s |
-| warm, once Julia has compiled | 10.48 s | 1.04 s |
-| step | 1.103, 1.103 ms | 1.105, 1.098 ms |
-
-Of the replayed warm preparation's 15.5 s, 14.2 are Julia compiling. The
-replayed plan is the one its cover reached: the warm explain is the cold
-one's, and the cover's on the same files, byte for byte.
-
-Decisions are replayed only when settled: reached by a cover that wrote
-nothing to the record or the rates file and whose claims all built, so
-that a cover in a new process would reach them again. A cover that
-measures reads a time absent at first and present after, and on the record
-it leaves a cover could rank its proposals otherwise. So a preparation that
-measured as it decided covers again on what it left, until a cover writes
-nothing, three at most (TEMPEST_SETTLE=false keeps the first). Without
-settling, the GPT step's cold cover measured 303 claims, the second
-process's cover one more and the third's none, and only the fourth process
-would replay, the three plans the same, their explains differing only in
-the times they print. Settling runs those covers in the cold process: 8.2 s
-and 2 kernels more than main's cold preparation, 5 more times recorded, and
-the second process replays. It is the default: its seconds are paid once per
-program, and the warm preparation's saving every time after. Behind a first
-result given before the search, settling's covers would run after the
-result.
-
-Kept decisions rest on their evidence compared exactly, which holds only
-where a table in memory holds what its file reads back. It did not: the
-first launch the device timed in a session was a Float32 (the replay
-overhead was returned as the value of its assignment), kept in memory as a
-Float64 and written at a Float32's digits, and a decision set whose
-evidence held that time never replayed in the next process. One writer now
-keeps and writes the same Float64 for the record and the rates file
-(`keep!`), and the timer returns a Float64 every time.
-
-Measured and left: the LSTM's decisions never replay on the device. Eight
-cuTile product claims (256×256 and 256×32 at batch 100, TF32 tiles) fail
-to build each time they are measured, and the record marks them lost at
-Inf in the process but not in the file, so no cover of the LSTM is settled:
-replayed 0, covered 12, cold 63.9 s against main's 65.7 and warm 24.8
-against 25.5. Its steps, 5.44 and 5.47 ms against main's 5.34 and 5.36,
-run plans that differ from main's in 5 of 33 kernels: each tree measured
-its own record from empty, and the LSTM is covered as on main. What
-removes it is the measuring consolidation, the record holding only
-measured times and a failed claim read from the failures, after which a
-failure is no reason to cover again: a claim that fails to build fails
-under the same key. Also left: the rates the decisions read include the
-applied scalar-function lines, 14 in the GPT step's evidence and 7 in the
-LSTM's, of which 9 and 4 are zero or under 1e-13 s a position, noise a
-recalibration refits; any such refit sends the decisions to the cover.
-Recorded 11 November: the LSTM settles, no claim of it failing to build, the
-small shape preparing in 53.2 s and a second process replaying it in 13.8.
-
-Also left: the decisions kept are never removed. The store of compiled
-kernels beside them is bounded (`JULIA_OBJCACHE_CAPACITY`, 512 MiB by
-default, the entries used least recently removed); the `decisions`
-directory beside the record is not. A key holds Tempest's own identity, so
-every edit of its source keeps a program's decisions again beside the old,
-which nothing reads after. One tuning directory after two days of this
-trial held 18 files in 2.2 MB, from under 1 KB to 1.9 MB a file. What
-removes them is the kernel store's bound applied to them, by when each was
-last read.
-
-Taken next, the kernels' part of a cold preparation, each kernel's
-compile, each burst and each timing logged by a build that wraps them (a
-patch with the session, not kept), one cold run each of the GPT step and
-the LSTM at batch 64. The GPT compiled 346 kernels: 30 for the device's
-calibration, 20 trials of whether cuTile lowers a scalar function, 296 for
-the search's options, of which 36 are in the plan built. The LSTM compiled
-203: 23, 16 and 164. Of a cuTile kernel's compile, `tileiras` is 74% of the
-thread-seconds (GPT) and 87% (LSTM); inference about 0.10 s a kernel, the
-bytecode 0.06, Tempest's dependencies 0.01. Measured and left, the
-assembler's flags, the GPT's 336 distinct kernels assembled one at a time:
-175.5 s of CPU at `-O3 --lineinfo`, cuTile's default, 172.8 without line
-information, 170.6 at `-O2` and 168.4 at `-O1`, 140.2 at `-O0`; `-O2`
-emits the code of `-O3` for 330 of the 336, `-O1` other code for 334.
-`ptxas`, which `tileiras` runs, takes 0.1 to 0.5 s a kernel, 10 to 15% of
-it. The LSTM's slowest kernels, its cell's fused products of 450 to 555
-statements, take 3.3 to 5 s at every level. Line information makes the
-CUBINs 3.4 times larger for the same code, 70.4 against 20.6 MB for the
-GPT's, which the kernel cache stores: an option for cuTile to take for the
-cache's size, not for time.
-
-The bursts, against their bound, their slowest kernel's compile or their
-thread-seconds over the 20 cores: the GPT's 41.5 s of bursts against
-26.7. A burst of 34 to 84 kernels ends about 1.5 s past its bound, its
-kernels emitted on one thread and its cores contended; a burst of a few
-ends with its slowest. Of the GPT's 41.9 s of search bursts, 22.4 were 14
-bursts of 1 to 8 kernels: a comparison decides its groups one at a time,
-and a group not searched yet is searched alone, three or four stages of
-about 1.6 s each, the next group's after. Searched together, the starting
-plan's groups with the trials', and both sides of a comparison before
-either is decided, the same groups and so the same kernels, in a build of
-the cover that did both (with the rates shipped as well): the LSTM's
-searches of one group fell from 6 bursts and 12.1 s to 3 and 0.48 s, its
-cold preparation from 77.0 s to 57.0 and its kernels from 203 to 176; the
-GPT's did not fall, 17 bursts and 25.1 s, its cold preparation 117.1 s to
-101.5 and its kernels 346 to 341. Not taken as built: what is timed and in what order it may be
-built is decided in five places now (`measured_ranks`, `expand!`, `compare`,
-`search!` and the cover's searches ahead), and batching them is a sixth;
-it waits for one function that owns the question, of which the searches
-together are callers.
-
-Measured and left, fewer candidates timed. The estimate against the time
-of every claim the cold runs timed: the generator's products 0.76 of their
-estimate by the median, 70% within the close-call factor of 1.5; cuBLAS's
-2.02, 33% within it. Of the GPT's 98 decisions, 38 had one option, 27 were
-decided by estimate and 33 by 235 options timed, and the time chose other
-than the estimate in 14. Policies replayed on the record, each against
-measuring as now: one orientation of each product, 132 timings fewer and
-the decisions' time 12.9% more (GPT), 6.0% (LSTM); no options beyond a
-tile's (workers, a transposed load, the inner depth, occupancy), 81 fewer
-and 3.9% more (GPT); the first stage's claims alone, 9.4% more (LSTM). A
-record shipped as a prior, by product shape, from the user's record of 632
-groups: the best tile of the nearest shape within 2% of the measured best
-for 63% of groups, the best three for 87%, so a prior would still time
-three and miss one group in eight. The two orientations of a product differ
-by 2.4% at the median and 23% at the 90th percentile, 64% within 5%. The
-same claim timed in two runs, 415 claims: the larger time over the smaller
-1.086 at the median and 1.266 at the 90th percentile; the generator's
-products 1.08 and 1.19, cuBLAS's 1.07 and 1.35, the generator's pointwise
-kernels 1.30 and 1.68. One close-call factor of 1.5 for every kind sits
-inside the products' noise and at the pointwise kernels' 90th percentile:
-the data suggest a factor by kind, not changed here.
-
-Measured and left, estimates fitted on the record. The same estimates
-decide a plan where nothing is measured, the plan a first tier runs:
-node's step 7.93 ms on the GB10's rates against 6.43 measured, 8.56 on
-nominal rates (the tiers lane's). By the time of the option the estimates
-pick among those timed, summed over the measured decisions, against the
-best timed: as they stand, 8.0% over the best for the GPT's and the LSTM's,
-15.6% for node's and heat's. A scale per implementation and claim kind, the
-median of time over estimate, fitted on the GPT and the LSTM and tried on
-node and heat, 15.6% to 12.0%; fitted on node and heat and tried on the GPT
-and the LSTM, 8.0% to 221%, picking cuTile for the LSTM's batched products
-at 3.4 to 5.3 times the best; fitted on all four, it loses so in sample. A
-line in log time and log estimate does the same. The error is a regime's,
-not an implementation's: node's products, 2.1 MFLOP on 2 to 4 blocks, are
-estimated at 22 μs and run in 4, a launch of fewer blocks than the 48
-multiprocessors priced at that share of the memory's bandwidth; the LSTM's
-batched products are estimated alike for every tile, at 511 μs, and run in
-648 to 3413, which only measurement ranks. Two terms of a launch of few
-blocks, the memory's share saturating at m blocks and a block's loop along
-the sum at least L a step, fitted on the record: on node and heat, m 24
-and L 0, which takes them from 15.6% to 5.8% and the GPT's and the LSTM's
-from 8.0% to 14.9%; on the GPT and the LSTM, nothing changes. The LSTM's
-step product, its fused cell, is estimated at 80 μs unsplit on 4 blocks
-and at 60 split eight ways, and runs in 42 and 22: priced right in its
-memory, the unsplit one is taken, at twice the time. Holding both ways
-wants a third term, the fused epilogue's price in this regime, which would
-fit the corpus. Left open, with these numbers, so that no scale is fitted
-again.
-
-Taken, rates shipped for a device Tempest knows: a file per device in
-`src/Compiler/cover/rates`, named as a machine's rates file is, stating the
-timing basis its times were taken on and the device's memory bandwidth,
-cache and multiprocessors as `device_rates` reports them
-(`shipped_rates`), read under the machine's own rates file. Those are the
-configuration's rated values, which the driver reports alike for every
-unit, so a file is read on any GB10 of this configuration, a second unit
-reporting the same; a unit's own clocks and power cap are not in them, and
-show as the spread of the rates fitted on each. A file of another name, or
-of the name and another identity or basis, is not read,
-and the decider fits on first need as before, or prices on nominal rates
-where it measures nothing. The GB10's is the file the tests held as a
-fixture; `test/bench/rates.jl` writes it again. Rates only price options,
-and the close calls among them are measured whichever rates priced them,
-so a file that misprices, one package's products a thousand times slower
-than it says, makes the plan take the other package and agree with the
-interpreter (`test/cuda/cover.jl`). The decider's rates table is by
-default the machine's own rates over the shipped ones (`known_rates`),
-noted as the evidence of the decisions reached on it; `calibrate!` is given
-the machine's alone. The decisions key holds the timing basis beside the
-device's reported rates. Cold, by the corpus on the second GB10, in one
-sitting: the GPT step 90.8 s on main and 77.8 and 77.9 with the rates
-shipped; the LSTM 64.0 and 62.1 against 56.3 and 56.2; warm, and the steps,
-the same (the GPT's 39.1 to 41.0 s and 1.09 to 1.10 ms, the LSTM's 24.0 to
-24.9 s and 5.25 to 5.32 ms). The second GB10 reports the same identity, and
-its two calibrations differ from the shipped file by no more than two
-calibrations of one unit do (products' rates by 1 to 2% at the median,
-latencies by 3 to 7%). An RTX 6000 Ada reads none of the file, and its
-suite calibrates. Shipped rates do not make a cold plan the same run to
-run. The GPT step's two cold runs on each GB10 differ, 162 kernels each,
-in 3 to 15 of their kernels' claims and in three joins of a residual sum
-into the normalization that reads it, close calls measured and falling
-either way; the
-four plans are of two kinds, 297 or 300 values stored, and a kind seen on
-one unit is seen on the other. What makes a plan the same in the next
-process is the replay: the warm preparation's plan was the cold one's,
-line for line, the GPT's and the LSTM's.
-
-Measured, whether a plan turns on the applied lines of the rates, 190 of
-the file's 257 for the swept and inner regimes, fitted at 1e-14 to 1e-11 s
-a position, and within one unit 32 of the 63 inner lines zero in one
-calibration and not in the other. The GPT step and the LSTM prepared
-measuring nothing, where the estimates decide everything, on the shipped
-rates, on the shipped rates with those 190 lines zero, and on each of the
-second GB10's two calibrations: every plan the same in every kernel and
-every claim. The 190 at zero moved the GPT's printed estimates by 0.1 μs
-in a few comparisons (47.8 to 47.7) and changed no decision; the steps
-1.181 to 1.193 ms and 5.647 to 5.670. Not tested: measuring close calls,
-the lines could move a comparison across the close-call factor, which at
-deltas of 0.2% would take one sitting at it. The lines are noise to the
-plans and not to the decisions kept: a refit across zero changes their
-evidence and sends them back to the cover.
-
-Counted and not built, kernels that take their extents as arguments: of
-the 336 distinct kernels the GPT's cold preparation compiled, 217 differ in
-more than their extents, the tiles' shapes kept; of the LSTM's 176, 105.
-Every integer a symbol gives the same counts.
-
-Warm, a kernel's load costs about 12 ms, one after another on one thread:
-the kernel store's lookup and its dependencies' check 1.65 ms (0.16 once
-the checks are cached), its function defined 3.8 ms, its key 1.5 ms, its
-module loaded 5 ms; the GPT's 55 loads 0.7 s of its 3.4 s build, the rest
-Julia compiling the build. Left, under a second. The final build compiles
-again 8 of the GPT's 22 kernels and 2 of the LSTM's 3 that the search
-compiled with other argument types or other buffers aliasing: left, in the
-build's one burst. Taken, the floor's kernels keyed as the tiles' are: their
-key held a hash of all Tempest's sources, so an edit anywhere compiled them
-again, one at a time under CUDA's compiler lock, about 0.35 s each; the
-code instances the compiler's inference leaves under its job's owner give
-what a kernel used of Tempest's code, as cuTile's inference does for a
-tile kernel, and it loads while that is unchanged. After an edit that
-changes no code, node's warm preparation compiled the floor's 12 kernels
-again, and compiles none now, loading 40; the LSTM's and the GPT step's
-none either, loading 31 and 52.
-
-Left unmeasured, the floor: a cold preparation that knows its decisions
-and compiles only its plan's kernels. Counted, the GPT step's plan built
-36 kernels of the 346 its cold preparation compiled, 24.4 thread-seconds,
-the slowest 1.78 s, so in one burst on the 20 cores about 2 s beyond a warm
-preparation that compiles nothing (15.5 s with the decisions replayed);
-the LSTM's 10 kernels, 1.7 thread-seconds. The distance to it is the
-search: the cold preparation's 77.8 s on the rates shipped, before
-settling's covers, against about 18. Timing it, with the record and decisions copied and the kernel cache
-empty, was cut from the second GB10's queue with node's and heat's runs.
-
-Measured and taken, the LSTM's eight claims that never built. They were one
-kernel's, in a trial the cover planned: a sum of the backward's weight
-gradient over the steps riding the recurrence, which computes each step's
-product of the input and the gate's gradient inside the recurrence's
-kernel, taken with an implementation's candidate of that product as a
-kernel of its own. That kernel stored nothing and nothing read it, its
-products computed in the steps besides; its cuTile claims observed a fold
-and stored nothing, which cuTile does not compile ("SSAValue not found in
-context" at the loop: of the LSTM's 87 kernels that observe a fold, the 8
-that store nothing are the 8 that fail; the reproduction is kept with the
-session). The verifier states the fault (invariant 3: a value a riding sum
-reads at each step is owned by another kernel), and verifies every plan
-the cover tries where verification is on, as the tests have it; the corpus
-prepared without it. Prepared with it, the LSTM threw, and the GPT step,
-node and heat formed no invalid plan in 145, 102 and 5; `verify` cost 0.61,
-0.67, 0.06 and under 0.01 s of their cold preparations, under 1%. A ride
-is now about what its steps compute for the sum (`Ride(value, within)`,
-`fixes`), so the cover takes no proposal of a kernel of one of those values
-with it. The LSTM prepares with every plan verified, and the next process
-replays its decisions, 3 replayed and none covered against 0 and 12, its
-record holding no failure, in 15.3 s. Its plan is the one it had, group
-for group and claim for claim, and so is its step: the rides were refused
-then and are not tried now. Priced right they lose too: in the plan with
-the product's candidate taken, the ride of an input weight's sum cost 2100
-μs against 1810, of which the dead kernel's product was 117 to 129, and of
-a recurrent weight's 15300 against 2810 estimated, of which it was 530 to
-607.
-
-Open, exclusive proposals. Where two proposals are about one value, as a
-ride and the candidate of its product are now, the cover prices each
-against the starting plan, ranks them by what they save there, and takes
-them in that order; the second, about a value the first took, plans
-nothing and is dropped, neither priced in the plan the first made nor
-compared with it, and `explain` does not show it. So of a ride and a
-candidate the one ranked first wins, by its saving against the starting
-plan, with no comparison of the plan with the ride and without the
-candidate against the plan with the candidate and without the ride. Before
-this fix that comparison was made, on a wrong price; now it is not made.
-Pricing both would cost a trial for each such pair in the plan as it is
-when the second comes up (eight on the LSTM, against 215 plans its cover
-forms), and a measurement where the two are close; a cheaper trial, the
-scaling lane's replanning, would make it affordable, a search change to
-propose after that lands.
-
-Taken, verifying apart from crosschecking, and the corpus verifying.
-`verify` (TEMPEST_VERIFY) checked plans against the invariants and also
-compared the decisions a preparation replayed with those a fresh cover
-reached: a cover's cost on every warm preparation, the LSTM's 15.3 s to
-21.1 with its cover run again. The comparison checks the replay itself, a
-shorter way against the whole computation, and is now a crosscheck of its
-own (TEMPEST_CROSSCHECK, `crosschecking`), which the tests turn on beside
-verification and nothing else does; a trial planned incrementally against
-the plan of its whole inputs is the same kind of check. The corpus prepares
-with every plan verified, the cover's trials among them, and each row says
-so: 0.06 to 0.67 s of a cold preparation, under 1%, and the built plan's
-check of a warm one.
-
-Open, a preparation verifying by default. With verifying this cheap and
-free of the crosscheck, what stands in the way is that a trial plan the
-verifier rejects throws from inside the cover's task, ending a preparation
-over a trial that would likely not have won. The cover plans every trial in
-one place (`plan_taking`), which refuses a trial that forms no group by
-returning nothing; a trial the verifier rejects would be refused there the
-same way, counted, and shown by `explain` with the invariant it broke, and
-only the plan built would verify or throw. The proposal type needs nothing
-for it: a rejected trial is a composition of proposals the planner could
-not plan validly, not a kind of proposal. The planner's own check of each
-plan it forms would move to the two places a plan is used, `plan_taking`
-and the build, and the tests would assert that no trial was refused rather
-than rely on the throw.
+- The gate. Measuring close calls, the LSTM, the GPT step and the 4B prepare
+  cold past 60 s; measuring nothing, every program is within it but the 4B
+  at 16 and 64 tokens. Which of the two the gate means is not said.
+- A warm preparation is Julia compiling, 14.2 of the GPT step's 15.5 s with
+  its decisions replayed (9 November). By whose code, of the 8,431 instances
+  the GPT compiles after the LSTM: the user's own under tracing, about 2,900
+  and 1.5 to 2 s, which only an interpreter for the traced call would spare;
+  the compiler's on program-sized tuples, 2,385, which one type in IR for a
+  sequence the program sizes would take, specified and not built, about 2 s
+  of the GPT's first preparation; the device paths, 4.6 to 6.8 s a warm
+  session, which a stand-in device under the CUDA target would let a
+  workload run, specified and not built; the build's instances on device
+  types, 3 s, which no workload can run. The 4B step's Julia compilation was
+  20 to 30 s on 10 November, not measured since claims are asked on threads.
+- A trial that cannot win, a projection recomputed at every element its
+  readers read, is planned whole before it is priced, 3.6 s of the 4B's
+  trials' wall.
+- What is timed and in what order it may be built is decided in five places
+  (`measured_ranks`, `expand!`, `compare`, `search!` and the cover's
+  searches ahead). Searching a comparison's groups together took the LSTM's
+  cold preparation from 77.0 s to 57.0 in a build not taken; it waits for
+  one function that owns the question.
+- One close-call factor of 1.5 for every kind sits inside the products'
+  noise and at the pointwise kernels' 90th percentile; the record suggests a
+  factor by kind.
+- The decisions kept are never removed. The store of compiled kernels beside
+  them is bounded (`JULIA_OBJCACHE_CAPACITY`, 512 MiB); the `decisions`
+  directory is not, and a key holds Tempest's own identity, so every edit of
+  its source keeps a program's decisions again beside the old: 18 files in
+  2.2 MB after two days. What removes them is the kernel store's bound
+  applied to them, by when each was last read.
+- A refit of the rates' applied lines across zero, noise to the plans,
+  changes the evidence of the decisions kept and sends them back to the
+  cover.
+- Exclusive proposals. Where two proposals are about one value, as a ride
+  and the candidate of its product, the cover prices each against the
+  starting plan and takes them in the order of what they save there; the
+  second plans nothing and is dropped, never compared with the first in the
+  plan the first made, and `explain` does not show it. Pricing both costs a
+  trial for each such pair (eight on the LSTM, against 215 plans its cover
+  forms) and a measurement where they are close.
+- A preparation verifying by default. Verifying costs under 1% of a cold
+  preparation; what stands in the way is that a trial plan the verifier
+  rejects throws from inside the cover's task. It would be refused where
+  every trial is planned (`plan_taking`), counted and shown by `explain`
+  with the invariant it broke, only the plan built verifying or throwing.
+- Julia keeps ten compiled images of a package, and each environment,
+  checkout and set of flags needs its own: past ten, the one evicted pays a
+  precompile, a minute or more. `using` is 2.7 to 3.5 s; Tempest precompiles
+  in 49 to 101 s with its workload and 2.9 s without.
 
 **How preparation grows with the program.** `test/bench/scaling.jl`
 prepares fourteen families of programs dry on the CUDA target, each scaled
@@ -2169,6 +1437,282 @@ against Reactant's 9.9 to 11.0 ms and torch `reduce-overhead`'s 11.2, run
 there by their own scripts on 8 November (the corpus's entry). How planning
 grows for a program that stays unrolled is the trial of how preparation
 grows with the program, where 32 unrolled RK4 steps prepare in 7.16 s.
+
+**First execution: the workloads cover the CUDA planning path and a group's
+candidates build at once, adopted.** The baseline, each in a new process,
+wall seconds: `test/bench/prepare.jl`'s programs cold 98 and warm 34, the
+GPT step cold 126 and warm 44, its preparation 120 and 37. Warm was 99%
+Julia compilation, the workloads covering only the CPU target and the launch
+path compiling a specialization per kernel; cold added a kernel compiled per
+second, serialized, three quarters of them candidates the search times and
+discards. Taken: a preparation that builds nothing, so the workloads cover
+the CUDA planning path, no specialization per kernel, every proposal's trial
+planned in parallel and a grouped five-axis attention in the workloads, the
+GPT step's preparation warm 19.6 s and cold 85.6; every group's measured
+candidates built at once before any decision (`prebuild!`), cold 85.6 to
+71.6; every function a plan applies priced together, the references built
+side by side (`fit_applied_all!`, `price_all!`), one precision's calibration
+24.6 s against about a minute, cold 71.6 to 63.0; the staged search of a
+product's tiles (decided below), 63.0 to 55.1. Standing then: the GPT step's
+preparation warm 37 to 20 s and cold 120 to 55, prepare.jl's programs warm
+27 to 13 and cold 92 to 63.
+
+**First execution: worker processes for compilation, not adopted.** The
+challenger was tinygrad's BEAM pool. Its premise was wrong: a process
+compiles kernels in parallel on its threads already, 16 distinct GPT kernels
+666 ms each in sequence and 92 on threads. A pool of eight warmed workers
+lost on every measurement: the calibrated GPT step with cold kernels 69.3 s
+against 60.8, 236 ms a kernel through the pool against 92, a worker's first
+kernel 6 to 9 s.
+
+**First execution: the search's order, three changes measured and left.**
+Each on the cold GPT preparation, every compile burst and timing wrapped.
+The kernels of the groups the search never touches, compiled last, are 27 in
+a 2.5 s burst, compile throughput the bound, so an earlier burst would take
+as long, and 7 of them run on buffers that alias. The candidates timed one
+at a time are 140 launches in 1.2 s. The cover's trials searched together
+ahead of pricing took the small bursts from about 10 s to 4, but fitted four
+reference functions and measured ten candidates the sequential pricing never
+reaches: 54.5, 54.3 and 53.9 s against 55.8, 56.3 and 54.5, recorded as
+lost. Each group's claims and estimates found once rather than twice: no
+change, 55.0, 54.7 and 55.3 against 55.4, 55.1 and 54.8. Later, the starting
+plan's groups searched with the trials' and both sides of a comparison
+before either is decided, with the rates shipped: the LSTM's searches of one
+group 6 bursts and 12.1 s to 3 and 0.48, its cold preparation 77.0 s to 57.0
+and its kernels 203 to 176; the GPT's 117.1 s to 101.5 and 346 to 341. Not
+taken as built (Time to first execution, in Open).
+
+**First execution: a second kernel package voids the first's compiled code,
+the protocol called in the latest world, adopted.** The warm GPT
+preparation's 20 s were 11.7 s of Julia compilation, 1214 instances, and 8.5
+s of work, 3.6 of it the cover's loop. cuBLAS's CuArray constructor from a
+Diagonal, reached from `upload`, invalidated 333 instances, and the
+Implementation protocol's call sites, bound by inference to the one method a
+package sees while it precompiles, some 60 more. The protocol called in the
+latest world and the upload filled rather than constructed: the GPT step
+warm 20.2 to 19.6 s. The tracer's entry points unspecialized and a
+selection's indices data rather than a type parameter: 19.6 to 18.1. A
+workload for the cuBLAS products: 18.1 to 17.2; prepare.jl's programs 13.0
+to 10.3 over the three. Left: cuTile's integer overlays void Tempest's
+tracing code in Julia 1.13's log, and tracing again after cuTile loads costs
+0.03 s.
+
+**First execution: a term hashed by its fields, hashed once, adopted.**
+Qwen3.5-4B's decoding step, 5038 nodes and 440 kernels, prepared warm in 52
+to 59 s, 31.8 s of it work once Julia had compiled, and its trials waited 24
+s on two of the 23, a projection recomputed where it is read: each lookup of
+a term in `subterms` hashed its whole subtree. `Apply` and `Recomputed` keep
+a hash computed once from their parts' (`src/Compiler/IR/terms.jl`): that
+trial 23.0 to 3.6 s, the 4B step's preparation in a new process 52.4 and
+58.7 to 33.8 and 42.9 s, 31.8 to 12.2 once compiled, the same kernels and
+tokens; the GPT step's warm preparation 24.8 to 17.9 s.
+
+**First execution: package images rejected as they load, their calls made on
+concrete types, adopted.** Warm was Julia compiling Tempest's code, 33.5 of
+the LSTM's 34.5 s, most of the instances in the package images already and
+rejected as they loaded: Tempest's image is compiled without cuTile,
+GPUArrays or SparseArrays, which add methods to `reduce`, `prod`, `minimum`,
+`count`, `vcat` and `Base.setindex`, and an instance whose inference called
+one of them on a type it could not narrow failed its edges at load, with
+every instance that called it. Of 4908 rejected, 1454 were Tempest's and its
+extensions'. Those calls on concrete types, a selection's indices asserted,
+concatenation by `push!` and `append!`: 1454 to 606, the warm preparation by
+the corpus 31.1 to 23.1 s (LSTM) and 42.3 to 33.1 (GPT). Still rejected:
+roots in Base, `convert(::Type{Int32}, ::Integer)` under cuTile's
+`Int32(::Bool)` (193) and `unsafe_read!` under KernelAbstractions (293).
+That is Julia's doing in 1.12 and 1.13, not 1.11: a method added to a method
+table of one's own (`Base.Experimental.@overlay`) invalidates compiled code
+that calls the function it overlays on an abstract type; with cuTile's
+integer overlays removed, loading rejects 2465 rather than 3571, Tempest's
+576 rather than 854. Measured and left: typing the call sites the log names
+raised Tempest's rejected instances 885 to 996. The order of a user's
+`using` lines decides which they get: 3571 rejected, 854 of them Tempest's,
+with the kernel packages first, and 4225 and 117 with Tempest first, whose
+code the kernel packages then invalidate.
+
+**First execution: an implementation's far claims measured only once the
+record refutes its best, adopted.** Of the kernels compiled for options, 125
+of 141 (LSTM) and 205 of 244 (GPT) were not in the plan built. The LSTM's
+are close calls, every one within 1.17 of the best estimate; the GPT's
+included 14 claims of products split four ways, estimated 3.0 to 4.4 times
+the best tile and measured 3 to 8 times, never fastest. An implementation's
+own claims past the estimate's error of its best are measured once the
+record refutes the best's estimate (`refuted`): the GPT's cold preparation
+281 kernels to 219, its bursts 22.4 to 19.6 s. The calibration's lines and
+memories built side by side (`fit!`, `fit_memory!`): 11.0 to 8.9 s (LSTM)
+and 11.4 to 10.0 (GPT). The bursts overlap, 4.4 kernels at once for the LSTM
+and 9.2 for the GPT, no lock serializing them; a burst lasts as long as its
+slowest kernel, the LSTM's 4.5 to 4.8 s. By the corpus, with the package
+images' change above, two runs each after: the neural ODE cold 53.4 s before
+and 44.8 and 45.7 after, warm 31.6 and 22.0 and 24.2; heat cold 29.9 and
+22.7 and 21.2, warm 22.0 and 15.3 and 14.6; the LSTM cold 71.6 and 57.7 and
+62.6, warm 31.1 and 22.1 and 23.7; the GPT step cold 78.9 and 72.0 and 66.6,
+warm 42.3 and 33.9 and 35.4; the steps within the noise.
+
+**First execution: a system image, the floor, not offered.** PackageCompiler
+2.4.5 on Julia 1.13.3, holding Tempest, its extensions, the CUDA packages
+and the precompile statements of the GPT step's and the LSTM's sessions.
+Warm, against the base in the same sitting: the GPT step 47.0 s to 15.9 and
+20.2, the LSTM 34.1 to 4.7 and 5.6, and of programs it did not record the
+neural ODE 34.5 and 31.4 to 9.3 and 13.0 and heat 20.2 and 16.6 to 8.3 and
+9.0; `using` 2.7 to 3.5 s to 0.01. Not offered, nor a recipe: it takes 8.5
+to 11 minutes and 30 GB of memory to build, a 1.14 GB library, again after
+any change to any package in it, and does not load as built,
+KernelAbstractions' OpenCL backend leaving three device intrinsics as
+undefined symbols.
+
+**First execution: recorded precompile statements, not adopted.** What a
+warm session compiles splits by what reaches it without a device: of the GPT
+step's 33.0 s of compilation 23.4 are reached without one and 9.6 are device
+paths, of the LSTM's 22.9, 15.7 and 7.2. The statements recorded from the
+two sessions, 3753, cover 8.4 s of the GPT's device paths and 19.1 of its
+shapes, 6.5 and 12.7 of the LSTM's, for 54 CPU seconds more of precompiling;
+those both programs compiled, 1180, cover 5.2 and 3.8, 4.1 and 3.6, for 15.
+Not adopted, since a list stands in for an interface, and closures numbered
+by their function are renamed as it changes. Precompiling 33 entry points by
+construction gives the GPT step 0.8 s and the LSTM 0.6: the device paths
+dispatch at run time below every entry point. The clean form, specified and
+not built: every device operation of a prepared program through the Target
+interface and a stand-in device under the CUDA target, host memory, launches
+that do nothing, timings fixed, for a workload to run every path a session
+runs, at most 6.8 s (GPT) and 4.9 (LSTM).
+
+**First execution: the compiler compiles once whatever a program's shapes,
+adopted.** Most of what a second program compiled after a first was Base's
+generic methods on the shapes of the compiler's values, a node's inputs, a
+definition's operands, an index's `Affine`s and the nested tuples of
+structural keys, and the planner's methods for each function and fold.
+Taken: a `Key` that hashes once and compares element by element, definitions
+without type parameters, pricing by the rates table's own function objects,
+walkers of nested arguments by their fields, `@nospecialize` with
+`@nospecializeinfer` on what takes an index, a domain's extents or a
+selection's indices, operations compared by identity, and collections of the
+element types the code declares. Instances newly inferred by the second
+program: the GPT after the LSTM 14,362 to 8,431, the LSTM after the GPT
+8,488 to 6,250, the neural ODE after heat 8,619 to 5,883, heat after it
+3,872 to 3,123; the GPT's first preparation without the device 26.1 and 23.9
+s of compilation to 11.3. On the idle twin, the GPT step warm 40.4 and 41.3
+s to 30.3 and 31.3, the LSTM 23.9 and 25.3 to 19.4 and 20.3, the steps the
+same, and `explain` identical to main's on the four corpus programs and 300
+fuzzer seeds. `test/specialization.jl` holds it, a second program of other
+shapes compiling no instance of the compiler's methods again: 13 on main,
+none now; it needs Julia 1.12. Held back on the branch prep-latency:
+parallel structures where passes walk operands, 8,431 to 6,923 and the GPT
+warm 28.6 and 26.6 s. Tried and reverted: the tracer's broadcast walkers
+unspecialized, which made the user's inference less precise, 103 instances
+under the user's call to 179.
+
+**First execution: per-module compiler options, measured and left.** On the
+compiler's modules and extensions, the warm LSTM, trace to prepared:
+`@optlevel 1` 25.2 s, `@optlevel 0` 22.2, `@max_methods 1` 28.7, against
+24.0 and 25.5 without, a module's options reaching only the methods it
+defines where most of what is compiled is Base's. `infer=false` fails
+precompilation, a fold's state type being inferred. `compile=min`, dry: the
+GPT's first preparation 28.4 s against 31.1 and the LSTM's 13.5 against
+15.4, the second preparation 10.2 against 9.7 and 0.69 against 0.52; not
+taken, since no submodule can turn it off and the module kernels are
+generated into is under the compiler's, so CPU-target kernels would run
+interpreted.
+
+**First execution: a warm preparation replays the decisions its cover
+reached, adopted.** The challengers keep a search's results beside its
+kernels (tinygrad) or a whole program's compilation (JAX, torch.compile). A
+preparation keeps the proposals its cover took and each group's decision
+under a key that writes out everything a decision reads, with the record's
+and the rates file's entries the cover read
+(`src/Compiler/cover/reached.jl`); a preparation of the same program whose
+files still hold those values plans the taken proposals once and reads each
+decision back, nothing priced, measured or compiled but the plan's own
+kernels. The small GPT on the idle GB10, each in a new process: warm 38.4 s
+to 15.5, 10.48 to 1.04 once Julia has compiled; cold 95.1 to 103.3, three
+covers; the step and the plan the same, `explain` byte for byte. Decisions
+are replayed only when settled, reached by a cover that wrote nothing to the
+record and whose claims all built, so a preparation that measured covers
+again on what it left, three times at most, 8.2 s and 2 kernels more cold,
+the default; without it the fourth process is the first to replay. One
+writer keeps and writes the same Float64 for the record and the rates file
+(`keep!`), where the session's first timing, kept as a Float32's digits,
+never compared equal in the next process. The LSTM never settled, eight
+cuTile claims failing to build each time: they were one kernel's, a
+candidate of a product taken with a sum riding the recurrence that computes
+that product in its steps, storing nothing, which the verifier states
+(invariant 3) and which threw once the corpus prepared verified. A ride is
+now about what its steps compute for the sum (`Ride(value, within)`,
+`fixes`), so the cover takes no such proposal with it: the LSTM's plan and
+step as they were, its next process replaying in 15.3 s, and on 11 November
+preparing in 53.2 s and replaying in 13.8. A cold plan differs from
+another's by its measured close calls, the GPT 182, 178, 182 and 182 kernels
+in four runs; what makes a plan the same in the next process is the replay.
+
+**First execution: rates shipped for a device Tempest knows, adopted.** A
+file per device in `src/Compiler/cover/rates`, stating the timing basis and
+the device's reported memory bandwidth, cache and multiprocessors
+(`shipped_rates`), read under the machine's own rates file and only where
+name, identity and basis match; the GB10's is what `test/bench/rates.jl`
+writes. Cold, by the corpus on the second GB10 in one sitting: the GPT step
+90.8 s to 77.8 and 77.9, the LSTM 64.0 and 62.1 to 56.3 and 56.2, warm and
+the steps the same. The second unit's two calibrations differ from the file
+by no more than two calibrations of one unit do, products' rates 1 to 2% at
+the median and latencies 3 to 7%. A file that misprices one package's
+products a thousandfold makes the plan take the other and agree with the
+interpreter (`test/cuda/cover.jl`). Whether a plan turns on the applied
+lines, 190 of the file's 257, fitted at 1e-14 to 1e-11 s a position:
+prepared measuring nothing on the shipped rates, on those with the 190 at
+zero and on each of the second unit's calibrations, the GPT step and the
+LSTM plan the same in every kernel and claim.
+
+**First execution: the kernels' part of a cold preparation, measured; the
+floor's kernels keyed as the tiles' are, adopted.** The GPT's cold
+preparation compiled 346 kernels, 30 for calibration, 20 trials of whether
+cuTile lowers a function and 296 for options, 36 of them in the plan built;
+the LSTM's 203, 23, 16 and 164. `tileiras` is 74% (GPT) and 87% (LSTM) of a
+cuTile kernel's compile. Left, the assembler's flags over the GPT's 336
+kernels: 175.5 s of CPU at `-O3 --lineinfo`, cuTile's default, 172.8 without
+line information, 170.6 at `-O2`, 168.4 at `-O1`, 140.2 at `-O0`; line
+information makes the CUBINs 3.4 times larger, 70.4 MB against 20.6. Counted
+and not built, kernels that take their extents as arguments: 217 of the
+GPT's 336 distinct kernels differ in more than their extents, 105 of the
+LSTM's 176. Left, a warm kernel's load, about 12 ms, the GPT's 55 loads 0.7
+s. Taken: a floor kernel's key held a hash of all Tempest's sources, so any
+edit compiled it again, about 0.35 s each under CUDA's compiler lock; it is
+kept with what its compilation used of Tempest's code, and after an edit
+that changes no code the neural ODE's warm preparation compiles none of its
+12 where it compiled all. The floor of a cold preparation, its decisions
+known and only its plan's kernels compiled, was counted then at about 2 s
+past warm; the corpus's runner times it since: 16.0 to 16.1 s for the GPT
+step against 13.9 to 15.1 warm, 15.6 to 16.1 for the LSTM against 13.4 to
+14.7 (12 November).
+
+**First execution: fewer candidates timed, and estimates scaled on the
+record, measured and left.** The estimate against every claim the cold runs
+timed: the generator's products 0.76 of their estimate at the median, 70%
+within the close-call factor of 1.5; cuBLAS's 2.02 and 33%. Of the GPT's 98
+decisions, 38 had one option, 27 were decided by estimate and 33 by 235
+options timed, the time choosing other than the estimate in 14. Policies
+replayed on the record: one orientation of each product, 132 timings fewer
+and the decisions' time 12.9% more (GPT), 6.0% (LSTM); no options beyond a
+tile's, 81 fewer and 3.9% more; the first stage's claims alone, 9.4% more
+(LSTM). A record shipped as a prior by product shape: the nearest shape's
+best tile within 2% of the measured best for 63% of groups, its best three
+for 87%. The same claim timed in two runs, 415 claims: 1.086 at the median
+and 1.266 at the 90th percentile, the pointwise kernels 1.30 and 1.68. A
+scale per implementation and claim kind fitted on the GPT and the LSTM takes
+the neural ODE's and heat's choices from 15.6% over the best to 12.0%;
+fitted on those two it takes the GPT's and the LSTM's from 8.0% to 221%. The
+error is a regime's, not an implementation's: the neural ODE's products on 2
+to 4 blocks are estimated at 22 μs and run in 4, the LSTM's batched products
+alike for every tile at 511 μs and run in 648 to 3413. Two terms of a launch
+of few blocks fitted on the record take the first pair to 5.8% and the
+second to 14.9%. Left so that no scale is fitted again; the regime is the
+estimate's trial (Open).
+
+**First execution: verifying apart from crosschecking, adopted.** `verify`
+(TEMPEST_VERIFY) checked plans against the invariants and also compared
+replayed decisions with a fresh cover's, a cover's cost on every warm
+preparation, the LSTM's 15.3 s to 21.1. The comparison is a crosscheck of
+its own (TEMPEST_CROSSCHECK), which the tests turn on and nothing else does.
+The corpus prepares with every plan verified, the cover's trials among them:
+0.06 to 0.67 s of a cold preparation, under 1%.
 
 **BFloat16 attention's forward: matrices from one product to the next,
 adopted.** On trial was the product kernel's tiles laid out in the full rank
