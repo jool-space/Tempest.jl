@@ -864,9 +864,45 @@ resident); a launch of 6 blocks priced on its share of the device, eight
 times its bytes' time, stood in for work recomputed inside it that nothing
 prices (an attention's scores recomputed in its product estimated at 12.8
 μs and taking 155). These, with the two held corrections, land together.
-Tables, scripts and logs:
+Built together on branch `stage-b` (14 Nov, GB10 only, not landed, parked):
+a launch states its work as a tree of sweeps, each its steps, its loads and
+what it recomputes inside (`Sweep`, `StepLoad`; every plan and estimate as
+before, 75fcb58), and one law prices the tree (e0bd687): a block's chain,
+each step its latency and a time per element it loads, a product's
+multiply-adds at the line's rate over the device's blocks, the sweeps
+inside by the same law, joined with the bytes at the bandwidth as the root
+of the sum of squares. Fitted on 660 kernels timed alone on the GB10 (90 ns
+a step, 84 ps an element) it prices them within 1.25 where main's estimate
+2.50, sweeps of 1 to 8 blocks within 1.38 where 5.17; one block is flat to
+about 8 blocks and reaches 9 to 34 GB/s, not the bandwidth; refitted to the
+Ada's saved sweeps the time per element orders them within 1.32 where
+bytes at a block's rate 1.44. The refold's price, the swept and inner
+regimes and their references go, the rates file 82 lines where 300.
+Unmeasured the 4B decodes in 37.5, 42.7 and 60.6 ms at 1, 4 and 16
+sequences where main 37.6, 47.3 and 62.2, and chunks of 16 and 64 tokens
+in 43.9 and 55.9 where 44.6 and 57.4; the corpus does not hold: with the
+floor stating its sweep (884fd55), a launch's latency fitted among launches
+of itself (cuTile 0.99 μs, the floor 0.74, where 1.75 and 2.49, one tick of
+a cold launch) and loads priced warm where the bytes between writer and
+reader fit the cache (f84d338), heat steps in 0.582 ms where 0.561, the GPT
+in 1.174 where 1.154, the neural ODE in 8.44 where 7.72 and the LSTM in
+8.28 where 5.10. Three causes stand reduced: a function's stepped price is
+the device's, measured in the generator's kernels, and over-prices the
+floor's (a 256×64 map of three inputs estimated at 1.75 μs taking 0.97 in
+a loop, the generator's 1.57 taking 1.49); a launch's written bytes are
+priced warm by its loads' share (four 256×256 products at batch 100 writing
+105 MB, the generator's kernel estimated at 295 μs and taking 2722, cuBLAS
+509 and 669); and that kernel is under-priced five times on main too (511),
+cause unfound. Also measured: looped, a step's data in the cache, an
+element costs 1 to 7 ps where 84 cold, and the floor's map launches in 1.04
+to 1.08 μs where the generator's 1.2 to 1.7; a product's step slows 4 to 5
+times past 64 KB loaded on the TF32 and BFloat16 paths, as a sweep's does,
+though `held_bytes` exempts products; measured mode, timing each claim from
+a cleared cache, now differs from a law that prices warm loads warm.
+Nothing of this is re-measured on the Ada. Tables, scripts and logs:
 ~/dev/jool/challengers/overfit-2026-11-13/ (`m2/` the outcomes, `form/` the
-grid and fits) and devnum-2026-11-13/. Closes when, on each device judged
+grid and fits), devnum-2026-11-13/ and stageb-2026-11-14/ (`tables/` the
+timings and offline fits, `box*/` the gates and reductions). Closes when, on each device judged
 alone, the 4B's and the corpus's unmeasured steps are within 5% of their
 measured ones (the 4B at one sequence is, on both), with products, refolds,
 work recomputed in a launch and the two held corrections priced by the one
