@@ -134,6 +134,32 @@ end
     @test_throws "result 1 must be on device 2 and on device 1" C.with_devices(graph, [1, 2]; pins = [1 => 1, 1 => 2])
 end
 
+@testset "what two devices compute apart is a run of kernels on each, $(nameof(f))" for f in (towers_loss, towers_step)
+    a, b = placed_model(Float32; blocks = 3), again(placed_model(Float32; blocks = 3)...)
+    args = (a..., b...)
+    program = trace(f, args...)
+    labels = C.argument_devices(C.CPUTarget(), program, (on_label(0, a)..., on_label(1, b)...)).labels
+    p = C.verify(placed_plan(f, args, labels))
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
+    # The towers meet where their losses are added, a number crossing: the
+    # first's kernels, the second's, and the sum where the first is.
+    @test crossed_bytes(p) == [sizeof(Float32)]
+    @test device_runs(p) == [1, 2, 1]
+    f === towers_step && @test gradients_off(p, program) == 0
+    q, _, s = C.storage(p)
+    @test C.verify(q, s) === q
+end
+
+@testset "kernels two devices interleave are ordered in runs" begin
+    # Two chains of two kernels, one on each device, and a fifth reading both.
+    needs = [Set{Int}(), Set{Int}(), Set([1]), Set([2]), Set([3, 4])]
+    @test C.in_runs([1, 2, 3, 4, 5], needs, [1, 2, 1, 2, 1]) == [1, 3, 2, 4, 5]
+    # A device's kernel that reads another's waits for it, and no longer.
+    @test C.in_runs([1, 2, 3, 4, 5], [Set{Int}(), Set{Int}(), Set([2]), Set([2]), Set([3, 4])], [1, 2, 1, 2, 1]) == [1, 2, 4, 3, 5]
+    # One that waits holds back none of its device's that does not.
+    @test C.in_runs([1, 2, 3, 4], [Set{Int}(), Set{Int}(), Set([2]), Set([1])], [1, 2, 1, 1]) == [1, 4, 2, 3]
+end
+
 @testset "a program on one device plans as it did" begin
     ws, x, _ = placed_model(Float32)
     graph = C.rewrite(C.lower(trace(placed_half, ws, x)))
@@ -166,11 +192,18 @@ end
     stored = copy(p.stored)
     stored[c] = false
     @test invalid_by(() -> C.verify(C.Plan(p.graph, stored, p.groups, p.owner))) == 1
-    # A kernel computing a member on another device than its own.
-    g = only(filter(g -> !(g.kind isa C.CrossingKind) && length(C.members(g)) > 1, p.groups))
-    devices = copy(p.graph.devices)
+    # A kernel computing a member on another device than its own: of the
+    # placed step's, as the sum here and its product with what crosses are
+    # two kernels, the product waiting for the crossing and the sum not.
+    @test all(g -> length(C.members(g)) == 1, p.groups)
+    ws, x, t = placed_model(Float32)
+    step = placed_plan(placed_step, (ws, x, t), C.argument_devices(C.CPUTarget(), trace(placed_step, ws, x, t), labelled_model(ws, x, t)).labels)
+    g = first(filter(g -> length(C.members(g)) > 1, step.groups))
+    devices = copy(step.graph.devices)
     devices[last(C.members(g))] = 3 - devices[first(C.members(g))]
-    @test invalid_by(() -> C.verify(relabelled(devices))) == 5
+    moved = C.IndexGraph(step.graph.values, step.graph.arguments, step.graph.results, step.graph.result_dims,
+        step.graph.result_scalar, step.graph.result_eltype, step.graph.rewrites, step.graph.backward, devices)
+    @test invalid_by(() -> C.verify(C.Plan(moved, step.stored, step.groups, step.owner))) == 5
     # A crossing computed by a kernel that is not a crossing's.
     k = findfirst(==(crossing), p.groups)
     groups = copy(p.groups)

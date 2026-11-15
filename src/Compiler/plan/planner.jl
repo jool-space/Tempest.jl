@@ -47,8 +47,10 @@ end
 What forming every plan of one graph shares, whatever the planner is given:
 the graph as given and with its results stored, what runs, the results, each
 value's ancestors, the values that read each, and through a gather too
-(`followers`, those that run only), the recurrences, and the seeds of the
-kernels other than the fixed sets', in the order they form (see `Seed`).
+(`followers`, those that run only), how many crossings each comes after
+(`awaits`: what it waits for of other devices), the recurrences, and the
+seeds of the kernels other than the fixed sets', in the order they form
+(see `Seed`).
 """
 struct Grounds
     source::IndexGraph
@@ -58,6 +60,7 @@ struct Grounds
     up::Vector{BitVector}
     users::Vector{Vector{Int}}
     followers::Vector{Vector{Int}}
+    awaits::Vector{Int}
     recurrences::Vector{Cycle}
     seeds::Vector{Seed}
 end
@@ -85,7 +88,10 @@ function Grounds(source::IndexGraph, s)
     crossings = filter(id -> values[id].definition isa Crossed, 1:n)
     seeds = Seed[[RecurrenceSeed(k) for k in eachindex(recurring)]; [CrossingSeed(id) for id in crossings]; [FoldSeed(id) for id in folds];
         [MapSeed(id) for id in maps]]
-    Grounds(source, graph, live, s.results, ancestors(graph), readers(graph), followers, recurring, seeds)
+    up = ancestors(graph)
+    crossed = BitVector(v.definition isa Crossed for v in values)
+    awaits = any(crossed) ? [count(up[id] .& crossed) for id in 1:n] : zeros(Int, n)
+    Grounds(source, graph, live, s.results, up, readers(graph), followers, awaits, recurring, seeds)
 end
 
 """
@@ -242,7 +248,7 @@ function grown_fold(grounds::Grounds, cx::Forming, id)
             other = frontier[k]
             k += 1
             grounds.live[other] && !owned(cx, other) && !(other in members(g)) || continue
-            taken = taking(g.kind, grounds, cx, g, other, id)
+            taken = joined(grounds, cx, g, other, id)
             taken === nothing && continue
             g = taken
             changed = true
@@ -274,7 +280,7 @@ function grown_map(grounds::Grounds, cx::Forming, id)
         other = frontier[k]
         k += 1
         grounds.live[other] && !owned(cx, other) || continue
-        taking(g.kind, grounds, cx, g, other, id) === nothing && continue
+        joined(grounds, cx, g, other, id) === nothing && continue
         reach!(frontier, grounds.followers, cx, [other], id)
     end
     g
@@ -343,6 +349,16 @@ function try_add!(graph, cx::Forming, g::Group, v; fold, recomputing = true)
     g.phase[v] = maximum(s -> g.phase[s], stats(t); init = 0) + (fold ? 1 : 0)
     true
 end
+
+# Group `g`, grown from `seed`, with `other` taken as its kind takes it (see
+# `taking`), where the two come after the same crossings: a kernel waits
+# for every value it reads of another device, so one holding a value that
+# waits for a crossing and one that does not would keep back whatever on
+# its device reads the second, and two devices that compute apart, joined
+# where a number of one's is added to the other's, would run one after the
+# other.
+joined(grounds::Grounds, cx::Forming, g::Group, other, seed) =
+    grounds.awaits[other] == grounds.awaits[seed] ? taking(g.kind, grounds, cx, g, other, seed) : nothing
 
 """
     taking(kind, grounds, cx, g, other, seed) -> group or nothing
@@ -575,5 +591,40 @@ function order_groups(graph, groups, owner)
         end
     end
     done == n || error("kernels depend on each other in a cycle")
-    sort!(collect(eachindex(groups)); by = k -> (pass[k], k))
+    order = sort!(collect(eachindex(groups)); by = k -> (pass[k], k))
+    device = [graph.devices[first(members(g))] for g in groups]
+    allequal(device) ? order : in_runs(order, needs, device)
+end
+
+# `order` with each device's kernels in runs as long as what they read
+# allows: the next taken is the earliest of the device's own whose reads
+# are all written, and where it has none, the earliest of another's. A
+# crossing is its reader's, so a device runs all it can before it waits for
+# another. What two devices compute apart is then a run on each, each a
+# graph of its device's that runs beside the other's (see `walk`), where
+# passes alone interleave them kernel by kernel; and a kernel that waits
+# for another device holds back none of its own that does not.
+function in_runs(order, needs, device)
+    position = invperm(order)
+    waiting = map(length, needs)
+    after = [Int[] for _ in order]
+    foreach(k -> foreach(d -> push!(after[d], k), needs[k]), eachindex(needs))
+    # Each device's kernels whose reads are written, by their place in `order`.
+    ready = Dict(d => Int[] for d in device)
+    await!(k) = insert!(ready[device[k]], searchsortedfirst(ready[device[k]], position[k]), position[k])
+    foreach(k -> waiting[k] == 0 && await!(k), order)
+    runs = Int[]
+    current = device[first(order)]
+    while length(runs) < length(order)
+        if isempty(ready[current])
+            current = argmin(d -> isempty(ready[d]) ? typemax(Int) : first(ready[d]), keys(ready))
+        end
+        k = order[popfirst!(ready[current])]
+        push!(runs, k)
+        for j in after[k]
+            waiting[j] -= 1
+            waiting[j] == 0 && await!(j)
+        end
+    end
+    runs
 end

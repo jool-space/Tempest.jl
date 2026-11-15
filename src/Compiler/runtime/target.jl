@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, walk, follow, written, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, walk, written, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -417,17 +417,23 @@ end
 device: the one place an execution's steps are put on their devices, as
 they run (`execute!`). Consecutive steps on one device, or consecutive
 crossings between the same two, are a run, walked in one entry of its
-device (see `on_device`) after the runs before it on another are ordered
-before it (see `follow`), so an execution on one device, as a program
+device (see `on_device`), so an execution on one device, as a program
 planned on one is, enters it once. A recording takes the same runs as its
 segments (see `Captured`).
+
+The steps are walked in the plan's order, and on a target whose devices
+run apart each device runs its own in that order, beside the others': a
+step reads only what is on its device, a crossing alone reading another's,
+and a crossing is ordered after what wrote its source and before what
+reads its copy (see `crossing`). So what two devices compute between
+crossings runs on both at once, and nothing else orders one device's work
+after another's.
 """
 function walk(f, target::Target, steps)
     start = 1
     while start <= length(steps)
         stop = run_end(steps, start)
         device = steps[start].device
-        start > 1 && steps[start - 1].device != device && follow(target, steps[start - 1].device, device)
         on_device(() -> foreach(k -> f(steps[k]), start:stop), target, device)
         start = stop + 1
     end
@@ -436,20 +442,6 @@ end
 
 # Run step `s` where the task is.
 run_step(s::Step) = (s.run(); nothing)
-
-"""
-    follow(target, before, after)
-
-Order the work launched next on device `after` after what was launched on
-device `before`: called between consecutive runs of an execution's steps
-on two devices (see `walk`), and between segments of a recording on two
-(see `Captured`), with the task where the caller has it. A target whose
-devices run apart orders them here, by an event recorded on `before`'s
-stream and waited for on `after`'s, or by waiting for `before`. A
-crossing's own copy is ordered after what wrote its source either way. The
-CPU runs its steps in order, and does nothing.
-"""
-follow(::Target, before, after) = nothing
 
 """
     written(target, x)
@@ -470,7 +462,11 @@ devices, into buffer `to`, storage on another, as large: how a value read
 on another device than its own gets there (see `Crossed`). `values` names
 the two buffers, `to_value => from_value`, for the run to be pointed
 elsewhere as a `Copy` is (see `repoint!`). It is built with the task on
-`to`'s device; each buffer knows its own. A target with graphs says, as it
+`to`'s device; each buffer knows its own. On a target whose devices run
+apart the run orders itself: after the work launched so far on `from`'s
+device, which wrote its source, and before the work launched next on
+`to`'s, which reads its copy; it is all that orders two devices (see
+`walk`). A target with graphs says, as it
 records a segment of crossings (see `capture`), whether the crossing is
 recorded or runs as the segment is replayed. On the CPU, whose devices are
 labels on the host's memory, it is a copy on the host.
@@ -540,8 +536,8 @@ end
 What `capture!` records of an executable: the steps of the executions a
 replay runs, and a segment per run of them, each captured as its device's
 own graph, a target's graph being one device's. A replay launches the
-segments in order, each on its device after the one before it is ordered
-before it (see `follow`). An execution on one device is one segment, its
+segments in order, each on its device, ordered between devices as the
+steps are (see `walk`). An execution on one device is one segment, its
 graph the target's capture of every step.
 """
 struct Captured
@@ -564,8 +560,7 @@ end
 
 # Launch what `r` recorded, segment by segment.
 function replay_recording(target::Target, r::Captured)
-    for (k, s) in enumerate(r.segments)
-        k > 1 && r.segments[k - 1].device != s.device && follow(target, r.segments[k - 1].device, s.device)
+    for s in r.segments
         on_device(() -> replay(target, s.graph), target, s.device)
     end
     nothing

@@ -49,17 +49,6 @@ end
 
 ## Devices.
 
-# The work launched next on device `after` waits on its stream for what the
-# task launched on `before`'s so far, by an event CUDA.jl keeps per stream.
-# A crossing orders its own legs (see `Staged`); this orders the rest of the
-# walk as it is written, so that no step on one device depends on which of
-# another's it shares no buffer with.
-function Tempest.Compiler.follow(target::CUDATarget, before::Int, after::Int)
-    source = Tempest.Compiler.on_device(CUDACore.stream, target, before)
-    Tempest.Compiler.on_device(() -> CUDACore.stream_wait(CUDACore.stream(), source), target, after)
-    nothing
-end
-
 # CUDA.jl learns which stream last used an array, and whether work on it is
 # pending, from the operations it submits, and a reader on another stream
 # waits for that stream only while it is: the floor's, cuTile's and cuBLAS's

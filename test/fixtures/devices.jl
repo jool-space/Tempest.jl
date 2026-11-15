@@ -39,6 +39,22 @@ function labelled_model(ws, x, t; devices = 2)
 end
 
 # The model's arrays again, other numbers, as a later call brings them.
+# Two towers of the placed model's blocks, each with its own weights, input
+# and target, joined where their losses are added: what two devices
+# compute apart.
+towers_loss(wa, xa, ta, wb, xb, tb) = placed_loss(wa, xa, ta) + placed_loss(wb, xb, tb)
+towers_step(wa, xa, ta, wb, xb, tb) = Tempest.withgradient(towers_loss, wa, xa, ta, wb, xb, tb)
+
+# A tower's arrays all on `device`.
+on_label(device, (ws, x, t)) = (map(w -> map(a -> Labelled(a, device), w), ws), Labelled(x, device), Labelled(t, device))
+
+# The devices of the kernels of plan `p`, a crossing's its reader's, each
+# run of kernels on one device once.
+function device_runs(p)
+    devices = [C.group_device(p, g) for g in p.groups]
+    [devices[k] for k in eachindex(devices) if k == 1 || devices[k] != devices[k - 1]]
+end
+
 again(ws, x, t) = (map(w -> map(a -> a .+ 1, w), ws), 2 .* x, t .- 1)
 
 crossings(p) = count(g -> g.kind isa C.CrossingKind, p.groups)
