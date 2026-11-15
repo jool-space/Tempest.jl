@@ -79,6 +79,9 @@ mutable struct Executable{T <: Target}
     # The steps of an execution, in order, each on its device: the inputs
     # saved, each launch, and the staged copies (see `walk`).
     steps::Vector{Step}
+    # What each step reads and writes, as storage (see `step_touches`): what
+    # orders the steps between streams (see `stream_schedule`).
+    touches::Vector{Touches}
     # What `replay!` runs, once captured (see `capture!`).
     captured::Union{Nothing, Captured}
     # The device each of the plan's labels stands for (see `Placement`), and
@@ -433,7 +436,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
         none(n) = Vector{Any}(nothing, n)
         return Executable(program, p, target, s, Any[], none(length(values)),
             none(n), none(n), none(length(p.graph.results)), nothing,
-            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], Step[], nothing,
+            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], Step[], Touches[], nothing,
             devices, argument_devices, result_devices, Vector{Union{Nothing, Uses}}(nothing, n), none(n),
             zeros(UInt, n), zeros(UInt, n), fill(false, n), none(n), 1, false, reached)
     end
@@ -527,6 +530,10 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     steps = Step[Step(save.copy, device(last(save.copy.values))) for save in saves]
     append!(steps, Step(l, devices[group_device(p, g)], devices[source_device(p, g)]) for (l, g) in zip(launches, p.groups))
     append!(steps, Step(c, device(first(c.values))) for c in copies)
+    # The storage each value lives in: its slot, else the argument's it is
+    # over, else its root's own buffer.
+    storage_of(v) = s.slots[v] > 0 ? (:slot, s.slots[v]) : over(v) > 0 ? (:argument, over(v)) : (:value, root[v])
+    touches = step_touches(p, saves, copies, storage_of)
     stored(k) = haskey(replaced, k) ? vec(pointed[replaced[k]]) : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
     results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     # Where each pointable argument's storage is used: the steps that use
@@ -554,7 +561,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     at = UInt[x === nothing ? 0 : on(() -> address_of(x), input[k]) for (k, x) in enumerate(pointed)]
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, kept, arguments, referenced, results, outputs_over(program, results),
-        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, nothing,
+        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, touches, nothing,
         devices, argument_devices, result_devices, used, pointed, at, zeros(UInt, n), fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
 end
 

@@ -93,6 +93,7 @@ include("plan/verify.jl")
 # Code generation and prepared programs.
 include("codegen/scalar.jl")
 include("runtime/target.jl")
+include("runtime/schedule.jl")
 include("runtime/runtime.jl")
 
 # The cover: which groups there are, and how each runs.

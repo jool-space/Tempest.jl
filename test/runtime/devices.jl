@@ -2,6 +2,7 @@
 # the CPU target, a crossing between them a copy on the host; CUDA's target
 # runs such programs over its devices (test/cuda/devices.jl).
 include("../fixtures/devices.jl")
+include("../fixtures/schedules.jl")
 
 # The leaves of the outputs of `ex`, copied.
 leaf_copies(ex) = map(copy, C.leaves(outputs(ex)))
@@ -25,6 +26,7 @@ result_leaves(r) = collect(C.leaves(r))
         execute!(whole)
         execute!(placed)
         @test leaf_copies(placed) == leaf_copies(whole)
+        @test unordered(placed) == []
         # The labels stand for the devices the arguments are on, the first home.
         @test placed.devices == [0, 1]
         # Each crossing is a step of its own from the device its source is on
@@ -253,5 +255,7 @@ end
         ex = prepare(program, map(Labelled, map(copy, args), labels)...; target = T.CPUTarget(), verify = true)
         @test map(copy, C.leaves(outputs(execute!(ex)))) == whole
         @test gradients_off(ex.plan, program) == 0
+        # Steps on two streams that touch one storage are ordered by waits.
+        @test unordered(ex) == []
     end
 end
