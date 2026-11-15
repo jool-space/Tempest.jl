@@ -82,6 +82,8 @@ mutable struct Executable{T <: Target}
     # What each step reads and writes, as storage (see `step_touches`): what
     # orders the steps between streams (see `stream_schedule`).
     touches::Vector{Touches}
+    # How an execution runs them, each on its stream (see `walk`).
+    schedule::Schedule
     # What `replay!` runs, once captured (see `capture!`).
     captured::Union{Nothing, Captured}
     # The device each of the plan's labels stands for (see `Placement`), and
@@ -436,7 +438,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
         none(n) = Vector{Any}(nothing, n)
         return Executable(program, p, target, s, Any[], none(length(values)),
             none(n), none(n), none(length(p.graph.results)), nothing,
-            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], Step[], Touches[], nothing,
+            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], Step[], Touches[], Schedule(target, Step[], Touches[]), nothing,
             devices, argument_devices, result_devices, Vector{Union{Nothing, Uses}}(nothing, n), none(n),
             zeros(UInt, n), zeros(UInt, n), fill(false, n), none(n), 1, false, reached)
     end
@@ -534,6 +536,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     # over, else its root's own buffer.
     storage_of(v) = s.slots[v] > 0 ? (:slot, s.slots[v]) : over(v) > 0 ? (:argument, over(v)) : (:value, root[v])
     touches = step_touches(p, saves, copies, storage_of)
+    schedule = Schedule(target, steps, touches)
     stored(k) = haskey(replaced, k) ? vec(pointed[replaced[k]]) : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
     results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     # Where each pointable argument's storage is used: the steps that use
@@ -561,7 +564,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     at = UInt[x === nothing ? 0 : on(() -> address_of(x), input[k]) for (k, x) in enumerate(pointed)]
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, kept, arguments, referenced, results, outputs_over(program, results),
-        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, touches, nothing,
+        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, touches, schedule, nothing,
         devices, argument_devices, result_devices, used, pointed, at, zeros(UInt, n), fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
 end
 
@@ -1071,10 +1074,10 @@ function retarget!(ex::Executable, moves)
         repoint() = pointed[] || (foreach(m -> repoint!(ex.steps[i].run, m[3].value, m[4]), mine); pointed[] = true)
         if r !== nothing
             at = recorded_steps(ex, i)
-            held = unique(segment_at(r, j) for j in at)
+            held = unique(first(r.at[j]) for j in at)
             segment = r.segments[first(held)]
-            changed = length(held) == 1 && on_device(ex.target, segment.device) do
-                retarget!(ex.target, segment.graph, collect(at .- (first(segment.steps) - 1)), [m[3] for m in mine], repoint)
+            changed = length(held) == 1 && on_stream(ex.target, segment.stream) do
+                retarget!(ex.target, segment.graph, [last(r.at[j]) for j in at], [m[3] for m in mine], repoint)
             end
             if !changed
                 foreach(m -> ex.settles[m[2]] = true, mine)
@@ -1107,7 +1110,7 @@ capture.
 """
 function execute!(ex::Executable)
     runnable(ex)
-    walk(run_step, ex.target, ex.steps)
+    walk(ex.target, ex.schedule)
     write_back!(ex)
 end
 
@@ -1116,8 +1119,9 @@ end
 
 Record what `execute!` launches, for `replay!` to run, each replay
 `repetitions` executions of the program (for timing): as one graph on one
-device, and over several as a graph per run of steps on one device, each
-crossing between them a step of its own (see `Captured`). Captured runs
+device, and over several as a graph per run of the schedule of the
+executions, the runs of a device's steps and of a lane's crossings (see
+`Captured`). Captured runs
 nothing. What varies between replays lives in device buffers: inputs bound by
 copy or by reference, scalars and seeds among them, are read where they are,
 so they need no new capture. Capturing again replaces the graph. On a target
@@ -1134,7 +1138,7 @@ function capture!(ex::Executable; repetitions::Integer = 1)
     runnable(ex)
     release!(ex)
     ex.repetitions = repetitions
-    ex.captured = record(ex.target, recorded(ex), ex.steps)
+    ex.captured = record(ex.target, Schedule(ex.target, recorded(ex), repeat(ex.touches, repetitions)), ex.steps)
     ex
 end
 

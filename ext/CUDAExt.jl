@@ -124,7 +124,9 @@ function Tempest.Compiler.Implement.repoint!(c::Staged, value, buffer)
     c
 end
 
-# Run with the task on the reader's device, as `walk` puts a crossing.
+# Run with the task on the reader's device, where its lane puts it (see
+# `Tempest.Compiler.on_stream`), its download on the source's stream and its
+# upload on the reader's.
 function (c::Staged)()
     s = c.staging
     bytes = sizeof(c.from)
@@ -202,7 +204,7 @@ mutable struct Graph
     exec::CUDACore.CuGraphExec
     # The graph the executable was made from, whose nodes name its own.
     graph::CUDACore.CuGraph
-    steps::Vector{Tempest.Compiler.Step}
+    steps::Vector{Tempest.Compiler.Scheduled}
     nodes::Vector{Vector{Any}}
     # Per step and value, where its address is in the step's kernels, and
     # the alignments it was learned at.
@@ -278,15 +280,18 @@ end
 
 # The steps captured as one graph, and per step its nodes: those the frontier
 # after the step depends on, back to the step before's. Each step is captured
-# by itself, after the step before, on its device (see `walk`): a library
-# records a call within a longer capture otherwise than alone (cuBLAS, a word
-# of its kernels' arguments), and `retarget!` learns from a step captured alone.
+# by itself, after the step before, with the task on the steps' stream (see
+# `capture`): a library records a call within a longer capture otherwise than
+# alone (cuBLAS, a word of its kernels' arguments), and `retarget!` learns
+# from a step captured alone. A step's waits and record are the target's
+# events, of which CUDA makes none (see `Tempest.Compiler.event`): the
+# devices' streams order its steps as they are launched.
 function steps_recorded(target, steps)
     graph = CUDACore.CuGraph()
     after = CUDACore.CuGraphNode[]
     marks = Vector{CUDACore.CUgraphNode}[]
-    Tempest.Compiler.walk(target, steps) do step
-        after = captured!(() -> step.run(), graph; after)
+    for s in steps
+        after = captured!(() -> s.step.run(), graph; after)
         push!(marks, CUDACore.CUgraphNode[n.handle for n in after])
     end
     seen = Set{CUDACore.CUgraphNode}()
@@ -319,11 +324,11 @@ function captured!(f, graph; after)
     end
 end
 
-# A segment of crossings is not recorded: it runs as it is replayed (see
+# A run of crossings is not recorded: it runs as it is replayed (see
 # `Staged`), as the steps of a target without graphs do, and is changed by
 # repointing its copies alone.
 function Tempest.Compiler.capture(target::CUDATarget, steps, keep)
-    Tempest.Compiler.crosses(first(steps)) && return steps
+    Tempest.Compiler.crosses(first(steps).step) && return steps
     graph, nodes = steps_recorded(target, steps)
     exec = CUDACore.instantiate(graph)
     g = finalizer(g -> (finalize(g.exec); finalize(g.graph)), Graph(exec, graph, steps, nodes, Dict(), Dict(), Set{Int}()))
@@ -521,7 +526,10 @@ Tempest.Compiler.time_launch(target::CUDATarget, launch) = Tempest.Compiler.on_d
 
 # A launch timed, `n` times over as the steps of a graph, on the target's
 # device, where its timing runs.
-timed_steps(target, launch, n) = fill(Tempest.Compiler.Step(launch, Tempest.Compiler.home_device(target)), n)
+function timed_steps(target, launch, n)
+    d = Tempest.Compiler.home_device(target)
+    fill(Tempest.Compiler.Scheduled(Tempest.Compiler.Step(launch, d), Tempest.Compiler.stream(target, d, d), Any[], nothing), n)
+end
 
 function timed_launch(target, launch)
     launch()

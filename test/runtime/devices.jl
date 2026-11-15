@@ -36,7 +36,7 @@ result_leaves(r) = collect(C.leaves(r))
         @test all(s -> s.run isa C.Copy, crossing)
         capture!(placed)
         segments = placed.captured.segments
-        @test [s.device for s in segments] == (f === placed_half ? [0, 1, 1] : [0, 1, 1, 0, 0])
+        @test segment_devices(placed.captured) == (f === placed_half ? [0, 1, 1] : [0, 1, 1, 0, 0])
         @test all(s -> allequal((step.device, step.from) for step in placed.steps[s.steps]), segments)
         @test only.(unique.([[(step.from, step.device) for step in placed.steps[s.steps]] for s in segments])) ==
             (f === placed_half ? [(0, 0), (0, 1), (1, 1)] : [(0, 0), (0, 1), (1, 1), (1, 0), (0, 0)])
@@ -90,7 +90,7 @@ end
     @test leaf_copies(placed) == leaf_copies(whole)
     replay!(capture!(placed))
     @test leaf_copies(placed) == leaf_copies(whole)
-    @test Set(s.device for s in placed.captured.segments) == Set([0, 1, 2])
+    @test Set(segment_devices(placed.captured)) == Set([0, 1, 2])
 end
 
 # A host target that notes the device the task is on as each buffer is
@@ -113,7 +113,7 @@ C.allocate(t::Watched, T, n) = (note!(t, :allocate, T); Vector{T}(undef, n))
 C.upload(t::Watched, x) = (note!(t, :upload); x)
 C.crossing(t::Watched, to, from, values) = (note!(t, :crossing, values); Watching(C.Copy(to, from, values), t, values))
 C.floor_launch(t::Watched, k::C.ScalarKernel, args) = (note!(t, :build); Watching(C.floor_launch(T.CPUTarget(), k, args), t, nothing))
-C.capture(t::Watched, steps, keep) = (note!(t, :segment, [(s.from, s.device) for s in steps]); steps)
+C.capture(t::Watched, steps, keep) = (note!(t, :segment, [(s.step.from, s.step.device) for s in steps]); steps)
 
 # A launch that notes where it runs.
 struct Watching
@@ -153,10 +153,12 @@ C.Implement.repoint!(w::Watching, value, buffer) = (C.Implement.repoint!(w.run, 
     crossings = [g for g in p.groups if g.kind isa C.CrossingKind]
     @test [(e[2], e[end]) for e in target.log if e[1] === :crossing] ==
         [(only(g.outputs) => C.crossed_from(p.graph, only(g.outputs)), ex.devices[C.group_device(p, g)]) for g in crossings]
-    # Each step run on its device, and each segment recorded on its own.
+    # Each step run on its device, in the order its runs are launched, and
+    # each segment recorded on its own.
     empty!(target.log)
     execute!(ex)
-    @test [e[end] for e in target.log if e[1] === :run] == reduce(vcat, [fill(s.device, launches(s.run)) for s in ex.steps])
+    launched = [ex.steps[k] for run in ex.schedule.runs for k in run]
+    @test [e[end] for e in target.log if e[1] === :run] == reduce(vcat, [fill(s.device, launches(s.run)) for s in launched])
     empty!(target.log)
     capture!(ex)
     recorded = [e for e in target.log if e[1] === :segment]

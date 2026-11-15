@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, walk, written, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, written, crossing, stream, on_stream, event, record!, wait!, Scheduled, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -379,9 +379,10 @@ floor_split(::Target, items, positions, adjacent) = nothing
     Step(run, device, from = device)
 
 A step of an execution: `run()`, a kernel's launch or a copy, and the device
-it runs on (see `device_of`), where `walk` puts it; and the device it reads
-from, another only for a crossing, a copy from `from` to `device` (see
-`crossing`).
+it runs on (see `device_of`); and the device it reads from, another only for
+a crossing, a copy from `from` to `device` (see `crossing`). The two name
+the stream it runs on (see `stream`): a device's own, or the lane of the
+ordered pair of devices a crossing copies between.
 """
 struct Step
     run::Any
@@ -394,54 +395,11 @@ Step(run, device) = Step(run, device, device)
 """
     crosses(step) -> Bool
 
-Whether `step` copies between two devices, a crossing's (see `crossing`):
-a target with graphs records a segment of other steps as one device's
-graph, and says how a segment of crossings runs (see `capture`).
+Whether `step` copies between two devices, a crossing's (see `crossing`),
+on the lane of the two rather than on a device's own stream: a target with
+graphs says how a run of crossings is recorded (see `capture`).
 """
 crosses(s::Step) = s.from != s.device
-
-# The last of the steps from `start` on that run where it does: on one
-# device, or crossing between the same two.
-function run_end(steps, start)
-    stop = start
-    while stop < length(steps) && (steps[stop + 1].device, steps[stop + 1].from) == (steps[start].device, steps[start].from)
-        stop += 1
-    end
-    stop
-end
-
-"""
-    walk(f, target, steps)
-
-`f(step)` for each of `steps` in order, the calling task on the step's
-device: the one place an execution's steps are put on their devices, as
-they run (`execute!`). Consecutive steps on one device, or consecutive
-crossings between the same two, are a run, walked in one entry of its
-device (see `on_device`), so an execution on one device, as a program
-planned on one is, enters it once. A recording takes the same runs as its
-segments (see `Captured`).
-
-The steps are walked in the plan's order, and on a target whose devices
-run apart each device runs its own in that order, beside the others': a
-step reads only what is on its device, a crossing alone reading another's,
-and a crossing is ordered after what wrote its source and before what
-reads its copy (see `crossing`). So what two devices compute between
-crossings runs on both at once, and nothing else orders one device's work
-after another's.
-"""
-function walk(f, target::Target, steps)
-    start = 1
-    while start <= length(steps)
-        stop = run_end(steps, start)
-        device = steps[start].device
-        on_device(() -> foreach(k -> f(steps[k]), start:stop), target, device)
-        start = stop + 1
-    end
-    nothing
-end
-
-# Run step `s` where the task is.
-run_step(s::Step) = (s.run(); nothing)
 
 """
     written(target, x)
@@ -462,30 +420,84 @@ devices, into buffer `to`, storage on another, as large: how a value read
 on another device than its own gets there (see `Crossed`). `values` names
 the two buffers, `to_value => from_value`, for the run to be pointed
 elsewhere as a `Copy` is (see `repoint!`). It is built with the task on
-`to`'s device; each buffer knows its own. On a target whose devices run
-apart the run orders itself: after the work launched so far on `from`'s
-device, which wrote its source, and before the work launched next on
-`to`'s, which reads its copy; it is all that orders two devices (see
-`walk`). A target with graphs says, as it
-records a segment of crossings (see `capture`), whether the crossing is
-recorded or runs as the segment is replayed. On the CPU, whose devices are
+`to`'s device, and runs where its lane puts the task (see `on_stream`); each
+buffer knows its own device. Its schedule orders it after what wrote its
+source and before what reads its copy (see `Schedule`). A target with graphs
+says, as it records a run of crossings (see `capture`), whether the crossing
+is recorded or runs as the run is replayed. On the CPU, whose devices are
 labels on the host's memory, it is a copy on the host.
 """
 crossing(::CPUTarget, to, from, values::Pair{Int, Int}) = Copy(to, from, values)
+
+## Streams.
+
+"""
+    stream(target, from, to) -> stream
+
+What the steps of one stream run on (see `stream_of`): with `from == to`, a
+device's own, its kernels and copies in order; else the lane of the ordered
+pair, the crossings from `from` to `to` in order. Made once for each
+schedule, with the task on `to`'s device. By default the pair itself, whose
+steps run with the task on `to` (see `on_stream`).
+"""
+stream(::Target, from, to) = (from, to)
+
+"""
+    on_stream(f, target, stream)
+
+`f()` with the calling task where the steps of `stream` run, as `on_device`
+puts it on a device. By default on the stream's last device: a device's
+own, or the reader's of a lane, where a crossing's run is built and expects
+to run (see `crossing`). A target whose lanes are streams of their own
+enters them here.
+"""
+on_stream(f, target::Target, stream) = on_device(f, target, last(stream))
+
+"""
+    event(target, stream) -> event
+
+What a step on `stream` records once it has run, for steps on other streams
+to wait for (see `record!` and `wait!`), made with the task where the
+stream's steps run. A target whose steps run in the order they are
+launched, the CPU's, has none: `nothing`.
+"""
+event(::Target, stream) = nothing
+
+"""
+    record!(target, stream, event)
+
+Record `event` on `stream`, after what was launched on it so far, with the
+task where the stream's steps run (see `on_stream`): after a step that a
+step on another stream waits for, and as a call begins and ends (see
+`walk`). Recorded into a graph (see `capture`), each launch of the graph
+records it again.
+"""
+record!(::Target, stream, event) = nothing
+
+"""
+    wait!(target, stream, event)
+
+Make what is launched on `stream` from now on wait for what was launched
+before the last `record!` of `event`, with the task where the stream's
+steps run (see `on_stream`): before a step that waits for a step on another
+stream, and as a call begins and ends (see `walk`). Recorded into a graph,
+the wait is for the last record launched before the graph.
+"""
+wait!(::Target, stream, event) = nothing
 
 ## Graphs.
 
 """
     capture(target, steps, keep) -> graph
 
-`steps`, each a `Step` that launches work on `target`, all on one device or
-all crossings between the same two (a segment of a `Captured`), captured
-in order as one graph for `replay(target, graph)` to launch again;
+`steps`, each a `Scheduled` step that launches work on `target`, all on one
+stream (a run of a `Schedule`), captured in order, their waits and records
+with them, as one graph for `replay(target, graph)` to launch again;
 `retarget!` changes the addresses one step's work reads. Tempest asks with
-the task on the steps' device, where the graph is made, launched and
-changed. The graph keeps `keep`, what it launches, alive until
-`release(target, graph)` or the collector destroys it. A target without
-graphs replays the steps themselves.
+the task where the stream's steps run (see `on_stream`), where the graph is
+made, launched and changed. The graph keeps `keep`, what it launches, alive
+until `release(target, graph)` or the collector destroys it. A target
+without graphs replays the steps themselves.
 """
 capture(::Target, steps, keep) = steps
 
@@ -514,67 +526,10 @@ where their launches read: true.
 retarget!(::Target, graph, steps, moves, repoint) = true
 
 "Launch `graph`, what `capture` recorded on `target`."
-replay(target::Target, steps) = walk(run_step, target, steps)
+replay(target::Target, steps) = foreach(s -> run!(target, s), steps)
 
 "Destroy `graph`, what `capture` recorded on `target`, once nothing replays it."
 release(::Target, graph) = nothing
-
-"""
-A run of a recording's steps on one device, or of crossings between the
-same two, as `walk` forms them: its device, where its graph is made,
-launched and changed, the positions of its steps among the recording's,
-and the graph the target captured of them (see `capture`), recorded again
-in place where its launches move (see `recapture`).
-"""
-mutable struct Segment
-    const device::Union{Nothing, Int}
-    const steps::UnitRange{Int}
-    graph::Any
-end
-
-"""
-What `capture!` records of an executable: the steps of the executions a
-replay runs, and a segment per run of them, each captured as its device's
-own graph, a target's graph being one device's. A replay launches the
-segments in order, each on its device, ordered between devices as the
-steps are (see `walk`). An execution on one device is one segment, its
-graph the target's capture of every step.
-"""
-struct Captured
-    steps::Vector{Step}
-    segments::Vector{Segment}
-end
-
-# `steps` recorded on `target`, a segment per run, each graph keeping `keep` alive.
-function record(target::Target, steps::Vector{Step}, keep)
-    segments = Segment[]
-    start = 1
-    while start <= length(steps)
-        stop = run_end(steps, start)
-        device = steps[start].device
-        push!(segments, Segment(device, start:stop, on_device(() -> capture(target, steps[start:stop], keep), target, device)))
-        start = stop + 1
-    end
-    Captured(steps, segments)
-end
-
-# Launch what `r` recorded, segment by segment.
-function replay_recording(target::Target, r::Captured)
-    for s in r.segments
-        on_device(() -> replay(target, s.graph), target, s.device)
-    end
-    nothing
-end
-
-# Segment `s` of what `r` recorded, recorded again after its launches moved.
-recapture_segment!(target::Target, r::Captured, s::Segment, keep) =
-    s.graph = on_device(() -> recapture(target, s.graph, r.steps[s.steps], keep), target, s.device)
-
-# Destroy every segment's graph of what `r` recorded.
-release_recording(target::Target, r::Captured) = foreach(s -> on_device(() -> release(target, s.graph), target, s.device), r.segments)
-
-# The segment that holds position `j` among what `r` recorded.
-segment_at(r::Captured, j) = findlast(s -> first(s.steps) <= j, r.segments)
 
 ## Measuring.
 

@@ -186,8 +186,8 @@ gradients_home(ex, program, inputs) =
                 # each crossing runs between them as it is replayed.
                 capture!(ex)
                 segments = ex.captured.segments
-                @test [s.device for s in segments] == (f === placed_half ? [0, 1, 1] : [0, 1, 1, 0, 0])
-                @test [s.graph isa Vector{C.Step} for s in segments] == (f === placed_half ? [false, true, false] : [false, true, false, true, false])
+                @test segment_devices(ex.captured) == (f === placed_half ? [0, 1, 1] : [0, 1, 1, 0, 0])
+                @test [s.graph isa Vector{C.Scheduled} for s in segments] == (f === placed_half ? [false, true, false] : [false, true, false, true, false])
                 foreach(a -> fill!(a, 0), C.leaves(outputs(ex)))
                 replay!(ex)
                 @test all(splat(≈), zip(host_leaves(outputs(ex)), host_leaves(outputs(one))))
@@ -264,7 +264,7 @@ gradients_home(ex, program, inputs) =
                 @test gradients_home(ex, program, placed)
                 replay!(capture!(ex))
                 @test all(splat(≈), zip(host_leaves(outputs(ex)), host_leaves(outputs(one))))
-                @test Set(s.device for s in ex.captured.segments) == Set([0, 1, 2])
+                @test Set(segment_devices(ex.captured)) == Set([0, 1, 2])
             end
         end
     end

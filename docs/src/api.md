@@ -105,9 +105,14 @@ Tempest.Compiler.Split
 Tempest.Compiler.merge_lanes
 Tempest.Compiler.Step
 Tempest.Compiler.crosses
-Tempest.Compiler.walk
 Tempest.Compiler.written
 Tempest.Compiler.crossing
+Tempest.Compiler.stream
+Tempest.Compiler.on_stream
+Tempest.Compiler.event
+Tempest.Compiler.record!
+Tempest.Compiler.wait!
+Tempest.Compiler.Scheduled
 Tempest.Compiler.capture
 Tempest.Compiler.replay
 Tempest.Compiler.release

@@ -95,12 +95,57 @@ end
     @test_throws "waits for step 2, launched with or after it" unordered(steps, touches, [[], [1], [2]], [[1, 3], [2]])
 end
 
-@testset "one device: one run, and no waits" begin
+@testset "one device: one run, no waits, and a recording of one segment" begin
     ws, x, t = placed_model(Float32)
     ex = prepare(trace(placed_step, ws, x, t), ws, x, t; target = T.CPUTarget())
     s = C.stream_schedule(ex.steps, ex.touches)
     @test all(isempty, s.waits)
     @test s.runs == [collect(eachindex(ex.steps))]
+    @test ex.schedule.runs == s.runs
+    @test isempty(ex.schedule.lanes)
+    @test all(k -> isempty(ex.schedule.steps[k].waits) && ex.schedule.steps[k].signal === nothing, eachindex(ex.steps))
+    capture!(ex)
+    @test length(ex.captured.segments) == 1
+    @test only(ex.captured.segments).steps == collect(eachindex(ex.steps))
+end
+
+# A program that crosses a value to the second device and back: the copy
+# back takes the slot of the value first crossed, once that crossing has
+# read it.
+there_and_back(w0, x, w1, w2) = (h = tanh.(w0 * x); y = tanh.(w1 * h); tanh.(w2 * y) .+ x)
+
+# The leaves of the outputs of `ex` after its steps ran in `order`, copied.
+function ran_in(ex, order)
+    foreach(k -> ex.steps[k].run(), order)
+    map(copy, C.leaves(outputs(ex)))
+end
+
+# The arrays of a call of `f`, and the same labelled with their devices.
+function placed_call(f)
+    if f === there_and_back
+        xs = (randn(Xoshiro(2), 16, 16), randn(Xoshiro(3), 16, 8), randn(Xoshiro(4), 64, 16), randn(Xoshiro(5), 16, 64))
+        return xs, map(Labelled, xs, (0, 0, 1, 0))
+    end
+    ws, x, t = placed_model(Float64)
+    (ws, x, t), labelled_model(ws, x, t)
+end
+
+@testset "steps run in any order the schedule allows compute what plan order computes: $(nameof(f))" for f in (there_and_back, placed_step)
+    xs, labelled = placed_call(f)
+    ex = prepare(trace(f, xs...), labelled...; target = T.CPUTarget(), verify = true)
+    s = C.stream_schedule(ex.steps, ex.touches)
+    if f === there_and_back
+        # The copy back is written over the storage the first crossing read.
+        crossing = findall(C.crosses, ex.steps)
+        @test length(crossing) == 2
+        @test !isempty(intersect(ex.touches[crossing[1]].reads, ex.touches[crossing[2]].writes))
+    end
+    expected = map(copy, C.leaves(outputs(execute!(ex))))
+    rng = Xoshiro(7)
+    @test all(_ -> ran_in(ex, interleaving(rng, ex.steps, s.waits, s.runs)) == expected, 1:30)
+    # Without the waits, an order the streams alone allow computes otherwise.
+    none = [Int[] for _ in ex.steps]
+    @test any(_ -> ran_in(ex, interleaving(rng, ex.steps, none, s.runs)) != expected, 1:30)
 end
 
 @testset "the placed model over $n devices" for n in (2, 3)

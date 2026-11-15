@@ -55,6 +55,10 @@ function device_runs(p)
     [devices[k] for k in eachindex(devices) if k == 1 || devices[k] != devices[k - 1]]
 end
 
+# The device each segment of recording `r` runs on: its steps', a
+# crossing's its reader's.
+segment_devices(r) = [r.schedule.steps[first(s.steps)].step.device for s in r.segments]
+
 again(ws, x, t) = (map(w -> map(a -> a .+ 1, w), ws), 2 .* x, t .- 1)
 
 crossings(p) = count(g -> g.kind isa C.CrossingKind, p.groups)
