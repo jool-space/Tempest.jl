@@ -1,19 +1,18 @@
 # Where each value lives. An argument lives where the caller's array is, a
 # fact read of it as its extents are; every other value's device is planned
-# (`assigned_devices`), and a value read on another device than its own is
-# read through a crossing, a copy between the two (`Crossed`), so that every
-# other read joins values on one device and a kernel, which computes what it
-# reads in place or loads it, stays on one. A value is made again on each
-# device that reads it, rather than copied there, where that copies no more
-# than what it is made from and spares a hop (see `remade_values`): a sum of
-# what several devices computed, which each of them reads, is computed on
-# each from the others' terms, one copy each way and none of the sum after
-# it. A crossing copies only the range of its source's last axis that its
-# readers read, one span of its storage (see `narrowed_crossings`): a slice
-# read across devices is copied, not what it is a slice of. Devices are
-# labels: the first
-# device the arguments are on is 1, the next 2, so that a plan and its
-# decisions do not depend on which of a machine's devices hold the arrays.
+# (`assigned_devices`), and a value read on another device than its own gets
+# there as it is realized (see plan/realize.jl): copied, a crossing between
+# the two (`Crossed`), so that every other read joins values on one device
+# and a kernel, which computes what it reads in place or loads it, stays on
+# one; or made again there from what it reads there, where that loads the
+# devices' links less: a sum of what several devices computed, which each of
+# them reads, is computed on each from the others' terms, one copy each way
+# and none of the sum after it. A crossing copies only the range of its
+# source's last axis that its readers read, one span of its storage (see
+# `narrowed_crossings`): a slice read across devices is copied, not what it
+# is a slice of. Devices are labels: the first device the arguments are on is
+# 1, the next 2, so that a plan and its decisions do not depend on which of a
+# machine's devices hold the arrays.
 
 """
     with_devices(graph, arguments; pins = []) -> IndexGraph
@@ -22,11 +21,10 @@
 argument's (see `assigned_devices`), and each result `k` of a pair `k =>
 device` in `pins` on that device: a result that replaces an argument, written
 where the argument lives, and a gradient, returned where its argument lives.
-A value read on another device than its own is made there again where
-`remade_values` says so, from what it reads there, its own operands or what
-they are there in turn, by the same definition, so that each device computes
-it by the same arithmetic in the same order; a crossing is made wherever
-else a value is read on another device, one per value and device it is read
+A value read on another device than its own is realized there as
+`realizations` says: made there again from what it reads there, by the same
+definition, so that each device computes it by the same arithmetic in the
+same order, or copied there, a crossing, one per value and device it is read
 on, shared by every reader there, made just before the first of them, a
 result's after the values, and copying only what they read of it (see
 `narrowed_crossings`).
@@ -36,35 +34,18 @@ function with_devices(graph::IndexGraph, arguments; pins = Pair{Int, Int}[])
     devices = assigned_devices(graph, arguments, landing)
     placed = IndexGraph(graph.values, graph.arguments, graph.results, graph.result_dims, graph.result_scalar, graph.result_eltype,
         graph.rewrites, graph.backward, devices)
-    remade = remade_values(graph, devices, landing)
-    # What value `r` is on device `here`, not its own: made there again, or a
-    # crossing, a copy of it.
-    there = Dict{Tuple{Int, Int}, Int}()
-    function across!(b, r, here)
-        haskey(there, (r, here)) && return there[(r, here)]
-        source = graph.values[r]
-        if remade[r]
-            through = Dict{Int, Int}()
-            for o in operands(source.definition), u in read_values(o)
-                devices[u] == here || (through[u] = across!(b, u, here))
-            end
-            made = add!(b, remap(source.definition, Rerouted(b.ids, through)), source.dims, source.eltype, source.scalar)
-        else
-            made = add!(b, Crossed(Read(b.ids[r], identity_index(source.dims))), source.dims, source.eltype, source.scalar)
-        end
-        there[(r, here)] = made
-    end
+    p = Realizing(graph, devices, realizations(graph, devices, landing))
     rebuilt, ids = rebuild(placed) do b, id
         v = graph.values[id]
         here = devices[id]
         through = Dict{Int, Int}()
         for o in operands(v.definition), r in read_values(o)
-            devices[r] == here || (through[r] = across!(b, r, here))
+            devices[r] == here || (through[r] = across!(p, b, r, here))
         end
         isempty(through) && return nothing
         add!(b, remap(v.definition, Rerouted(b.ids, through)), v.dims, v.eltype, v.scalar)
     end
-    narrowed_crossings(landed(rebuilt, ids, graph.results, landing, devices, across!))
+    narrowed_crossings(landed(rebuilt, ids, graph.results, landing, devices, (b, r, here) -> across!(p, b, r, here)))
 end
 
 # The device each result is pinned to, by `pins`, zero for one that is not.
@@ -143,14 +124,11 @@ end
 # it is read over, a value's operand's or a result's.
 function crossing_spans(graph::IndexGraph)
     values = graph.values
-    bounds = Dict{Int, Tuple{Int, Int}}()
+    read = Dict{Int, UnitRange{Int}}()
     whole = Set{Int}()
     function reached!(o::Read, d::Domain)
         union!(whole, gathered_values(o))
-        crossing(graph, o.value) && !isempty(o.index) || return
-        lo, hi = affine_range(last(o.index), d)
-        a, b = get(bounds, o.value, (lo, hi))
-        bounds[o.value] = (min(a, lo), max(b, hi))
+        crossing(graph, o.value) && reach!(read, o.value, read_range(values[o.value], o, d))
     end
     reached!(o::Operand, d::Domain) = union!(whole, gathered_values(o))
     for v in values
@@ -158,13 +136,22 @@ function crossing_spans(graph::IndexGraph)
         v.definition isa Carried && union!(whole, read_values(v.definition.from))
     end
     foreach((o, dims) -> reached!(o, Domain(dims)), graph.results, graph.result_dims)
-    spans = Dict{Int, UnitRange{Int}}()
-    for (c, (lo, hi)) in bounds
-        span = max(lo, 0):min(hi, last(values[c].dims) - 1)
-        c in whole || length(span) == last(values[c].dims) || (spans[c] = span)
-    end
-    spans
+    Dict{Int, UnitRange{Int}}(c => span for (c, span) in read if !(c in whole) && span != whole_range(values[c]))
 end
+
+# The range of value `v`'s last axis a read `o` of it over domain `d`
+# reaches, within its extent: by the range of the read's last formula, of
+# which a crossing of `v` copies no more. A value of no axes is read whole.
+function read_range(v::Value, o::Read, d::Domain)
+    isempty(v.dims) && return whole_range(v)
+    lo, hi = affine_range(last(o.index), d)
+    max(lo, 0):min(hi, last(v.dims) - 1)
+end
+
+whole_range(v::Value) = isempty(v.dims) ? (0:0) : (0:(last(v.dims) - 1))
+
+# The bytes of `range` of value `v`'s last axis, its other axes whole.
+span_bytes(v::Value, range) = isempty(v.dims) ? value_bytes(v) : value_bytes(v) ÷ last(v.dims) * length(range)
 
 # The crossings of a graph narrowed to the ranges `spans` gives, as their
 # readers read them: at their positions less where each range starts, the
@@ -181,56 +168,6 @@ function within(index, span)
     length(span) == 1 && return index[1:(end - 1)]
     e = last(index)
     (index[1:(end - 1)]..., Affine(e.constant - first(span), e.terms))
-end
-
-"""
-    remade_values(graph, devices, landing) -> BitVector
-
-Whether each value of `graph`, placed on `devices`, is made again on each
-other device that reads it, from what it reads there, rather than copied
-there: a value made from nothing another holds (see `made_anywhere`), and an
-elementwise value no larger than any value it reads, whose terms lie on
-several devices and which its own device reads too. Its terms are what it is
-computed from through such values, down to values that are not, those made
-anywhere left out. Made again on a device that holds a term, it copies there
-the others, no more than it would copy of itself, and is read where it is
-made rather than a hop later, after it is computed and copied: a sum of what
-several devices computed, read on each, is computed on each from the
-others' terms, and every device holds it at once. Terms all on one device
-are joined there once, and their result copied.
-"""
-function remade_values(graph::IndexGraph, devices, landing)
-    values = graph.values
-    n = length(values)
-    anywhere = made_anywhere(graph)
-    # The devices each value's terms lie on, the values before it first.
-    terms = Vector{BitSet}(undef, n)
-    remade = falses(n)
-    elementwise = falses(n)
-    for v in 1:n
-        d = values[v].definition
-        reads = [r for o in operands(d) for r in read_values(o)]
-        if anywhere[v]
-            terms[v] = BitSet()
-            remade[v] = true
-        elseif d isa Pointwise && all(r -> value_bytes(values[r]) >= value_bytes(values[v]), reads)
-            elementwise[v] = true
-            terms[v] = mapreduce(r -> terms[r], union, reads; init = BitSet())
-        else
-            terms[v] = BitSet(devices[v])
-        end
-    end
-    # Whether each value is read on its own device: by a value there, or a
-    # result there or on no device in particular.
-    home = falses(n)
-    for (u, v) in enumerate(values), o in operands(v.definition), r in read_values(o)
-        devices[u] == devices[r] && (home[r] = true)
-    end
-    for (k, o) in enumerate(graph.results), r in read_values(o)
-        landing[k] in (0, devices[r]) && (home[r] = true)
-    end
-    remade .|= elementwise .& (length.(terms) .> 1) .& home
-    remade
 end
 
 # The new ids of a reader's operands: a value it reads across devices, its

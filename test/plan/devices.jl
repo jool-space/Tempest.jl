@@ -159,6 +159,19 @@ end
     @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(h, args...)))), args...)
 end
 
+# A sum of two devices' terms, read on its own device and on a third that
+# holds neither, is copied to the third once: made again there, both terms
+# would cross to it, and the second device's link would carry its term to
+# the first and the third, 96 bytes in the heaviest direction rather than 48.
+@testset "a sum read on a device that holds none of its terms is copied there" begin
+    f(a, b, c, d) = (s = a .+ b; (sum(s .* c; dims = 3), sum(s .* d; dims = 3)))
+    args = (rand(Float32, 4, 3), rand(Float32, 4, 3), rand(Float32, 4, 3, 5), rand(Float32, 4, 3, 5))
+    p = C.verify(placed_plan(f, args, [1, 2, 1, 3]))
+    @test crossed_bytes(p) == [48, 48]
+    @test maximum(values(link_bytes(p))) == 48
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
+end
+
 # A kernel's values come after the same crossings, however the kernel is
 # formed: a set fixed by the cover, as a group grown from a seed, holds no
 # value that waits for another device beside one that does not, which would

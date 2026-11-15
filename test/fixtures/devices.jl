@@ -142,6 +142,21 @@ crossings(p) = count(g -> g.kind isa C.CrossingKind, p.groups)
 # The crossings of plan `p`, each as the bytes it copies.
 crossed_bytes(p) = [C.value_bytes(p.graph.values[only(g.outputs)]) for g in p.groups if g.kind isa C.CrossingKind]
 
+# The bytes the crossings of plan `p` carry over each device's link in each
+# direction, `(device, :out)` and `(device, :in)`.
+function link_bytes(p)
+    g = p.graph
+    bytes = Dict{Tuple{Int, Symbol}, Int}()
+    for c in eachindex(g.values)
+        C.crossing(g, c) || continue
+        b = C.value_bytes(g.values[c])
+        from = g.devices[g.values[c].definition.operand.value]
+        bytes[(from, :out)] = get(bytes, (from, :out), 0) + b
+        bytes[(g.devices[c], :in)] = get(bytes, (g.devices[c], :in), 0) + b
+    end
+    bytes
+end
+
 # Each gradient a program of `withgradient` returns, paired with the argument
 # it is the gradient of: its output's `grad` is in the inputs' structure,
 # result numbers where the input has an argument's.
