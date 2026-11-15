@@ -81,6 +81,8 @@ Tempest.Compiler.InvalidPlan
 Tempest.Compiler.Target
 Tempest.Compiler.target_for
 Tempest.Compiler.device_of
+Tempest.Compiler.default_device
+Tempest.Compiler.at_home
 Tempest.Compiler.on_device
 Tempest.Compiler.implementations
 Tempest.Compiler.numerics

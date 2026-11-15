@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, crosses, walk, follow, written, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, walk, follow, written, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -28,11 +28,14 @@ end
 Base.show(io::IO, t::CPUTarget) = print(io, "CPUTarget(", join(map(repr, t.implementations), ", "), ")")
 
 """
-    CUDATarget(implementations...; device = 0, precision = :full, online = true, rounded_backward = true, deterministic = false)
+    CUDATarget(implementations...; device = nothing, precision = :full, online = true, rounded_backward = true, deterministic = false)
 
-Run on an NVIDIA GPU, the one CUDA numbers `device`; needs CUDACore loaded.
-A program whose arrays are on a device is prepared for that device's target,
-whatever device the calling task is on (see `target_for`). The target uses the floor and
+Run on NVIDIA GPUs; needs CUDACore loaded. A program runs where its arrays
+are, whatever device the calling task is on, and a target is at home (see
+`Placement`) on the first device an argument is on, or, with every array on
+the host, on the calling task's device. `device`, as CUDA numbers them from
+0, names the home instead: where arrays on the host go, and where claims
+are timed. The target uses the floor and
 the `implementations` given, as in `CUDATarget(cuTileGenerator())`, ties
 between their estimates going to the first; by default Tempest's own whose
 packages are loaded when it is made, cuBLAS's, cuDNN's and cuTile's (see
@@ -77,20 +80,21 @@ struct CUDATarget <: Target
     implementations::Tuple{Vararg{Implementation}}
     rounded_backward::Bool
     deterministic::Bool
-    # The device's number, as CUDA counts them from 0.
-    device::Int
+    # The home device's number, as CUDA counts them from 0; nothing where
+    # the arrays say (see `at_home`).
+    device::Union{Nothing, Int}
 end
 
-CUDATarget(precision::Symbol, online::Bool, implementations::Tuple) = CUDATarget(precision, online, implementations, true, false, 0)
+CUDATarget(precision::Symbol, online::Bool, implementations::Tuple) = CUDATarget(precision, online, implementations, true, false, nothing)
 
-function CUDATarget(implementations::Implementation...; device::Integer = 0, precision::Symbol = :full, online::Bool = true,
+function CUDATarget(implementations::Implementation...; device::Union{Nothing, Integer} = nothing, precision::Symbol = :full, online::Bool = true,
         rounded_backward::Bool = true, deterministic::Bool = false)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
     CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations, rounded_backward, deterministic, device)
 end
 
 Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", join(map(repr, t.implementations), ", "), "; ",
-    t.device == 0 ? "" : "device = $(t.device), ", "precision = :", t.precision, t.online ? "" : ", online = false",
+    t.device === nothing ? "" : "device = $(t.device), ", "precision = :", t.precision, t.online ? "" : ", online = false",
     t.rounded_backward ? "" : ", rounded_backward = false", t.deterministic ? ", deterministic = true" : "", ")")
 
 "The implementations a target uses beside the floor, in order."
@@ -136,8 +140,9 @@ plans_across_devices(::Union{CPUTarget, CUDATarget}) = true
 Where a preparation's arguments are: the label of each argument's device
 (see `with_devices`), a fact of the plan, and the device each label stands
 for, as `device_of` numbers it, nothing for the host's memory, a fact of
-the arrays. Label 1 is home: the target's device where it has one, else
-the first device an argument is on, else the host's memory. Arguments on
+the arrays. Label 1 is home: the target's device where it names one, else
+the first device an argument is on, else the target's default (see
+`default_device`). Arguments on
 the host and values no placed input reaches are there, and the decider
 builds and times there. The devices the other arguments are on follow in
 the order the arguments first meet them, so that a plan and its decisions
@@ -149,7 +154,31 @@ struct Placement
 end
 
 # Every argument of `program` at home on `target`.
-Placement(target::Target, program) = Placement(ones(Int, length(program.arguments)), Union{Nothing, Int}[device_of(target)])
+Placement(target::Target, program) = Placement(ones(Int, length(program.arguments)), Union{Nothing, Int}[home_device(target)])
+
+"""
+    default_device(target) -> Int or nothing
+
+Where a target that names no device is at home when no argument is on one:
+the host's memory for the CPU, the calling task's device for CUDA.
+"""
+default_device(::Target) = nothing
+
+# The device a target names, else its default.
+function home_device(target::Target)
+    d = device_of(target)
+    d === nothing ? default_device(target) : d
+end
+
+"""
+    at_home(target, device) -> target
+
+`target` at home on `device`: what a preparation builds and times with,
+once its arguments have said where home is.
+"""
+at_home(target::Target, device) = target
+at_home(t::CUDATarget, device::Int) = t.device == device ? t :
+    CUDATarget(t.precision, t.online, t.implementations, t.rounded_backward, t.deterministic, device)
 
 # Where the arguments of `program` among `inputs` are, on `target`.
 function argument_devices(target::Target, program, @nospecialize(inputs))
@@ -157,9 +186,10 @@ function argument_devices(target::Target, program, @nospecialize(inputs))
     devices = Union{Nothing, Int}[device_of(target)]
     append!(devices, filter(!isnothing, found))
     unique!(devices)
-    # Without a device of its own the target is at home where the first
-    # argument on a device is, and on the host when none is.
+    # Naming no device, the target is at home where the first argument on a
+    # device is, and at its default when none is.
     length(devices) > 1 && devices[1] === nothing && popfirst!(devices)
+    devices[1] === nothing && (devices[1] = default_device(target))
     refuse_kinds(target, devices)
     Placement([d === nothing ? 1 : findfirst(isequal(d), devices) for d in found], devices)
 end
@@ -176,7 +206,7 @@ function refuse_kinds(target::Target, devices)
 end
 
 """
-    on_device(f, target, device = device_of(target))
+    on_device(f, target, device = home_device(target))
 
 `f()` with the calling task on `device` of `target`'s kind, its state on the
 device it was on (for CUDA, its context and stream) as it was when `f`
@@ -185,7 +215,7 @@ program, runs on its own, whatever device the caller is on. An executable's
 steps are put on theirs by `walk` alone. A target of no devices, as the CPU,
 runs `f()` as it is.
 """
-on_device(f, target::Target) = on_device(f, target, device_of(target))
+on_device(f, target::Target) = on_device(f, target, home_device(target))
 on_device(f, ::Target, device) = f()
 
 function default_target(inputs)

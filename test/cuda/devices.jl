@@ -19,6 +19,8 @@ cu32(x) = CuArray(Float32.(x))
     @test T.CUDATarget(; device = 1).device == 1
     @test contains(repr(T.CUDATarget(T.cuTileGenerator(); device = 1)), "device = 1")
     @test !contains(repr(T.CUDATarget(T.cuTileGenerator())), "device")
+    @test T.CUDATarget().device === nothing
+    @test compile(x -> x .+ 1, x; target = T.CUDATarget()).executable.target.device == 0
 
 
     @testset "host arrays go to the target's device as before" begin
@@ -101,7 +103,19 @@ end
             @test task_device() == before
         end
 
-        @testset "a target on another device than the arrays' is home" begin
+        @testset "a target naming no device is at home where the arrays are" begin
+            c = compile(f, a, b; target = T.CUDATarget(T.cuTileGenerator()))
+            @test c.executable.target.device == 1
+            @test c.executable.devices == [1]
+            @test Array(c(a, b)) ≈ f(Array(a), Array(b))
+            # With every array on the host, on the calling task's device.
+            h = data(8, 8)
+            c = CUDACore.device!(() -> compile(x -> x .+ 1, h; target = T.CUDATarget()), 1)
+            @test c.executable.devices == [1]
+            @test task_device() == before
+        end
+
+        @testset "a target naming another device than the arrays' is home there" begin
             x0 = cu32(data(8, 8))
             c = compile(x -> x .+ 1, x0; target = T.CUDATarget(; device = 1))
             @test c.executable.devices == [1, 0]

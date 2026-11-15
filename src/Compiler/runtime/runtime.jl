@@ -280,6 +280,7 @@ of its own (see `Tables`), which `decide!`, `given` and `prepared` fill.
 function setup(program::Program; target, placement = Placement(target, program), measure = measuring(), replaces = (),
         recompute = (), ride = (), partition::Bool = true, build::Bool = true)
     tables = Tables()
+    target = at_home(target, first(placement.devices))
     in_tables(tables) do
         # Each phase marked (see `phase`).
         lowered = phase(() -> lower(program), :lower)

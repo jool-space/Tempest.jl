@@ -161,7 +161,8 @@ end
 
 const THREADS = 256
 
-Tempest.Compiler.device_name(target::CUDATarget) = Tempest.Compiler.device_name(target, target.device)
+Tempest.Compiler.default_device(::CUDATarget) = CUDACore.deviceid(CUDACore.device())
+Tempest.Compiler.device_name(target::CUDATarget) = Tempest.Compiler.device_name(target, Tempest.Compiler.home_device(target))
 Tempest.Compiler.device_name(::CUDATarget, device::Int) = CUDACore.name(CUDACore.CuDevice(device))
 
 # The compilers' package holds tileiras and ptxas, which assemble the tile and
@@ -531,7 +532,7 @@ Tempest.Compiler.time_launch(target::CUDATarget, launch) = Tempest.Compiler.on_d
 
 # A launch timed, `n` times over as the steps of a graph, on the target's
 # device, where its timing runs.
-timed_steps(target, launch, n) = fill(Tempest.Compiler.Step(launch, target.device), n)
+timed_steps(target, launch, n) = fill(Tempest.Compiler.Step(launch, Tempest.Compiler.home_device(target)), n)
 
 function timed_launch(target, launch)
     launch()
@@ -639,7 +640,7 @@ const LAUNCH = 5.0e-7
 # which transfers twice a cycle; an integrated one, the system's memory, as
 # GB10 its LPDDR5X's transfer rate, 8533 MT/s over 256 pins, 273 GB/s.
 function Tempest.Compiler.device_rates(target::CUDATarget)
-    device = CUDACore.CuDevice(target.device)
+    device = CUDACore.CuDevice(Tempest.Compiler.home_device(target))
     attribute(a) = Float64(CUDACore.attribute(device, a))
     transfers = (attribute(CUDACore.DEVICE_ATTRIBUTE_INTEGRATED) == 1 ? 1 : 2) * 1.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE)
     bandwidth = transfers * attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8

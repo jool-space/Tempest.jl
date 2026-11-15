@@ -21,9 +21,9 @@ end
 
 if CUDA_FUNCTIONAL
     @testset "prepared on CUDA" begin
-        check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget())
+        check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget(; device = 0))
     end
     @testset "prepared on CUDA with cuTile, Float32" begin
-        check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget(); rtol = 2.0e-4, precision = single)
+        check_prepared(x -> x isa AbstractArray ? CuArray(x) : x, T.CUDATarget(; device = 0); rtol = 2.0e-4, precision = single)
     end
 end
