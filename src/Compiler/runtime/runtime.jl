@@ -1069,9 +1069,12 @@ function retarget!(ex::Executable, moves)
             stop += 1
         end
         mine = view(moves, start:stop)
-        # The step is pointed at the new storage once, by the target or after it.
+        # The step is pointed at the new storage once, by the target or after
+        # it, with the task on the step's device, where its launches take
+        # their buffers' addresses.
         pointed = Ref(false)
-        repoint() = pointed[] || (foreach(m -> repoint!(ex.steps[i].run, m[3].value, m[4]), mine); pointed[] = true)
+        point_step() = foreach(m -> repoint!(ex.steps[i].run, m[3].value, m[4]), mine)
+        repoint() = pointed[] || (on_device(point_step, ex.target, ex.steps[i].device); pointed[] = true)
         if r !== nothing
             at = recorded_steps(ex, i)
             held = unique(first(r.at[j]) for j in at)

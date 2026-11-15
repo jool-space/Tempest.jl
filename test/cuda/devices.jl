@@ -269,3 +269,76 @@ gradients_home(ex, program, inputs) =
         end
     end
 end
+
+# A crossing runs on a lane of its own, beside both devices' kernels: what
+# overwrites its source, in the call or in the next, waits for it, and the
+# next call's steps for the last call's. Each copy is large, 128 MiB, so that
+# it takes longer than the kernels around it, and calls are made back to
+# back, unsynchronized, their results compared to the bit with the same
+# program on one device.
+@testset "crossings beside the kernels" begin
+    if CUDACore.ndevices() < 2
+        @test_skip "needs two devices"
+    else
+        CUDACore.device!(0)
+        before = task_device()
+        on(d, a) = CUDACore.device!(() -> CuArray(a), d)
+        n = 32 << 20
+        # The state on device 0, updated in place by the first kernel of each
+        # call, crosses to device 1, where it is added into the other state.
+        step!(w, v) = (w .= w .+ 1.0f0; v .= v .+ w; 2.0f0 .* v)
+        w, v = rand(Xoshiro(1), Float32, n), rand(Xoshiro(2), Float32, n)
+
+        @testset "the next call overwrites what a crossing of the last reads" begin
+            placed, whole = compile(step!, on(0, w), on(1, v)), compile(step!, on(0, w), on(0, v))
+            @test any(C.crosses, placed.executable.steps)
+            pw, pv, ww, wv = on(0, w), on(1, v), on(0, w), on(0, v)
+            got = [placed(pw, pv) for _ in 1:20]
+            expected = [whole(ww, wv) for _ in 1:20]
+            @test all(k -> Array(got[k]) == Array(expected[k]), 1:20)
+            @test Array(pw) == Array(ww) && Array(pv) == Array(wv)
+            @test task_device() == before
+        end
+
+        @testset "a recording replayed back to back is the execution" begin
+            program = trace(step!, w, v)
+            live, recorded = prepare(program, on(0, w), on(1, v); point = true), prepare(program, on(0, w), on(1, v); point = true)
+            capture!(recorded)
+            foreach(_ -> execute!(live), 1:20)
+            foreach(_ -> replay!(recorded), 1:20)
+            @test host_leaves(outputs(recorded)) == host_leaves(outputs(live))
+            # Pointed at other arrays, the recording is changed in place.
+            graphs = [s.graph for s in recorded.captured.segments]
+            C.point!(recorded, on(0, w), on(1, v))
+            C.point!(live, on(0, w), on(1, v))
+            @test !any(recorded.settles)
+            @test [s.graph for s in recorded.captured.segments] == graphs
+            replay!(recorded)
+            execute!(live)
+            @test host_leaves(outputs(recorded)) == host_leaves(outputs(live))
+        end
+
+        @testset "a copy back into the storage a crossing read" begin
+            # A value crossed to device 1 and back, the copy back in the slot
+            # of the value first crossed, once that crossing has read it.
+            there_and_back(w0, x, w1, w2) = (h = tanh.(w0 * x); y = tanh.(w1 * h); tanh.(w2 * y) .+ x)
+            # The two copies, 112 MiB each, cost less than the 256 MiB of `w1` that
+            # computing on device 0 would copy instead.
+            m, k = 8192, 3584
+            rng = Xoshiro(3)
+            xs = (randn(rng, Float32, m, m) ./ m, randn(rng, Float32, m, k), randn(rng, Float32, m, m) ./ m, randn(rng, Float32, m, m) ./ m)
+            placed = compile(there_and_back, on(0, xs[1]), on(0, xs[2]), on(1, xs[3]), on(0, xs[4]))
+            ex = placed.executable
+            crossing = findall(C.crosses, ex.steps)
+            @test length(crossing) == 2
+            @test !isempty(intersect(ex.touches[crossing[1]].reads, ex.touches[crossing[2]].writes))
+            whole = compile(there_and_back, map(a -> on(0, a), xs)...)
+            pa, wa = map(a -> on(0, a), xs), map(a -> on(0, a), xs)
+            pa = (pa[1], pa[2], on(1, xs[3]), pa[4])
+            got = [placed(pa...) for _ in 1:5]
+            expected = [whole(wa...) for _ in 1:5]
+            @test all(k -> Array(got[k]) == Array(expected[k]), 1:5)
+        end
+        @test task_device() == before
+    end
+end

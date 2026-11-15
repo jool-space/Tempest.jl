@@ -94,39 +94,54 @@ end
 """
 A crossing on CUDA's target: buffer `from` on one device copied into `to`
 on another through page-locked host memory, chunk by chunk, each chunk's
-download on the source's stream and upload on the reader's, so that
-neither device waits for the host and the host for neither: the copy
-between two devices that every pair of them can make, where a kernel or a
-copy between devices can touch only a peer's memory. It is ordered after
-what wrote its source and before what reads its copy on their devices'
-streams, and CUDA.jl's arrays learn which stream used them last, so that a
-task reading the copy on another stream waits for it. It runs as it is
-replayed between the graphs of the devices around it rather than
+download on the lane's stream on the source and its upload on the lane's
+stream on the reader (see `Lane`), so that the copy runs beside both
+devices' kernels, and neither device waits for the host nor the host for
+either: the copy between two devices that every pair of them can make,
+where a kernel or a copy between devices can touch only a peer's memory. It
+reads and writes its buffers by addresses taken where they were given it,
+each on its own device with the task's own stream, never on a lane's:
+CUDA.jl learns from the operations it submits which stream an array is
+used on, and would order the next use of one after a lane's stream, or wait
+for it on the host. Its schedule orders it after what wrote its source and
+before what reads its copy (see `Tempest.Compiler.Schedule`). It runs as it
+is replayed between the graphs of the devices around it rather than
 recorded (see `capture`), and repoints as a `Copy` does.
 """
 mutable struct Staged
     to::Any
     from::Any
+    to_address::CUDACore.CuPtr{Cvoid}
+    from_address::CUDACore.CuPtr{Cvoid}
     const values::Pair{Int, Int}
     const staging::Staging
 end
 
+# The address of buffer `x`, taken with the task on its device.
+address(x) = CUDACore.device!(() -> reinterpret(CUDACore.CuPtr{Cvoid}, pointer(x)), Tempest.Compiler.device_of(x))
+
 function Tempest.Compiler.crossing(::CUDATarget, to, from, values::Pair{Int, Int})
     sizeof(to) == sizeof(from) || throw(DimensionMismatch("a crossing copies $(sizeof(from)) bytes into $(sizeof(to))"))
-    Staged(to, from, values, Staging(sizeof(from), Tempest.Compiler.device_of(from)))
+    Staged(to, from, address(to), address(from), values, Staging(sizeof(from), Tempest.Compiler.device_of(from)))
 end
 
 Tempest.Compiler.Implement.repoints(::Staged) = true
 
 function Tempest.Compiler.Implement.repoint!(c::Staged, value, buffer)
-    first(c.values) == value && (c.to = buffer)
-    last(c.values) == value && (c.from = buffer)
+    if first(c.values) == value
+        c.to = buffer
+        c.to_address = address(buffer)
+    end
+    if last(c.values) == value
+        c.from = buffer
+        c.from_address = address(buffer)
+    end
     c
 end
 
-# Run with the task on the reader's device, where its lane puts it (see
-# `Tempest.Compiler.on_stream`), its download on the source's stream and its
-# upload on the reader's.
+# Run on its lane (see `on_stream`): the task on the reader's device, and
+# each device's stream the lane's there, the source's for the downloads and
+# the reader's for the uploads.
 function (c::Staged)()
     s = c.staging
     bytes = sizeof(c.from)
@@ -136,19 +151,69 @@ function (c::Staged)()
         host = pointer(s.host[k])
         CUDACore.device!(Tempest.Compiler.device_of(c.from)) do
             CUDACore.wait(s.uploaded[k])
-            CUDACore.with_managed_arrays(c.from) do
-                CUDACore.cuMemcpyDtoHAsync_v2(host, reinterpret(CUDACore.CuPtr{Cvoid}, pointer(c.from)) + at, n, CUDACore.stream())
-            end
+            CUDACore.cuMemcpyDtoHAsync_v2(host, c.from_address + at, n, CUDACore.stream())
             CUDACore.record(s.downloaded[k])
         end
         CUDACore.wait(s.downloaded[k])
-        CUDACore.with_managed_arrays(c.to) do
-            CUDACore.cuMemcpyHtoDAsync_v2(reinterpret(CUDACore.CuPtr{Cvoid}, pointer(c.to)) + at, host, n, CUDACore.stream())
-        end
+        CUDACore.cuMemcpyHtoDAsync_v2(c.to_address + at, host, n, CUDACore.stream())
         CUDACore.record(s.uploaded[k])
     end
     nothing
 end
+
+## Streams.
+
+"""
+A device's own stream: the task's stream on it, where CUDA.jl's operations
+and Tempest's launches run, entered by entering the device.
+"""
+struct Own
+    device::Int
+end
+
+"""
+The lane of an ordered pair of devices, where the crossings from one to the
+other run beside both devices' kernels, in order: a stream on the source,
+which its downloads take, and a stream on the reader, which its uploads
+take, each a stream of its own that CUDA.jl's operations never use. A
+crossing's upload waits for its download, so that what is launched on the
+lane after a wait on the source's stream waits for it too, and the lane's
+work ends on the reader's stream.
+"""
+struct Lane
+    from::Int
+    to::Int
+    download::CUDACore.CuStream
+    upload::CUDACore.CuStream
+end
+
+function Tempest.Compiler.stream(target::CUDATarget, from::Int, to::Int)
+    from == to && return Own(to)
+    download = Tempest.Compiler.on_device(() -> CUDACore.CuStream(; flags = CUDACore.STREAM_NON_BLOCKING), target, from)
+    upload = Tempest.Compiler.on_device(() -> CUDACore.CuStream(; flags = CUDACore.STREAM_NON_BLOCKING), target, to)
+    Lane(from, to, download, upload)
+end
+
+Tempest.Compiler.on_stream(f, target::CUDATarget, s::Own) = Tempest.Compiler.on_device(f, target, s.device)
+
+# The task on the reader's device, and on each device the lane's stream the
+# task's, as a crossing's run takes them (see `Staged`).
+function Tempest.Compiler.on_stream(f, target::CUDATarget, l::Lane)
+    Tempest.Compiler.on_device(target, l.from) do
+        CUDACore.stream!(l.download) do
+            Tempest.Compiler.on_device(() -> CUDACore.stream!(f, l.upload), target, l.to)
+        end
+    end
+end
+
+Tempest.Compiler.event(::CUDATarget, stream) = CUDACore.CuEvent(CUDACore.EVENT_DISABLE_TIMING)
+
+# Live, outside a capture: a recording takes a step's waits and record as
+# nodes of its own (see `steps_recorded`).
+Tempest.Compiler.record!(::CUDATarget, ::Own, e) = CUDACore.cuEventRecord(e, CUDACore.stream())
+Tempest.Compiler.record!(::CUDATarget, l::Lane, e) = CUDACore.cuEventRecord(e, l.upload)
+Tempest.Compiler.wait!(::CUDATarget, ::Own, e) = CUDACore.cuStreamWaitEvent(CUDACore.stream(), e, 0)
+Tempest.Compiler.wait!(target::CUDATarget, l::Lane, e) = Tempest.Compiler.on_device(() -> CUDACore.cuStreamWaitEvent(l.download, e, 0), target, l.from)
 
 const THREADS = 256
 
@@ -283,19 +348,28 @@ end
 # by itself, after the step before, with the task on the steps' stream (see
 # `capture`): a library records a call within a longer capture otherwise than
 # alone (cuBLAS, a word of its kernels' arguments), and `retarget!` learns
-# from a step captured alone. A step's waits and record are the target's
-# events, of which CUDA makes none (see `Tempest.Compiler.event`): the
-# devices' streams order its steps as they are launched.
+# from a step captured alone. A step's waits, before it, and its record,
+# after it, are captures of their own, whose nodes hold no address and are
+# no step's: the driver takes a wait or a record in a capture only as an
+# external one, a node waiting for the record launched last before the graph
+# or recording at each launch, and refuses those flags outside a capture.
 function steps_recorded(target, steps)
     graph = CUDACore.CuGraph()
     after = CUDACore.CuGraphNode[]
-    marks = Vector{CUDACore.CUgraphNode}[]
+    # Each capture's frontier, and whether its nodes are a step's.
+    marks = Tuple{Bool, Vector{CUDACore.CUgraphNode}}[]
+    function mark!(f, step::Bool)
+        after = captured!(f, graph; after)
+        push!(marks, (step, CUDACore.CUgraphNode[n.handle for n in after]))
+    end
     for s in steps
-        after = captured!(() -> s.step.run(), graph; after)
-        push!(marks, CUDACore.CUgraphNode[n.handle for n in after])
+        isempty(s.waits) || mark!(() -> foreach(e -> CUDACore.cuStreamWaitEvent(CUDACore.stream(), e, CUDACore.CU_EVENT_WAIT_EXTERNAL), s.waits), false)
+        mark!(() -> s.step.run(), true)
+        s.signal === nothing || mark!(() -> CUDACore.cuEventRecordWithFlags(s.signal, CUDACore.stream(), CUDACore.CU_EVENT_RECORD_EXTERNAL), false)
     end
     seen = Set{CUDACore.CUgraphNode}()
-    nodes = map(marks) do mark
+    nodes = Vector{Any}[]
+    for (step, mark) in marks
         mine, todo = CUDACore.CUgraphNode[], copy(mark)
         while !isempty(todo)
             n = pop!(todo)
@@ -304,7 +378,7 @@ function steps_recorded(target, steps)
             push!(mine, n)
             append!(todo, dependencies(n))
         end
-        Any[node_record(n) for n in reverse!(mine)]
+        step && push!(nodes, Any[node_record(n) for n in reverse!(mine)])
     end
     graph, nodes
 end
