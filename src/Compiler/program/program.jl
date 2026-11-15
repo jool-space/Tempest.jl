@@ -126,11 +126,15 @@ mutable struct Tape
     # Whether the function is being traced: when its trace ends, a handle to
     # the tape names nothing (see `named`).
     open::Bool
+    # Each gradient a `withgradient` returned, as `gradient => primal` of
+    # nodes: the node of the array it is the gradient of, as it was when the
+    # gradient was taken.
+    adjoints::Vector{Pair{Int, Int}}
 end
 
-Tape() = Tape(Node[], BitSet(), Int[], 0, Any[], true)
-Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[], true)
-Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[], true)
+Tape() = Tape(Node[], BitSet(), Int[], 0, Any[], true, Pair{Int, Int}[])
+Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[], true, Pair{Int, Int}[])
+Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[], true, Pair{Int, Int}[])
 
 function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
     # A loop's step was recorded node by node.
@@ -146,9 +150,11 @@ end
 A traced program: its nodes, the nodes that are its inputs and results, the
 structures they came in, as nested tuples, named tuples and `Parts` of leaf
 indices, the nodes that are its backward, where a reverse pass recorded them,
-and its writes into its inputs: pairs `result => argument` of positions, each
+its writes into its inputs: pairs `result => argument` of positions, each
 input's contents when the program ends, a result after those its output
-structure names.
+structure names; and its gradients, pairs `result => argument` of
+positions, each result a gradient of the argument's contents as the program
+gets them, which is computed where the argument lives.
 """
 struct Program
     nodes::Vector{Node}
@@ -158,12 +164,15 @@ struct Program
     output_structure::Any
     backward::BitSet
     writes::Vector{Pair{Int, Int}}
+    gradients::Vector{Pair{Int, Int}}
 end
 
 Program(nodes, arguments, results, input_structure, output_structure) =
     Program(nodes, arguments, results, input_structure, output_structure, BitSet())
 Program(nodes, arguments, results, input_structure, output_structure, backward) =
     Program(nodes, arguments, results, input_structure, output_structure, backward, Pair{Int, Int}[])
+Program(nodes, arguments, results, input_structure, output_structure, backward, writes) =
+    Program(nodes, arguments, results, input_structure, output_structure, backward, writes, Pair{Int, Int}[])
 
 """
 A recurrence's step: a program whose arguments are the state's arrays, a slice
@@ -440,5 +449,5 @@ function prune(p::Program)
         new[id] = length(nodes)
     end
     Program(nodes, map(i -> new[i], p.arguments), map(i -> new[i], p.results), p.input_structure, p.output_structure,
-        BitSet(new[i] for i in p.backward if keep[i]), p.writes)
+        BitSet(new[i] for i in p.backward if keep[i]), p.writes, p.gradients)
 end

@@ -818,17 +818,19 @@ function differentiate(p::Program)
     loss !== nothing && tape.nodes[loss].scalar || throw(ArgumentError("differentiate needs a program with one scalar result"))
     cotangents = reverse_pass!(tape, loss, eachindex(p.nodes))
     results = [loss]
+    of = Pair{Int, Int}[]
     function result(position)
         position === nothing && return nothing
         g = cotangent!(tape, cotangents, p.arguments[position])
         g === nothing && return nothing
         push!(results, g.id)
+        push!(of, length(results) => position)
         length(results)
     end
     gradients = tangent(result, p.input_structure)
     writes = map(((r, a),) -> (push!(results, p.results[r]); length(results) => a), p.writes)
     # Rules may build what nothing reads, such as a constant operand's share.
-    prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...), tape.backward, writes))
+    prune(Program(tape.nodes, p.arguments, results, p.input_structure, (1, gradients...), tape.backward, writes, of))
 end
 
 """
@@ -916,7 +918,10 @@ function withgradient(@nospecialize(f), @nospecialize(args...))
         k = findfirst(e -> e[1] === x, entered)
         k === nothing && return nothing
         g = cotangent!(tape, cotangents, entered[k][3])
-        g === nothing ? nothing : TracedArray(tape, g.id)
+        g === nothing && return nothing
+        # The stand-in reads the array as it was when the gradient was taken.
+        push!(tape.adjoints, g.id => only(tape.nodes[entered[k][3]].inputs))
+        TracedArray(tape, g.id)
     end
     # What `f` wrote into a stand-in it writes into the argument, as `f`
     # would untraced; a constant of the program cannot change.
