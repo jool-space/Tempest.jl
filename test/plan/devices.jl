@@ -68,6 +68,21 @@ end
     @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
 end
 
+# A write into a middle range of columns is selected by a mask that is the
+# conjunction of two comparisons of positions, made from values made
+# anywhere: each device that reads it makes it, and only the addends cross.
+@testset "a value made from values made anywhere is made on each device that reads it" begin
+    f(a, b, c, d) = (s = c[:, 2:3] .+ d[:, 2:3]; x = copy(a); x[:, 2:3] .-= s; y = copy(b); y[:, 2:3] .-= s; (x, y))
+    args = Tuple(rand(Float32, 4, 5) for _ in 1:4)
+    p = C.verify(placed_plan(f, args, [1, 2, 1, 2]))
+    g = p.graph
+    copies = [c for c in eachindex(g.values) if C.crossing(g, c)]
+    @test all(c -> g.values[g.values[c].definition.operand.value].definition isa C.Input, copies)
+    masks = [v for v in eachindex(g.values) if g.values[v].definition isa C.Pointwise && g.values[v].definition.f === (&)]
+    @test sort(g.devices[masks]) == [1, 2]
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
+end
+
 # A sum of what several devices computed, which each of them reads, is
 # computed on each from the others' terms by the same arithmetic in the same
 # order; nothing crosses but the terms. The goal's spelling, over two and

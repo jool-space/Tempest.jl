@@ -121,6 +121,7 @@ are joined there once, and their result copied.
 function remade_values(graph::IndexGraph, devices, landing)
     values = graph.values
     n = length(values)
+    anywhere = made_anywhere(graph)
     # The devices each value's terms lie on, the values before it first.
     terms = Vector{BitSet}(undef, n)
     remade = falses(n)
@@ -128,7 +129,7 @@ function remade_values(graph::IndexGraph, devices, landing)
     for v in 1:n
         d = values[v].definition
         reads = [r for o in operands(d) for r in read_values(o)]
-        if made_anywhere(d)
+        if anywhere[v]
             terms[v] = BitSet()
             remade[v] = true
         elseif d isa Pointwise && all(r -> value_bytes(values[r]) >= value_bytes(values[v]), reads)
@@ -186,7 +187,7 @@ function assigned_devices(graph::IndexGraph, arguments, landing)
     # A program on one device has nothing to place.
     all(==(1), arguments) && all(<=(1), landing) && return ones(Int, n)
     home = recurrence_vertices(graph)
-    anywhere = [made_anywhere(v.definition) for v in values]
+    anywhere = made_anywhere(graph)
     # Result `k` pinned is vertex `n + k`.
     users = value_readers(graph)
     landers = [Int[] for _ in values]
@@ -206,7 +207,8 @@ function assigned_devices(graph::IndexGraph, arguments, landing)
         devices[v] == 0 && (devices[v] = last_device)
     end
     placed = [devices[home[v]] for v in 1:n]
-    for v in 1:n
+    # Readers first: a value made anywhere may be read by another.
+    for v in n:-1:1
         anywhere[v] && (placed[v] = first_reader_device(placed, users[v], landing, landers[v]))
     end
     placed
@@ -279,17 +281,26 @@ function value_readers(graph)
 end
 
 """
-    made_anywhere(definition) -> Bool
+    made_anywhere(graph) -> BitVector
 
-Whether a value is made from nothing another value holds: a constant, or a
-function of positions and literals. It is made again on each device that
-reads it, where a copy across would move it on every call: a constant is put
-on each device that reads it once, before the first call. An argument is the
-caller's, on its device, and a recurrence's state reads what it is carried
-from, which `operands` leaves out.
+Whether each value of `graph` is made from nothing another value holds: a
+constant, a function of positions and literals, or a function of such
+values, as a mask of a range is the conjunction of two comparisons of
+positions. It is made again on each device that reads it, where a copy
+across would move it on every call: a constant is put on each device that
+reads it once, before the first call. An argument is the caller's, on its
+device, and a recurrence's state reads what it is carried from, which
+`operands` leaves out.
 """
-made_anywhere(d::Definition) = all(o -> isempty(read_values(o)), operands(d))
-made_anywhere(::Union{Input, Carried, Crossed}) = false
+function made_anywhere(graph::IndexGraph)
+    anywhere = falses(length(graph.values))
+    for (v, value) in enumerate(graph.values)
+        d = value.definition
+        d isa Union{Input, Carried, Crossed} && continue
+        anywhere[v] = all(r -> anywhere[r], (r for o in operands(d) for r in read_values(o)))
+    end
+    anywhere
+end
 
 "Whether value `v` of `graph` is read across devices: a crossing's copy."
 crossing(graph, v) = graph.values[v].definition isa Crossed
