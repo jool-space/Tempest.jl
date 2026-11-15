@@ -130,11 +130,12 @@ function stages!(out, case, cuda)
     # The arrays on two devices by label, drawn by a generator of their own:
     # the plan places the program across them, verified, and computes what it
     # computes on one.
-    labelled = map(a -> a isa AbstractArray ? Labelled(copy(a), rand(Xoshiro(case.seed + 3), 0:1)) : a, args)
+    labels = Xoshiro(case.seed + 3)
+    labelled = map(a -> a isa AbstractArray ? Labelled(copy(a), rand(labels, 0:1)) : a, args)
     unlabelled === nothing || stage!(out, :fwd_devices, function ()
         ex = C.prepare(p, labelled...; verify = true)
         out[:fwd_crossings] = crossings(ex.plan)
-        relerr(only(C.leaves(C.outputs(C.execute!(ex)))), unlabelled; floor = 0.0)
+        relerr(only(C.leaves(C.outputs(C.execute!(ex)))), unlabelled; floor = floatmin(Float64))
     end)
     if forward !== nothing
         riders = C.riding_values(forward)
@@ -178,7 +179,7 @@ function stages!(out, case, cuda)
                 ex = C.prepare(q, labelled...; verify = true)
                 out[:grad_crossings] = crossings(ex.plan)
                 out[:gradients_off] = gradients_off(ex.plan, q)
-                leaves_err(C.leaves(C.outputs(C.execute!(ex))), unlabelled; floor = 0.0)
+                leaves_err(C.leaves(C.outputs(C.execute!(ex))), unlabelled; floor = floatmin(Float64))
             end)
             if planned !== nothing
                 sums = C.riding_values(planned)
