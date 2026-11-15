@@ -68,6 +68,56 @@ end
     @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
 end
 
+# A sum of what several devices computed, which each of them reads, is
+# computed on each from the others' terms by the same arithmetic in the same
+# order; nothing crosses but the terms. The goal's spelling, over two and
+# three replicas.
+@testset "a reduction every device reads is computed on each of them, $n devices" for n in (2, 3)
+    ws, x, t = placed_model(Float32; tokens = 96)
+    args = replicas_of(ws, x, t, n)
+    ex = prepare(trace(replicated_sgd!, args...), labelled_replicas(args...)...; target = T.CPUTarget(), build = false, verify = true)
+    g = ex.plan.graph
+    copies = [v for v in eachindex(g.values) if C.crossing(g, v)]
+    # No crossing copies a value whose terms lie on several devices.
+    @test all(c -> length(term_devices(g, g.values[c].definition.operand.value)) == 1, copies)
+    # Each device receives each other's gradient of each weight once, and the loss's terms.
+    weight = C.value_bytes(g.values[only(v for v in eachindex(g.values) if g.values[v].definition isa C.Input && g.values[v].definition.argument == 1)])
+    lanes = [(g.devices[g.values[c].definition.operand.value], g.devices[c]) for c in copies if C.value_bytes(g.values[c]) == weight]
+    @test length(lanes) == n * (n - 1) * 2length(ws) && all(l -> count(==(l), lanes) == 2length(ws), unique(lanes))
+    # Each replica's update reads its gradient reduced on its own device, by the same arithmetic as every other's.
+    results = [o.value for o in g.results if o isa C.Read]
+    updates = [r for r in results if C.value_bytes(g.values[r]) == weight && length(term_devices(g, r)) == n]
+    @test length(updates) == n * 2length(ws)
+    for r in updates
+        @test all(v -> g.devices[v] == g.devices[r] && !C.crossing(g, v), [u for o in C.operands(g.values[r].definition) for u in C.read_values(o)])
+    end
+    # The replicas' updates of one weight, the replica's own weight left out, alike.
+    written = [computed(g, r, k -> :own) for r in updates]
+    @test length(unique(written)) == 2length(ws)
+    @test all(w -> count(==(w), written) == n, unique(written))
+end
+
+# Terms all on one device are joined there once, and the result copied.
+@testset "a sum of one device's terms is computed once and copied" begin
+    f(a, b, c) = (s = a .+ b; (sum(s), sum(s .* c; dims = 3)))
+    args = (rand(Float32, 4, 3), rand(Float32, 4, 3), rand(Float32, 4, 3, 5))
+    p = C.verify(placed_plan(f, args, [1, 1, 2]))
+    g = p.graph
+    sums = [v for v in eachindex(g.values) if g.values[v].definition isa C.Pointwise && g.values[v].definition.f === (+)]
+    @test length(sums) == 1
+    @test crossed_bytes(p) == [sizeof(args[1])]
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
+    # With its terms on two devices and read on both, it is computed on both, and only the terms cross.
+    h(a, b, c, d) = (s = a .+ b; (sum(s .* c; dims = 3), sum(s .* d; dims = 3)))
+    args = (rand(Float32, 4, 3), rand(Float32, 4, 3), rand(Float32, 4, 3, 5), rand(Float32, 4, 3, 5))
+    p = C.verify(placed_plan(h, args, [1, 2, 1, 2]))
+    g = p.graph
+    sums = [v for v in eachindex(g.values) if g.values[v].definition isa C.Pointwise && g.values[v].definition.f === (+)]
+    @test sort(g.devices[sums]) == [1, 2]
+    @test sort([g.values[g.values[c].definition.operand.value].definition isa C.Input for c in eachindex(g.values) if C.crossing(g, c)]) == [true, true]
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(h, args...)))), args...)
+end
+
 @testset "a recurrence's cycle is on one device" begin
     cell(Wh, xs, h0) = sum(last(accumulate((h, x) -> tanh.(transpose(Wh) * h .+ x), eachslice(xs; dims = 2); init = h0)))
     args = (rand(Float32, 4, 4), rand(Float32, 4, 6), rand(Float32, 4))

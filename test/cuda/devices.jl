@@ -342,3 +342,25 @@ end
         @test task_device() == before
     end
 end
+
+# Data parallelism in its own spelling over the devices there are, two and
+# three: each replica updated from its gradients reduced on its own device,
+# from the others' gradients crossed to it, stays its fellows' to the bit.
+@testset "replicas over $n devices stay alike to the bit" for n in (2, 3)
+    if CUDACore.ndevices() < n
+        @test_skip "needs $n devices"
+    else
+        on(d, a) = CUDACore.device!(() -> CuArray(a), d)
+        ws, x, t = placed_model(Float32; tokens = 96)
+        rs, xs, ts = replicas_of(ws, x, t, n)
+        args = (Tuple(map(w -> map(a -> on(k - 1, a), w), r) for (k, r) in enumerate(rs)),
+            Tuple(on(k - 1, a) for (k, a) in enumerate(xs)), Tuple(on(k - 1, a) for (k, a) in enumerate(ts)))
+        c = compile(replicated_sgd!, args...)
+        @test c.executable.devices == collect(0:(n - 1))
+        foreach(_ -> c(args...), 1:3)
+        replicas = [map(Array, collect(Iterators.flatten(r))) for r in args[1]]
+        @test all(r -> r == replicas[1], replicas)
+        copies = [s for s in c.executable.steps if C.crosses(s)]
+        @test Set((s.from, s.device) for s in copies) == Set((a, b) for a in 0:(n - 1), b in 0:(n - 1) if a != b)
+    end
+end

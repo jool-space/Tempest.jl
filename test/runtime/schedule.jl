@@ -229,6 +229,26 @@ end
     @test unordered(ex) == []
 end
 
+# A crossing carries terms only: no kernel waits for a crossing that copies
+# a value computed from its own device's terms, which it would have computed
+# itself, a hop sooner. The trial's step and the goal's spelling over two and
+# three replicas.
+@testset "no device waits for what it could compute itself: $name" for (name, f, args, labelled) in (
+        ("the trial's step", shards_sgd!, shards_of(placed_model(Float32)...), labelled_shards),
+        ("two replicas", replicated_sgd!, replicas_of(placed_model(Float32; tokens = 96)..., 2), labelled_replicas),
+        ("three replicas", replicated_sgd!, replicas_of(placed_model(Float32; tokens = 96)..., 3), labelled_replicas))
+    ex = prepare(trace(f, args...), labelled(args...)...; target = T.CPUTarget(), verify = true)
+    p = ex.plan
+    g = p.graph
+    order = C.plan_order(p)
+    for (j, group) in enumerate(p.groups), k in order.waits[j]
+        group.kind isa C.CrossingKind && continue
+        crossed = only(p.groups[k].outputs)
+        @test !(C.group_device(p, group) in term_devices(g, g.values[crossed].definition.operand.value))
+    end
+    @test unordered(ex) == []
+end
+
 # Storage shares a slot only where the program orders its users: a crossing
 # of the data-parallel step, which the program orders after the kernels that
 # wrote what it copies alone, never takes a slot a kernel of its reader's

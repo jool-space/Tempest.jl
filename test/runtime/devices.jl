@@ -54,6 +54,23 @@ result_leaves(r) = collect(C.leaves(r))
     end
 end
 
+# Data parallelism in its own spelling: each replica updated from its
+# gradients reduced on its own device stays its fellows' to the bit, and the
+# whole batch's on one device, the sums associating alike.
+@testset "replicas over $n devices stay alike to the bit" for n in (2, 3)
+    ws, x, t = placed_model(Float32; tokens = 96)
+    args = replicas_of(ws, x, t, n)
+    whole = deepcopy(args)
+    labelled = labelled_replicas(args...)
+    c, w = compile(replicated_sgd!, labelled...), compile(replicated_sgd!, whole...)
+    for _ in 1:3
+        @test c(labelled...) == w(whole...)
+    end
+    replicas = [collect(Iterators.flatten(r)) for r in args[1]]
+    @test all(r -> r == replicas[1], replicas)
+    @test replicas[1] == collect(Iterators.flatten(whole[1][1]))
+end
+
 @testset "an argument on another device than planned is refused by name" begin
     ws, x, t = placed_model(Float32)
     lws, lx, lt = labelled_model(ws, x, t)
