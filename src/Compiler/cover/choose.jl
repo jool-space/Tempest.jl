@@ -347,6 +347,16 @@ floor_seconds(::RecurrenceKind, d::Decider, p::Plan, g::Group) = stepped_seconds
 floor_seconds(::CrossingKind, d::Decider, p::Plan, g::Group) = crossing_seconds(d.rates, value_bytes(p.graph.values[only(g.outputs)]))
 
 """
+Whether a decider that measures times a group of a kind: every kind but a
+crossing, which is priced over the link alone. The decider's buffers are at
+home, where a crossing's copy would be a copy within one device, and every
+plan the cover weighs crosses alike, as placement decides the crossings
+before the cover, so that its time would rank nothing.
+"""
+timed(::GroupKind) = true
+timed(::CrossingKind) = false
+
+"""
 A floor `o` its kind prices itself (see `floor_seconds`), as a recurrence's
 run a step at a time, priced at its run timed whole where the record holds
 that time, as a decider measuring close calls
@@ -577,7 +587,7 @@ holds times is expanded, and nothing is measured.
 """
 function search!(d::Decider, groups)
     while true
-        pending = [(p, g, os[k]) for (p, g, os) in groups for k in measured_ranks(d, os) if !haskey(d.record, os[k].key)]
+        pending = [(p, g, os[k]) for (p, g, os) in groups if timed(g.kind) for k in measured_ranks(d, os) if !haskey(d.record, os[k].key)]
         if !isempty(pending) && d.measure in (:close, :all)
             build_unmeasured!(d, pending)
             foreach(((p, g, o),) -> measure!(d, p, g, o), pending)
@@ -1019,6 +1029,7 @@ function build_unmeasured!(d::Decider, options)
 end
 
 function measure!(d::Decider, p::Plan, g::Group, o::Choice)
+    timed(g.kind) || return
     haskey(d.record, o.key) && return
     launch = build_option!(d, p, g, o)
     launch === nothing && return
