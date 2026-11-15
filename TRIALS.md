@@ -422,8 +422,40 @@ being the driver's and CUDA.jl not told the arrays were written (`written`).
 Open: the link's rate is a constant, 7.7 GB/s, not fitted; a crossing's legs
 are not recorded in the graphs beside it; three devices are placed by cuts
 of one device against the rest, an approximation, and ran right, untimed;
-nothing overlaps, one device working while the other waits; and what a cut
-by bytes, not by time, gives where the devices' work is unequal.
+and what a cut by bytes, not by time, gives where the devices' work is
+unequal.
+
+Two devices at once, 15 November (`towers.jl`, `shards.jl` there). Nothing
+orders one device's work after another's but a crossing, which waits for
+what wrote its source and is waited for by what reads its copy: the walk
+and the replay no longer order each run of steps after the last on another
+device (`follow`, removed), a step reading only its own device's values
+but for a crossing. The planner orders the kernels in runs, a device
+running all it can before it waits for another (`in_runs`), where passes
+interleaved two towers kernel by kernel, a graph for every kernel or two;
+and a
+kernel takes only values that come after the same crossings (`joined`),
+where the first tower's loss, read with the second's crossed to it, had
+shared a kernel with the value its whole backward starts from, the
+backward then waiting for the other device: 103.5 ms a step where 71.4.
+Two towers of six blocks, each with its weights and batch on its device,
+joined where their losses are added: forward 29.5 ms where one tower alone
+takes 29.8 and both on one device 61.4; a training step 71.4 where 71.4
+and 151.3; four segments, a graph on each device, the number crossing and
+the sum; results the one device's to the bit. The chain of the placed model
+is as it was, 137.2 ms a step. Data parallelism written by hand, a replica
+of six blocks' weights (192 MiB) on each device and a batch of 8192 tokens
+in two shards, the loss the mean of the shards' losses, against the whole
+batch on one device, 122 ms: the gradients left on their devices 74.9 ms,
+one shard alone being 71; summed on one device, twelve crossings of 16 MiB,
+106.0; a step of SGD written into both replicas, the sum crossing back,
+122.5, no faster than one device. The reduce is the cost: 192 MiB each way
+at the staged copy's rate is 26 ms, behind the devices' work rather than
+beside it, each crossing on its devices' one stream. Open beside the
+above: crossings on streams of their own, and NCCL's rate, 9.7 GB/s; the
+sum where each replica needs it without crossing twice; a replica the
+compiler keeps, made where the weights change rather than passed; more
+than two shards.
 
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
