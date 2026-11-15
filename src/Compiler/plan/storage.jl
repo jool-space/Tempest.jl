@@ -1,7 +1,13 @@
 # Storage, the last step of the decision procedure: where each stored value
 # lives. Inputs, constants and results have storage of their own. Every other
-# stored value lives in a slot from the kernel that writes it to the last
-# kernel that reads it, and values whose lifetimes do not overlap share a slot.
+# stored value lives in a slot, and a value takes a slot only where every
+# kernel that used what it held runs before the one that writes it by the
+# program's own order (see `plan_order`): on one stream earlier, or before it
+# through the values it reads. Storage so never orders two streams the
+# program leaves apart, which would hold a crossing back until the kernels of
+# a device it does not need have run, or a device until a crossing has; on
+# one device, whose kernels are one stream, values whose lifetimes do not
+# overlap share a slot.
 # A result that replaces an argument is written into the argument's storage
 # where the kernel that writes it reads the argument only at the address it
 # writes; it is staged otherwise, in storage of its own and copied after the
@@ -48,9 +54,11 @@ argument values they replace; `in_place(k)` says whether the realization of
 kernel `k` reads each element a set of outputs needs before it writes any of
 them. A kernel that writes a result into an argument's storage, or a fold by
 key over the contents it starts from, runs after the other kernels that read
-them, when the plan allows it. Slots are
-assigned in the order of kernels: each value takes the smallest free slot that
-fits it, or else grows the largest free slot, or else a new one.
+them, when the plan allows it and a kernel it would so run after is on its
+stream or before it already. Slots are assigned in the order of kernels:
+each value takes the smallest slot free for its kernel that fits it, or else
+grows the largest free slot, or else a new one; a slot is free for a kernel
+once every kernel using what it holds runs before it (see `plan_order`).
 """
 function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
     graph = p.graph
@@ -64,6 +72,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
     after = [Int[] for _ in p.groups]
     foreach(k -> foreach(j -> push!(after[j], k), needs[k]), eachindex(needs))
     results = Set(o.value for o in graph.results if o isa Read)
+    streams = [group_stream(p, g) for g in p.groups]
     base(v) = p.owner[v] > 0 ? overwritable(graph, p.groups[p.owner[v]], v) : nothing
     overwrites, overwritten, bases = Pair{Int, Int}[], Set{Int}(), Set{Int}()
     # Kernel `k` made to run after every other kernel that reads value `a`,
@@ -72,9 +81,16 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
     # `added`, for `undo!`. The needs are acyclic, so a cycle would pass
     # through `k`, and only what runs after `k` is walked, once per result
     # an argument's storage takes, where ordering every kernel again took
-    # each a pass over every kernel for each kernel.
+    # each a pass over every kernel for each kernel. A kernel on another
+    # stream it is not made to run after, which would hold one stream for
+    # another by storage alone: it must run before `k` already.
     function follow!(added, k, a)
-        js = [j for j in get(readers, a, Int[]) if j != k && !(j in needs[k])]
+        readers_apart = Int[]
+        js = Int[]
+        for j in get(readers, a, Int[])
+            j == k || j in needs[k] || push!(streams[j] == streams[k] ? js : readers_apart, j)
+        end
+        all(j -> runs_after(after, j, [k]), readers_apart) || return false
         isempty(js) && return true
         runs_after(after, k, js) && return false
         foreach(j -> (push!(needs[k], j); push!(after[j], k); push!(added, k => j)), js)
@@ -127,14 +143,19 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
     n = length(graph.values)
     # What each kernel reads, by its place in the order they run, in order.
     reading = [sort!(collect(reads[j])) for j in order]
+    ordering = plan_order(p)
+    # Each value's last kernel, and on each stream its last that uses it.
     last = copy(p.owner)
+    users = zeros(Int, length(ordering.streams), n)
+    foreach(v -> p.owner[v] > 0 && (users[ordering.on[p.owner[v]], v] = p.owner[v]), 1:n)
     for (k, rs) in enumerate(reading), r in rs
         last[r] = max(last[r], k)
+        users[ordering.on[k], r] = k
     end
     lifetimes = [p.owner[v] > 0 ? (p.owner[v]:last[v]) : (1:0) for v in 1:n]
     slots = zeros(Int, n)
-    pool = SlotPool()
-    (; sizes, busy) = pool
+    pool = SlotPool(ordering)
+    sizes = pool.sizes
     over = Dict(overwrites)
     reused, taken = Pair{Int, Int}[], Set{Tuple{Int, Int}}()
     # A value its kernel reads for the last time, at the address the kernel
@@ -146,7 +167,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         # A scan's or a recurrence's kernel writes a step before it reads the next.
         g.kind isa Union{ReductionKind, PointwiseKind} && in_place(order[k]) || return nothing
         for b in reading[k]
-            slots[b] > 0 && busy[slots[b]] == k && !((slots[b], k) in taken) && last[b] == k && p.owner[b] != k && !(b in results) || continue
+            slots[b] > 0 && vacated(pool, slots[b], k) && !((slots[b], k) in taken) && last[b] == k && p.owner[b] != k && !(b in results) || continue
             value_bytes(graph.values[b]) == value_bytes(graph.values[v]) && graph.values[b].eltype == graph.values[v].eltype || continue
             writes_over(graph, g, v, b) && return b
         end
@@ -156,7 +177,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         if haskey(over, v)
             # The slot of the contents it writes over; none over an argument's storage.
             s = slots[over[v]]
-            s > 0 && occupy!(pool, s, last[v])
+            s > 0 && occupy!(pool, s, view(users, :, v))
             slots[v] = s
             continue
         end
@@ -164,81 +185,133 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         if b !== nothing
             s = slots[b]
             push!(taken, (s, p.owner[v]))
-            occupy!(pool, s, last[v])
+            occupy!(pool, s, view(users, :, v))
             slots[v] = s
             push!(reused, v => b)
             continue
         end
-        slots[v] = place!(pool, value_bytes(graph.values[v]), p.owner[v], last[v], graph.devices[v])
+        slots[v] = place!(pool, value_bytes(graph.values[v]), p.owner[v], view(users, :, v), graph.devices[v])
     end
     p, order, Storage(lifetimes, slots, sizes, pool.devices, donated, staged, overwrites, reused)
 end
 
 """
-The slots stored values take: each slot's bytes (`sizes`), the last
-kernel of the values in it (`busy`), and its device (`devices`). The slots
-free before a kernel are kept by device and size, the least of each first, and the busy ones by the kernel
-after which they free, so that a value finds its slot without a pass over
-every slot: with one, the backward of a stack of layers, whose activations
-live from the forward on, took a pass over thousands of slots for each
-value it stored.
+The slots stored values take: each slot's bytes (`sizes`), on each stream
+the last kernel that uses what it holds (`busy`), and its device
+(`devices`), by the order the slots are free in (`order`, see
+`plan_order`). The slots free for the kernels of each stream are kept by
+size, the least of each first, and the busy ones by the kernel of each
+stream that each awaits, so that a value finds its slot without a pass
+over every slot: with one, the backward of a stack of layers, whose
+activations live from the forward on, took a pass over thousands of slots
+for each value it stored. A slot is free for a stream's kernels once they
+run after its kernel on every stream, which, the streams' kernels running
+in order, each kernel of a stream finds in its turn: once for a slot,
+counted by the streams it awaits (`pending`). An entry for a slot from
+before it was taken or held longer (`held`) is stale.
 """
 struct SlotPool
+    order::StreamOrder
     sizes::Vector{Int}
-    busy::Vector{Int}
+    busy::Vector{Vector{Int}}
     devices::Vector{Int}
-    # A heap of the free slots of each device and size, and each device's
-    # sizes, in order.
-    free::Dict{Tuple{Int, Int}, Vector{Int}}
+    held::Vector{Int}
+    # The streams that write on each device.
+    writers::Dict{Int, Vector{Int}}
+    # For each stream, a heap of the slots free for its kernels of each
+    # size, and the sizes, in order.
+    free::Dict{Tuple{Int, Int}, Vector{Tuple{Int, Int}}}
     free_sizes::Dict{Int, Vector{Int}}
-    # A heap of the busy slots by `busy`, an entry gone stale once its slot's
-    # `busy` moved past it.
-    freeing::Vector{Tuple{Int, Int}}
+    # For each stream and each it awaits, a heap of the slots by the kernel
+    # awaited; and for each stream and slot, the streams it awaits yet.
+    freeing::Dict{Tuple{Int, Int}, Vector{Tuple{Int, Int, Int}}}
+    pending::Dict{Tuple{Int, Int}, Int}
 end
 
-SlotPool() = SlotPool(Int[], Int[], Int[], Dict{Tuple{Int, Int}, Vector{Int}}(), Dict{Int, Vector{Int}}(), Tuple{Int, Int}[])
+function SlotPool(order::StreamOrder)
+    writers = Dict{Int, Vector{Int}}()
+    foreach(((σ, stream),) -> push!(get!(() -> Int[], writers, last(stream)), σ), enumerate(order.streams))
+    SlotPool(order, Int[], Vector{Int}[], Int[], Int[], writers, Dict{Tuple{Int, Int}, Vector{Tuple{Int, Int}}}(), Dict{Int, Vector{Int}}(),
+        Dict{Tuple{Int, Int}, Vector{Tuple{Int, Int, Int}}}(), Dict{Tuple{Int, Int}, Int}())
+end
 
-# Slot `s` busy until kernel `until` at least.
+# Slot `s` held until the kernels `until`, on each stream, at least: awaited
+# by each stream that writes on its device until they have run.
 function occupy!(pool::SlotPool, s, until)
-    until > pool.busy[s] || return
-    pool.busy[s] = until
-    heap_push!(pool.freeing, (until, s))
+    busy = pool.busy[s]
+    all(τ -> until[τ] <= busy[τ], eachindex(busy)) && return
+    busy .= max.(busy, until)
+    held = pool.held[s] += 1
+    for σ in pool.writers[pool.devices[s]]
+        awaited = findall(>(0), busy)
+        pool.pending[(σ, s)] = length(awaited)
+        foreach(τ -> heap_push!(get!(() -> Tuple{Int, Int, Int}[], pool.freeing, (σ, τ)), (busy[τ], s, held)), awaited)
+    end
+end
+
+"Whether kernel `k` uses what slot `s` holds, and every other kernel that does runs before it."
+function vacated(pool::SlotPool, s, k)
+    after = pool.order.after[k]
+    busy = pool.busy[s]
+    busy[pool.order.on[k]] == k && all(τ -> busy[τ] <= after[τ], eachindex(busy))
 end
 
 """
     place!(pool, bytes, k, until, device) -> slot
 
-The slot of a value of `bytes` on `device`, written by kernel `k` and read
-last by kernel `until`: of the device's slots free before `k`, the smallest that fits it,
-or else the largest, grown to fit it, or else a new one; the least slot of
-those alike.
+The slot of a value of `bytes` on `device`, written by kernel `k` and used
+last on each stream by kernel `until[τ]`: of the device's slots free for
+`k`, the smallest that fits it, or else the largest, grown to fit it, or
+else a new one; the least slot of those alike.
 """
 function place!(pool::SlotPool, bytes, k, until, device)
-    (; sizes, busy, devices, free, freeing) = pool
-    while !isempty(freeing) && first(freeing[1]) < k
-        b, s = heap_pop!(freeing)
-        b == busy[s] || continue
-        size = sizes[s]
-        each = get!(() -> Int[], pool.free_sizes, devices[s])
-        haskey(free, (devices[s], size)) || insert!(each, searchsortedfirst(each, size), size)
-        heap_push!(get!(() -> Int[], free, (devices[s], size)), s)
+    (; order, sizes, busy, devices, held, free, freeing, pending) = pool
+    σ = order.on[k]
+    after = order.after[k]
+    for τ in eachindex(order.streams)
+        heap = get(freeing, (σ, τ), nothing)
+        heap === nothing && continue
+        # A kernel of its own stream before `k`, or of another that `k` runs after.
+        reached = min(k - 1, after[τ])
+        while !isempty(heap) && first(heap[1]) <= reached
+            _, s, h = heap_pop!(heap)
+            h == held[s] || continue
+            (pending[(σ, s)] -= 1) == 0 || continue
+            each = get!(() -> Int[], pool.free_sizes, σ)
+            haskey(free, (σ, sizes[s])) || insert!(each, searchsortedfirst(each, sizes[s]), sizes[s])
+            heap_push!(get!(() -> Tuple{Int, Int}[], free, (σ, sizes[s])), (s, h))
+        end
     end
-    free_sizes = get!(() -> Int[], pool.free_sizes, device)
-    i = min(searchsortedfirst(free_sizes, bytes), length(free_sizes))
-    s = if i == 0
+    s = take_free!(pool, σ, bytes)
+    if s == 0
         push!(sizes, 0)
-        push!(busy, 0)
+        push!(busy, zeros(Int, length(order.streams)))
         push!(devices, device)
-        length(sizes)
-    else
-        size = free_sizes[i]
-        s = heap_pop!(free[(device, size)])
-        isempty(free[(device, size)]) && (delete!(free, (device, size)); deleteat!(free_sizes, i))
-        s
+        push!(held, 0)
+        s = length(sizes)
     end
     sizes[s] = max(sizes[s], bytes)
     occupy!(pool, s, until)
     s
+end
+
+# The slot free for the kernels of stream `σ` that a value of `bytes` takes,
+# the smallest that fits it or else the largest; zero for none. A slot
+# another stream took since it was freed is stale and passed over.
+function take_free!(pool::SlotPool, σ, bytes)
+    (; free, held) = pool
+    each = get!(() -> Int[], pool.free_sizes, σ)
+    while !isempty(each)
+        i = min(searchsortedfirst(each, bytes), length(each))
+        heap = free[(σ, each[i])]
+        while !isempty(heap)
+            s, h = heap_pop!(heap)
+            h == held[s] && (isempty(heap) && (delete!(free, (σ, each[i])); deleteat!(each, i)); return s)
+        end
+        delete!(free, (σ, each[i]))
+        deleteat!(each, i)
+    end
+    0
 end
 
 # Kernels in an order where each runs after those it needs, otherwise in their

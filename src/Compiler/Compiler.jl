@@ -87,6 +87,7 @@ include("plan/partition.jl")
 include("plan/masks.jl")
 include("plan/cpu.jl")
 include("plan/explain.jl")
+include("plan/order.jl")
 include("plan/storage.jl")
 include("plan/verify.jl")
 

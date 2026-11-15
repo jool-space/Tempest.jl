@@ -2,17 +2,10 @@
 # steps on one stream, in order; a crossing runs on a lane of its own, the
 # stream of its ordered pair of devices, so that it copies beside the kernels
 # of both. Whatever two streams touch of one storage is ordered between them
-# by a wait: the later step waits for the earlier, one on each stream, as
-# plan order has them. What a step touches is known where the steps are made
-# (see `step_touches`); the waits and the runs a recording launches are
-# derived from it alone (see `stream_schedule`), and an execution runs by
+# by a wait (see plan/order.jl). What a step touches is known where the steps
+# are made (see `step_touches`); the waits and the runs a recording launches
+# are derived from it alone (see `stream_schedule`), and an execution runs by
 # them (see `Schedule` and `walk`).
-
-"""
-What a step reads and writes, as storage keys: a slot, an argument's
-storage, or a buffer of a value's own, each numbered (see `numbered`).
-"""
-const Touches = @NamedTuple{reads::Vector{Int}, writes::Vector{Int}}
 
 """
     stream_of(step) -> (from, device)
@@ -66,16 +59,16 @@ end
     stream_schedule(steps, touches) -> (; waits, runs)
 
 The waits between streams that `steps`, in plan order, need, and the runs a
-recording launches them in, from what each touches (`touches[k]`, see
-`Touches`).
+recording launches them in, from the storage each touches (`touches[k]`,
+see `Touches`).
 
-`waits[k]` holds the earlier steps on other streams that step `k` waits for:
-the last that wrote what it reads, and the last that wrote and those that
-read since what it writes, each of another stream. A stream runs its own in
-order, so a step that waits for one waits for everything before it on its
-stream, and for everything that one waited for: a wait the stream is already
-ordered after is left out. One device's steps touch only its own storage,
-and wait for none.
+`waits[k]` holds the earlier steps on other streams that step `k` waits for,
+as `stream_order` derives them: the last that wrote what it reads, and the
+last that wrote and those that read since what it writes, less those its
+stream is ordered after already. Storage shares a slot only where the
+program orders its users (see `storage`), so these are the waits of the
+values each step reads and the arguments it writes; one device's steps wait
+for none.
 
 `runs` holds the positions of each run, in the order they are launched, each
 of one stream's steps in order: a step joins its stream's last run unless it
@@ -86,45 +79,7 @@ device feeds would wait for the crossing of the execution before. One
 device's steps are one run.
 """
 function stream_schedule(steps::Vector{Step}, touches::Vector{Touches})
-    streams = unique(map(stream_of, steps))
-    index = Dict(σ => i for (i, σ) in enumerate(streams))
-    on = [index[stream_of(s)] for s in steps]
-    n, m = length(steps), length(streams)
-    # Per stream, the last step of each stream it is ordered after; and per
-    # step, its stream's as the step ends.
-    clocks = [zeros(Int, m) for _ in 1:m]
-    after = Vector{Vector{Int}}(undef, n)
-    # Per key, the step that wrote it last, and per stream the last that read it since.
-    writer = Dict{Int, Int}()
-    readers = Dict{Int, Vector{Int}}()
-    waits = [Int[] for _ in 1:n]
-    for k in 1:n
-        σ = on[k]
-        earlier = Int[]
-        for key in touches[k].reads
-            haskey(writer, key) && push!(earlier, writer[key])
-        end
-        for key in touches[k].writes
-            haskey(writer, key) && push!(earlier, writer[key])
-            haskey(readers, key) && append!(earlier, filter(>(0), readers[key]))
-        end
-        # The latest first: what it was ordered after need not be waited for.
-        for j in sort!(unique!(earlier); rev = true)
-            on[j] == σ && continue
-            clocks[σ][on[j]] >= j && continue
-            push!(waits[k], j)
-            clocks[σ] .= max.(clocks[σ], after[j])
-        end
-        clocks[σ][σ] = k
-        after[k] = copy(clocks[σ])
-        for key in touches[k].reads
-            get!(() -> zeros(Int, m), readers, key)[σ] = k
-        end
-        for key in touches[k].writes
-            writer[key] = k
-            readers[key] = zeros(Int, m)
-        end
-    end
+    (; on, waits) = stream_order(map(stream_of, steps), touches)
     (; waits, runs = stream_runs(on, waits))
 end
 

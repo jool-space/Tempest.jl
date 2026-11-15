@@ -56,10 +56,15 @@ Check the invariants the kernels of `plan` rely on, and throw an
     other; every value a kernel or a result reads is an input, a constant, or
     stored by a kernel earlier in the order.
  2. With `storage`, simulating the order: no slot is given to a value while
-    the value it holds has a reader yet to run, but where a pair the storage
-    records allows it, and each donated, staged, overwritten and reused pair
-    holds by the rule that allows it, tested again; each lifetime covers its
-    value's kernel and every reader.
+    a kernel that uses the value it holds does not run before the value's,
+    by the order the program gives the kernels (see `plan_order`: on one
+    stream earlier, or before it through the values it reads), but where a
+    pair the storage records allows it, the kernel the last to use it; each
+    donated, staged, overwritten and reused pair holds by the rule that
+    allows it, tested again, the other kernels reading what it writes over
+    running before its kernel by that order; and each lifetime covers its
+    value's kernel and every reader. On one device, whose kernels are one
+    stream, a value's users run before a kernel where they are earlier.
  3. A recurrence's group has every state of its cycle first among its
     members, each carried from a different value it computes, and stores the
     values of the cycle no other kernel stores; each member outside the
@@ -307,8 +312,12 @@ function verify_storage(p::Plan, s::Storage, in_place, reads)
         value_bytes(values[v]) <= s.sizes[slot] ||
             invalid(2, value_name(p, v), " is in slot ", slot, " of ", s.sizes[slot], " bytes, too few for it")
     end
-    # The kernels other than `k` that read `b` run before it.
-    before(b, k) = all(j -> j == k || !(b in reads[j]) || j < k, eachindex(reads))
+    order = plan_order(p)
+    # The kernels that use each value, and whether those but `k` run before it.
+    users = [p.owner[v] > 0 ? [p.owner[v]] : Int[] for v in eachindex(values)]
+    foreach(((j, rs),) -> foreach(r -> push!(users[r], j), rs), enumerate(reads))
+    unordered(b, k) = findfirst(j -> j != k && !ordered(order, j, k), users[b])
+    readers_before(b, k) = all(j -> j == k || !(b in reads[j]) || ordered(order, j, k), users[b])
     replaced = [s.donated; s.staged]
     allunique(first.(replaced)) && allunique(last.(replaced)) ||
         invalid(2, "a result replaces two arguments, or an argument is replaced twice")
@@ -326,22 +335,22 @@ function verify_storage(p::Plan, s::Storage, in_place, reads)
             v = over[v]
         end
         haskey(over, v) && continue
-        in_place(k) && writes_over(graph, p.groups[k], r, a) && before(a, k) ||
+        in_place(k) && writes_over(graph, p.groups[k], r, a) && readers_before(a, k) ||
             invalid(2, kernel_name(p, k), " writes result ", value_name(p, r), " into the storage of ", value_name(p, a),
-                ", which it ", in_place(k) ? "reads elsewhere than where it writes, or a later kernel reads" : "does not read before it writes")
+                ", which it ", in_place(k) ? "reads elsewhere than where it writes, or a kernel not before it reads" : "does not read before it writes")
     end
     for (v, b) in s.overwrites
         k = p.owner[v]
         k > 0 && overwritable(graph, p.groups[k], v) == b ||
             invalid(2, value_name(p, v), " is written over ", value_name(p, b), ", which it does not start from as stored, or its kernel reads otherwise")
-        before(b, k) || invalid(2, value_name(p, v), " is written over ", value_name(p, b), ", which a kernel after ", kernel_name(p, k), " reads")
+        readers_before(b, k) || invalid(2, value_name(p, v), " is written over ", value_name(p, b), ", which a kernel not before ", kernel_name(p, k), " reads")
         b in results && !given(graph, b) && invalid(2, value_name(p, v), " is written over result ", value_name(p, b))
         s.slots[v] == s.slots[b] || invalid(2, value_name(p, v), " is written over ", value_name(p, b), " but lies in another slot")
     end
     for (v, b) in s.reused
         k = p.owner[v]
         g = p.groups[k]
-        reusable = g.kind isa Union{ReductionKind, PointwiseKind} && in_place(k) && final[b] == k && p.owner[b] != k && !(b in results) &&
+        reusable = g.kind isa Union{ReductionKind, PointwiseKind} && in_place(k) && final[b] == k && unordered(b, k) === nothing && p.owner[b] != k && !(b in results) &&
             value_bytes(values[v]) == value_bytes(values[b]) && values[v].eltype == values[b].eltype && writes_over(graph, g, v, b)
         reusable && s.slots[v] == s.slots[b] > 0 ||
             invalid(2, value_name(p, v), " takes the slot of ", value_name(p, b), ", which ", kernel_name(p, k), " does not read last where it writes")
@@ -353,8 +362,10 @@ function verify_storage(p::Plan, s::Storage, in_place, reads)
         for v in sort!(filter(m -> s.slots[m] > 0, members(g)))
             slot = s.slots[v]
             u = holder[slot]
-            u == 0 || final[u] < k || final[u] == k && (v => u) in allowed ||
-                invalid(2, kernel_name(p, k), " writes ", value_name(p, v), " into slot ", slot, ", which holds ", value_name(p, u), " until kernel ", final[u], " reads it")
+            j = u == 0 ? nothing : unordered(u, k)
+            j === nothing && (u == 0 || final[u] < k || final[u] == k && (v => u) in allowed) ||
+                invalid(2, kernel_name(p, k), " writes ", value_name(p, v), " into slot ", slot, ", which holds ", value_name(p, u), j === nothing ?
+                    string(" until kernel ", final[u], " reads it") : string(", which ", kernel_name(p, j), " uses and does not run before it"))
             holder[slot] = v
         end
     end
