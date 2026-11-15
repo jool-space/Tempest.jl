@@ -262,14 +262,43 @@ end
     @test C.verify(q, s) === q
 end
 
+# Devices run at once: each runs its own kernels that wait for no other
+# device before those that do, so that none holds its own work behind a
+# crossing it could have run beside; and devices that compute alike, the
+# replicas of data parallelism, run their kernels in the same order.
+@testset "each device runs what waits for no crossing first, $n devices" for n in (2, 3)
+    ws, x, t = placed_model(Float32; tokens = 96)
+    args = replicas_of(ws, x, t, n)
+    p = prepare(trace(replicated_sgd!, args...), labelled_replicas(args...)...; target = T.CPUTarget(), build = false, verify = true).plan
+    g = p.graph
+    up = C.ancestors(g)
+    waits(k) = any(m -> any(u -> C.crossing(g, u), findall(up[m])), C.members(p.groups[k]))
+    kernels(d) = [k for (k, group) in enumerate(p.groups) if C.group_device(p, group) == d && !(group.kind isa C.CrossingKind)]
+    for d in 1:n
+        w = map(waits, kernels(d))
+        @test w == sort(w)
+    end
+    # Each kernel as any device runs it: its kind, whether it waits, and its members' definitions.
+    summary(v) = (d = g.values[v].definition; (typeof(d), d isa C.Pointwise ? d.f : d isa C.Reduction ? d.fold : nothing, g.values[v].dims))
+    alike(k) = (C.kind_name(p.groups[k].kind), waits(k), sort!(map(summary, C.members(p.groups[k])); by = repr))
+    replica(d) = [alike(k) for k in kernels(d) if !(any(m -> g.values[m].scalar, C.members(p.groups[k])))]
+    @test all(d -> replica(d) == replica(1), 2:n)
+end
+
 @testset "kernels two devices interleave are ordered in runs" begin
+    # Each kernel's needs, its device, and the crossings it comes after: one
+    # for each read of another device's kernel, through those it reads too.
     # Two chains of two kernels, one on each device, and a fifth reading both.
     needs = [Set{Int}(), Set{Int}(), Set([1]), Set([2]), Set([3, 4])]
-    @test C.in_runs([1, 2, 3, 4, 5], needs, [1, 2, 1, 2, 1]) == [1, 3, 2, 4, 5]
+    @test C.in_runs([1, 2, 3, 4, 5], needs, [1, 2, 1, 2, 1], [0, 0, 0, 0, 1]) == [1, 3, 2, 4, 5]
     # A device's kernel that reads another's waits for it, and no longer.
-    @test C.in_runs([1, 2, 3, 4, 5], [Set{Int}(), Set{Int}(), Set([2]), Set([2]), Set([3, 4])], [1, 2, 1, 2, 1]) == [1, 2, 4, 3, 5]
+    @test C.in_runs([1, 2, 3, 4, 5], [Set{Int}(), Set{Int}(), Set([2]), Set([2]), Set([3, 4])], [1, 2, 1, 2, 1], [0, 0, 1, 0, 2]) == [1, 2, 4, 3, 5]
     # One that waits holds back none of its device's that does not.
-    @test C.in_runs([1, 2, 3, 4], [Set{Int}(), Set{Int}(), Set([2]), Set([1])], [1, 2, 1, 1]) == [1, 4, 2, 3]
+    @test C.in_runs([1, 2, 3, 4], [Set{Int}(), Set{Int}(), Set([2]), Set([1])], [1, 2, 1, 1], [0, 0, 1, 0]) == [1, 4, 2, 3]
+    # Nor where it comes first in the order, ready in this walk as soon as the
+    # other device's kernel is taken: the devices run at once, and the second's
+    # kernel that waits for the first's would hold back its own after it.
+    @test C.in_runs([1, 2, 3, 4], [Set{Int}(), Set{Int}(), Set([1, 2]), Set([2])], [1, 2, 2, 2], [0, 0, 1, 0]) == [1, 2, 4, 3]
 end
 
 @testset "a program on one device plans as it did" begin

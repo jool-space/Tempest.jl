@@ -556,7 +556,7 @@ function kernels(grounds::Grounds, k::Kernels)
             filter!(!=(m), g.outputs)
         end
     end
-    order = order_groups(graph, groups, owner)
+    order = order_groups(graph, groups, owner, [grounds.awaits[first(members(g))] for g in groups])
     position = invperm(order)
     Plan(graph, stored, groups[order], map(o -> o == 0 ? 0 : position[o], owner))
 end
@@ -569,7 +569,7 @@ end
 # where passes repeated until all were taken looked at every kernel a pass,
 # as many passes as the program has layers: 22 million times for the GPT
 # step's 1354 kernels at 32 layers.
-function order_groups(graph, groups, owner)
+function order_groups(graph, groups, owner, awaits)
     n = length(groups)
     needs = map(eachindex(groups)) do k
         deps = Set(owner[r] for r in group_reads(graph, groups[k]) if owner[r] > 0)
@@ -599,33 +599,41 @@ function order_groups(graph, groups, owner)
     done == n || error("kernels depend on each other in a cycle")
     order = sort!(collect(eachindex(groups)); by = k -> (pass[k], k))
     device = [graph.devices[first(members(g))] for g in groups]
-    allequal(device) ? order : in_runs(order, needs, device)
+    allequal(device) ? order : in_runs(order, needs, device, awaits)
 end
 
 # `order` with each device's kernels in runs as long as what they read
-# allows: the next taken is the earliest of the device's own whose reads
-# are all written, and where it has none, the earliest of another's. A
-# crossing is its reader's, so a device runs all it can before it waits for
-# another. What two devices compute apart is then a run on each, each a
-# graph of its device's that runs beside the other's (see `walk`), where
-# passes alone interleave them kernel by kernel; and a kernel that waits
-# for another device holds back none of its own that does not.
-function in_runs(order, needs, device)
+# allows: the next taken is, of the device's own whose reads are all
+# written, the one after the fewest crossings (`awaits[k]`), the earliest of
+# those, and where it has none, the same of another's. A crossing is its
+# reader's, so a device runs all it can before it waits for another. What
+# two devices compute apart is then a run on each, each a graph of its
+# device's that runs beside the other's (see `walk`), where passes alone
+# interleave them kernel by kernel; and a kernel that waits for another
+# device holds back none of its own that does not. This walk takes the
+# devices one after another, where they run at once: a kernel reading
+# what another device computed is ready here once that device's kernels are
+# taken, before its own device's that come later in `order` but wait for
+# nothing, which a device running beside the other would hold behind the
+# crossing. Of two that come after as many crossings, the walk cannot say
+# which a device can run first without the times they would take.
+function in_runs(order, needs, device, awaits)
     position = invperm(order)
     waiting = map(length, needs)
     after = [Int[] for _ in order]
     foreach(k -> foreach(d -> push!(after[d], k), needs[k]), eachindex(needs))
-    # Each device's kernels whose reads are written, by their place in `order`.
-    ready = Dict(d => Int[] for d in device)
-    await!(k) = insert!(ready[device[k]], searchsortedfirst(ready[device[k]], position[k]), position[k])
+    # Each device's kernels whose reads are written, by the crossings they
+    # come after and their place in `order`.
+    ready = Dict(d => Tuple{Int, Int}[] for d in device)
+    await!(k) = (key = (awaits[k], position[k]); insert!(ready[device[k]], searchsortedfirst(ready[device[k]], key), key))
     foreach(k -> waiting[k] == 0 && await!(k), order)
     runs = Int[]
     current = device[first(order)]
     while length(runs) < length(order)
         if isempty(ready[current])
-            current = argmin(d -> isempty(ready[d]) ? typemax(Int) : first(ready[d]), keys(ready))
+            current = argmin(d -> isempty(ready[d]) ? (typemax(Int), 0) : first(ready[d]), keys(ready))
         end
-        k = order[popfirst!(ready[current])]
+        k = order[last(popfirst!(ready[current]))]
         push!(runs, k)
         for j in after[k]
             waiting[j] -= 1
