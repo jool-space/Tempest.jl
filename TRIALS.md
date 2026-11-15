@@ -389,6 +389,42 @@ no stored activation, and the rest the two crossings and the waits. So what
 a plan over both devices has to beat is the whole's time, and by hand a
 placed forward already meets it.
 
+Built, 15 November, and measured on the same two RTX A6000s (main 7c214d7,
+`placed_compiled.jl` there, cuTile and cuBLAS loaded, nothing measured, one
+thread). A program follows its arrays' devices: where each argument lives is
+read as a label, the first device met the first and home; every other value
+is placed by a minimum cut of bytes over the index graph, each value a net
+charged once whichever way it is read across, a result that replaces an
+argument and a gradient `withgradient` returns pinned as readers on their
+argument's device, a constant made on each device that reads it; a value
+read on another device is a crossing, a kernel of its own kind that the
+verifier holds apart (no read joins two devices but through one, a slot
+holds one device's values) and that the target builds, on CUDA a copy staged
+through two page-locked buffers in chunks of 8 MB, estimated over a link
+rate; each buffer, constant and kernel is made on its own device, a call's
+arguments checked against the plan's, bound and returned each on its own;
+and a recording is a graph for each run of steps on one device, replayed in
+order, the crossings run live between them. One graph over two devices is
+not built: the driver allows it, but a capture CUDA.jl does not know of
+fails beside another task's synchronize, reclaim or finalizer, and CUDA.jl's
+own is of one context. The placed model of twelve blocks, as one `compile`:
+forward 60.5 ms where the whole on one device takes 60.1 and by hand 59.4 to
+60.8, one crossing of 16 MiB, 3.2 ms, its result the whole's to the bit; a
+training step 135.6 ms where the whole takes 140.2 and by hand 179 to 182,
+two crossings of 16 MiB, the activation forward and its gradient back, its
+segments 19.9, 74.7 and 44.8 ms, every result the whole's to the bit and
+every gradient on its parameter's device. On the CPU's labels the fuzzer's
+seeds 1 to 400 with arrays on two devices at random are bit-equal to one
+device forward and in gradient, the three that do not plan failing on one
+device too. Found on the way and fixed for one device as well: a result read
+from another task after a call could be the call before's, the launches
+being the driver's and CUDA.jl not told the arrays were written (`written`).
+Open: the link's rate is a constant, 7.7 GB/s, not fitted; a crossing's legs
+are not recorded in the graphs beside it; three devices are placed by cuts
+of one device against the rest, an approximation, and ran right, untimed;
+nothing overlaps, one device working while the other waits; and what a cut
+by bytes, not by time, gives where the devices' work is unequal.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
