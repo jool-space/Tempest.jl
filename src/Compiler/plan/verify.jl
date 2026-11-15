@@ -69,6 +69,12 @@ Check the invariants the kernels of `plan` rely on, and throw an
     recurrence's; each member has a place within the domain; a fold read as
     a `Stat` is a primary fold of the group complete in an earlier phase;
     and a fold a term recomputes is not a member of the group.
+ 5. Every read joins values on one device but a crossing's, which reads a
+    value on another device than its own; every member of a kernel, and
+    every value it reads, is on its device, but a crossing's kernel's, whose
+    one member is a crossing, reading its source (both stored, by 1); with
+    `storage`, a slot holds values of one device, and a result that
+    replaces an argument is on that argument's device.
 
 `in_place(k)` says whether kernel `k`'s realization reads each element a set
 of its outputs needs before it writes any of them, as `storage` was told.
@@ -80,13 +86,59 @@ function verify(p::Plan)
     verify_owners(p, reads)
     verify_recurrences(p)
     verify_terms(p)
+    verify_devices(p, reads)
     p
 end
 
 function verify(p::Plan, s::Storage; in_place = k -> true)
     verify(p)
     verify_storage(p, s, in_place, [group_reads(p.graph, g) for g in p.groups])
+    verify_placed_storage(p, s)
     p
+end
+
+# Invariant 5: a kernel on one device, a crossing between two.
+function verify_devices(p::Plan, reads)
+    graph = p.graph
+    devices = graph.devices
+    on(v) = string(value_name(p, v), " on device ", devices[v])
+    for (v, val) in enumerate(graph.values)
+        d = val.definition
+        joined = [r for o in operands(d) for r in read_values(o)]
+        d isa Carried && append!(joined, read_values(d.from))
+        if d isa Crossed
+            devices[d.operand.value] != devices[v] || invalid(5, "the crossing ", on(v), " reads ", on(d.operand.value), ", on its own device")
+            continue
+        end
+        for r in joined
+            devices[r] == devices[v] || invalid(5, on(v), " reads ", on(r), " but through a crossing")
+        end
+    end
+    for (k, g) in enumerate(p.groups)
+        device = group_device(p, g)
+        for m in members(g)
+            devices[m] == device || invalid(5, kernel_name(p, k), " on device ", device, " computes ", on(m))
+            crossing(graph, m) == crosses(g.kind) ||
+                invalid(5, kernel_name(p, k), crosses(g.kind) ? " copies across devices " : " computes the crossing ", on(m))
+        end
+        crosses(g.kind) && continue
+        for r in reads[k]
+            devices[r] == device || invalid(5, kernel_name(p, k), " on device ", device, " reads ", on(r))
+        end
+    end
+end
+
+# Invariant 5, of storage: a slot on one device, a replaced argument's device kept.
+function verify_placed_storage(p::Plan, s::Storage)
+    devices = p.graph.devices
+    for (v, slot) in enumerate(s.slots)
+        slot == 0 || devices[v] == s.devices[slot] ||
+            invalid(5, value_name(p, v), " on device ", devices[v], " is in slot ", slot, ", on device ", s.devices[slot])
+    end
+    for (r, a) in [s.donated; s.staged]
+        devices[r] == devices[a] ||
+            invalid(5, "result ", value_name(p, r), " on device ", devices[r], " replaces ", value_name(p, a), ", on device ", devices[a])
+    end
 end
 
 # Invariant 1: one owner, and every read written before.

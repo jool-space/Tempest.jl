@@ -38,6 +38,8 @@ run_group!(::ReductionKind, g::Group, buffers, graph) = run_reduction!(g, buffer
 run_group!(::ScanKind, g::Group, buffers, graph) = run_scan!(g, buffers, graph)
 run_group!(::PointwiseKind, g::Group, buffers, graph) = run_pointwise!(g, buffers, graph)
 run_group!(::RecurrenceKind, g::Group, buffers, graph) = run_recurrence!(g, buffers, graph)
+# A crossing on the CPU, whose devices are labels on the host's memory: a copy.
+run_group!(::CrossingKind, g::Group, buffers, graph) = run_pointwise!(g, buffers, graph)
 
 # A step at a time, the last first for states carried in reverse: the
 # states, where they start at the first step; then each other member over

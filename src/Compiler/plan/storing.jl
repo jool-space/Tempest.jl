@@ -78,6 +78,9 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
             foreach(r -> materialized[r] = true, gathered_values(o))
         end
         d isa Keyed && d.into !== nothing && foreach(r -> materialized[r] = true, read_values(d.into))
+        # A crossing copies storage on one device into storage on another:
+        # its kernel reads what it crosses from where that is stored.
+        d isa Crossed && (materialized[d.operand.value] = materialized[id] = true)
     end
     foreach(v -> materialized[v] = true, store)
     # A recurrence one of whose folds rides it, a sum, runs a step at a time
@@ -102,7 +105,7 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     stored = map(eachindex(values)) do id
         d = values[id].definition
         id in results || materialized[id] || !(id in recomputed || after[id]) || return false
-        d isa Union{Pointwise, Reduction, Scan, Keyed} && !live[id] && return false
+        d isa Union{Pointwise, Reduction, Scan, Keyed, Crossed} && !live[id] && return false
         d isa Pointwise ? (counts[id] != 1 || id in results || materialized[id] || fold_slice(values, d)) : true
     end
     # A sum another sum reads, adding a fold, is stored: the sums of a value
@@ -238,6 +241,7 @@ end
 function with_stored_results(graph::IndexGraph)
     values = copy(graph.values)
     results = copy(graph.results)
+    devices = copy(graph.devices)
     users = readers(graph)
     for (k, r) in enumerate(results)
         r isa Read || continue
@@ -255,10 +259,12 @@ function with_stored_results(graph::IndexGraph)
         r isa Read && values[r.value].scalar == graph.result_scalar[k] && reads_storage(values[r.value], r.index, dims) && continue
         push!(values, Value(narrow(Pointwise(identity, (r,)), dims), map(k -> dims[k], wide_axes(dims)),
             graph.result_eltype[k], graph.result_scalar[k]))
+        # A result's copy is made where what it copies lives.
+        push!(devices, r isa Read ? devices[r.value] : 1)
         results[k] = Read(length(values), wide_index(dims))
     end
     IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.rewrites,
-        vcat(graph.backward, falses(length(values) - length(graph.backward))))
+        vcat(graph.backward, falses(length(values) - length(graph.backward))), devices)
 end
 
 # The axes an index reads a value at, when it is a permutation of the reader's

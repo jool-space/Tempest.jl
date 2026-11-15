@@ -124,6 +124,15 @@ end
 Carried(init, from, axis) = Carried(init, from, axis, false)
 
 """
+`operand`, an identity read, whose value lives on another device than what
+it reads: a crossing between devices, a copy (see `with_devices`). It is
+the one read that joins two devices: every other joins values on one.
+"""
+struct Crossed <: Definition
+    operand::Read
+end
+
+"""
 A value: its definition, the extents of its domain (none of them one; see
 `wide_axes`), its element type, and whether it is a number rather than an array.
 """
@@ -177,7 +186,9 @@ A program at the index level: values in topological order, the values that are
 arguments, and each result as a read over the result's own shape (results may be
 layouts of values, or constants). `rewrites` notes the values that rewrites of
 the graph made, and what each rewrote. `backward` marks the values of the
-program's backward, where a reverse pass recorded it. `masks` holds what
+program's backward, where a reverse pass recorded it. `devices` gives the
+device each value lives on, by label, the first device the arguments are on
+being 1 (see `with_devices`): all on 1 until the graph is placed. `masks` holds what
 `masked` finds (`Masks`), once per graph: every view of a group asks it of
 the values the group reads.
 """
@@ -190,15 +201,17 @@ struct IndexGraph
     result_eltype::Vector{DataType}
     rewrites::Vector{Pair{Int, String}}
     backward::BitVector
+    devices::Vector{Int}
     masks::Base.Lockable{Masks, ReentrantLock}
 end
 
-IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int, String}[], backward = falses(length(values))) =
-    IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites, backward, Base.Lockable(Masks()))
+IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int, String}[], backward = falses(length(values)),
+        devices = ones(Int, length(values))) =
+    IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites, backward, devices, Base.Lockable(Masks()))
 
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
-operands(d::Union{Reduction, Scan}) = (d.operand,)
+operands(d::Union{Reduction, Scan, Crossed}) = (d.operand,)
 operands(d::Carried) = (d.init,)
 # A fold by key reads its key's positions, as a gather reads its indices, and
 # the contents it starts from.
@@ -247,6 +260,7 @@ describe(d::ConstantArray) = "constant array $(size(d.data))"
 describe(d::Pointwise) = "pointwise($(d.f))"
 describe(d::Reduction) = "reduce($(fold_name(d.fold)), reduce $(d.reduced) of $(d.iteration))"
 describe(d::Scan) = "scan($(scan_summary(d.fold, d.axes, d.reverse, d.exclusive)))"
+describe(d::Crossed) = string("crossed from ", sprint(show_operand, d.operand))
 describe(d::Carried) = string("carried along ", d.axis, " from ", sprint(show_operand, d.from), d.reverse ? " one on" : " one back")
 describe(d::Keyed) = "reduce($(fold_name(d.fold)) by key [$(join(map(string, d.key), ", "))] of $(d.iteration)" *
     (d.into === nothing ? ")" : string(" into ", sprint(show_operand, d.into), ")"))
@@ -267,7 +281,8 @@ function Base.show(io::IO, ::MIME"text/plain", g::IndexGraph)
                 show_operand(io, o)
             end
         end
-        println(io, " :: ", v.eltype, v.scalar ? " scalar" : string(v.dims))
+        print(io, " :: ", v.eltype, v.scalar ? " scalar" : string(v.dims))
+        println(io, all(==(1), g.devices) ? "" : string(" on device ", g.devices[id]))
     end
     for (k, r) in enumerate(g.results)
         print(io, "  result ", k, " = ")

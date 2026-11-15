@@ -149,7 +149,7 @@ function key_parts(d::Decider; measure = d.measure)
     # rates file states it (see `device_identity`); the record's times, and
     # the shipped rates fitted on them, are on the timing basis.
     ("decisions", REACHED_SCHEMA, TIMING_BASIS, g.values, g.arguments, g.results, g.result_dims, g.result_scalar, g.result_eltype,
-        collect(g.backward), sort!(collect(d.pinned)), sort!(collect(d.kept)), sort!(collect(d.rides)), d.steps, measure,
+        collect(g.backward), g.devices, sort!(collect(d.pinned)), sort!(collect(d.kept)), sort!(collect(d.rides)), d.steps, measure,
         d.measurable, d.target, device, d.rates, loaded_implementations(), packages, extensions, read_settings())
 end
 

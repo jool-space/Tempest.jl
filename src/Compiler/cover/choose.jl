@@ -454,8 +454,10 @@ function offered(d::Decider, p::Plan, g::Group)
     # as they load, and were a call to bind the one method a package saw
     # while it precompiled, the cover's code that package cached would be
     # void in every session where another package loaded too.
+    # A crossing is a copy between devices, no kernel an implementation claims.
+    implementing = crosses(g.kind) ? () : implementations(d.target)
     told = Tuple{Implementation, Any, Int, Said}[(i, c, k, said(d.target, i, c, view))
-        for i in implementations(d.target) for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
+        for i in implementing for (k, c) in enumerate(Base.invokelatest(claims, i, d.target, view))]
     Offered(told, Choice[], Dict{Tuple{String, Int}, String}(), Dict{Tuple{String, Int}, Choice}())
 end
 

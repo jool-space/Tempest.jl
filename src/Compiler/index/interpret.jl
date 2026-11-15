@@ -28,6 +28,7 @@ shaped(x, v::Value) = v.scalar ? x : reshape(x, v.dims)
 
 evaluate_value(d::Input, v, arrays, graph, arguments) = shaped(arguments[d.argument], v)
 evaluate_value(d::ConstantArray, v, arrays, graph, arguments) = d.data
+evaluate_value(d::Crossed, v, arrays, graph, arguments) = copy(materialize(d.operand, v.dims, arrays, graph; scalar = v.scalar))
 
 # A definition holds its function and fold untyped (see `Pointwise`): each is
 # passed on as an argument, so that the loop over the value's elements is

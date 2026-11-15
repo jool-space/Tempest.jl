@@ -228,7 +228,9 @@ end
 floor_estimate(p::Plan, g::Group, split = (items, positions, adjacent) -> nothing) = floor_estimate(g.kind, p, g, split)
 floor_estimate(::RecurrenceKind, p::Plan, g::Group, split) = recurrence_floor_estimate(p, g)
 
-function floor_estimate(::Union{ReductionKind, ScanKind, PointwiseKind}, p::Plan, g::Group, split)
+# A crossing is priced as its copy within one device for now: the bytes it
+# reads and writes, not yet over the link between the two.
+function floor_estimate(::Union{ReductionKind, ScanKind, PointwiseKind, CrossingKind}, p::Plan, g::Group, split)
     points = prod(g.domain; init = 1)
     loaded(m) = unique(l.value for l in loads(g.terms[m]))
     per_point = sum(m -> sum(v -> sizeof(p.graph.values[v].eltype), loaded(m); init = 0), members(g); init = 0)

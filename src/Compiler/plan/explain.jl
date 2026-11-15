@@ -61,20 +61,42 @@ function explain(io::IO, p::Plan)
     for (v, note) in graph.rewrites
         println(io, "rewritten: ", describe_value(graph, v), ", ", note)
     end
+    # A plan over one device says nothing of devices.
+    placed = !allequal(graph.devices)
     for (k, g) in enumerate(p.groups)
         reads = sort!(collect(group_reads(graph, g)))
-        print(io, "kernel ", k, ": ", g.kind, " over ", g.domain)
+        print(io, "kernel ", k, ": ", g.kind, " over ", g.domain, placed ? string(" on device ", group_device(p, g)) : "")
         println(io, isempty(reads) ? "" : string(", reads ", join(map(r -> "%$r", reads), " ")))
-        for r in sort(g.reductions; by = r -> (g.phase[r], r))
-            g.kind isa RecurrenceKind && (println(io, "  adds to ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r], " at each step, riding the steps"); continue)
-            println(io, "  phase ", g.phase[r], ": ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r])
-        end
-        g.kind isa RecurrenceKind && (explain_recurrence(io, p, g); continue)
-        for m in g.outputs
-            p.stored[m] || continue
-            println(io, "  writes ", describe_value(graph, m), " = ", g.terms[m])
-        end
+        explain_members(io, g.kind, p, g)
     end
+end
+
+# What a kernel of each kind computes, as `explain` words it.
+function explain_members(io::IO, ::GroupKind, p::Plan, g::Group)
+    graph = p.graph
+    for r in sort(g.reductions; by = r -> (g.phase[r], r))
+        println(io, "  phase ", g.phase[r], ": ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r])
+    end
+    for m in g.outputs
+        p.stored[m] || continue
+        println(io, "  writes ", describe_value(graph, m), " = ", g.terms[m])
+    end
+end
+
+function explain_members(io::IO, ::RecurrenceKind, p::Plan, g::Group)
+    graph = p.graph
+    for r in sort(g.reductions; by = r -> (g.phase[r], r))
+        println(io, "  adds to ", describe_value(graph, r), " = ", describe_fold(graph.values[r].definition), " of ", g.terms[r], " at each step, riding the steps")
+    end
+    explain_recurrence(io, p, g)
+end
+
+function explain_members(io::IO, ::CrossingKind, p::Plan, g::Group)
+    graph = p.graph
+    c = only(g.outputs)
+    from = (graph.values[c].definition::Crossed).operand.value
+    println(io, "  copies ", describe_value(graph, from), " on device ", graph.devices[from], " to ", describe_value(graph, c),
+        " on device ", graph.devices[c], ", ", Base.format_bytes(value_bytes(graph.values[c])))
 end
 
 # A recurrence's members: its states, which it carries from step to step and

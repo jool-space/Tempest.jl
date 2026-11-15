@@ -71,6 +71,10 @@ function definition_term(graph, cx::Forming, g, d::Pointwise, val, index, domain
     Apply(d.f, args, val.eltype)
 end
 
+# A crossing copies what it reads, which is stored on the device it crosses from.
+definition_term(graph, cx::Forming, g, d::Crossed, val, index, domain, memo = Dict{Any, Term}()) =
+    Apply(identity, (operand_term(graph, cx, g, d.operand, index, domain, memo),), val.eltype)
+
 # A fold recomputed where it is read: its operand over the domain extended by
 # its reduced axes.
 function fold_term(graph, cx::Forming, g, v, index, domain, memo = Dict{Any, Term}())

@@ -111,7 +111,7 @@ end
 # Whether `seed` is here what it was there, where kernel `f` formed from it:
 # a fixed seed the same set, a recurrence's the same values riding it.
 same_seed(r::Replay, seed::FixedSeed, f::Formed) = r.before.fixed[seed.at] == r.fixed[seed.at]
-same_seed(r::Replay, seed::Union{FoldSeed, MapSeed}, f::Formed) = true
+same_seed(r::Replay, seed::Union{CrossingSeed, FoldSeed, MapSeed}, f::Formed) = true
 
 function same_seed(r::Replay, seed::RecurrenceSeed, f::Formed)
     c = first(f.group.outputs)

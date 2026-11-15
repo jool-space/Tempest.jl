@@ -81,8 +81,10 @@ function Grounds(source::IndexGraph, s)
     # aside, which no kernel computes.
     folds = [filter(id -> values[id].definition isa Scan, 1:n); filter(id -> values[id].definition isa Reduction, 1:n);
         filter(id -> values[id].definition isa Keyed, 1:n)]
-    maps = filter(id -> !(values[id].definition isa Union{Input, ConstantArray}), 1:n)
-    seeds = Seed[[RecurrenceSeed(k) for k in eachindex(recurring)]; [FoldSeed(id) for id in folds]; [MapSeed(id) for id in maps]]
+    maps = filter(id -> !(values[id].definition isa Union{Input, ConstantArray, Crossed}), 1:n)
+    crossings = filter(id -> values[id].definition isa Crossed, 1:n)
+    seeds = Seed[[RecurrenceSeed(k) for k in eachindex(recurring)]; [CrossingSeed(id) for id in crossings]; [FoldSeed(id) for id in folds];
+        [MapSeed(id) for id in maps]]
     Grounds(source, graph, live, s.results, ancestors(graph), readers(graph), followers, recurring, seeds)
 end
 
@@ -188,12 +190,19 @@ end
 # holds yet.
 starts(grounds::Grounds, cx::Forming, seed::FixedSeed) = true
 starts(grounds::Grounds, cx::Forming, seed::RecurrenceSeed) = grounds.live[first(grounds.recurrences[seed.at].states)]
-starts(grounds::Grounds, cx::Forming, seed::Union{FoldSeed, MapSeed}) = grounds.live[seed.at] && !owned(cx, seed.at) && isstored(cx, seed.at)
+starts(grounds::Grounds, cx::Forming, seed::Union{CrossingSeed, FoldSeed, MapSeed}) = grounds.live[seed.at] && !owned(cx, seed.at) && isstored(cx, seed.at)
 
 # The kernel formed from `seed` (see `formation`).
 grown(grounds::Grounds, cx::Forming, seed::FixedSeed, fixed, riders) = fixed_group(grounds.graph, cx, fixed[seed.at])
 grown(grounds::Grounds, cx::Forming, seed::FoldSeed, fixed, riders) = grown_fold(grounds, cx, seed.at)
 grown(grounds::Grounds, cx::Forming, seed::MapSeed, fixed, riders) = grown_map(grounds, cx, seed.at)
+
+# A crossing's kernel copies it and takes nothing else.
+function grown(grounds::Grounds, cx::Forming, seed::CrossingSeed, fixed, riders)
+    g = Group(CrossingKind(), grounds.graph.values[seed.at].dims)
+    try_add!(grounds.graph, cx, g, seed.at; fold = false)
+    g
+end
 
 function grown(grounds::Grounds, cx::Forming, seed::RecurrenceSeed, fixed, riders)
     recurrence = grounds.recurrences[seed.at]

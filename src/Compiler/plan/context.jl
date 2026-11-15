@@ -150,18 +150,24 @@ struct MapSeed
     at::Int
 end
 
+"A crossing between devices, at its value: its own kernel."
+struct CrossingSeed
+    at::Int
+end
+
 """
 Where forming starts a kernel, in the order it forms them: each set fixed as
-a group, each recurrence, then each fold and each map no kernel holds yet.
+a group, each recurrence, each crossing, then each fold and each map no kernel holds yet.
 A seed answers whether a kernel forms from it (`starts`) and which (`grown`).
 A union, as a group's kinds are (see `GroupKind`).
 """
-const Seed = Union{FixedSeed, RecurrenceSeed, FoldSeed, MapSeed}
+const Seed = Union{FixedSeed, RecurrenceSeed, CrossingSeed, FoldSeed, MapSeed}
 
 Base.show(io::IO, s::FixedSeed) = print(io, "set fixed ", s.at)
 Base.show(io::IO, s::RecurrenceSeed) = print(io, "recurrence ", s.at)
 Base.show(io::IO, s::FoldSeed) = print(io, "fold %", s.at)
 Base.show(io::IO, s::MapSeed) = print(io, "map %", s.at)
+Base.show(io::IO, s::CrossingSeed) = print(io, "crossing %", s.at)
 
 """
 A kernel as formed, from its seed (see `Seed`), before what no other kernel

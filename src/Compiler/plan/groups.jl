@@ -58,13 +58,20 @@ it stored them, and the sums riding its steps, its folds (see
 struct RecurrenceKind end
 
 """
+A crossing's group: the one value it writes, a copy on its device of a value
+stored on another (see `Crossed`). It takes nothing else: what reads the
+copy reads it from storage, on the copy's device.
+"""
+struct CrossingKind end
+
+"""
 The kind of a group: what its kernel does over its domain. The kinds are a
 union and not the subtypes of an abstract type: a group holds its kind in
 place, and a call on it is decided where it is made, among the four, as the
 kernels of a long program form; a fifth kind is added here, with its
 methods, and to the union.
 """
-const GroupKind = Union{ReductionKind, ScanKind, PointwiseKind, RecurrenceKind}
+const GroupKind = Union{ReductionKind, ScanKind, PointwiseKind, RecurrenceKind, CrossingKind}
 
 """
 A kind's name, as it is written out. A group's view keeps the name and not
@@ -75,6 +82,7 @@ kind_name(::ReductionKind) = :reduction
 kind_name(::ScanKind) = :scan
 kind_name(::PointwiseKind) = :pointwise
 kind_name(::RecurrenceKind) = :recurrence
+kind_name(::CrossingKind) = :crossing
 
 Base.show(io::IO, k::GroupKind) = print(io, kind_name(k))
 
@@ -87,6 +95,14 @@ map only it reads is recomputed in it.
 """
 stepwise(::RecurrenceKind) = true
 stepwise(::GroupKind) = false
+
+"""
+Whether a group of the kind reads on another device than the one it writes
+on: a crossing's, which copies a value from the device it is stored on. A
+group of any other kind reads and writes on one.
+"""
+crosses(::CrossingKind) = true
+crosses(::GroupKind) = false
 
 struct Group
     kind::GroupKind
@@ -145,10 +161,16 @@ struct Plan
     owner::Vector{Int}
 end
 
+"The device group `g` of `p` runs on: its members', which are on one (see `with_devices`)."
+group_device(p::Plan, g::Group) = p.graph.devices[first(members(g))]
+
 "Where group `g` keeps value `v`, which it computes, as the value's index over the domain; or nothing."
 placement(graph, g::Group, v) = placement(g.kind, graph, g, v)
 
 placement(::Union{ReductionKind, PointwiseKind}, graph, g::Group, v) = kept_placement(graph, g, v)
+
+# A crossing's group keeps its copy over its whole domain.
+placement(::CrossingKind, graph, g::Group, v) = identity_index(g.domain)
 
 # A scan's group keeps everything but its folds over its whole domain.
 function placement(::ScanKind, graph, g::Group, v)

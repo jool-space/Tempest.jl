@@ -52,8 +52,7 @@ function Around(p::Plan, sets)
         g = p.groups[j]
         i = findfirst(s -> p.owner[first(s)] == j, sets)
         i === nothing || return (:fixed, i)
-        g.kind isa ReductionKind ? (:fold, first(g.reductions)) : g.kind isa PointwiseKind ? (:pointwise, minimum(owned[j])) :
-            g.kind isa RecurrenceKind ? (:recurrence, first(g.outputs)) : (:scan, first(g.reductions))
+        seeded_at(g.kind, g, owned[j])
     end
     reading = [Int[] for _ in p.graph.values]
     for (j, g) in enumerate(p.groups), r in group_reads(p.graph, g)
@@ -65,6 +64,13 @@ function Around(p::Plan, sets)
     end
     Around(owned, map(place, eachindex(p.groups)), reading, followers)
 end
+
+# Where group `g`, of its kind and owning `owned`, is seeded, by the value it grew from.
+seeded_at(::ReductionKind, g::Group, owned) = (:fold, first(g.reductions))
+seeded_at(::PointwiseKind, g::Group, owned) = (:pointwise, minimum(owned))
+seeded_at(::RecurrenceKind, g::Group, owned) = (:recurrence, first(g.outputs))
+seeded_at(::ScanKind, g::Group, owned) = (:scan, first(g.reductions))
+seeded_at(::CrossingKind, g::Group, owned) = (:crossing, only(g.outputs))
 
 # The stored values `v` reads, directly or through values not stored.
 function loaded(p::Plan, v)

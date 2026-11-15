@@ -53,12 +53,17 @@ struct Builder
     # value being rebuilt.
     backward::BitVector
     in_backward::Base.RefValue{Bool}
+    # The devices of the values added, and the device of those added now:
+    # the old value's (see `with_devices`).
+    devices::Vector{Int}
+    on_device::Base.RefValue{Int}
 end
 
 "Add a value to the new graph; its id."
 function add!(b::Builder, d::Definition, dims, T, scalar = false)
     push!(b.values, Value(d, dims, T, scalar))
     push!(b.backward, b.in_backward[])
+    push!(b.devices, b.on_device[])
     length(b.values)
 end
 
@@ -66,10 +71,11 @@ end
 # the id of (or kept, for `nothing`), leaving out the values `keep` excludes;
 # and each old value's new id.
 function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
-    b = Builder(Value[], zeros(Int, length(graph.values)), Pair{Int, String}[], BitVector(), Ref(false))
+    b = Builder(Value[], zeros(Int, length(graph.values)), Pair{Int, String}[], BitVector(), Ref(false), Int[], Ref(1))
     for (id, v) in enumerate(graph.values)
         keep[id] || continue
         b.in_backward[] = graph.backward[id]
+        b.on_device[] = graph.devices[id]
         new = f(b, id)
         b.ids[id] = new === nothing ? add!(b, remap(v.definition, b.ids), v.dims, v.eltype, v.scalar) : new
     end
@@ -81,7 +87,7 @@ function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
     end
     notes = [[b.ids[v] => s for (v, s) in graph.rewrites if b.ids[v] != 0]; b.rewrites]
     g = IndexGraph(b.values, map(a -> b.ids[a], graph.arguments), Operand[remap(o, b.ids) for o in graph.results],
-        graph.result_dims, graph.result_scalar, graph.result_eltype, notes, b.backward)
+        graph.result_dims, graph.result_scalar, graph.result_eltype, notes, b.backward, b.devices)
     g, b.ids
 end
 
@@ -99,6 +105,7 @@ remap(d::Scan, ids) = Scan(d.fold, remap(d.operand, ids), d.axes, d.reverse, d.e
 remap(d::Keyed, ids) = Keyed(d.fold, remap(d.operand, ids), d.iteration, map(e -> remap(e, ids), d.key),
     d.into === nothing ? nothing : remap(d.into, ids))
 remap(d::Union{Input, ConstantArray}, ids) = d
+remap(d::Crossed, ids) = Crossed(remap(d.operand, ids))
 # What a state is carried from is remapped once the graph is rebuilt (see `rebuild`).
 remap(d::Carried, ids) = Carried(remap(d.init, ids), d.from, d.axis, d.reverse)
 

@@ -18,7 +18,9 @@
 
 Where a plan's stored values live: for each value, the kernels from the one
 that writes it to the last that reads it (`lifetimes`) and its slot (`slots`,
-zero for a value with storage of its own); the bytes of each slot (`sizes`).
+zero for a value with storage of its own); the bytes of each slot (`sizes`)
+and the device it is on (`devices`, see `with_devices`), whose values alone
+it holds.
 `donated` holds the results written into the storage of the arguments they
 replace and `staged` those copied there after the last kernel, each as
 `result value => argument value`; `overwrites` the folds by key written over
@@ -30,6 +32,7 @@ struct Storage
     lifetimes::Vector{UnitRange{Int}}
     slots::Vector{Int}
     sizes::Vector{Int}
+    devices::Vector{Int}
     donated::Vector{Pair{Int, Int}}
     staged::Vector{Pair{Int, Int}}
     overwrites::Vector{Pair{Int, Int}}
@@ -166,15 +169,15 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
             push!(reused, v => b)
             continue
         end
-        slots[v] = place!(pool, value_bytes(graph.values[v]), p.owner[v], last[v])
+        slots[v] = place!(pool, value_bytes(graph.values[v]), p.owner[v], last[v], graph.devices[v])
     end
-    p, order, Storage(lifetimes, slots, sizes, donated, staged, overwrites, reused)
+    p, order, Storage(lifetimes, slots, sizes, pool.devices, donated, staged, overwrites, reused)
 end
 
 """
-The slots stored values take: each slot's bytes (`sizes`) and the last
-kernel of the values in it (`busy`). The slots free before a kernel are
-kept by size, the least of each size first, and the busy ones by the kernel
+The slots stored values take: each slot's bytes (`sizes`), the last
+kernel of the values in it (`busy`), and its device (`devices`). The slots
+free before a kernel are kept by device and size, the least of each first, and the busy ones by the kernel
 after which they free, so that a value finds its slot without a pass over
 every slot: with one, the backward of a stack of layers, whose activations
 live from the forward on, took a pass over thousands of slots for each
@@ -183,15 +186,17 @@ value it stored.
 struct SlotPool
     sizes::Vector{Int}
     busy::Vector{Int}
-    # A heap of the free slots of each size, and the sizes, in order.
-    free::Dict{Int, Vector{Int}}
-    free_sizes::Vector{Int}
+    devices::Vector{Int}
+    # A heap of the free slots of each device and size, and each device's
+    # sizes, in order.
+    free::Dict{Tuple{Int, Int}, Vector{Int}}
+    free_sizes::Dict{Int, Vector{Int}}
     # A heap of the busy slots by `busy`, an entry gone stale once its slot's
     # `busy` moved past it.
     freeing::Vector{Tuple{Int, Int}}
 end
 
-SlotPool() = SlotPool(Int[], Int[], Dict{Int, Vector{Int}}(), Int[], Tuple{Int, Int}[])
+SlotPool() = SlotPool(Int[], Int[], Int[], Dict{Tuple{Int, Int}, Vector{Int}}(), Dict{Int, Vector{Int}}(), Tuple{Int, Int}[])
 
 # Slot `s` busy until kernel `until` at least.
 function occupy!(pool::SlotPool, s, until)
@@ -201,31 +206,34 @@ function occupy!(pool::SlotPool, s, until)
 end
 
 """
-    place!(pool, bytes, k, until) -> slot
+    place!(pool, bytes, k, until, device) -> slot
 
-The slot of a value of `bytes` written by kernel `k` and read last by
-kernel `until`: of the slots free before `k`, the smallest that fits it,
+The slot of a value of `bytes` on `device`, written by kernel `k` and read
+last by kernel `until`: of the device's slots free before `k`, the smallest that fits it,
 or else the largest, grown to fit it, or else a new one; the least slot of
 those alike.
 """
-function place!(pool::SlotPool, bytes, k, until)
-    (; sizes, busy, free, free_sizes, freeing) = pool
+function place!(pool::SlotPool, bytes, k, until, device)
+    (; sizes, busy, devices, free, freeing) = pool
     while !isempty(freeing) && first(freeing[1]) < k
         b, s = heap_pop!(freeing)
         b == busy[s] || continue
         size = sizes[s]
-        haskey(free, size) || insert!(free_sizes, searchsortedfirst(free_sizes, size), size)
-        heap_push!(get!(() -> Int[], free, size), s)
+        each = get!(() -> Int[], pool.free_sizes, devices[s])
+        haskey(free, (devices[s], size)) || insert!(each, searchsortedfirst(each, size), size)
+        heap_push!(get!(() -> Int[], free, (devices[s], size)), s)
     end
+    free_sizes = get!(() -> Int[], pool.free_sizes, device)
     i = min(searchsortedfirst(free_sizes, bytes), length(free_sizes))
     s = if i == 0
         push!(sizes, 0)
         push!(busy, 0)
+        push!(devices, device)
         length(sizes)
     else
         size = free_sizes[i]
-        s = heap_pop!(free[size])
-        isempty(free[size]) && (delete!(free, size); deleteat!(free_sizes, i))
+        s = heap_pop!(free[(device, size)])
+        isempty(free[(device, size)]) && (delete!(free, (device, size)); deleteat!(free_sizes, i))
         s
     end
     sizes[s] = max(sizes[s], bytes)
