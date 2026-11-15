@@ -18,6 +18,7 @@ ENV["TEMPEST_REPLAY"] = "false"
 
 isdefined(@__MODULE__, :Gen) || include(joinpath(@__DIR__, "gen.jl"))
 isdefined(@__MODULE__, :verdict) || include(joinpath(@__DIR__, "verdict.jl"))
+isdefined(@__MODULE__, :Labelled) || include(joinpath(@__DIR__, "..", "fixtures", "devices.jl"))
 
 const CUDA_OK = CUDACore.functional()
 
@@ -119,10 +120,21 @@ function stages!(out, case, cuda)
     # interprets the same.
     out[:trace] isa Integer && out[:trace] > 0 && stage!(out, :roll, () -> relerr(C.interpret(p, args...), C.interpret(unrolled(f, args...), args...)))
     forward = nothing
+    unlabelled = nothing
     stage!(out, :fwd_cpu, function ()
         ex = C.prepare(p, args...)
         forward = ex.plan
-        relerr(only(C.leaves(C.outputs(C.execute!(ex)))), ref)
+        unlabelled = snapshot(only(C.leaves(C.outputs(C.execute!(ex)))))
+        relerr(unlabelled, ref)
+    end)
+    # The arrays on two devices by label, drawn by a generator of their own:
+    # the plan places the program across them, verified, and computes what it
+    # computes on one.
+    labelled = map(a -> a isa AbstractArray ? Labelled(copy(a), rand(Xoshiro(case.seed + 3), 0:1)) : a, args)
+    unlabelled === nothing || stage!(out, :fwd_devices, function ()
+        ex = C.prepare(p, labelled...; verify = true)
+        out[:fwd_crossings] = crossings(ex.plan)
+        relerr(only(C.leaves(C.outputs(C.execute!(ex)))), unlabelled; floor = 0.0)
     end)
     if forward !== nothing
         riders = C.riding_values(forward)
@@ -155,10 +167,18 @@ function stages!(out, case, cuda)
             out[:grad_trace] isa Integer && out[:grad_trace] > 0 && stage!(out, :grad_roll,
                 () -> leaves_err(C.leaves(C.interpret(q, args...)), C.leaves(C.interpret(unrolled(g, args...), args...))))
             planned = nothing
+            unlabelled = nothing
             stage!(out, :grad_cpu, function ()
                 ex = C.prepare(q, args...)
                 planned = ex.plan
-                leaves_err(C.leaves(C.outputs(C.execute!(ex))), reference)
+                unlabelled = map(snapshot, C.leaves(C.outputs(C.execute!(ex))))
+                leaves_err(unlabelled, reference)
+            end)
+            unlabelled === nothing || stage!(out, :grad_devices, function ()
+                ex = C.prepare(q, labelled...; verify = true)
+                out[:grad_crossings] = crossings(ex.plan)
+                out[:gradients_off] = gradients_off(ex.plan, q)
+                leaves_err(C.leaves(C.outputs(C.execute!(ex))), unlabelled; floor = 0.0)
             end)
             if planned !== nothing
                 sums = C.riding_values(planned)
