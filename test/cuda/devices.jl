@@ -187,7 +187,9 @@ gradients_home(ex, program, inputs) =
         end
 
         @testset "a result read on another task's stream waits for the call" begin
-            # Large enough that a read not ordered after the call would find the result unwritten.
+            # Large enough that a read not ordered after the call would find
+            # the result unwritten, and often enough to have caught a read
+            # that raced in two calls of five.
             large = placed_model(Float32; blocks = 4, width = 256, tokens = 4096)
             first_arrays = placed_over(large..., 2)
             second_arrays = placed_over(map(w -> map(a -> 0.5f0 .* a, w), large[1]), 2 .* large[2], large[3] .- 1, 2)
@@ -195,19 +197,23 @@ gradients_home(ex, program, inputs) =
             ex = prepare(program, first_arrays...)
             expected = host_leaves(outputs(execute!(prepare(program, second_arrays...))))
             read_elsewhere() = fetch(Threads.@spawn host_leaves(outputs(ex)))
-            execute!(ex)
-            bind!(ex, second_arrays...)
-            execute!(ex)
-            @test all(splat(≈), zip(read_elsewhere(), expected))
+            # The calls of `run` on the first arrays then the second whose
+            # results, read on another task, are not the second's.
+            wrong(run; trials = 25) = count(1:trials) do _
+                bind!(ex, first_arrays...)
+                run(ex)
+                bind!(ex, second_arrays...)
+                run(ex)
+                !all(splat(==), zip(read_elsewhere(), expected))
+            end
+            @test wrong(execute!) == 0
             capture!(ex)
-            bind!(ex, first_arrays...)
-            replay!(ex)
-            bind!(ex, second_arrays...)
-            replay!(ex)
-            @test all(splat(≈), zip(read_elsewhere(), expected))
+            @test wrong(replay!) == 0
             c = compile(placed_step, first_arrays...)
-            c(first_arrays...)
-            @test all(splat(≈), zip(fetch(Threads.@spawn host_leaves(c(second_arrays...))), expected))
+            @test count(1:25) do _
+                c(first_arrays...)
+                !all(splat(==), zip(fetch(Threads.@spawn host_leaves(c(second_arrays...))), expected))
+            end == 0
         end
 
         @testset "a program that writes an argument on the second device" begin
