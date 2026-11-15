@@ -294,7 +294,7 @@ function cover(d::Decider)
             # shared. One shared had its dictionaries written at once.
             k = Kernels(start.stored, unowned, Group[], based.grounds.up, Dict{Int, Set{Int}}(), Dict{Term, Vector{Int}}(),
                 DependsWalk(length(unowned)))
-            fixed_group(start.graph, Plain(k), set)
+            fixed_group(start.graph, based.grounds.awaits, Plain(k), set)
             true
         catch e
             e isa NotAGroup || rethrow()

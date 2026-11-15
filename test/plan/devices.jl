@@ -159,6 +159,27 @@ end
     @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(h, args...)))), args...)
 end
 
+# A kernel's values come after the same crossings, however the kernel is
+# formed: a set fixed by the cover, as a group grown from a seed, holds no
+# value that waits for another device beside one that does not, which would
+# hold the second back behind the crossing.
+@testset "a fixed set mixing values that wait for another device and values that do not is no group" begin
+    f(a, b, c) = (sum(a .* c; dims = 3), a .+ b)
+    args = (rand(Float32, 4, 3), rand(Float32, 4, 3), rand(Float32, 4, 3, 5))
+    graph = C.rewrite(C.lower(trace(f, args...)))
+    # The fold of the first device's arrays, and the sum that reads the second's through a crossing.
+    pair(g) = (only(v for v in eachindex(g.values) if g.values[v].definition isa C.Reduction),
+        only(v for v in eachindex(g.values) if g.values[v].definition isa C.Pointwise && g.values[v].definition.f === (+)))
+    placed = C.with_devices(graph, [1, 2, 1])
+    fold, sum_ = pair(placed)
+    after_crossing(v) = any(u -> C.crossing(placed, u), findall(C.ancestors(placed)[v]))
+    @test placed.devices[fold] == placed.devices[sum_] && !after_crossing(fold) && after_crossing(sum_)
+    @test_throws C.NotAGroup C.plan(placed; fixed = [[fold, sum_]])
+    # The same set on one device, where nothing crosses, is one kernel.
+    one = C.with_devices(graph, [1, 1, 1])
+    @test Set(pair(one)) in [Set(C.members(g)) for g in C.plan(one; fixed = [collect(pair(one))]).groups]
+end
+
 @testset "a recurrence's cycle is on one device" begin
     cell(Wh, xs, h0) = sum(last(accumulate((h, x) -> tanh.(transpose(Wh) * h .+ x), eachslice(xs; dims = 2); init = h0)))
     args = (rand(Float32, 4, 4), rand(Float32, 4, 6), rand(Float32, 4))

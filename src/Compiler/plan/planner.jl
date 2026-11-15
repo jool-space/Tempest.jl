@@ -199,7 +199,7 @@ starts(grounds::Grounds, cx::Forming, seed::RecurrenceSeed) = grounds.live[first
 starts(grounds::Grounds, cx::Forming, seed::Union{CrossingSeed, FoldSeed, MapSeed}) = grounds.live[seed.at] && !owned(cx, seed.at) && isstored(cx, seed.at)
 
 # The kernel formed from `seed` (see `formation`).
-grown(grounds::Grounds, cx::Forming, seed::FixedSeed, fixed, riders) = fixed_group(grounds.graph, cx, fixed[seed.at])
+grown(grounds::Grounds, cx::Forming, seed::FixedSeed, fixed, riders) = fixed_group(grounds.graph, grounds.awaits, cx, fixed[seed.at])
 grown(grounds::Grounds, cx::Forming, seed::FoldSeed, fixed, riders) = grown_fold(grounds, cx, seed.at)
 grown(grounds::Grounds, cx::Forming, seed::MapSeed, fixed, riders) = grown_map(grounds, cx, seed.at)
 
@@ -358,7 +358,10 @@ end
 # where a number of one's is added to the other's, would run one after the
 # other.
 joined(grounds::Grounds, cx::Forming, g::Group, other, seed) =
-    grounds.awaits[other] == grounds.awaits[seed] ? taking(g.kind, grounds, cx, g, other, seed) : nothing
+    alike(grounds.awaits, (other, seed)) ? taking(g.kind, grounds, cx, g, other, seed) : nothing
+
+"Whether `values` come after the same crossings (`awaits`), as the values of one kernel do (see `joined`)."
+alike(awaits, values) = allequal(awaits[v] for v in values)
 
 """
     taking(kind, grounds, cx, g, other, seed) -> group or nothing
@@ -498,10 +501,13 @@ Base.showerror(io::IO, e::NotAGroup) = print(io, "the values ", join(map(v -> "%
 # over the domain of its folds, wherever they come in the set, or with no fold
 # a pointwise group over the first value's domain. A candidate spanning
 # several domains waits for groups that span them: a kernel is maps and folds
-# over one domain, each fold at its own positions within it.
-function fixed_group(graph, cx::Forming, set)
+# over one domain, each fold at its own positions within it. Its values come
+# after the same crossings, as a kernel grown from a seed (see `joined`): a
+# fold of one device's backward fused with an update that waits for another
+# device's gradient held the backward behind the crossing.
+function fixed_group(graph, awaits, cx::Forming, set)
     values = graph.values
-    all(v -> !owned(cx, v), set) || throw(NotAGroup(set))
+    all(v -> !owned(cx, v), set) && alike(awaits, set) || throw(NotAGroup(set))
     folds = filter(v -> values[v].definition isa Reduction, set)
     # Folds over other extents along axes they keep share the box that holds
     # them (see `joint_domain`).
