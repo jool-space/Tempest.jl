@@ -113,7 +113,10 @@ target_for(x) = nothing
 The device whose memory holds `x`, an array or a target's storage, by the
 number its package gives it; nothing for the host's memory, the CPU's. A
 target reads arrays on the host, copying them where they cannot be its
-storage, and the CPU reads a device's arrays so.
+storage, and the CPU reads a device's arrays so; but a program's arrays and
+its target are on one device at most, beside the host: a program over
+several devices is not planned yet, and a call that brings arrays of
+another device than its target's throws (see `point!`).
 """
 device_of(x) = nothing
 device_of(target::CUDATarget) = target.device

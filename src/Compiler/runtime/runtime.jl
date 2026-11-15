@@ -211,6 +211,7 @@ them where the caller has them, for any arrays a call brings.
 function prepare(program::Program, @nospecialize(inputs...); target = default_target(inputs), measure = measuring(),
         replaces = (), by_reference = (), point::Bool = false, recompute = (), ride = (), partition::Bool = true, build::Bool = true,
         verify::Bool = verifying())
+    refuse_devices(target, inputs, input_paths)
     s = setup(program; target, measure, replaces, recompute, ride, partition, build)
     prepared(s, decide!(s; verify), inputs...; by_reference, point, verify)
 end
@@ -643,11 +644,13 @@ julia> outputs(execute!(ex))
 """
 function bind!(ex::Executable, @nospecialize(inputs...))
     runnable(ex)
+    refuse_devices(ex.target, inputs, input_paths)
     bind_leaves!(ex, leaves(ex.program.input_structure), leaves(inputs))
 end
 
 function bind!(ex::Executable, bindings::Pair{<:Integer}...)
     runnable(ex)
+    refuse_devices(ex.target, map(last, bindings), _ -> binding_paths(bindings))
     foreach(((j, x),) -> bind_leaves!(ex, leaves(ex.program.input_structure[j]), leaves(x)), bindings)
     ex
 end
@@ -689,7 +692,7 @@ again is the caller's array only once the caller brings the same array twice
 in a row. The executable holds the arrays it reads and writes until it is
 bound again.
 """
-point!(ex::Executable, @nospecialize(inputs...)) = on_device(() -> point_each!(ex, bound(ex.program, inputs)), ex.target)
+point!(ex::Executable, @nospecialize(inputs...)) = on_device(() -> point_each!(ex, bound(ex, inputs)), ex.target)
 
 """
 A call's arrays, one per argument of a program, each with where it lives:
@@ -697,25 +700,33 @@ the address of its first element, as `pointer` gives it, 0 for an array
 without one, and the addresses its elements span (see `extent`). One walk of
 the call's leaves finds them, `compile`'s call checking each against its
 signature as it goes, and binding the call (`point!`) and finding memory it
-shares with an argument the program writes read them.
+shares with an argument the program writes read them. The walk notes the
+arguments on another device than the target's, `device` (see `device_of`),
+and asks them no address: on a machine whose devices read each other's
+memory, asking would open the other's to the target's kernels.
 """
 struct Passed
     arrays::Vector{Any}
     at::Vector{UInt}
     extents::Vector{Union{Nothing, UnitRange{UInt}}}
+    device::Union{Nothing, Int}
+    elsewhere::Vector{Int}
 end
 
-Passed(n::Int) = Passed(Vector{Any}(nothing, n), zeros(UInt, n), Vector{Union{Nothing, UnitRange{UInt}}}(nothing, n))
+Passed(n::Int, device) = Passed(Vector{Any}(nothing, n), zeros(UInt, n), Vector{Union{Nothing, UnitRange{UInt}}}(nothing, n), device, Int[])
 
-# The arrays among `inputs`, given in the structure program `p` was traced
-# with, bound to its arguments.
-Base.@nospecializeinfer function bound(p::Program, @nospecialize(inputs))
+# The arrays among `inputs`, given in the structure the program of `ex` was
+# traced with, bound to its arguments. Arrays on another device than its
+# target's throw.
+Base.@nospecializeinfer function bound(ex::Executable, @nospecialize(inputs))
+    p = ex.program
     positions, xs = leaves(p.input_structure), leaves(inputs)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
-    b = Passed(length(p.arguments))
+    b = Passed(length(p.arguments), device_of(ex.target))
     for (k, x) in zip(positions, xs)
         k === nothing || place!(b, k, x)
     end
+    isempty(b.elsewhere) || refuse_devices(ex.target, inputs, input_paths)
     b
 end
 
@@ -723,6 +734,7 @@ end
 # leaf's type, which asks where it lives once.
 function place!(b::Passed, k::Int, x)
     b.arrays[k] = x
+    read_on(b.device, x) || return (push!(b.elsewhere, k); b)
     if x isa StridedArray
         at = reinterpret(UInt, pointer(x))
         b.at[k], b.extents[k] = at, extent(x, at)
@@ -731,6 +743,34 @@ function place!(b::Passed, k::Int, x)
     end
     b
 end
+
+# Whether a target on `device` reads array `x`: an array on the host, which
+# it copies where it cannot be its storage, or on its device; the CPU's,
+# on no device, reads a device's arrays by copying them too.
+read_on(device, x) = (d = device_of(x)) === nothing || device === nothing || d == device
+
+# Throw where the arrays among `inputs` and `target` are on more than one
+# device, beside the host (see `device_of`), naming each array by its path,
+# as `paths(inputs)` gives them in the order of `leaves`: a program over
+# several devices is not planned yet. Asked before anything reads the arrays.
+function refuse_devices(target, @nospecialize(inputs), paths)
+    xs = leaves(inputs)
+    devices = Union{Nothing, Int}[device_of(x) for x in xs]
+    placed = unique(filter(!isnothing, [device_of(target); devices]))
+    length(placed) <= 1 && return
+    names = paths(inputs)
+    held = [string(names[k], " on device ", d) for (k, d) in enumerate(devices) if d !== nothing]
+    on_target = device_of(target) === nothing ? "" : string(", and the target on device ", device_of(target))
+    throw(ArgumentError(string("the arrays are on more than one device: ", join(held, ", "), on_target,
+        "; a program over several devices is not planned yet, so bring its arrays to one")))
+end
+
+# The path of each leaf of `inputs`, as a preparation takes them, in the
+# order `leaves` gives them.
+input_paths(inputs) = foldl((out, (k, x)) -> leaf_paths!(out, x, "input $k"), enumerate(inputs); init = String[])
+
+# The path of each leaf of the inputs `bindings` give by position, as `bind!` takes them.
+binding_paths(bindings) = foldl((out, (j, x)) -> leaf_paths!(out, x, "input $j"), bindings; init = String[])
 
 # The addresses the elements of array `x` span, its first byte to its last,
 # along its strides from `at`, its first element's: none for an array with

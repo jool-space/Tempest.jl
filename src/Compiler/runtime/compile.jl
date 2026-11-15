@@ -138,6 +138,7 @@ does. `c.executable` is the prepared program, and `explain(c)` shows it.
 function compile(f, @nospecialize(args...); target = default_target((f, args...)), measure = measuring(), search::Symbol = searching(),
         capture::Bool = true)
     search in (:before, :after) || throw(ArgumentError("search is :before or :after, not :$search"))
+    refuse_devices(target, (f, args...), leaf_paths)
     passed = argument_arrays((f, args...))
     globals = read_globals(f, args, passed)
     program, met = trace_meeting(call, f, args...)
@@ -506,11 +507,12 @@ function bound(c::Compiled, call)
     s = c.signature
     n, m = length(s) - 1, length(call) - 1
     n == m || throw(ArgumentError(compiled_for(c, string("it takes ", n, n == 1 ? " argument" : " arguments", ", not ", m))))
-    b = Passed(length(c.executable.program.arguments))
+    b = Passed(length(c.executable.program.arguments), device_of(c.executable.target))
     for k in eachindex(s)
         d = match!(b, s[k], call[k])
         d === nothing || throw(ArgumentError(compiled_for(c, differs(d, k == 1 ? "f" : "argument $(k - 1)"))))
     end
+    isempty(b.elsewhere) || refuse_devices(c.executable.target, call, leaf_paths)
     for (g, value) in c.globals
         now = getglobal(g.mod, g.name)
         isequal(now, value) ||
