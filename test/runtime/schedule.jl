@@ -198,20 +198,21 @@ end
     @test_broken refused(() -> prepare(program, a, a; target = T.CPUTarget(), by_reference = (1, 2)))
 end
 
-# Data parallelism, the trial's SGD step over two replicas: each crossing
-# starts once what it copies is written, runs beside both devices' kernels,
-# and holds back only what needs it. Storage shares a slot only where the
-# program orders its users, so no crossing waits for a kernel over what its
-# copy overwrites, nor a kernel for a crossing over what it reads.
-@testset "data parallelism: a crossing waits only for what it copies, and only what needs it waits for it" begin
-    ws, x, t = placed_model(Float32)
-    args = shards_of(ws, x, t)
-    ex = prepare(trace(shards_sgd!, args...), labelled_shards(args...)...; target = T.CPUTarget(), verify = true)
+# Data parallelism, the trial's SGD step over two replicas and the goal's
+# spelling over three, its sums made in pieces: each crossing starts once
+# what it copies is written, runs beside both devices' kernels, and holds
+# back only what needs it. Storage shares a slot only where the program
+# orders its users, so no crossing waits for a kernel over what its copy
+# overwrites, nor a kernel for a crossing over what it reads.
+@testset "data parallelism: a crossing waits only for what it copies, and only what needs it waits for it: $name" for (name, f, args, labelled, n) in (
+        ("the trial's step", shards_sgd!, shards_of(placed_model(Float32)...), labelled_shards, 2),
+        ("three replicas", replicated_sgd!, replicas_of(placed_model(Float32; width = 12, tokens = 96)..., 3), labelled_replicas, 3))
+    ex = prepare(trace(f, args...), labelled(args...)...; target = T.CPUTarget(), verify = true)
     steps, touches = ex.steps, ex.touches
     (; waits) = C.stream_schedule(steps, touches)
     crossing = findall(C.crosses, steps)
     lanes = unique(map(k -> C.stream_of(steps[k]), crossing))
-    @test Set(lanes) == Set([(0, 1), (1, 0)])
+    @test Set(lanes) == Set((a, b) for a in 0:(n - 1), b in 0:(n - 1) if a != b)
     # The step before `k` that last wrote `key`.
     writer(k, key) = findlast(j -> key in touches[j].writes, 1:(k - 1))
     # A crossing waits only for what wrote its source.
@@ -231,12 +232,12 @@ end
 
 # A crossing carries terms only: no kernel waits for a crossing that copies
 # a value computed from its own device's terms, which it would have computed
-# itself, a hop sooner. The trial's step and the goal's spelling over two and
-# three replicas.
+# itself, a hop sooner. The trial's step and the goal's spelling over two
+# replicas; over three, the sums are made in pieces, each piece on one
+# device, which the others wait for.
 @testset "no device waits for what it could compute itself: $name" for (name, f, args, labelled) in (
         ("the trial's step", shards_sgd!, shards_of(placed_model(Float32)...), labelled_shards),
-        ("two replicas", replicated_sgd!, replicas_of(placed_model(Float32; tokens = 96)..., 2), labelled_replicas),
-        ("three replicas", replicated_sgd!, replicas_of(placed_model(Float32; tokens = 96)..., 3), labelled_replicas))
+        ("two replicas", replicated_sgd!, replicas_of(placed_model(Float32; tokens = 96)..., 2), labelled_replicas))
     ex = prepare(trace(f, args...), labelled(args...)...; target = T.CPUTarget(), verify = true)
     p = ex.plan
     g = p.graph

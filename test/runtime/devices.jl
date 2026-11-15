@@ -75,7 +75,7 @@ end
 # Data parallelism in its own spelling: each replica updated from its
 # gradients reduced on its own device stays its fellows' to the bit, and the
 # whole batch's on one device, the sums associating alike.
-@testset "replicas over $n devices stay alike to the bit" for n in (2, 3)
+@testset "replicas over $n devices stay alike to the bit" for n in (2, 3, 4)
     ws, x, t = placed_model(Float32; tokens = 96)
     args = replicas_of(ws, x, t, n)
     whole = deepcopy(args)

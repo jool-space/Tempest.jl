@@ -109,11 +109,10 @@ end
     @test invalid_by(() -> C.verify(C.plan(graph))) == 5
 end
 
-# A sum of what several devices computed, which each of them reads, is
-# computed on each from the others' terms by the same arithmetic in the same
-# order; nothing crosses but the terms. The goal's spelling, over two and
-# three replicas.
-@testset "a reduction every device reads is computed on each of them, $n devices" for n in (2, 3)
+# A sum of what two devices computed, which each of them reads, is computed
+# on each from the other's terms by the same arithmetic in the same order;
+# nothing crosses but the terms. The goal's spelling over two replicas.
+@testset "a reduction every device reads is computed on each of them, $n devices" for n in (2,)
     ws, x, t = placed_model(Float32; tokens = 96)
     args = replicas_of(ws, x, t, n)
     ex = prepare(trace(replicated_sgd!, args...), labelled_replicas(args...)...; target = T.CPUTarget(), build = false, verify = true)
@@ -136,6 +135,84 @@ end
     written = [computed(g, r, k -> :own) for r in updates]
     @test length(unique(written)) == 2length(ws)
     @test all(w -> count(==(w), written) == n, unique(written))
+end
+
+# Over three devices or more, a sum of what each computed, which each reads,
+# is made in pieces: a range of its last axis on each device, from that
+# range of each device's term, each piece copied to the others, which put
+# the pieces together. Each element is summed on one device, so that every
+# replica's update reads the same values, and each device's link carries in
+# each direction its share of the others' terms and its piece to each other,
+# 2(n - 1)/n of a gradient, where made again on each it carried n - 1. The
+# goal's spelling, over three and four replicas, of weights whose last axes
+# share out evenly.
+@testset "a reduction every device reads is made in pieces, $n devices" for n in (3, 4)
+    ws, x, t = placed_model(Float32; width = 12, tokens = 96)
+    args = replicas_of(ws, x, t, n)
+    ex = prepare(trace(replicated_sgd!, args...), labelled_replicas(args...)...; target = T.CPUTarget(), build = false, verify = true)
+    g = ex.plan.graph
+    copies = planned_crossings(ex.plan)
+    source(c) = g.values[c].definition.operand.value
+    # A number is never made in pieces: a partial sum of the losses, read on
+    # one device that holds none of its terms, is copied there once.
+    pieces = unique!([source(c) for c in copies if !isempty(g.values[source(c)].dims) && length(term_devices(g, source(c))) > 1])
+    weights = 2length(ws)
+    # Each weight's reduced gradient is in a piece on each device, no piece
+    # computed twice, nor any range of one.
+    @test length(pieces) == n * weights
+    @test all(d -> count(v -> g.devices[v] == d, pieces) == weights, 1:n)
+    @test allunique([computed(g, v, identity) for v in pieces])
+    # A piece is read by its crossings and the selects that put the pieces
+    # together, and a crossing of one only by those: none is made again, made
+    # in pieces again, or added to.
+    users = C.readers(g)
+    selects(u) = g.values[u].definition isa C.Pointwise && g.values[u].definition.f === ifelse
+    @test all(v -> all(u -> C.crossing(g, u) || selects(u), users[v]), pieces)
+    @test all(c -> all(selects, users[c]), [c for c in copies if source(c) in pieces])
+    # Each device's link in each direction carries its share of the terms and
+    # of the pieces, and the losses' numbers.
+    gradient = sum(w -> sum(sizeof, w), ws)
+    @test maximum(values(link_bytes(ex.plan))) <= 2(n - 1) * gradient ÷ n + 16n
+    # The replicas' updates of one weight, the replica's own weight left out,
+    # read the same pieces put together alike.
+    written = [computed(g, g.results[k].value, a -> :own) for (k, a) in ex.program.writes]
+    @test length(unique(written)) == weights
+    @test all(w -> count(==(w), written) == n, unique(written))
+end
+
+# The rule's small cases: a sum of three devices' terms read on two, and of
+# two devices' terms read on three, are made in pieces over the three, each
+# device's link carrying its share, two thirds of what made again or copied
+# would carry in the heaviest direction.
+@testset "a sum whose terms or readers are on three devices is made in pieces" begin
+    f(a, b, c, d, e) = (s = a .+ b .+ c; (sum(s .* d; dims = 3), sum(s .* e; dims = 3)))
+    g(a, b, c, d, e) = (s = a .+ b; (sum(s .* c; dims = 3), sum(s .* d; dims = 3), sum(s .* e; dims = 3)))
+    matrices(k) = Tuple(rand(Float32, 4, 3) for _ in 1:k)
+    cubes(k) = Tuple(rand(Float32, 4, 3, 5) for _ in 1:k)
+    for (h, args, labels) in ((f, (matrices(3)..., cubes(2)...), [1, 2, 3, 1, 2]), (g, (matrices(2)..., cubes(3)...), [1, 2, 1, 2, 3]))
+        p = C.verify(placed_plan(h, args, labels))
+        @test maximum(values(link_bytes(p))) == 64
+        @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(h, args...)))), args...)
+    end
+end
+
+# A sum of three devices' terms read on the three whose last axis is shorter
+# than the three is made in as many pieces as the axis is long, on the first
+# devices, the third sending its terms and receiving the pieces, 48 bytes in
+# the heaviest direction where made again it would be 64; of numbers it is
+# made again on each, each device sending its number to the two others.
+@testset "a sum of a last axis shorter than its devices, or of numbers, by the same rule" begin
+    f(a, b, c, d, e, h) = (s = a .+ b .+ c; (sum(s .* d; dims = 3), sum(s .* e; dims = 3), sum(s .* h; dims = 3)))
+    n(a, b, c, d, e, h) = (s = sum(a) + sum(b) + sum(c); (s .* d, s .* e, s .* h))
+    short = (Tuple(rand(Float32, 4, 2) for _ in 1:3)..., Tuple(rand(Float32, 4, 2, 5) for _ in 1:3)...)
+    numbers = Tuple(rand(Float32, 4, 3) for _ in 1:6)
+    for (h, args, heaviest, shapes) in ((f, short, 48, [(4,)]), (n, numbers, 8, [()]))
+        p = C.verify(placed_plan(h, args, [1, 2, 3, 1, 2, 3]))
+        g = p.graph
+        @test maximum(values(link_bytes(p))) == heaviest
+        @test unique([g.values[c].dims for c in planned_crossings(p)]) == shapes
+        @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(h, args...)))), args...)
+    end
 end
 
 # Terms all on one device are joined there once, and the result copied.
@@ -280,7 +357,8 @@ end
 # crossing it could have run beside; and devices that compute alike, the
 # replicas of data parallelism, run their kernels in the same order.
 @testset "each device runs what waits for no crossing first, $n devices" for n in (2, 3)
-    ws, x, t = placed_model(Float32; tokens = 96)
+    # Weights whose last axes share out evenly, so that pieces are alike.
+    ws, x, t = placed_model(Float32; width = 12, tokens = 96)
     args = replicas_of(ws, x, t, n)
     p = prepare(trace(replicated_sgd!, args...), labelled_replicas(args...)...; target = T.CPUTarget(), build = false, verify = true).plan
     g = p.graph

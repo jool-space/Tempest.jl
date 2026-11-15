@@ -110,7 +110,8 @@ remap(d::Crossed, ids) = Crossed(remap(d.operand, ids))
 remap(d::Carried, ids) = Carried(remap(d.init, ids), d.from, d.axis, d.reverse)
 
 # The values something reads: the results and what they read, inputs and
-# constant arrays.
+# constant arrays. A crossing is a copy for what reads it, kept where
+# something does.
 function live_values(graph::IndexGraph)
     live = falses(length(graph.values))
     for o in graph.results, r in read_values(o)
@@ -122,7 +123,7 @@ function live_values(graph::IndexGraph)
     end
     for id in length(graph.values):-1:1
         d = graph.values[id].definition
-        live[id] |= !(d isa Union{Pointwise, Reduction, Scan, Keyed})
+        live[id] |= !(d isa Union{Pointwise, Reduction, Scan, Keyed, Crossed})
         live[id] || continue
         foreach(o -> foreach(r -> live[r] = true, read_values(o)), operands(d))
     end

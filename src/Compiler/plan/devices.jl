@@ -34,17 +34,8 @@ function with_devices(graph::IndexGraph, arguments; pins = Pair{Int, Int}[])
     devices = assigned_devices(graph, arguments, landing)
     placed = IndexGraph(graph.values, graph.arguments, graph.results, graph.result_dims, graph.result_scalar, graph.result_eltype,
         graph.rewrites, graph.backward, devices)
-    p = Realizing(graph, devices, realizations(graph, devices, landing))
-    rebuilt, ids = rebuild(placed) do b, id
-        v = graph.values[id]
-        here = devices[id]
-        through = Dict{Int, Int}()
-        for o in operands(v.definition), r in read_values(o)
-            devices[r] == here || (through[r] = across!(p, b, r, here))
-        end
-        isempty(through) && return nothing
-        add!(b, remap(v.definition, Rerouted(b.ids, through)), v.dims, v.eltype, v.scalar)
-    end
+    p = realizations(graph, devices, landing)
+    rebuilt, ids = rebuild((b, id) -> home!(p.realized[id], p, b, id), placed)
     narrowed_crossings(landed(rebuilt, ids, graph.results, landing, devices, (b, r, here) -> across!(p, b, r, here)))
 end
 
@@ -105,25 +96,32 @@ function narrowed_crossings(graph::IndexGraph)
     narrowed = Narrowed(spans)
     values = map(enumerate(graph.values)) do (v, val)
         haskey(spans, v) || return Value(remap(val.definition, narrowed), val.dims, val.eltype, val.scalar)
-        span = spans[v]
-        dims = length(span) == 1 ? val.dims[1:(end - 1)] : (val.dims[1:(end - 1)]..., length(span))
-        d = Domain(dims)
-        # The position of the whole that each position of the span is.
-        kept = ntuple(var, length(val.dims) - 1)
-        along = length(span) == 1 ? constant(first(span)) : add(var(length(val.dims)), first(span), d)
-        at = (kept..., along)
+        dims, at = range_positions(val.dims, spans[v])
         source = val.definition.operand
-        Value(Crossed(Read(source.value, map(e -> substitute(e, at, d), source.index))), dims, val.eltype, val.scalar)
+        Value(Crossed(Read(source.value, map(e -> substitute(e, at, Domain(dims)), source.index))), dims, val.eltype, val.scalar)
     end
     IndexGraph(values, graph.arguments, Operand[remap(o, narrowed) for o in graph.results], graph.result_dims, graph.result_scalar,
         graph.result_eltype, graph.rewrites, graph.backward, graph.devices)
 end
 
+# The extents of `range` of the last axis of a value of extents `dims`, the
+# axis dropped where the range holds one position, and the position of the
+# whole that each of its positions is.
+function range_positions(dims, range)
+    kept = dims[1:(end - 1)]
+    extents = length(range) == 1 ? kept : (kept..., length(range))
+    along = length(range) == 1 ? constant(first(range)) : add(var(length(dims)), first(range), Domain(extents))
+    (extents, (ntuple(var, length(dims) - 1)..., along))
+end
+
 # The range of its last axis each crossing's readers read, where that is less
 # than all of it: of each read, the range of its last formula over the domain
-# it is read over, a value's operand's or a result's.
+# it is read over, a value's operand's or a result's. A value nothing reads,
+# as a value made in pieces is not on its own device, where the pieces are
+# put together instead, reads nothing a crossing need copy.
 function crossing_spans(graph::IndexGraph)
     values = graph.values
+    live = live_values(graph)
     read = Dict{Int, UnitRange{Int}}()
     whole = Set{Int}()
     function reached!(o::Read, d::Domain)
@@ -131,9 +129,10 @@ function crossing_spans(graph::IndexGraph)
         crossing(graph, o.value) && reach!(read, o.value, read_range(values[o.value], o, d))
     end
     reached!(o::Operand, d::Domain) = union!(whole, gathered_values(o))
-    for v in values
-        foreach(reached!, operands(v.definition), operand_domains(v))
-        v.definition isa Carried && union!(whole, read_values(v.definition.from))
+    for (v, val) in enumerate(values)
+        live[v] || continue
+        foreach(reached!, operands(val.definition), operand_domains(val))
+        val.definition isa Carried && union!(whole, read_values(val.definition.from))
     end
     foreach((o, dims) -> reached!(o, Domain(dims)), graph.results, graph.result_dims)
     Dict{Int, UnitRange{Int}}(c => span for (c, span) in read if !(c in whole) && span != whole_range(values[c]))

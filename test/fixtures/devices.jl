@@ -139,6 +139,10 @@ again(ws, x, t) = (map(w -> map(a -> a .+ 1, w), ws), 2 .* x, t .- 1)
 
 crossings(p) = count(g -> g.kind isa C.CrossingKind, p.groups)
 
+# The crossings plan `p` runs, by the values they copy into: a crossing nothing
+# reads is in its graph and not its kernels.
+planned_crossings(p) = [only(g.outputs) for g in p.groups if g.kind isa C.CrossingKind]
+
 # The crossings of plan `p`, each as the bytes it copies.
 crossed_bytes(p) = [C.value_bytes(p.graph.values[only(g.outputs)]) for g in p.groups if g.kind isa C.CrossingKind]
 
@@ -147,8 +151,7 @@ crossed_bytes(p) = [C.value_bytes(p.graph.values[only(g.outputs)]) for g in p.gr
 function link_bytes(p)
     g = p.graph
     bytes = Dict{Tuple{Int, Symbol}, Int}()
-    for c in eachindex(g.values)
-        C.crossing(g, c) || continue
+    for c in planned_crossings(p)
         b = C.value_bytes(g.values[c])
         from = g.devices[g.values[c].definition.operand.value]
         bytes[(from, :out)] = get(bytes, (from, :out), 0) + b
