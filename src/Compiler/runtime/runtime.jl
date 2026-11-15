@@ -277,8 +277,9 @@ function setup(program::Program; target, devices = ones(Int, length(program.argu
         lowered = phase(() -> lower(program), :lower)
         rewritten = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
         pairs = replacements(program, replaces)
-        # A result that replaces an argument is written where the argument lives.
-        pins = Dict(rewritten.results[k].value => devices[a] for (k, a) in pairs)
+        # A result that replaces an argument is written where the argument
+        # lives, and a gradient of one returned there.
+        pins = [k => devices[a] for (k, a) in [pairs; program.gradients]]
         graph = phase(() -> with_devices(rewritten, devices; pins), :place)
         input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
         pinned = Set{Int}(recompute)

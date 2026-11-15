@@ -257,14 +257,23 @@ function with_stored_results(graph::IndexGraph)
         dims = graph.result_dims[k]
         # A value read whole, or a reshape of it, presents its storage as it is.
         r isa Read && values[r.value].scalar == graph.result_scalar[k] && reads_storage(values[r.value], r.index, dims) && continue
-        push!(values, Value(narrow(Pointwise(identity, (r,)), dims), map(k -> dims[k], wide_axes(dims)),
-            graph.result_eltype[k], graph.result_scalar[k]))
-        # A result's copy is made where what it copies lives.
+        copy, index = result_copy(graph, k, r)
+        push!(values, copy)
+        # A result's copy is made where what it copies lives; one that copies
+        # no value is on its device already (see `with_devices`), or on 1.
         push!(devices, r isa Read ? devices[r.value] : 1)
-        results[k] = Read(length(values), wide_index(dims))
+        results[k] = Read(length(values), index)
     end
     IndexGraph(values, graph.arguments, results, graph.result_dims, graph.result_scalar, graph.result_eltype, graph.rewrites,
         vcat(graph.backward, falses(length(values) - length(graph.backward))), devices)
+end
+
+# A value holding result `k`, read as `r`, as storage of the result's
+# extents, and the index the result reads it at.
+function result_copy(graph, k, r)
+    dims = graph.result_dims[k]
+    (Value(narrow(Pointwise(identity, (r,)), dims), map(k -> dims[k], wide_axes(dims)), graph.result_eltype[k], graph.result_scalar[k]),
+        wide_index(dims))
 end
 
 # The axes an index reads a value at, when it is a permutation of the reader's

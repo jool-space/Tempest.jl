@@ -11,6 +11,8 @@ include("../fixtures/devices.jl")
         whole = prepare(program, args...; target = T.CPUTarget(), verify = true)
         placed = prepare(program, labelled...; target = T.CPUTarget(), verify = true)
         @test crossed_bytes(placed.plan) == fill(sizeof(x), f === placed_half ? 1 : 2)
+        # Every gradient the step returns is on its argument's device.
+        f === placed_step && @test gradients_off(placed.plan, program) == 0
         execute!(whole)
         execute!(placed)
         @test map(copy, C.leaves(outputs(placed))) == map(copy, C.leaves(outputs(whole)))

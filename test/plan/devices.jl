@@ -82,11 +82,56 @@ end
     end
 end
 
-@testset "two requirements of one value that differ are refused" begin
-    f(a, b) = a .+ b
-    graph = C.rewrite(C.lower(trace(f, rand(Float32, 3), rand(Float32, 3))))
-    input = only(v for v in eachindex(graph.values) if graph.values[v].definition == C.Input(2))
-    @test_throws "must be on device 1 and value %$input on device 2" C.with_devices(graph, [1, 2]; pins = Dict(input => 1))
+# The plan of program `program`, prepared from its arguments on the devices
+# `labels` gives, its results pinned as a preparation pins them.
+function pinned_plan(program, labels)
+    graph = C.rewrite(C.lower(program))
+    pins = [k => labels[a] for (k, a) in [program.writes; program.gradients]]
+    C.verify(C.plan(C.with_devices(graph, labels; pins)))
+end
+
+@testset "a gradient is returned on its argument's device" begin
+    # The small weight is read where the large input is, copied there; its
+    # gradient is summed there and its 3 numbers copied back, the input's
+    # gradient computed where the input is.
+    f(w, x) = sum(abs2, w .* x)
+    args = (rand(Float32, 1, 3), rand(Float32, 4, 3))
+    program = trace((xs...) -> T.withgradient(f, xs...), args...)
+    @test program.gradients == gradient_pairs(program) == [2 => 1, 3 => 2]
+    for labels in ([2, 1], [1, 2])
+        p = pinned_plan(program, labels)
+        @test gradients_off(p, program) == 0
+        @test crossed_bytes(p) == [12, 12]
+        @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
+    end
+    # Prepared, the gradients are pinned so.
+    ex = prepare(program, Labelled(args[1], 1), Labelled(args[2], 0); target = T.CPUTarget(), verify = true)
+    @test gradients_off(ex.plan, program) == 0
+    # A gradient that reads no value, the input's of a sum, is made where
+    # the input is.
+    g(w, x) = sum(abs2, w) + sum(x)
+    program = trace((xs...) -> T.withgradient(g, xs...), args...)
+    p = pinned_plan(program, [1, 2])
+    @test gradients_off(p, program) == 0
+    # Only the sum of the weight's squares crosses, to be added to the input's.
+    @test crossed_bytes(p) == [4]
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
+end
+
+@testset "a result that replaces an argument is written on its device" begin
+    # The result reads only the second argument, and is copied to the
+    # first's device, whose array it replaces.
+    f!(a, b) = (a .= 2 .* b; nothing)
+    args = (rand(Float32, 4), rand(Float32, 4))
+    program = trace(f!, args...)
+    p = pinned_plan(program, [1, 2])
+    @test crossed_bytes(p) == [16]
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
+end
+
+@testset "a result pinned to two devices is refused" begin
+    graph = C.rewrite(C.lower(trace((a, b) -> a .+ b, rand(Float32, 3), rand(Float32, 3))))
+    @test_throws "result 1 must be on device 2 and on device 1" C.with_devices(graph, [1, 2]; pins = [1 => 1, 1 => 2])
 end
 
 @testset "a program on one device plans as it did" begin
