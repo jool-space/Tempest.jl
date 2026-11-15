@@ -823,7 +823,7 @@ Base.@nospecializeinfer function bound(ex::Executable, @nospecialize(inputs))
         k === nothing || place!(b, k, x)
     end
     isempty(b.elsewhere) || refuse_elsewhere(ex, b, positions, inputs, input_paths)
-    located!(b, ex)
+    located!(b, ex, inputs, input_paths, "the program")
 end
 
 # Array `x` as argument `k` of `b`, noted where it is on another device
@@ -843,8 +843,65 @@ function refuse_elsewhere(ex, b::Passed, positions, @nospecialize(inputs), paths
     refuse_placed(ex, positions, leaves(inputs), b.elsewhere, paths(inputs))
 end
 
-# The addresses of the arrays of `b`, each asked on its argument's device.
-located!(b::Passed, ex::Executable) = (on_each_device(k -> locate!(b, k, b.arrays[k]), k -> b.devices[k], ex.target, eachindex(b.arrays)); b)
+# The addresses of the arrays of `b`, each asked on its argument's device;
+# arrays that share memory with one the program writes throw, named by
+# their paths among `inputs` and the program by `writer`. Every binding of
+# a call's arrays, `point!`'s and `compile`'s call, finds them here.
+function located!(b::Passed, ex::Executable, @nospecialize(inputs), paths, writer)
+    on_each_device(k -> locate!(b, k, b.arrays[k]), k -> b.devices[k], ex.target, eachindex(b.arrays))
+    isempty(ex.program.writes) || refuse_shared(ex, b, inputs, paths, writer)
+    b
+end
+
+# A call whose arrays share memory with one the program writes throws: the
+# program reads each array as one of its own, which the function itself,
+# run on the same arrays, would not, as `f!(x, x)` writing its first
+# argument and reading its second reads what it wrote; and the steps of an
+# execution are ordered by the storage each touches, an argument's its own,
+# so that a crossing reading one array and a kernel writing another over
+# the same memory would not be ordered. Which arrays may
+# share memory is Base's `mightalias`, as broadcasting's, asked only of two
+# that the addresses their elements span (see `extent`) do not show apart:
+# the arrays sorted by where they start find in one pass every two whose
+# spans meet, none in a call of arrays each its own allocation, and two
+# rows of one matrix, which lie between each other and share no element,
+# are asked and pass. An array whose addresses are not known is asked
+# beside every other. `b` holds the call's arrays.
+function refuse_shared(ex::Executable, b::Passed, @nospecialize(inputs), paths, writer)
+    xs = b.arrays
+    written = falses(length(xs))
+    foreach(((_, a),) -> written[a] = true, ex.program.writes)
+    refuse(k, a) = refuse_sharing(ex, paths(inputs), k, a, writer)
+    function ask(k, j)
+        (written[k] || written[j]) && Base.mightalias(xs[k], xs[j]) || return
+        written[j] ? refuse(k, j) : refuse(j, k)
+    end
+    spans = Tuple{UInt, UInt, Int}[]
+    unknown = Int[]
+    for (k, r) in enumerate(b.extents)
+        r === nothing ? push!(unknown, k) : isempty(r) || push!(spans, (first(r), last(r), k))
+    end
+    sort!(spans)
+    # The spans begun and not ended, each by where it ends.
+    open = Tuple{UInt, Int}[]
+    for (start, stop, k) in spans
+        filter!(((ends, _),) -> ends >= start, open)
+        foreach(((_, j),) -> ask(k, j), open)
+        push!(open, (stop, k))
+    end
+    for u in unknown, k in eachindex(xs)
+        k == u || ask(u, k)
+    end
+end
+
+# Argument `k` shares memory with argument `a`, which `writer` writes: each
+# named by its path among `paths`, as the program's inputs place them.
+function refuse_sharing(ex, paths, k, a, writer)
+    positions = leaves(ex.program.input_structure)
+    path(j) = paths[findfirst(==(j), positions)]
+    throw(ArgumentError(string(path(k), " shares memory with ", path(a), ", which ", writer,
+        " writes: the program reads its arrays apart, so pass arrays that share none")))
+end
 
 # Where array `x`, argument `k` of `b`, lives: one call a leaf, specialized
 # on the leaf's type, which asks once.

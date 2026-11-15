@@ -128,20 +128,27 @@ end
 
 # Arguments that share memory, one of them written, are two storages to the
 # steps: a crossing reading the one and a kernel writing the other would not
-# be ordered. `compile`'s call refuses them (see `refuse_shared`); `prepare`
-# by reference and `point!` do not yet, and refusing them there as the call
-# does closes this.
+# be ordered. Every binding of a call's arrays refuses them where it locates
+# them (see `located!`): `compile`'s call, `point!` and so `prepare` with
+# `point`. Arrays bound by reference become the storage as `prepare` plans,
+# before any binding of a call sees them; refusing them needs that binding
+# to locate them as the others do.
 @testset "arguments sharing memory, one written, are refused by every binding" begin
     f!(x, y) = (x .= 2 .* y; sum(x))
     a = rand(Float32, 8)
     program = trace(f!, copy(a), copy(a))
+    c = T.compile(f!, copy(a), copy(a))
+    @test_throws "argument 2 shares memory with argument 1, which f! writes" c(a, a)
+    # Compiled on them, as its preparation binds them.
+    @test_throws "shares memory with" T.compile(f!, a, a)
+    ex = prepare(program, copy(a), copy(a); target = T.CPUTarget(), point = true)
+    @test_throws "input 2 shares memory with input 1, which the program writes" C.point!(ex, a, a)
+    @test_throws "input 2 shares memory with input 1" prepare(program, a, a; target = T.CPUTarget(), point = true)
     refused(f) = try
         f()
         false
     catch err
         err isa ArgumentError
     end
-    @test refused(() -> T.compile(f!, a, a)(a, a))
     @test_broken refused(() -> prepare(program, a, a; target = T.CPUTarget(), by_reference = (1, 2)))
-    @test_broken refused(() -> C.point!(prepare(program, copy(a), copy(a); target = T.CPUTarget(), point = true), a, a))
 end

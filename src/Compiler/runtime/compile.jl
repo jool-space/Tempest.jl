@@ -381,7 +381,6 @@ end
 # A call of the compiled function, its arrays `b` as `bound` finds them, run
 # by executable `ex`.
 function called(ex::Executable, b::Passed, @nospecialize(call))
-    isempty(ex.program.writes) || refuse_shared(ex, b, call)
     point_each!(ex, b)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
     returned(ex)
@@ -528,7 +527,7 @@ function bound(c::Compiled, call)
         isequal(now, value) ||
             throw(ArgumentError(compiled_for(c, string("the global ", g.name, " is ", shown(now), ", not ", shown(value), " as when traced"))))
     end
-    located!(b, c.executable)
+    located!(b, c.executable, call, leaf_paths, string(c.f))
 end
 
 compiled_for(c, difference) = string(c.f, " was compiled for other arguments: ", difference)
@@ -605,51 +604,6 @@ function placed!(b::Passed, e::InputType, x)
 end
 
 shown(x) = sprint(show, x; context = :limit => true)
-
-# A call whose arrays share memory with one the program writes throws: the
-# program reads each array as one of its own, which the function itself,
-# run on the same arrays, would not, as `f!(x, x)` writing its first
-# argument and reading its second reads what it wrote. Which arrays may
-# share memory is Base's `mightalias`, as broadcasting's, asked only of two
-# that the addresses their elements span (see `extent`) do not show apart:
-# the arrays sorted by where they start find in one pass every two whose
-# spans meet, none in a call of arrays each its own allocation, and two
-# rows of one matrix, which lie between each other and share no element,
-# are asked and pass. An array whose addresses are not known is asked
-# beside every other. `b` holds the call's arrays.
-function refuse_shared(ex::Executable, b::Passed, call)
-    xs = b.arrays
-    written = falses(length(xs))
-    foreach(((_, a),) -> written[a] = true, ex.program.writes)
-    function ask(k, j)
-        (written[k] || written[j]) && Base.mightalias(xs[k], xs[j]) || return
-        written[j] ? refuse_sharing(ex, call, k, j) : refuse_sharing(ex, call, j, k)
-    end
-    spans = Tuple{UInt, UInt, Int}[]
-    unknown = Int[]
-    for (k, r) in enumerate(b.extents)
-        r === nothing ? push!(unknown, k) : isempty(r) || push!(spans, (first(r), last(r), k))
-    end
-    sort!(spans)
-    # The spans begun and not ended, each by where it ends.
-    open = Tuple{UInt, Int}[]
-    for (start, stop, k) in spans
-        filter!(((ends, _),) -> ends >= start, open)
-        foreach(((_, j),) -> ask(k, j), open)
-        push!(open, (stop, k))
-    end
-    for u in unknown, k in eachindex(xs)
-        k == u || ask(u, k)
-    end
-end
-
-# Argument `k` of the call shares memory with argument `a`, which the program writes.
-function refuse_sharing(ex, call, k, a)
-    paths, positions = leaf_paths(call), leaves(ex.program.input_structure)
-    path(j) = paths[findfirst(==(j), positions)]
-    throw(ArgumentError(string(path(k), " shares memory with ", path(a), ", which ", call[1],
-        " writes: a compiled call reads its arrays apart, so pass arrays that share none")))
-end
 
 # The path of each leaf of the call `(f, args...)`, as a difference names it,
 # in the order `leaves` gives them.
