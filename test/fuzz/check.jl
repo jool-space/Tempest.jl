@@ -178,7 +178,8 @@ function stages!(out, case, cuda)
             unlabelled === nothing || stage!(out, :grad_devices, function ()
                 ex = C.prepare(q, labelled...; verify = true)
                 out[:grad_crossings] = crossings(ex.plan)
-                out[:gradients_off] = gradients_off(ex.plan, q)
+                # Each gradient is returned on its argument's device.
+                gradients_off(ex.plan, q) == 0 || return "error: a gradient is returned on another device than its argument's"
                 leaves_err(C.leaves(C.outputs(C.execute!(ex))), unlabelled; floor = floatmin(Float64))
             end)
             if planned !== nothing
