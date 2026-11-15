@@ -122,6 +122,23 @@ device_of(x) = nothing
 device_of(target::CUDATarget) = target.device
 
 """
+Whether a target plans and runs a program whose arrays are on several
+devices: the CPU, whose devices are labels on the host's memory, a crossing
+between two a copy there. CUDA's does not yet, and refuses such arrays.
+"""
+plans_across_devices(::Target) = false
+plans_across_devices(::CPUTarget) = true
+
+# The device of each argument of `program` among `inputs`, by label (see
+# `with_devices`): the devices in the order the arguments first meet them,
+# from 1, an argument on the host on the first.
+function argument_devices(program, @nospecialize(inputs))
+    found = map(device_of, argument_leaves(program, inputs))
+    order = unique(filter(!isnothing, found))
+    [d === nothing ? 1 : findfirst(==(d), order) for d in found]
+end
+
+"""
     on_device(f, target, device = device_of(target))
 
 `f()` with the calling task on `device` of `target`'s kind, its state on the

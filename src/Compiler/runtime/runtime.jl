@@ -215,7 +215,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         replaces = (), by_reference = (), point::Bool = false, recompute = (), ride = (), partition::Bool = true, build::Bool = true,
         verify::Bool = verifying())
     refuse_devices(target, inputs, input_paths)
-    s = setup(program; target, measure, replaces, recompute, ride, partition, build)
+    s = setup(program; target, devices = argument_devices(program, inputs), measure, replaces, recompute, ride, partition, build)
     prepared(s, decide!(s; verify), inputs...; by_reference, point, verify)
 end
 
@@ -261,20 +261,25 @@ function running(f, s::Setup, verify)
 end
 
 """
-    setup(program; target, measure, replaces, recompute, ride, partition, build) -> Setup
+    setup(program; target, devices, measure, replaces, recompute, ride, partition, build) -> Setup
 
 `program` set up as `prepare` sets it up, the keywords as `prepare` takes
-them: lowered, rewritten and partitioned, with its decider, and with tables
+them, `devices` the label of each argument's device (see
+`argument_devices`), all on one by default: lowered, rewritten, placed
+(see `with_devices`) and partitioned, with its decider, and with tables
 of its own (see `Tables`), which `decide!`, `given` and `prepared` fill.
 """
-function setup(program::Program; target, measure = measuring(), replaces = (), recompute = (), ride = (), partition::Bool = true,
-        build::Bool = true)
+function setup(program::Program; target, devices = ones(Int, length(program.arguments)), measure = measuring(), replaces = (),
+        recompute = (), ride = (), partition::Bool = true, build::Bool = true)
     tables = Tables()
     in_tables(tables) do
         # Each phase marked (see `phase`).
         lowered = phase(() -> lower(program), :lower)
-        graph = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
+        rewritten = permits_rewrites(target) ? phase(() -> rewrite(lowered; rounded = rounded_backward(target)), :rewrite) : lowered
         pairs = replacements(program, replaces)
+        # A result that replaces an argument is written where the argument lives.
+        pins = Dict(rewritten.results[k].value => devices[a] for (k, a) in pairs)
+        graph = phase(() -> with_devices(rewritten, devices; pins), :place)
         input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
         pinned = Set{Int}(recompute)
         # A value reading an argument a result replaces is not recomputed:
@@ -761,6 +766,7 @@ read_on(device, x) = (d = device_of(x)) === nothing || device === nothing || d =
 # as `paths(inputs)` gives them in the order of `leaves`: a program over
 # several devices is not planned yet. Asked before anything reads the arrays.
 function refuse_devices(target, @nospecialize(inputs), paths)
+    plans_across_devices(target) && return
     xs = leaves(inputs)
     devices = Union{Nothing, Int}[device_of(x) for x in xs]
     placed = unique(filter(!isnothing, [device_of(target); devices]))

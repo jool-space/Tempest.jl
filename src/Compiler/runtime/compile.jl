@@ -158,7 +158,7 @@ replays(ex::Executable, measure) = ex.reached.settled && ex.reached.how === leve
 # The program prepared again behind its first result, measuring as `measure`
 # says, its timings by `timer`, its arguments bound as `compile` binds them.
 function searched(program, inputs, target, measure, timer)
-    s = setup(program; target, measure)
+    s = setup(program; target, devices = argument_devices(program, inputs), measure)
     prepared(s, decide!(s; timer), inputs...; point = true)
 end
 
