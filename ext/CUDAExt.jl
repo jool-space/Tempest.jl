@@ -60,6 +60,15 @@ function Tempest.Compiler.follow(target::CUDATarget, before::Int, after::Int)
     nothing
 end
 
+# CUDA.jl learns which stream last used an array, and whether work on it is
+# pending, from the operations it submits, and a reader on another stream
+# waits for that stream only while it is: the floor's, cuTile's and cuBLAS's
+# launches are not its operations, so after a reader had waited once, a
+# result written again by the next call was read before it was written (on
+# a second device, whose stream no reader shared). The result is taken as
+# used on the task's stream, after the launches that wrote it.
+Tempest.Compiler.written(::CUDATarget, x) = CUDACore.with_managed_arrays(Returns(nothing), x)
+
 # The bytes a crossing stages through the host at a time, and how many
 # buffers it stages them through: one chunk's upload runs beside the next
 # one's download, 7.7 GB/s between two RTX A6000s without peer access, where

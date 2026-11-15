@@ -951,6 +951,7 @@ end
 function write_back!(ex::Executable)
     back(a) = (x = ex.back[a]; x === nothing || download!(ex.target, vec(x), ex.arguments[a]))
     on_each_device(back ∘ last, w -> ex.argument_devices[last(w)], ex.target, ex.program.writes)
+    on_each_device(k -> written(ex.target, ex.results[k]), k -> ex.result_devices[k], ex.target, eachindex(ex.results))
     ex
 end
 

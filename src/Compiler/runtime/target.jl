@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, crosses, walk, follow, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, crosses, walk, follow, written, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -420,6 +420,17 @@ crossing's own copy is ordered after what wrote its source either way. The
 CPU runs its steps in order, and does nothing.
 """
 follow(::Target, before, after) = nothing
+
+"""
+    written(target, x)
+
+Make `x`, a result of the call that has just run, storage on the device the
+task is on, read after the call by whatever reads it next, on any stream
+or task: called as each execution and replay ends. A target whose launches
+its arrays' package does not see says here that the launches just made on
+the task's stream wrote `x`. The CPU's run in order, and it does nothing.
+"""
+written(::Target, x) = nothing
 
 """
     crossing(target, to, from, values) -> run

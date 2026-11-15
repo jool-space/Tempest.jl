@@ -105,6 +105,7 @@ Tempest.Compiler.Step
 Tempest.Compiler.crosses
 Tempest.Compiler.walk
 Tempest.Compiler.follow
+Tempest.Compiler.written
 Tempest.Compiler.crossing
 Tempest.Compiler.capture
 Tempest.Compiler.replay

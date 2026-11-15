@@ -195,25 +195,19 @@ gradients_home(ex, program, inputs) =
             second_arrays = placed_over(map(w -> map(a -> 0.5f0 .* a, w), large[1]), 2 .* large[2], large[3] .- 1, 2)
             program = trace(placed_step, large...)
             ex = prepare(program, first_arrays...)
-            expected = host_leaves(outputs(execute!(prepare(program, second_arrays...))))
-            read_elsewhere() = fetch(Threads.@spawn host_leaves(outputs(ex)))
+            expected = [host_leaves(outputs(execute!(prepare(program, arrays...)))) for arrays in (first_arrays, second_arrays)]
+            read_elsewhere(r) = fetch(Threads.@spawn host_leaves(r))
             # The calls of `run` on the first arrays then the second whose
-            # results, read on another task, are not the second's.
+            # results, read on another task, are not the call's.
             wrong(run; trials = 25) = count(1:trials) do _
-                bind!(ex, first_arrays...)
-                run(ex)
-                bind!(ex, second_arrays...)
-                run(ex)
-                !all(splat(==), zip(read_elsewhere(), expected))
+                any((first_arrays, second_arrays) .=> expected) do (arrays, e)
+                    !all(splat(==), zip(read_elsewhere(run(arrays...)), e))
+                end
             end
-            @test wrong(execute!) == 0
+            @test wrong((xs...) -> outputs(execute!(bind!(ex, xs...)))) == 0
             capture!(ex)
-            @test wrong(replay!) == 0
-            c = compile(placed_step, first_arrays...)
-            @test count(1:25) do _
-                c(first_arrays...)
-                !all(splat(==), zip(fetch(Threads.@spawn host_leaves(c(second_arrays...))), expected))
-            end == 0
+            @test wrong((xs...) -> outputs(replay!(bind!(ex, xs...)))) == 0
+            @test wrong(compile(placed_step, first_arrays...)) == 0
         end
 
         @testset "a program that writes an argument on the second device" begin
