@@ -63,7 +63,7 @@ const NOT_SESSION_TABLES = (
     "Tempest.Compiler.STEP_LATENCIES" => "constants: the latencies the fit of a sweep's step searches",
     "Tempest.Compiler.BLOCK_SHARES" => "constants: the shares of the bandwidth the fit of a block's rate searches",
     "CUDAExt.OVERHEAD" => "a measurement, once a session: measured again it may differ",
-    "CUDAExt.CLEARING" => "a device resource: the launch that clears the caches before one is timed",
+    "CUDAExt.CLEARING" => "device resources: the launch per device that clears its cache before one is timed",
     "CUDAExt.GRAPHS" => "device resources: the graphs kept while their programs are",
     "cuDNNExt.GRAPHS" => "device resources: a graph built per context and problem",
 )

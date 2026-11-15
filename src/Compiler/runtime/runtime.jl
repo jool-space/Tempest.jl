@@ -247,9 +247,13 @@ struct Setup{D}
 end
 
 # `f()` as preparation `s` runs it: within its tables, building as it does
-# and verifying as asked.
-running(f, s::Setup, verify) = in_tables(s.tables) do
-    Base.ScopedValues.with(f, Implement.COMPILING => s.build, VERIFYING => verify)
+# and verifying as asked, on its target's device where it builds. One that
+# builds nothing touches no device, as while a package precompiles without one.
+function running(f, s::Setup, verify)
+    scoped() = Base.ScopedValues.with(f, Implement.COMPILING => s.build, VERIFYING => verify)
+    in_tables(s.tables) do
+        s.build ? on_device(scoped, s.decider.target) : scoped()
+    end
 end
 
 """
@@ -648,7 +652,9 @@ function bind!(ex::Executable, bindings::Pair{<:Integer}...)
     ex
 end
 
-function bind_leaves!(ex, positions, xs)
+bind_leaves!(ex, positions, xs) = on_device(() -> bind_each!(ex, positions, xs), ex.target)
+
+function bind_each!(ex, positions, xs)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
     moves = nothing
     for (k, x) in zip(positions, xs)
@@ -683,7 +689,7 @@ again is the caller's array only once the caller brings the same array twice
 in a row. The executable holds the arrays it reads and writes until it is
 bound again.
 """
-point!(ex::Executable, @nospecialize(inputs...)) = point_each!(ex, bound(ex.program, inputs))
+point!(ex::Executable, @nospecialize(inputs...)) = on_device(() -> point_each!(ex, bound(ex.program, inputs)), ex.target)
 
 """
 A call's arrays, one per argument of a program, each with where it lives:
@@ -898,8 +904,10 @@ capture.
 """
 function execute!(ex::Executable)
     runnable(ex)
-    run_once(ex)
-    write_back!(ex)
+    on_device(ex.target) do
+        run_once(ex)
+        write_back!(ex)
+    end
 end
 
 # What an execution launches, and what a capture records.
@@ -928,10 +936,12 @@ replay!(ex)                     # the same graph, on the new values
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
     runnable(ex)
-    ex.captured === nothing || release(ex.target, ex.captured)
-    ex.captured = nothing
-    ex.repetitions = repetitions
-    ex.captured = capture(ex.target, steps(ex), (ex.saves, ex.launches, ex.copies))
+    on_device(ex.target) do
+        ex.captured === nothing || release(ex.target, ex.captured)
+        ex.captured = nothing
+        ex.repetitions = repetitions
+        ex.captured = capture(ex.target, steps(ex), (ex.saves, ex.launches, ex.copies))
+    end
     ex
 end
 
@@ -945,8 +955,10 @@ bound it to, where that is not its storage. The results are in `outputs(ex)`.
 """
 function replay!(ex::Executable)
     ex.captured === nothing && throw(ArgumentError("nothing to replay: capture! records the program first"))
-    replay(ex.target, ex.captured)
-    write_back!(ex)
+    on_device(ex.target) do
+        replay(ex.target, ex.captured)
+        write_back!(ex)
+    end
 end
 
 function explain(io::IO, ex::Executable)

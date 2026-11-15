@@ -370,8 +370,10 @@ Compiled(f, ex::Executable, signature, globals) = Compiled(f, ex, signature, glo
 
 function (c::Compiled)(@nospecialize(args...))
     call = (c.f, args...)
-    b = bound(c, call)
-    @lock c.lock called(c.executable, b, call)
+    on_device(c.executable.target) do
+        b = bound(c, call)
+        @lock c.lock called(c.executable, b, call)
+    end
 end
 
 # A call of the compiled function, its arrays `b` as `bound` finds them, run

@@ -80,6 +80,8 @@ Tempest.Compiler.InvalidPlan
 ```@docs
 Tempest.Compiler.Target
 Tempest.Compiler.target_for
+Tempest.Compiler.device_of
+Tempest.Compiler.on_device
 Tempest.Compiler.implementations
 Tempest.Compiler.numerics
 Tempest.Compiler.permits_rewrites

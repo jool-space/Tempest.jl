@@ -6,7 +6,19 @@ using Tempest
 using CUDACore
 import Tempest: CUDATarget
 
-Tempest.Compiler.target_for(::CuArray) = CUDATarget()
+Tempest.Compiler.target_for(x::CuArray) = CUDATarget(; device = Tempest.Compiler.device_of(x))
+Tempest.Compiler.device_of(x::CuArray) = CUDACore.deviceid(CUDACore.device(x))
+# A view or reshape of a device's array is on its parent's device.
+Tempest.Compiler.device_of(x::CUDACore.AnyCuArray) = Tempest.Compiler.device_of(parent(x))
+# On another device, the task's state there is kept apart from its state on
+# the device it was on, which CUDA.jl gives back, its stream too, as `f`
+# ends. A task on the device already runs `f` as it is: switching costs a
+# call of the driver, 0.2 μs on GB10, and a compiled call enters twice.
+function Tempest.Compiler.on_device(f, target::CUDATarget)
+    state = CUDACore.task_local_state()
+    state !== nothing && CUDACore.deviceid(state.device) == target.device && return f()
+    CUDACore.device!(f, target.device)
+end
 Tempest.Compiler.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
 # A copy of `x` on the device, filled rather than constructed from `x`:
 # CuArray's constructor from an array dispatches among every package's
@@ -36,7 +48,7 @@ end
 
 const THREADS = 256
 
-Tempest.Compiler.device_name(::CUDATarget) = CUDACore.name(CUDACore.device())
+Tempest.Compiler.device_name(target::CUDATarget) = CUDACore.name(CUDACore.CuDevice(target.device))
 
 # The compilers' package holds tileiras and ptxas, which assemble the tile and
 # floor kernels; the driver loads them.
@@ -48,10 +60,10 @@ Tempest.Compiler.measurable(::CUDATarget) = true
 # Every stream's work done, so that a claim is timed after what was launched
 # before it. CUDA.jl refuses to wait for the device while any task captures
 # a graph, before it waits: a timing waits for the capture to end.
-function Tempest.Compiler.quiesce(::CUDATarget)
+function Tempest.Compiler.quiesce(target::CUDATarget)
     while true
         try
-            return CUDACore.device_synchronize()
+            return Tempest.Compiler.on_device(CUDACore.device_synchronize, target)
         catch err
             err isa CUDACore.CaptureError || rethrow()
             sleep(0.001)
@@ -396,7 +408,9 @@ __init__() = atexit(() -> foreach(finalize, keys(GRAPHS)))
 # tiles were ranked at the cache's rate. Timings run one at a time (see
 # `time_launch`), so the cache's clearing and the replay's overhead below are
 # made and read by one timing at a time.
-function Tempest.Compiler.time_launch(target::CUDATarget, launch)
+Tempest.Compiler.time_launch(target::CUDATarget, launch) = Tempest.Compiler.on_device(() -> timed_launch(target, launch), target)
+
+function timed_launch(target, launch)
     launch()
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
@@ -437,21 +451,21 @@ function read_through((a, sink), n)
     return
 end
 
-# The launch that clears the cache and its buffers, made on first need,
-# within a timing.
-const CLEARING = Ref{Any}(nothing)
+# The launch that clears each device's cache and its buffers, made on first
+# need, within a timing on the device: timings run one at a time in the
+# process, as when this held one device's.
+const CLEARING = Dict{CUDACore.CuDevice, Any}()
 
 # Clear the cache, reading a buffer twice its size through it. Nvbench and
 # Triton's `do_bench` clear it by writing one, which leaves it dirty: a
 # launch is then timed writing it back, the output projection at 160 μs.
-function clear_cache!()
-    if CLEARING[] === nothing
-        bytes = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
-        a, sink = CUDACore.zeros(UInt32, 2bytes ÷ 4), CUDACore.zeros(UInt32, 1)
-        args = CUDACore.cudaconvert((a, sink))
-        CLEARING[] = (FloorLaunch(floor_function(read_through, (args, length(a)))..., (args, length(a)), 1024, 256, Int[]), a, sink)
-    end
-    first(CLEARING[])()
+clear_cache!() = first(get!(clearing, CLEARING, CUDACore.device()))()
+
+function clearing()
+    bytes = CUDACore.attribute(CUDACore.device(), CUDACore.DEVICE_ATTRIBUTE_L2_CACHE_SIZE)
+    a, sink = CUDACore.zeros(UInt32, 2bytes ÷ 4), CUDACore.zeros(UInt32, 1)
+    args = CUDACore.cudaconvert((a, sink))
+    (FloorLaunch(floor_function(read_through, (args, length(a)))..., (args, length(a)), 1024, 256, Int[]), a, sink)
 end
 
 # What timing one replay alone adds to the seconds of its launch among a
@@ -501,8 +515,8 @@ const LAUNCH = 5.0e-7
 # 476 GB/s and 256 MiB at 245. A discrete device reports its memory's clock,
 # which transfers twice a cycle; an integrated one, the system's memory, as
 # GB10 its LPDDR5X's transfer rate, 8533 MT/s over 256 pins, 273 GB/s.
-function Tempest.Compiler.device_rates(::CUDATarget)
-    device = CUDACore.device()
+function Tempest.Compiler.device_rates(target::CUDATarget)
+    device = CUDACore.CuDevice(target.device)
     attribute(a) = Float64(CUDACore.attribute(device, a))
     transfers = (attribute(CUDACore.DEVICE_ATTRIBUTE_INTEGRATED) == 1 ? 1 : 2) * 1.0e3 * attribute(CUDACore.DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE)
     bandwidth = transfers * attribute(CUDACore.DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH) / 8

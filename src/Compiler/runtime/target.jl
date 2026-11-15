@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -28,9 +28,11 @@ end
 Base.show(io::IO, t::CPUTarget) = print(io, "CPUTarget(", join(map(repr, t.implementations), ", "), ")")
 
 """
-    CUDATarget(implementations...; precision = :full, online = true, rounded_backward = true, deterministic = false)
+    CUDATarget(implementations...; device = 0, precision = :full, online = true, rounded_backward = true, deterministic = false)
 
-Run on an NVIDIA GPU; needs CUDACore loaded. The target uses the floor and
+Run on an NVIDIA GPU, the one CUDA numbers `device`; needs CUDACore loaded.
+A program whose arrays are on a device is prepared for that device's target,
+whatever device the calling task is on (see `target_for`). The target uses the floor and
 the `implementations` given, as in `CUDATarget(cuTileGenerator())`, ties
 between their estimates going to the first; by default Tempest's own whose
 packages are loaded when it is made, cuBLAS's, cuDNN's and cuTile's (see
@@ -75,18 +77,20 @@ struct CUDATarget <: Target
     implementations::Tuple{Vararg{Implementation}}
     rounded_backward::Bool
     deterministic::Bool
+    # The device's number, as CUDA counts them from 0.
+    device::Int
 end
 
-CUDATarget(precision::Symbol, online::Bool, implementations::Tuple) = CUDATarget(precision, online, implementations, true, false)
+CUDATarget(precision::Symbol, online::Bool, implementations::Tuple) = CUDATarget(precision, online, implementations, true, false, 0)
 
-function CUDATarget(implementations::Implementation...; precision::Symbol = :full, online::Bool = true,
+function CUDATarget(implementations::Implementation...; device::Integer = 0, precision::Symbol = :full, online::Bool = true,
         rounded_backward::Bool = true, deterministic::Bool = false)
     precision in (:full, :tf32, :tf32x3) || throw(ArgumentError("precision must be :full, :tf32 or :tf32x3, got $precision"))
-    CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations, rounded_backward, deterministic)
+    CUDATarget(precision, online, isempty(implementations) ? loaded_implementations() : implementations, rounded_backward, deterministic, device)
 end
 
 Base.show(io::IO, t::CUDATarget) = print(io, "CUDATarget(", join(map(repr, t.implementations), ", "), "; ",
-    "precision = :", t.precision, t.online ? "" : ", online = false",
+    t.device == 0 ? "" : "device = $(t.device), ", "precision = :", t.precision, t.online ? "" : ", online = false",
     t.rounded_backward ? "" : ", rounded_backward = false", t.deterministic ? ", deterministic = true" : "", ")")
 
 "The implementations a target uses beside the floor, in order."
@@ -97,11 +101,32 @@ implementations(::Target) = ()
     target_for(x) -> target or nothing
 
 The target an argument selects: `CPUTarget()` for an `Array`, a package's
-target for its arrays, nothing for anything else. A program is prepared on
-the first target among its inputs.
+target for its arrays, on the device that holds them, nothing for anything
+else. A program is prepared on the first target among its inputs.
 """
 target_for(x::AbstractArray) = CPUTarget()
 target_for(x) = nothing
+
+"""
+    device_of(x) -> Int or nothing
+
+The device whose memory holds `x`, an array or a target's storage, by the
+number its package gives it; nothing for the host's memory, the CPU's. A
+target reads arrays on the host, copying them where they cannot be its
+storage, and the CPU reads a device's arrays so.
+"""
+device_of(x) = nothing
+device_of(target::CUDATarget) = target.device
+
+"""
+    on_device(f, target)
+
+`f()` with the calling task on `target`'s device, its state on the device
+it was on (for CUDA, its context and stream) as it was when `f` returns or
+throws: what touches a device, building, binding and running a program, runs
+on its target's, whatever device the caller is on.
+"""
+on_device(f, ::Target) = f()
 
 function default_target(inputs)
     for leaf in leaves(inputs)
