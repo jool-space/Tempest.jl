@@ -13,11 +13,12 @@ Tempest.Compiler.device_of(x::CUDACore.AnyCuArray) = Tempest.Compiler.device_of(
 # On another device, the task's state there is kept apart from its state on
 # the device it was on, which CUDA.jl gives back, its stream too, as `f`
 # ends. A task on the device already runs `f` as it is: switching costs a
-# call of the driver, 0.2 μs on GB10, and a compiled call enters twice.
-function Tempest.Compiler.on_device(f, target::CUDATarget)
+# call of the driver, 0.2 μs on GB10, and a compiled call enters at its
+# binding, its run and its results.
+function Tempest.Compiler.on_device(f, ::CUDATarget, device::Int)
     state = CUDACore.task_local_state()
-    state !== nothing && CUDACore.deviceid(state.device) == target.device && return f()
-    CUDACore.device!(f, target.device)
+    state !== nothing && CUDACore.deviceid(state.device) == device && return f()
+    CUDACore.device!(f, device)
 end
 Tempest.Compiler.allocate(::CUDATarget, T, n) = CuArray{T}(undef, n)
 # A copy of `x` on the device, filled rather than constructed from `x`:
@@ -98,7 +99,7 @@ mutable struct Graph
     exec::CUDACore.CuGraphExec
     # The graph the executable was made from, whose nodes name its own.
     graph::CUDACore.CuGraph
-    steps::Vector{Any}
+    steps::Vector{Tempest.Compiler.Step}
     nodes::Vector{Vector{Any}}
     # Per step and value, where its address is in the step's kernels, and
     # the alignments it was learned at.
@@ -174,15 +175,16 @@ end
 
 # The steps captured as one graph, and per step its nodes: those the frontier
 # after the step depends on, back to the step before's. Each step is captured
-# by itself, after the step before: a library records a call within a longer
-# capture otherwise than alone (cuBLAS, a word of its kernels' arguments), and
-# `retarget!` learns from a step captured alone.
-function steps_recorded(steps)
+# by itself, after the step before, on its device (see `walk`): a library
+# records a call within a longer capture otherwise than alone (cuBLAS, a word
+# of its kernels' arguments), and `retarget!` learns from a step captured alone.
+function steps_recorded(target, steps)
     graph = CUDACore.CuGraph()
     after = CUDACore.CuGraphNode[]
-    marks = map(steps) do step
-        after = captured!(() -> step(), graph; after)
-        CUDACore.CUgraphNode[n.handle for n in after]
+    marks = Vector{CUDACore.CUgraphNode}[]
+    Tempest.Compiler.walk(target, steps) do step
+        after = captured!(() -> step.run(), graph; after)
+        push!(marks, CUDACore.CUgraphNode[n.handle for n in after])
     end
     seen = Set{CUDACore.CUgraphNode}()
     nodes = map(marks) do mark
@@ -214,8 +216,8 @@ function captured!(f, graph; after)
     end
 end
 
-function Tempest.Compiler.capture(::CUDATarget, steps, keep)
-    graph, nodes = steps_recorded(steps)
+function Tempest.Compiler.capture(target::CUDATarget, steps, keep)
+    graph, nodes = steps_recorded(target, steps)
     exec = CUDACore.instantiate(graph)
     g = finalizer(g -> (finalize(g.exec); finalize(g.graph)), Graph(exec, graph, steps, nodes, Dict(), Dict(), Set{Int}()))
     GRAPHS[g] = keep
@@ -225,7 +227,7 @@ end
 # Updated in place where the graph recorded again launches the same kernels,
 # as it does when only addresses moved; the records take its launches.
 function Tempest.Compiler.recapture(target::CUDATarget, g::Graph, steps, keep)
-    graph, nodes = steps_recorded(steps)
+    graph, nodes = steps_recorded(target, steps)
     if alike(g.nodes, nodes) && CUDACore.update(g.exec, graph; throw_error = false)
         foreach((old, new) -> foreach(adopt!, old, new), g.nodes, nodes)
         finalize(graph)
@@ -262,12 +264,12 @@ end
 # The alignment of an address, in powers of two up to 4096 bytes.
 alignment(address) = min(trailing_zeros(address), 12)
 
-function Tempest.Compiler.retarget!(::CUDATarget, g::Graph, steps, moves, repoint)
+function Tempest.Compiler.retarget!(target::CUDATarget, g::Graph, steps, moves, repoint)
     key = first(steps)
     copies(g.nodes[key]) && (repoint(); foreach(step -> foreach(n -> move_copy!(g, n, moves), g.nodes[step]), steps); return true)
-    key in g.recorded && (repoint(); return record_alone!(g, steps))
+    key in g.recorded && (repoint(); return record_alone!(target, g, steps))
     known = all(m -> haskey(g.slots, (key, m.value)) && alignment(m.to) in g.aligned[(key, m.value)], moves)
-    known || return learn!(g, steps, moves, repoint)
+    known || return learn!(target, g, steps, moves, repoint)
     repoint()
     foreach(step -> patch!(g, step, key, moves), steps)
     true
@@ -318,11 +320,11 @@ end
 # differ between the graph and a recording alone, stays as the graph has it.
 # A launch with other words changed is recorded alone at each move from then
 # on. Its kernels and other nodes must be as they were.
-function learn!(g::Graph, steps, moves, repoint)
+function learn!(target, g::Graph, steps, moves, repoint)
     key = first(steps)
-    old, (before,) = steps_recorded(Any[g.steps[key]])
+    old, (before,) = steps_recorded(target, g.steps[key:key])
     repoint()
-    new, (after,) = steps_recorded(Any[g.steps[key]])
+    new, (after,) = steps_recorded(target, g.steps[key:key])
     try
         same(before, after) && all(step -> same(g.nodes[step], after), steps) || return false
         found = Dict(m.value => Tuple{Int, Int, Int, Int}[] for m in moves)
@@ -360,8 +362,8 @@ end
 
 # The launch recorded alone, its kernels' arguments in each of its steps
 # taken from the record.
-function record_alone!(g::Graph, steps)
-    graph, (fresh,) = steps_recorded(Any[g.steps[first(steps)]])
+function record_alone!(target, g::Graph, steps)
+    graph, (fresh,) = steps_recorded(target, g.steps[first(steps):first(steps)])
     try
         all(step -> same(g.nodes[step], fresh), steps) || return false
         foreach(step -> take_record!(g, g.nodes[step], fresh), steps)
@@ -410,11 +412,15 @@ __init__() = atexit(() -> foreach(finalize, keys(GRAPHS)))
 # made and read by one timing at a time.
 Tempest.Compiler.time_launch(target::CUDATarget, launch) = Tempest.Compiler.on_device(() -> timed_launch(target, launch), target)
 
+# A launch timed, `n` times over as the steps of a graph, on the target's
+# device, where its timing runs.
+timed_steps(target, launch, n) = fill(Tempest.Compiler.Step(launch, target.device), n)
+
 function timed_launch(target, launch)
     launch()
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
-    g = Tempest.Compiler.capture(target, Any[launch], launch)
+    g = Tempest.Compiler.capture(target, timed_steps(target, launch, 1), launch)
     t = cleared(target, g; samples = clamp(round(Int, 1.0e-2 / max(once, 1.0e-6)), 3, 20))
     Tempest.Compiler.release(target, g)
     t - replay_overhead(target)
@@ -479,7 +485,7 @@ const OVERHEAD = Ref(NaN)
 function replay_overhead(target)
     isnan(OVERHEAD[]) || return OVERHEAD[]
     empty = blank_launch()
-    g = Tempest.Compiler.capture(target, Any[empty], empty)
+    g = Tempest.Compiler.capture(target, timed_steps(target, empty, 1), empty)
     alone = cleared(target, g)
     Tempest.Compiler.release(target, g)
     OVERHEAD[] = alone - batched(target, empty)
@@ -493,7 +499,7 @@ function batched(target, launch; samples = 5)
     CUDACore.synchronize()
     once = CUDACore.@elapsed launch()
     repetitions = clamp(round(Int, 1.0e-3 / max(once, 1.0e-6)), 1, 100)
-    g = Tempest.Compiler.capture(target, Any[launch for _ in 1:repetitions], launch)
+    g = Tempest.Compiler.capture(target, timed_steps(target, launch, repetitions), launch)
     Tempest.Compiler.replay(target, g)
     t = minimum(_ -> CUDACore.@elapsed(Tempest.Compiler.replay(target, g)), 1:samples) / repetitions
     Tempest.Compiler.release(target, g)

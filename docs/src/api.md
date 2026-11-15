@@ -101,6 +101,8 @@ Tempest.Compiler.accumulate!
 Tempest.Compiler.floor_split
 Tempest.Compiler.Split
 Tempest.Compiler.merge_lanes
+Tempest.Compiler.Step
+Tempest.Compiler.walk
 Tempest.Compiler.capture
 Tempest.Compiler.replay
 Tempest.Compiler.release

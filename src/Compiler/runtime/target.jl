@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, walk, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -122,14 +122,17 @@ device_of(x) = nothing
 device_of(target::CUDATarget) = target.device
 
 """
-    on_device(f, target)
+    on_device(f, target, device = device_of(target))
 
-`f()` with the calling task on `target`'s device, its state on the device
-it was on (for CUDA, its context and stream) as it was when `f` returns or
-throws: what touches a device, building, binding and running a program, runs
-on its target's, whatever device the caller is on.
+`f()` with the calling task on `device` of `target`'s kind, its state on the
+device it was on (for CUDA, its context and stream) as it was when `f`
+returns or throws: what touches a device, building, binding and running a
+program, runs on its own, whatever device the caller is on. An executable's
+steps are put on theirs by `walk` alone. A target of no devices, as the CPU,
+runs `f()` as it is.
 """
-on_device(f, ::Target) = f()
+on_device(f, target::Target) = on_device(f, target, device_of(target))
+on_device(f, ::Target, device) = f()
 
 function default_target(inputs)
     for leaf in leaves(inputs)
@@ -286,16 +289,61 @@ together and merges their states with `merge_lanes`.
 """
 floor_split(::Target, items, positions, adjacent) = nothing
 
+## Steps.
+
+"""
+    Step(run, device)
+
+A step of an execution: `run()`, a kernel's launch or a copy, and the device
+it runs on (see `device_of`), where `walk` puts it.
+"""
+struct Step
+    run::Any
+    device::Union{Nothing, Int}
+end
+
+"""
+    walk(f, target, steps)
+
+`f(step)` for each of `steps` in order, the calling task on the step's
+device: the one place an execution's steps are put on their devices, as
+they run (`execute!`), as a target records them as a graph (`capture`), and
+as it records one again (`retarget!`). Consecutive steps on one device are
+walked in one entry of it (see `on_device`), so an execution on one device,
+as every one is while a program is planned on one, enters it once.
+"""
+function walk(f, target::Target, steps)
+    start = 1
+    while start <= length(steps)
+        device = steps[start].device
+        stop = start
+        while stop < length(steps) && steps[stop + 1].device == device
+            stop += 1
+        end
+        # Steps on a device after steps on another would wait here for
+        # theirs, by an event recorded on the stream they ran on.
+        on_device(() -> foreach(k -> f(steps[k]), start:stop), target, device)
+        start = stop + 1
+    end
+    # And here the work of each device would join the caller's stream.
+    nothing
+end
+
+# Run step `s` where the task is.
+run_step(s::Step) = (s.run(); nothing)
+
 ## Graphs.
 
 """
     capture(target, steps, keep) -> graph
 
-`steps`, callables that launch work on `target`, captured in order as one
-graph for `replay(target, graph)` to launch again; `retarget!` changes the
-addresses one step's work reads. The graph keeps `keep`, what it launches,
-alive until `release(target, graph)` or the collector destroys it. A target
-without graphs replays the steps themselves.
+`steps`, each a `Step` that launches work on `target`, captured in order as
+one graph for `replay(target, graph)` to launch again, each step on its
+device as `walk` puts it there; `retarget!` changes the addresses one
+step's work reads. Tempest asks with the task on the target's device, where
+the graph is made, launched and changed. The graph keeps `keep`, what it
+launches, alive until `release(target, graph)` or the collector destroys
+it. A target without graphs replays the steps themselves.
 """
 capture(::Target, steps, keep) = steps
 
@@ -324,7 +372,7 @@ where their launches read: true.
 retarget!(::Target, graph, steps, moves, repoint) = true
 
 "Launch `graph`, what `capture` recorded on `target`."
-replay(::Target, steps) = foreach(step -> step(), steps)
+replay(target::Target, steps) = walk(run_step, target, steps)
 
 "Destroy `graph`, what `capture` recorded on `target`, once nothing replays it."
 release(::Target, graph) = nothing

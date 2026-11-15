@@ -17,7 +17,7 @@ caller's array where that is not its storage, and `outputs` is where the
 results are, overwritten by each run.
 """
 # Where an argument's storage is used, for `point!` to move it: each step of
-# an execution (see `execution`) that reads or writes it, by its place among
+# an execution (see `Step`) that reads or writes it, by its place among
 # them, with the value the step names it by, the argument's own or a value
 # written over it, a result in place of the argument or a fold by key; and
 # the results over it.
@@ -76,6 +76,9 @@ mutable struct Executable{T <: Target}
     saves::Vector{Any}
     # The `Copy` of each staged result into the argument it replaces, after the kernels.
     copies::Vector{Copy}
+    # The steps of an execution, in order, each on its device: the inputs
+    # saved, each launch, and the staged copies (see `walk`).
+    steps::Vector{Step}
     # The graph `execute!` replays, once captured (see `capture!`).
     captured::Any
     # Per argument whose storage can be the caller's array (see `point!`):
@@ -405,7 +408,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
         none(n) = Vector{Any}(nothing, n)
         return Executable(program, p, target, s, Any[], none(length(values)),
             none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
-            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], nothing,
+            Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], Step[], nothing,
             Vector{Union{Nothing, Uses}}(nothing, length(program.arguments)), none(length(program.arguments)),
             zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)),
             none(length(program.arguments)), 1, false, reached)
@@ -492,10 +495,14 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     launches = Any[b[1] for b in built]
     saves = Any[(argument = values[v].definition.argument, before = b, copy = Copy(b, buffers[v], 0 => v)) for (v, b) in befores]
     copies = Copy[Copy(buffers[a], buffers[r], a => r) for (r, a) in s.staged]
+    # Every step on the target's device: a program is planned on one.
+    device = device_of(target)
+    steps = Step[Step(run, device) for run in Any[(save.copy for save in saves)..., launches..., copies...]]
     stored(k) = haskey(replaced, k) ? vec(pointed[replaced[k]]) : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
     results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     # Where each pointable argument's storage is used: the steps that use
-    # it, by the values they name it by, and the results over it.
+    # it, by the values they name it by, in the order of `steps`, and the
+    # results over it.
     used = Vector{Union{Nothing, Uses}}(nothing, n)
     if movable
         foreach(a -> referenced[a] === nothing && (used[a] = (steps = Tuple{Int, Int}[], results = Int[])), keys(input))
@@ -517,7 +524,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     at = UInt[x === nothing ? 0 : address_of(x) for x in pointed]
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, kept, arguments, referenced, results, outputs_over(program, results),
-        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, nothing, used, pointed, at, zeros(UInt, n),
+        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, nothing, used, pointed, at, zeros(UInt, n),
         fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
 end
 
@@ -840,11 +847,12 @@ end
 # After a run, what the program wrote into an argument bound to an array
 # that is not its storage (see `point!`), an array not of the target's array
 # type, or not as aligned as its kernels assume, or one waiting to be brought
-# twice in a row, is copied into that array, from the storage it wrote.
+# twice in a row, is copied into that array, from the storage it wrote, on
+# the target's device.
 function write_back!(ex::Executable)
     for (_, a) in ex.program.writes
         x = ex.back[a]
-        x === nothing || download!(ex.target, vec(x), ex.arguments[a])
+        x === nothing || on_device(() -> download!(ex.target, vec(x), ex.arguments[a]), ex.target)
     end
     ex
 end
@@ -894,10 +902,10 @@ function retarget!(ex::Executable, moves)
         mine = view(moves, start:stop)
         # The step is pointed at the new storage once, by the target or after it.
         pointed = Ref(false)
-        repoint() = pointed[] || (foreach(m -> repoint!(execution_step(ex, i), m[3].value, m[4]), mine); pointed[] = true)
+        repoint() = pointed[] || (foreach(m -> repoint!(ex.steps[i].run, m[3].value, m[4]), mine); pointed[] = true)
         if ex.captured === nothing
             repoint()
-        elseif !retarget!(ex.target, ex.captured, collect(execution_steps(ex, i)), [m[3] for m in mine], repoint)
+        elseif !on_graph(() -> retarget!(ex.target, ex.captured, collect(recorded_steps(ex, i)), [m[3] for m in mine], repoint), ex)
             foreach(m -> ex.settles[m[2]] = true, mine)
             changed = false
         end
@@ -911,25 +919,20 @@ end
 # Record the captured graph again, after its launches were pointed elsewhere.
 function recapture!(ex::Executable)
     ex.captured === nothing && return ex
-    ex.captured = recapture(ex.target, ex.captured, steps(ex), (ex.saves, ex.launches, ex.copies))
+    ex.captured = on_graph(() -> recapture(ex.target, ex.captured, recorded(ex), ex.steps), ex)
     ex
 end
 
-# The steps of an execution, in order: the inputs saved, each launch, and
-# the staged copies.
-execution(ex::Executable) = Any[(save.copy for save in ex.saves)..., ex.launches..., ex.copies...]
-
-# Step `i` of an execution.
-function execution_step(ex::Executable, i)
-    s, l = length(ex.saves), length(ex.launches)
-    i <= s ? ex.saves[i].copy : i <= s + l ? ex.launches[i - s] : ex.copies[i - s - l]
-end
+# `f()` with the calling task on the device where an executable's graph is
+# made, launched and changed: its target's. Its steps run each on its own
+# device as the target records them (see `walk`).
+on_graph(f, ex::Executable) = on_device(f, ex.target)
 
 # What a graph records, step by step: each of the executions a replay runs.
-steps(ex::Executable) = reduce(vcat, fill(execution(ex), ex.repetitions))
+recorded(ex::Executable) = repeat(ex.steps, ex.repetitions)
 
 # Where step `i` of an execution is among what a graph records, once in each execution.
-execution_steps(ex::Executable, i) = i .+ (length(ex.saves) + length(ex.launches) + length(ex.copies)) .* (0:(ex.repetitions - 1))
+recorded_steps(ex::Executable, i) = i .+ length(ex.steps) .* (0:(ex.repetitions - 1))
 
 """
     execute!(ex) -> ex
@@ -944,17 +947,8 @@ capture.
 """
 function execute!(ex::Executable)
     runnable(ex)
-    on_device(ex.target) do
-        run_once(ex)
-        write_back!(ex)
-    end
-end
-
-# What an execution launches, and what a capture records.
-function run_once(ex::Executable)
-    foreach(save -> save.copy(), ex.saves)
-    foreach(launch -> launch(), ex.launches)
-    foreach(copy -> copy(), ex.copies)
+    walk(run_step, ex.target, ex.steps)
+    write_back!(ex)
 end
 
 """
@@ -976,11 +970,11 @@ replay!(ex)                     # the same graph, on the new values
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
     runnable(ex)
-    on_device(ex.target) do
+    on_graph(ex) do
         ex.captured === nothing || release(ex.target, ex.captured)
         ex.captured = nothing
         ex.repetitions = repetitions
-        ex.captured = capture(ex.target, steps(ex), (ex.saves, ex.launches, ex.copies))
+        ex.captured = capture(ex.target, recorded(ex), ex.steps)
     end
     ex
 end
@@ -995,10 +989,8 @@ bound it to, where that is not its storage. The results are in `outputs(ex)`.
 """
 function replay!(ex::Executable)
     ex.captured === nothing && throw(ArgumentError("nothing to replay: capture! records the program first"))
-    on_device(ex.target) do
-        replay(ex.target, ex.captured)
-        write_back!(ex)
-    end
+    on_graph(() -> replay(ex.target, ex.captured), ex)
+    write_back!(ex)
 end
 
 function explain(io::IO, ex::Executable)

@@ -371,25 +371,31 @@ Compiled(f, ex::Executable, signature, globals) = Compiled(f, ex, signature, glo
 
 function (c::Compiled)(@nospecialize(args...))
     call = (c.f, args...)
-    on_device(c.executable.target) do
-        b = bound(c, call)
-        @lock c.lock called(c.executable, b, call)
-    end
+    ex = c.executable
+    # Its arrays' addresses are asked on the target's device, as they are
+    # bound there and its results read there; its run puts each step on its
+    # own (see `walk`).
+    b = on_device(() -> bound(c, call), ex.target)
+    @lock c.lock called(ex, b, call)
 end
 
 # A call of the compiled function, its arrays `b` as `bound` finds them, run
 # by executable `ex`.
 function called(ex::Executable, b::Passed, @nospecialize(call))
     isempty(ex.program.writes) || refuse_shared(ex, b, call)
-    point_each!(ex, b)
+    on_device(() -> point_each!(ex, b), ex.target)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
-    # The results apart from the buffers the next call overwrites: a number
-    # where the program computed a number, else an array, though it have no
-    # dimensions. The arrays are copied first: each copy waits for the
-    # kernels on the device while the host goes on to allocate the next,
-    # where reading a number waits for them on the host, and the allocations
-    # after it, which grow the device's memory pool while the last call's
-    # results live, would wait in turn.
+    on_device(() -> returned(ex), ex.target)
+end
+
+# The results of a call apart from the buffers the next call overwrites: a
+# number where the program computed a number, else an array, though it have
+# no dimensions. The arrays are copied first: each copy waits for the
+# kernels on the device while the host goes on to allocate the next, where
+# reading a number waits for them on the host, and the allocations after it,
+# which grow the device's memory pool while the last call's results live,
+# would wait in turn.
+function returned(ex::Executable)
     scalar = ex.plan.graph.result_scalar
     out = ex.program.output_structure
     arrays = Any[k isa Int && !scalar[k] ? copy(ex.results[k]) : nothing for k in leaves(out)]
