@@ -549,7 +549,8 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     # launch may hold `buffers` itself, as a recurrence's steps do.
     kept = Any[over(v) == 0 ? buffers[v] : nothing for v in eachindex(values)]
     foreach(a -> used[a] === nothing && (pointed[a] = nothing), 1:n)
-    at = UInt[x === nothing ? 0 : address_of(x) for x in pointed]
+    # An array's address is taken on its device, where CUDA's arrays let a task take it.
+    at = UInt[x === nothing ? 0 : on(() -> address_of(x), input[k]) for (k, x) in enumerate(pointed)]
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, kept, arguments, referenced, results, outputs_over(program, results),
         launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, nothing,
