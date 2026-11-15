@@ -176,6 +176,23 @@ struct Unplaced <: C.Target end
     @test_throws "a program over several devices is not planned yet" C.refuse_devices(Unplaced(), x, C.input_paths)
 end
 
+# A host target whose devices by label are of two kinds.
+struct Mixed <: C.Target end
+
+C.plans_across_devices(::Mixed) = true
+C.device_name(::Mixed) = "large"
+C.device_name(::Mixed, device) = device == 1 ? "small" : "large"
+
+@testset "devices of more than one kind are refused by name" begin
+    ws, x, t = placed_model(Float32)
+    lws, lx, lt = labelled_model(ws, x, t)
+    program = trace(placed_half, ws, x)
+    @test_throws "device 0 is \"large\", device 1 is \"small\"" prepare(program, lws, lx; target = Mixed())
+    @test_throws "devices of more than one kind" compile(placed_half, lws, lx; target = Mixed())
+    # One kind, however many devices: planned.
+    @test prepare(program, ws, x; target = Mixed(), build = false) isa C.Executable
+end
+
 # The fuzzer's cases, as shrunk, that placing on two devices failed:
 # recurrences whose derivative accumulates the gradients of arguments on two
 # devices, the cycle pinned to both when a gradient was pinned on the value it

@@ -152,7 +152,8 @@ end
 
 const THREADS = 256
 
-Tempest.Compiler.device_name(target::CUDATarget) = CUDACore.name(CUDACore.CuDevice(target.device))
+Tempest.Compiler.device_name(target::CUDATarget) = Tempest.Compiler.device_name(target, target.device)
+Tempest.Compiler.device_name(::CUDATarget, device::Int) = CUDACore.name(CUDACore.CuDevice(device))
 
 # The compilers' package holds tileiras and ptxas, which assemble the tile and
 # floor kernels; the driver loads them.

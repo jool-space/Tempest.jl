@@ -160,7 +160,19 @@ function argument_devices(target::Target, program, @nospecialize(inputs))
     # Without a device of its own the target is at home where the first
     # argument on a device is, and on the host when none is.
     length(devices) > 1 && devices[1] === nothing && popfirst!(devices)
+    refuse_kinds(target, devices)
     Placement([d === nothing ? 1 : findfirst(isequal(d), devices) for d in found], devices)
+end
+
+# Throw where `devices` of `target` are of more than one kind: a decider
+# times its claims at home, and a time is the kernel's on every device of
+# the kind alone.
+function refuse_kinds(target::Target, devices)
+    names = [device_name(target, d) for d in devices]
+    allequal(names) && return
+    held = join([string(device_named(d), " is ", repr(n)) for (d, n) in zip(devices, names)], ", ")
+    throw(ArgumentError(string("the arrays are on devices of more than one kind: ", held,
+        "; a program is planned over devices of one kind, whose kernels are timed on one of them")))
 end
 
 """
@@ -530,8 +542,16 @@ segment_at(r::Captured, j) = findlast(s -> first(s.steps) <= j, r.segments)
 
 ## Measuring.
 
-"The name of the device `target` runs on, which names its tuning record and its rates file."
+"""
+    device_name(target[, device])
+
+The name of the device `target` runs on, which names its tuning record and
+its rates file; or of another of its devices, as `device_of` numbers them,
+which a program placed over several runs on (see `Placement`). A target's
+devices are of one kind unless it says otherwise.
+"""
 device_name(::CPUTarget) = "cpu"
+device_name(target::Target, device) = device_name(target)
 
 """
     toolchain(target) -> Vector{Pair{String, String}}
