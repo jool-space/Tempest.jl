@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, walk, follow, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, crosses, walk, follow, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -126,10 +126,11 @@ device_of(target::CUDATarget) = target.device
 """
 Whether a target plans and runs a program whose arrays are on several
 devices: the CPU, whose devices are labels on the host's memory, a crossing
-between two a copy there. CUDA's does not yet, and refuses such arrays.
+between two a copy there, and CUDA's, a crossing a copy staged through the
+host's memory. A target that does not refuses such arrays.
 """
 plans_across_devices(::Target) = false
-plans_across_devices(::CPUTarget) = true
+plans_across_devices(::Union{CPUTarget, CUDATarget}) = true
 
 """
 Where a preparation's arguments are: the label of each argument's device
@@ -348,7 +349,13 @@ end
 
 Step(run, device) = Step(run, device, device)
 
-# Whether step `s` copies between two devices.
+"""
+    crosses(step) -> Bool
+
+Whether `step` copies between two devices, a crossing's (see `crossing`):
+a target with graphs records a segment of other steps as one device's
+graph, and says how a segment of crossings runs (see `capture`).
+"""
 crosses(s::Step) = s.from != s.device
 
 # The last of the steps from `start` on that run where it does: on one

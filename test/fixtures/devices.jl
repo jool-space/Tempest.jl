@@ -38,6 +38,9 @@ function labelled_model(ws, x, t; devices = 2)
     (Tuple(map(a -> Labelled(a, run(k)), w) for (k, w) in enumerate(ws)), Labelled(x, 0), Labelled(t, devices - 1))
 end
 
+# The model's arrays again, other numbers, as a later call brings them.
+again(ws, x, t) = (map(w -> map(a -> a .+ 1, w), ws), 2 .* x, t .- 1)
+
 crossings(p) = count(g -> g.kind isa C.CrossingKind, p.groups)
 
 # The crossings of plan `p`, each as the bytes it copies.

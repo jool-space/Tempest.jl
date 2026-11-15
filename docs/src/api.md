@@ -102,6 +102,7 @@ Tempest.Compiler.floor_split
 Tempest.Compiler.Split
 Tempest.Compiler.merge_lanes
 Tempest.Compiler.Step
+Tempest.Compiler.crosses
 Tempest.Compiler.walk
 Tempest.Compiler.follow
 Tempest.Compiler.crossing

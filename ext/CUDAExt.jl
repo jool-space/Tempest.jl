@@ -47,6 +47,109 @@ function Tempest.Compiler.task_state(::CUDATarget)
     () -> (CUDACore.context!(context); CUDACore.stream!(stream))
 end
 
+## Devices.
+
+# The work launched next on device `after` waits on its stream for what the
+# task launched on `before`'s so far, by an event CUDA.jl keeps per stream.
+# A crossing orders its own legs (see `Staged`); this orders the rest of the
+# walk as it is written, so that no step on one device depends on which of
+# another's it shares no buffer with.
+function Tempest.Compiler.follow(target::CUDATarget, before::Int, after::Int)
+    source = Tempest.Compiler.on_device(CUDACore.stream, target, before)
+    Tempest.Compiler.on_device(() -> CUDACore.stream_wait(CUDACore.stream(), source), target, after)
+    nothing
+end
+
+# The bytes a crossing stages through the host at a time, and how many
+# buffers it stages them through: one chunk's upload runs beside the next
+# one's download, 7.7 GB/s between two RTX A6000s without peer access, where
+# the whole value through one buffer ran at half that.
+const CHUNK = 8 << 20
+const STAGES = 2
+
+"""
+The page-locked host memory a crossing copies through, a buffer per stage,
+mapped in every context, and per buffer an event on each device: its
+download recorded on the source's stream, its upload on the reader's. A
+download into a buffer waits on the device for the buffer's last upload,
+of this execution or the one before, and an upload for its download.
+"""
+mutable struct Staging
+    const host::Vector{CUDACore.HostMemory}
+    const downloaded::Vector{CUDACore.CuEvent}
+    const uploaded::Vector{CUDACore.CuEvent}
+end
+
+# Staging for `bytes` from device `from` to the task's: as many chunks as the
+# bytes fill, up to `STAGES`. It is freed once the last copy through it is done.
+function Staging(bytes, from::Int)
+    n = min(STAGES, cld(bytes, CHUNK))
+    host = [CUDACore.alloc(CUDACore.HostMemory, min(bytes, CHUNK), CUDACore.MEMHOSTALLOC_PORTABLE) for _ in 1:n]
+    downloaded = CUDACore.device!(() -> [CUDACore.CuEvent(CUDACore.EVENT_DISABLE_TIMING) for _ in 1:n], from)
+    uploaded = [CUDACore.CuEvent(CUDACore.EVENT_DISABLE_TIMING) for _ in 1:n]
+    CUDACore.resource_finalizer(Staging(host, downloaded, uploaded)) do s
+        foreach(CUDACore.synchronize, s.uploaded)
+        foreach(CUDACore.free, s.host)
+    end
+end
+
+"""
+A crossing on CUDA's target: buffer `from` on one device copied into `to`
+on another through page-locked host memory, chunk by chunk, each chunk's
+download on the source's stream and upload on the reader's, so that
+neither device waits for the host and the host for neither: the copy
+between two devices that every pair of them can make, where a kernel or a
+copy between devices can touch only a peer's memory. It is ordered after
+what wrote its source and before what reads its copy on their devices'
+streams, and CUDA.jl's arrays learn which stream used them last, so that a
+task reading the copy on another stream waits for it. It runs as it is
+replayed between the graphs of the devices around it rather than
+recorded (see `capture`), and repoints as a `Copy` does.
+"""
+mutable struct Staged
+    to::Any
+    from::Any
+    const values::Pair{Int, Int}
+    const staging::Staging
+end
+
+function Tempest.Compiler.crossing(::CUDATarget, to, from, values::Pair{Int, Int})
+    sizeof(to) == sizeof(from) || throw(DimensionMismatch("a crossing copies $(sizeof(from)) bytes into $(sizeof(to))"))
+    Staged(to, from, values, Staging(sizeof(from), Tempest.Compiler.device_of(from)))
+end
+
+Tempest.Compiler.Implement.repoints(::Staged) = true
+
+function Tempest.Compiler.Implement.repoint!(c::Staged, value, buffer)
+    first(c.values) == value && (c.to = buffer)
+    last(c.values) == value && (c.from = buffer)
+    c
+end
+
+# Run with the task on the reader's device, as `walk` puts a crossing.
+function (c::Staged)()
+    s = c.staging
+    bytes = sizeof(c.from)
+    for (i, at) in enumerate(0:CHUNK:(bytes - 1))
+        k = mod1(i, length(s.host))
+        n = min(CHUNK, bytes - at)
+        host = pointer(s.host[k])
+        CUDACore.device!(Tempest.Compiler.device_of(c.from)) do
+            CUDACore.wait(s.uploaded[k])
+            CUDACore.with_managed_arrays(c.from) do
+                CUDACore.cuMemcpyDtoHAsync_v2(host, reinterpret(CUDACore.CuPtr{Cvoid}, pointer(c.from)) + at, n, CUDACore.stream())
+            end
+            CUDACore.record(s.downloaded[k])
+        end
+        CUDACore.wait(s.downloaded[k])
+        CUDACore.with_managed_arrays(c.to) do
+            CUDACore.cuMemcpyHtoDAsync_v2(reinterpret(CUDACore.CuPtr{Cvoid}, pointer(c.to)) + at, host, n, CUDACore.stream())
+        end
+        CUDACore.record(s.uploaded[k])
+    end
+    nothing
+end
+
 const THREADS = 256
 
 Tempest.Compiler.device_name(target::CUDATarget) = CUDACore.name(CUDACore.CuDevice(target.device))
@@ -216,7 +319,11 @@ function captured!(f, graph; after)
     end
 end
 
+# A segment of crossings is not recorded: it runs as it is replayed (see
+# `Staged`), as the steps of a target without graphs do, and is changed by
+# repointing its copies alone.
 function Tempest.Compiler.capture(target::CUDATarget, steps, keep)
+    Tempest.Compiler.crosses(first(steps)) && return steps
     graph, nodes = steps_recorded(target, steps)
     exec = CUDACore.instantiate(graph)
     g = finalizer(g -> (finalize(g.exec); finalize(g.graph)), Graph(exec, graph, steps, nodes, Dict(), Dict(), Set{Int}()))

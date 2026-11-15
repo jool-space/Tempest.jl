@@ -1,6 +1,6 @@
 # A program whose arguments are on two devices, by label, prepared and run on
 # the CPU target, a crossing between them a copy on the host; CUDA's target
-# refuses such arguments still.
+# runs such programs over its devices (test/cuda/devices.jl).
 include("../fixtures/devices.jl")
 
 # The leaves of the outputs of `ex`, copied.
@@ -8,9 +8,6 @@ leaf_copies(ex) = map(copy, C.leaves(outputs(ex)))
 
 # The leaves of a compiled function's results.
 result_leaves(r) = collect(C.leaves(r))
-
-# The model's arrays again, other numbers, as a later call brings them.
-again(ws, x, t) = (map(w -> map(a -> a .+ 1, w), ws), 2 .* x, t .- 1)
 
 @testset "the placed model run over two devices on the CPU, $E" for E in (Float32, Float64)
     ws, x, t = placed_model(E)
@@ -168,11 +165,15 @@ C.Implement.repoint!(w::Watching, value, buffer) = (C.Implement.repoint!(w.run, 
     @test leaf_copies(ex) == leaf_copies(whole)
 end
 
+# A target of a package that says nothing of devices.
+struct Unplaced <: C.Target end
+
 @testset "a target that does not plan across devices refuses them" begin
     @test C.plans_across_devices(T.CPUTarget())
-    @test !C.plans_across_devices(T.CUDATarget())
+    @test C.plans_across_devices(T.CUDATarget())
+    @test !C.plans_across_devices(Unplaced())
     x = (Labelled(rand(Float32, 3), 0), Labelled(rand(Float32, 3), 1))
-    @test_throws "a program over several devices is not planned yet" C.refuse_devices(T.CUDATarget(), x, C.input_paths)
+    @test_throws "a program over several devices is not planned yet" C.refuse_devices(Unplaced(), x, C.input_paths)
 end
 
 # The fuzzer's cases, as shrunk, that placing on two devices failed:
