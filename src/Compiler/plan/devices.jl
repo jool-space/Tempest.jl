@@ -29,13 +29,17 @@ function with_devices(graph::IndexGraph, arguments; pins = Dict{Int, Int}())
             devices[r] == here && continue
             through[r] = get!(crossed, (r, here)) do
                 source = graph.values[r]
-                add!(b, Crossed(Read(b.ids[r], identity_index(source.dims))), source.dims, source.eltype, source.scalar)
+                add!(b, moved(source.definition, b.ids, r, source.dims), source.dims, source.eltype, source.scalar)
             end
         end
         isempty(through) && return nothing
         add!(b, remap(v.definition, Rerouted(b.ids, through)), v.dims, v.eltype, v.scalar)
     end)
 end
+
+# What value `r` is on another device than its own: a crossing, a copy of
+# it; or, made from nothing another value holds, made there again.
+moved(d::Definition, ids, r, dims) = made_anywhere(d) ? remap(d, ids) : Crossed(Read(ids[r], identity_index(dims)))
 
 # The new ids of a reader's operands: a value it reads across devices, its
 # crossing's.
@@ -50,28 +54,140 @@ Base.getindex(r::Rerouted, v::Int) = get(r.through, v, r.ids[v])
     assigned_devices(graph, arguments, pins) -> Vector{Int}
 
 The device of each value of `graph`, by label: an argument's is
-`arguments[k]`, and a value in `pins` is on the device it names. Any other
-value is on the device of what it reads, and where that is on several, of
-the value it reads with the most bytes, the latest of those alike; one that
-reads nothing is on device 1. A first rule, local to each value: where a
-model's layers are on two devices, it copies across both an activation and
-the values computed from it that the next layer reads, where a minimum cut
-of bytes would copy the activation alone.
+`arguments[k]`, a value in `pins` is on the device it names, and the rest are
+placed by a minimum cut of bytes, so that as little as can be is copied
+between devices. Each value is a net joining it to the values that read it,
+of its bytes, cut where they are not all on one device: a value read on
+another device is copied there once, however many read it there, and in
+either direction, which Lawler's construction makes exact for two devices.
+A recurrence's cycle is one vertex, its values computed step by step
+together on one device. A value made from nothing another holds is no net
+(see `made_anywhere`): made again on each device that reads it, it is on
+its first reader's. Of minimum cuts alike, the one with most on the lower
+device. Over more than two devices, each device is cut against those after
+it in turn, an approximation: a value one cut leaves on a device and two
+later devices read is copied twice and charged once.
 """
 function assigned_devices(graph::IndexGraph, arguments, pins)
-    devices = ones(Int, length(graph.values))
-    for (id, v) in enumerate(graph.values)
-        d = v.definition
-        devices[id] = haskey(pins, id) ? pins[id] : d isa Input ? arguments[d.argument] : read_device(graph, devices, id)
+    values = graph.values
+    # A program on one device has nothing to place.
+    all(==(1), arguments) && all(==(1), Base.values(pins)) && return ones(Int, length(values))
+    home = recurrence_vertices(graph)
+    anywhere = [made_anywhere(v.definition) for v in values]
+    vertices = [v for v in eachindex(values) if home[v] == v && !anywhere[v]]
+    required = required_devices(graph, arguments, pins, home)
+    last_device = maximum(required; init = 1)
+    devices = zeros(Int, length(values))
+    users = value_readers(graph)
+    nets = [(value_bytes(values[v]), unique!(sort!([home[v]; [home[u] for u in users[v]]]))) for v in eachindex(values) if !anywhere[v]]
+    for d in 1:(last_device - 1)
+        cut_device!(devices, vertices, required, nets, d)
+    end
+    for v in vertices
+        devices[v] == 0 && (devices[v] = last_device)
+    end
+    for v in eachindex(values)
+        anywhere[v] || (devices[v] = devices[home[v]])
+    end
+    for v in eachindex(values)
+        anywhere[v] || continue
+        devices[v] = haskey(pins, v) ? pins[v] : isempty(users[v]) ? 1 : devices[first(users[v])]
     end
     devices
 end
 
-function read_device(graph, devices, id)
-    read = [r for o in operands(graph.values[id].definition) for r in read_values(o)]
-    isempty(read) && return 1
-    devices[argmax(r -> (value_bytes(graph.values[r]), r), read)]
+# Places on device `d` the vertices not placed yet that a minimum cut puts on
+# its side, against the devices after it: those required on `d` are joined to
+# the source and those required on a later one to the sink, with infinite
+# capacity, and each net is a pair of vertices of its own, `inside` and
+# `outside`, an edge of its bytes between them, every vertex of the net
+# joined to `inside` and from `outside` with infinite capacity, so that a
+# cut separating any two of its vertices crosses that edge, and only it.
+function cut_device!(devices, vertices, required, nets, d)
+    n = length(devices)
+    source, sink = n + 2length(nets) + 1, n + 2length(nets) + 2
+    flow = Flow(sink)
+    for v in vertices
+        devices[v] == 0 && required[v] != 0 || continue
+        required[v] == d ? edge!(flow, source, v, Inf) : edge!(flow, v, sink, Inf)
+    end
+    for (k, (bytes, net)) in enumerate(nets)
+        open = filter(v -> devices[v] == 0, net)
+        length(open) > 1 || continue
+        inside, outside = n + 2k - 1, n + 2k
+        edge!(flow, inside, outside, Float64(bytes))
+        for v in open
+            edge!(flow, v, inside, Inf)
+            edge!(flow, outside, v, Inf)
+        end
+    end
+    maxflow!(flow, source, sink)
+    later = reaching(flow, sink)
+    for v in vertices
+        devices[v] == 0 && !later[v] && (devices[v] = d)
+    end
 end
+
+# The vertex each value is placed as: the first value of its recurrence's
+# cycle for each value of the cycle, which the cycle's states read back from
+# a value after them and so compute step by step together, and itself
+# otherwise. Cycles that share a value are one vertex.
+function recurrence_vertices(graph)
+    home = collect(eachindex(graph.values))
+    root(v) = home[v] == v ? v : root(home[v])
+    for cycle in recurrences(graph)
+        members = [cycle.states; cycle.from; cycle.values]
+        head = minimum(root, members)
+        foreach(m -> home[root(m)] = head, members)
+    end
+    map(root, home)
+end
+
+# The device each vertex is required on, zero where it may be on any: an
+# argument's, or the one `pins` names for a value. Two requirements of one
+# vertex that differ cannot both be met, and are refused.
+function required_devices(graph, arguments, pins, home)
+    required = zeros(Int, length(graph.values))
+    whose = zeros(Int, length(graph.values))
+    for (v, val) in enumerate(graph.values)
+        d = val.definition
+        for device in (d isa Input ? arguments[d.argument] : 0, get(pins, v, 0))
+            device == 0 && continue
+            h = home[v]
+            required[h] == 0 || required[h] == device ||
+                throw(ArgumentError(string("value %", v, " must be on device ", device, " and value %", whose[h], " on device ", required[h], ", but ",
+                    whose[h] == v ? "they are one value" : "they are of one recurrence, computed on one device",
+                    ": an argument is on its device, and a result that replaces one on that one's")))
+            required[h] = device
+            whose[h] = v
+        end
+    end
+    required
+end
+
+# The values reading each value, in order: through its operands, the values
+# their positions gather from too.
+function value_readers(graph)
+    users = [Int[] for _ in graph.values]
+    for (u, v) in enumerate(graph.values), o in operands(v.definition), r in read_values(o)
+        isempty(users[r]) || last(users[r]) != u || continue
+        push!(users[r], u)
+    end
+    users
+end
+
+"""
+    made_anywhere(definition) -> Bool
+
+Whether a value is made from nothing another value holds: a constant, or a
+function of positions and literals. It is made again on each device that
+reads it, where a copy across would move it on every call: a constant is put
+on each device that reads it once, before the first call. An argument is the
+caller's, on its device, and a recurrence's state reads what it is carried
+from, which `operands` leaves out.
+"""
+made_anywhere(d::Definition) = all(o -> isempty(read_values(o)), operands(d))
+made_anywhere(::Union{Input, Carried, Crossed}) = false
 
 "Whether value `v` of `graph` is read across devices: a crossing's copy."
 crossing(graph, v) = graph.values[v].definition isa Crossed

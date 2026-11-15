@@ -30,12 +30,37 @@ function placed_model(T; blocks = 4, width = 16, tokens = 32)
     (ws, randn(rng, T, width, tokens), randn(rng, T, width, tokens))
 end
 
-# The same arrays labelled: the first half's weights and the input on device
-# 0, the second half's weights and the target on device 1.
-function labelled_model(ws, x, t)
-    half = length(ws) ÷ 2
-    on(d) = w -> map(a -> Labelled(a, d), w)
-    ((map(on(0), ws[1:half])..., map(on(1), ws[(half + 1):end])...), Labelled(x, 0), Labelled(t, 1))
+# The same arrays labelled, the blocks' weights in `devices` runs of blocks
+# alike, the first run's on device 0 with the input, the last's with the
+# target: for two, the first half's weights on 0 and the second half's on 1.
+function labelled_model(ws, x, t; devices = 2)
+    run(k) = (k - 1) * devices ÷ length(ws)
+    (Tuple(map(a -> Labelled(a, run(k)), w) for (k, w) in enumerate(ws)), Labelled(x, 0), Labelled(t, devices - 1))
 end
 
 crossings(p) = count(g -> g.kind isa C.CrossingKind, p.groups)
+
+# The crossings of plan `p`, each as the bytes it copies.
+crossed_bytes(p) = [C.value_bytes(p.graph.values[only(g.outputs)]) for g in p.groups if g.kind isa C.CrossingKind]
+
+# Each gradient a program of `withgradient` returns, paired with the argument
+# it is the gradient of: its output's `grad` is in the inputs' structure,
+# result numbers where the input has an argument's.
+function gradient_pairs(program)
+    pairs = Pair{Int, Int}[]
+    pair!(g::Int, a::Int) = push!(pairs, g => a)
+    pair!(g::Tuple, a::Tuple) = foreach(pair!, g, a)
+    pair!(g, a) = nothing
+    pair!(program.output_structure.grad, program.input_structure)
+    pairs
+end
+
+# How many gradients plan `p` of the program `program` of `withgradient`
+# returns on another device than their argument's.
+function gradients_off(p, program)
+    graph = p.graph
+    count(gradient_pairs(program)) do (r, a)
+        result = graph.results[r]
+        result isa C.Read && graph.devices[result.value] != graph.devices[graph.arguments[a]]
+    end
+end

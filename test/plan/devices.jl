@@ -18,25 +18,75 @@ function invalid_by(f)
     end
 end
 
-@testset "the placed model planned over two devices, $T" for T in (Float32, Float64)
-    ws, x, t = placed_model(T)
-    for (f, args, crossed) in ((placed_half, (ws, x), 2), (placed_step, (ws, x, t), 5))
+@testset "the placed model planned over $n devices, $T" for T in (Float32, Float64), n in (2, 3)
+    ws, x, t = placed_model(T; blocks = 2n)
+    for (f, args) in ((placed_half, (ws, x)), (placed_step, (ws, x, t)))
         program = trace(f, args...)
-        labels = C.argument_devices(program, labelled_model(ws, x, t)[1:length(args)])
+        labels = C.argument_devices(program, labelled_model(ws, x, t; devices = n)[1:length(args)])
         p = C.verify(placed_plan(f, args, labels))
         whole = C.plan(C.rewrite(C.lower(program)))
         @test C.execute(p, args...) == C.execute(whole, args...)
         q, _, s = C.storage(p)
         @test C.verify(q, s) === q
-        # The rule copies the activation and its norm, which the next block
-        # reads, to the second device, and in the step the norm's sums too
-        # and two gradients back: a minimum cut copies the activation alone,
-        # once each way.
-        @test crossings(p) == crossed
-        @test_broken crossings(p) == (f === placed_half ? 1 : 2)
-        @test occursin("on device 2", sprint(C.explain, p))
+        # A minimum cut copies the activation alone where the weights change
+        # device, forward and, in the step, its gradient back: no value
+        # between two runs of blocks is smaller, a block's norm reading it
+        # whole and its residual adding it.
+        @test crossed_bytes(p) == fill(sizeof(x), f === placed_half ? n - 1 : 2(n - 1))
+        @test occursin("on device $n", sprint(C.explain, p))
         @test occursin(r"crossing over \(16, 32\) on device 2, reads %\d+\n  copies %\d+ \w+\(16, 32\) on device 1", sprint(C.explain, p))
+        # The gradient of each argument, the target's too, is computed where
+        # the argument is, by the cut alone.
+        f === placed_step && @test gradients_off(p, program) == 0
     end
+end
+
+@testset "placement is a minimum cut of bytes" begin
+    # A sum of a product added to an array of the second device: copying the
+    # sum's 3 numbers there costs less than copying the 4×3 factor of the
+    # first, or the 5×3 addend the other way.
+    f(a, b, c) = sum(a .* b; dims = 1) .+ c
+    args = (rand(Float32, 4, 3), rand(Float32, 1, 3), rand(Float32, 5, 3))
+    p = C.verify(placed_plan(f, args, [1, 1, 2]))
+    @test crossed_bytes(p) == [12]
+    # A value read on the other device is copied once, however many read it there.
+    g(a, b) = sum(abs2, a; dims = 1) .* b .+ sum(a; dims = 1) .* b
+    p = C.verify(placed_plan(g, (rand(Float32, 4, 3), rand(Float32, 1, 3)), [2, 1]))
+    @test length(crossed_bytes(p)) == 1
+    # The same program and labels place alike.
+    @test placed_plan(g, (rand(Float32, 4, 3), rand(Float32, 1, 3)), [2, 1]).graph.devices == p.graph.devices
+end
+
+@testset "a constant is made on each device that reads it" begin
+    w = rand(Float32, 3, 3)
+    f(a, b) = sum(w * a) + sum(w * b)
+    args = (rand(Float32, 3, 2), rand(Float32, 3, 2))
+    p = C.verify(placed_plan(f, args, [1, 2]))
+    constants = [v for v in eachindex(p.graph.values) if p.graph.values[v].definition isa C.ConstantArray]
+    @test sort(p.graph.devices[constants]) == [1, 2]
+    @test all(v -> !(p.graph.values[v].definition isa C.ConstantArray), (p.graph.values[c].definition.operand.value for c in eachindex(p.graph.values) if C.crossing(p.graph, c)))
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
+end
+
+@testset "a recurrence's cycle is on one device" begin
+    cell(Wh, xs, h0) = sum(last(accumulate((h, x) -> tanh.(transpose(Wh) * h .+ x), eachslice(xs; dims = 2); init = h0)))
+    args = (rand(Float32, 4, 4), rand(Float32, 4, 6), rand(Float32, 4))
+    for labels in ([1, 2, 2], [2, 1, 2], [2, 2, 1])
+        program = trace(cell, args...)
+        p = C.verify(placed_plan(cell, args, labels))
+        @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
+        step = trace((xs...) -> T.withgradient(cell, xs...), args...)
+        graph = C.rewrite(C.lower(step))
+        q = C.verify(C.plan(C.with_devices(graph, labels)))
+        @test C.execute(q, args...) == C.execute(C.plan(graph), args...)
+    end
+end
+
+@testset "two requirements of one value that differ are refused" begin
+    f(a, b) = a .+ b
+    graph = C.rewrite(C.lower(trace(f, rand(Float32, 3), rand(Float32, 3))))
+    input = only(v for v in eachindex(graph.values) if graph.values[v].definition == C.Input(2))
+    @test_throws "must be on device 1 and value %$input on device 2" C.with_devices(graph, [1, 2]; pins = Dict(input => 1))
 end
 
 @testset "a program on one device plans as it did" begin

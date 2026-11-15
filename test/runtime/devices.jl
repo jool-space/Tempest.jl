@@ -10,7 +10,7 @@ include("../fixtures/devices.jl")
         program = trace(f, args...)
         whole = prepare(program, args...; target = T.CPUTarget(), verify = true)
         placed = prepare(program, labelled...; target = T.CPUTarget(), verify = true)
-        @test crossings(placed.plan) > 0
+        @test crossed_bytes(placed.plan) == fill(sizeof(x), f === placed_half ? 1 : 2)
         execute!(whole)
         execute!(placed)
         @test map(copy, C.leaves(outputs(placed))) == map(copy, C.leaves(outputs(whole)))
