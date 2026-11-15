@@ -45,6 +45,33 @@ end
 towers_loss(wa, xa, ta, wb, xb, tb) = placed_loss(wa, xa, ta) + placed_loss(wb, xb, tb)
 towers_step(wa, xa, ta, wb, xb, tb) = Tempest.withgradient(towers_loss, wa, xa, ta, wb, xb, tb)
 
+# Data parallelism by hand, the trial's shards.jl at any size: a replica of
+# the weights on each of two devices and a shard of the batch beside each,
+# the loss the mean of the shards', the replicas' gradients summed and a
+# step of SGD written into both replicas.
+shards_loss(wa, wb, xa, ta, xb, tb) = (placed_loss(wa, xa, ta) + placed_loss(wb, xb, tb)) / 2
+function shards_sgd!(wa, wb, xa, ta, xb, tb)
+    l, (ga, gb) = Tempest.withgradient((a, b) -> shards_loss(a, b, xa, ta, xb, tb), wa, wb)
+    for (w, v, g, h) in zip(wa, wb, ga, gb), (p, q, r, s) in zip(w, v, g, h)
+        d = r .+ s
+        p .-= eltype(p)(0.01) .* d
+        q .-= eltype(q)(0.01) .* d
+    end
+    l
+end
+
+# The arrays of `shards_sgd!` for the placed model's weights, input and
+# target: the replicas and each half of the batch, all copies.
+function shards_of(ws, x, t)
+    half = size(x, 2) ÷ 2
+    replica() = map(w -> map(copy, w), ws)
+    (replica(), replica(), x[:, 1:half], t[:, 1:half], x[:, (half + 1):end], t[:, (half + 1):end])
+end
+
+# The same labelled, the first replica and shard on device 0, the second on 1.
+labelled_shards(wa, wb, xa, ta, xb, tb) = (map(w -> map(a -> Labelled(a, 0), w), wa), map(w -> map(a -> Labelled(a, 1), w), wb),
+    Labelled(xa, 0), Labelled(ta, 0), Labelled(xb, 1), Labelled(tb, 1))
+
 # A tower's arrays all on `device`.
 on_label(device, (ws, x, t)) = (map(w -> map(a -> Labelled(a, device), w), ws), Labelled(x, device), Labelled(t, device))
 

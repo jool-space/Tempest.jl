@@ -197,3 +197,41 @@ end
     end
     @test_broken refused(() -> prepare(program, a, a; target = T.CPUTarget(), by_reference = (1, 2)))
 end
+
+# Data parallelism, the trial's SGD step over two replicas: each crossing
+# starts once what it copies is written, runs beside both devices' kernels,
+# and holds back only what needs it.
+@testset "data parallelism: a crossing waits only for what it copies, and only what needs it waits for it" begin
+    ws, x, t = placed_model(Float32)
+    args = shards_of(ws, x, t)
+    ex = prepare(trace(shards_sgd!, args...), labelled_shards(args...)...; target = T.CPUTarget(), verify = true)
+    steps, touches = ex.steps, ex.touches
+    (; waits) = C.stream_schedule(steps, touches)
+    crossing = findall(C.crosses, steps)
+    lanes = unique(map(k -> C.stream_of(steps[k]), crossing))
+    @test Set(lanes) == Set([(0, 1), (1, 0)])
+    # The step before `k` that last wrote `key`, and the steps since that read it.
+    writer(k, key) = findlast(j -> key in touches[j].writes, 1:(k - 1))
+    users(k, key) = [j for j in something(writer(k, key), 0):(k - 1) if j > 0 && (key in touches[j].reads || key in touches[j].writes)]
+    for k in crossing
+        # What it copies, once written; and what its copy overwrites, once read.
+        sources = [writer(k, key) for key in touches[k].reads]
+        overwritten = reduce(vcat, [users(k, key) for key in touches[k].writes]; init = Int[])
+        @test waits[k] ⊆ filter(!isnothing, [sources; overwritten])
+        @test all(j -> !C.crosses(steps[j]), waits[k]) || all(j -> !isempty(intersect(touches[k].reads, touches[j].writes)), filter(j -> C.crosses(steps[j]), waits[k]))
+    end
+    # What waits for a crossing reads its copy, or writes over its source or its copy.
+    for j in eachindex(steps), k in waits[j]
+        C.crosses(steps[k]) || continue
+        reads_copy = !isempty(intersect(touches[j].reads, touches[k].writes))
+        overwrites = !isempty(intersect(touches[j].writes, union(touches[k].reads, touches[k].writes)))
+        @test reads_copy || overwrites
+    end
+    # A crossing waits for one the other way only where it copies what that one copied.
+    for j in crossing, k in waits[j]
+        C.stream_of(steps[k]) == reverse(C.stream_of(steps[j])) || continue
+        @test !isempty(intersect(touches[j].reads, touches[k].writes))
+    end
+    # And every two steps that touch one storage, one writing it, are ordered.
+    @test unordered(ex) == []
+end
