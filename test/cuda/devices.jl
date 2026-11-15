@@ -339,6 +339,21 @@ end
             expected = [whole(wa...) for _ in 1:5]
             @test all(k -> Array(got[k]) == Array(expected[k]), 1:5)
         end
+
+        @testset "a crossing of a span copies those bytes" begin
+            # Device 1 reads a middle range of six columns of `a`, three chunks
+            # of the staged copy, from a column three in: less than `b`, which
+            # computing on device 0 would copy instead.
+            n = 1 << 20
+            through(a, b) = a[:, 4:9] .* b
+            rng = Xoshiro(4)
+            a, b = randn(rng, Float32, n, 12), randn(rng, Float32, n, 6, 3)
+            placed = compile(through, on(0, a), on(1, b))
+            @test crossed_bytes(placed.executable.plan) == [sizeof(Float32) * n * 6]
+            @test occursin("from element $(3n) to %", sprint(C.explain, placed.executable))
+            whole = compile(through, on(0, a), on(0, b))
+            @test Array(placed(on(0, a), on(1, b))) == Array(whole(on(0, a), on(0, b)))
+        end
         @test task_device() == before
     end
 end

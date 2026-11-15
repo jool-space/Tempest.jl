@@ -124,9 +124,11 @@ end
 Carried(init, from, axis) = Carried(init, from, axis, false)
 
 """
-`operand`, an identity read, whose value lives on another device than what
-it reads: a crossing between devices, a copy (see `with_devices`). It is
-the one read that joins two devices: every other joins values on one.
+`operand`, whose value lives on another device than what it reads: a
+crossing between devices, a copy (see `with_devices`) of one span of what it
+reads in storage (see `storage_span`), all of it or a range of its last axis
+that is all its readers read. It is the one read that joins two devices:
+every other joins values on one.
 """
 struct Crossed <: Definition
     operand::Read
@@ -157,10 +159,19 @@ function dense_address(dims, index, d::Domain)
 end
 
 "Whether value `v` read at `index` over a reader of shape `dims` is its storage as it is."
-function reads_storage(v::Value, index, dims)
-    prod(v.dims; init = 1) == prod(dims; init = 1) || return false
+reads_storage(v::Value, index, dims) = prod(v.dims; init = 1) == prod(dims; init = 1) && storage_span(v, index, dims) == 0
+
+"""
+    storage_span(v, index, dims) -> Int or nothing
+
+Where value `v` read at `index` over a reader of shape `dims` is one span of
+its storage, the reader's elements in its own order: the elements of `v`
+before the span; nothing where the read is not one.
+"""
+function storage_span(v::Value, index, dims)
     d = Domain(dims)
-    dense_address(v.dims, index, d) == dense_address(dims, identity_index(dims), d)
+    offset = add(dense_address(v.dims, index, d), scale(dense_address(dims, identity_index(dims), d), -1), d)
+    isconstant(offset) ? offset.constant : nothing
 end
 
 # What `masked` finds of a graph's values: each value's mask (`of`), and what
@@ -219,6 +230,18 @@ operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempt
     (d.into === nothing ? () : (d.into,))...)
 
 reads(d::Definition) = (o for o in operands(d) if o isa Read)
+
+# The domain each operand of value `v` is read over, as `operands` lists them:
+# a fold's operand, and a fold by key's with its key's positions, over the
+# iteration, and every other over the value's own domain.
+operand_domains(v::Value) = operand_domains(v.definition, v)
+operand_domains(d::Definition, v::Value) = map(o -> domain(v), operands(d))
+operand_domains(d::Reduction, v::Value) = (Domain(d.iteration),)
+function operand_domains(d::Keyed, v::Value)
+    over = Domain(d.iteration)
+    keys = count(e -> !isempty(indirect_values(e)), d.key)
+    (over, ntuple(_ -> over, keys)..., (d.into === nothing ? () : (domain(v),))...)
+end
 
 # The values an operand reads: its own, and those its formulas gather from.
 gathered_values(o::Read) = indirect_values(o.index)

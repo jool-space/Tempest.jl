@@ -172,6 +172,9 @@ source_device(::CrossingKind, p::Plan, g::Group) = p.graph.devices[crossed_from(
 # The value crossing `c` copies.
 crossed_from(graph, c) = (graph.values[c].definition::Crossed).operand.value
 
+# The elements of the value crossing `c` copies before the span it copies.
+crossed_offset(graph, c) = storage_span(graph.values[crossed_from(graph, c)], (graph.values[c].definition::Crossed).operand.index, graph.values[c].dims)
+
 "Where group `g` keeps value `v`, which it computes, as the value's index over the domain; or nothing."
 placement(graph, g::Group, v) = placement(g.kind, graph, g, v)
 

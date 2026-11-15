@@ -83,6 +83,32 @@ end
     @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
 end
 
+# A crossing copies only the range of its source's last axis that its readers
+# read, one span of the source's storage: the remade sum of a middle range of
+# columns crosses those columns of each addend, and a product reading one
+# column of a matrix on another device crosses the column.
+@testset "a crossing copies the span its readers read" begin
+    f(a, b, c, d) = (s = c[:, 2:3] .+ d[:, 2:3]; x = copy(a); x[:, 2:3] .-= s; y = copy(b); y[:, 2:3] .-= s; (x, y))
+    args = Tuple(rand(Float32, 4, 5) for _ in 1:4)
+    p = C.verify(placed_plan(f, args, [1, 2, 1, 2]))
+    @test crossed_bytes(p) == [32, 32]
+    @test occursin("from element 4 to %", sprint(C.explain, p))
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
+    g(a, b) = a[:, 3] .* b
+    args = (rand(Float32, 4, 5), rand(Float32, 4, 100))
+    p = C.verify(placed_plan(g, args, [1, 2]))
+    @test crossed_bytes(p) == [16]
+    @test [p.graph.values[v].dims for v in eachindex(p.graph.values) if C.crossing(p.graph, v)] == [(4,)]
+    @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(g, args...)))), args...)
+    # A crossing of every other column is no one span, and is refused.
+    graph = C.with_devices(C.rewrite(C.lower(trace(f, (rand(Float32, 4, 5) for _ in 1:4)...))), [1, 2, 1, 2])
+    c = findfirst(v -> C.crossing(graph, v), eachindex(graph.values))
+    copied = graph.values[c]
+    strided = C.Read(copied.definition.operand.value, (C.IR.var(1), C.IR.scale(C.IR.var(2), 2)))
+    graph.values[c] = C.Value(C.Crossed(strided), copied.dims, copied.eltype, copied.scalar)
+    @test invalid_by(() -> C.verify(C.plan(graph))) == 5
+end
+
 # A sum of what several devices computed, which each of them reads, is
 # computed on each from the others' terms by the same arithmetic in the same
 # order; nothing crosses but the terms. The goal's spelling, over two and

@@ -54,6 +54,24 @@ result_leaves(r) = collect(C.leaves(r))
     end
 end
 
+# A crossing of a span copies those elements of its source's storage, and
+# its schedule orders it as a crossing of the whole: after what writes its
+# source and before what reads its copy.
+@testset "a crossing of a span run over two devices on the CPU" begin
+    f(a, b, c, d) = (s = c[:, 2:3] .+ d[:, 2:3]; x = copy(a); x[:, 2:3] .-= s; y = copy(b); y[:, 2:3] .-= s; (x, y))
+    g(a, b) = a[:, 3] .* b
+    for (h, args, labels) in ((f, Tuple(rand(Float32, 4, 5) for _ in 1:4), (0, 1, 0, 1)), (g, (rand(Float32, 4, 5), rand(Float32, 4, 100)), (0, 1)))
+        program = trace(h, args...)
+        whole = prepare(program, args...; target = T.CPUTarget(), verify = true)
+        placed = prepare(program, map(Labelled, args, labels)...; target = T.CPUTarget(), verify = true)
+        @test sum(crossed_bytes(placed.plan)) < sum(sizeof, args[[k for k in eachindex(args) if labels[k] == 1]])
+        execute!(whole)
+        execute!(placed)
+        @test leaf_copies(placed) == leaf_copies(whole)
+        @test unordered(placed) == []
+    end
+end
+
 # Data parallelism in its own spelling: each replica updated from its
 # gradients reduced on its own device stays its fellows' to the bit, and the
 # whole batch's on one device, the sums associating alike.
@@ -128,7 +146,7 @@ C.plans_across_devices(::Watched) = true
 C.on_device(f, t::Watched, device) = (push!(t.at, device); try f() finally pop!(t.at) end)
 C.allocate(t::Watched, T, n) = (note!(t, :allocate, T); Vector{T}(undef, n))
 C.upload(t::Watched, x) = (note!(t, :upload); x)
-C.crossing(t::Watched, to, from, values) = (note!(t, :crossing, values); Watching(C.Copy(to, from, values), t, values))
+C.crossing(t::Watched, to, from, values, offset) = (note!(t, :crossing, values); Watching(C.Copy(to, from, values, offset), t, values))
 C.floor_launch(t::Watched, k::C.ScalarKernel, args) = (note!(t, :build); Watching(C.floor_launch(T.CPUTarget(), k, args), t, nothing))
 C.capture(t::Watched, steps, keep) = (note!(t, :segment, [(s.step.from, s.step.device) for s in steps]); steps)
 

@@ -94,8 +94,10 @@ end
 function explain_members(io::IO, ::CrossingKind, p::Plan, g::Group)
     graph = p.graph
     c = only(g.outputs)
-    from = (graph.values[c].definition::Crossed).operand.value
-    println(io, "  copies ", describe_value(graph, from), " on device ", graph.devices[from], " to ", describe_value(graph, c),
+    from = crossed_from(graph, c)
+    # A span says where in the value's storage it starts.
+    span = value_bytes(graph.values[from]) == value_bytes(graph.values[c]) ? "" : string(" from element ", crossed_offset(graph, c))
+    println(io, "  copies ", describe_value(graph, from), " on device ", graph.devices[from], span, " to ", describe_value(graph, c),
         " on device ", graph.devices[c], ", ", Base.format_bytes(value_bytes(graph.values[c])))
 end
 

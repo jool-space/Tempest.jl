@@ -8,7 +8,10 @@
 # than what it is made from and spares a hop (see `remade_values`): a sum of
 # what several devices computed, which each of them reads, is computed on
 # each from the others' terms, one copy each way and none of the sum after
-# it. Devices are labels: the first
+# it. A crossing copies only the range of its source's last axis that its
+# readers read, one span of its storage (see `narrowed_crossings`): a slice
+# read across devices is copied, not what it is a slice of. Devices are
+# labels: the first
 # device the arguments are on is 1, the next 2, so that a plan and its
 # decisions do not depend on which of a machine's devices hold the arrays.
 
@@ -25,7 +28,8 @@ they are there in turn, by the same definition, so that each device computes
 it by the same arithmetic in the same order; a crossing is made wherever
 else a value is read on another device, one per value and device it is read
 on, shared by every reader there, made just before the first of them, a
-result's after the values.
+result's after the values, and copying only what they read of it (see
+`narrowed_crossings`).
 """
 function with_devices(graph::IndexGraph, arguments; pins = Pair{Int, Int}[])
     landing = result_devices(graph, pins)
@@ -60,7 +64,7 @@ function with_devices(graph::IndexGraph, arguments; pins = Pair{Int, Int}[])
         isempty(through) && return nothing
         add!(b, remap(v.definition, Rerouted(b.ids, through)), v.dims, v.eltype, v.scalar)
     end
-    landed(rebuilt, ids, graph.results, landing, devices, across!)
+    narrowed_crossings(landed(rebuilt, ids, graph.results, landing, devices, across!))
 end
 
 # The device each result is pinned to, by `pins`, zero for one that is not.
@@ -100,6 +104,83 @@ function landed(rebuilt, ids, results, landing, devices, across!)
     end
     IndexGraph(b.values, rebuilt.arguments, Operand[placed...], rebuilt.result_dims, rebuilt.result_scalar, rebuilt.result_eltype,
         rebuilt.rewrites, b.backward, b.devices)
+end
+
+"""
+    narrowed_crossings(graph) -> IndexGraph
+
+`graph`, placed, with each crossing copying only the range of its source's
+last axis that the values and results reading it read, where that is less
+than all of it: one span of the source's storage (see `storage_span`), its
+other axes whole, so that a value reading a slice of a value on another
+device has the slice copied rather than the whole. A crossing a formula
+gathers through, or a recurrence's state is carried from, is copied whole.
+Each value keeps its id: the crossing's extents and what it reads change,
+and its readers read it at their positions less where its range starts.
+"""
+function narrowed_crossings(graph::IndexGraph)
+    spans = crossing_spans(graph)
+    isempty(spans) && return graph
+    narrowed = Narrowed(spans)
+    values = map(enumerate(graph.values)) do (v, val)
+        haskey(spans, v) || return Value(remap(val.definition, narrowed), val.dims, val.eltype, val.scalar)
+        span = spans[v]
+        dims = length(span) == 1 ? val.dims[1:(end - 1)] : (val.dims[1:(end - 1)]..., length(span))
+        d = Domain(dims)
+        # The position of the whole that each position of the span is.
+        kept = ntuple(var, length(val.dims) - 1)
+        along = length(span) == 1 ? constant(first(span)) : add(var(length(val.dims)), first(span), d)
+        at = (kept..., along)
+        source = val.definition.operand
+        Value(Crossed(Read(source.value, map(e -> substitute(e, at, d), source.index))), dims, val.eltype, val.scalar)
+    end
+    IndexGraph(values, graph.arguments, Operand[remap(o, narrowed) for o in graph.results], graph.result_dims, graph.result_scalar,
+        graph.result_eltype, graph.rewrites, graph.backward, graph.devices)
+end
+
+# The range of its last axis each crossing's readers read, where that is less
+# than all of it: of each read, the range of its last formula over the domain
+# it is read over, a value's operand's or a result's.
+function crossing_spans(graph::IndexGraph)
+    values = graph.values
+    bounds = Dict{Int, Tuple{Int, Int}}()
+    whole = Set{Int}()
+    function reached!(o::Read, d::Domain)
+        union!(whole, gathered_values(o))
+        crossing(graph, o.value) && !isempty(o.index) || return
+        lo, hi = affine_range(last(o.index), d)
+        a, b = get(bounds, o.value, (lo, hi))
+        bounds[o.value] = (min(a, lo), max(b, hi))
+    end
+    reached!(o::Operand, d::Domain) = union!(whole, gathered_values(o))
+    for v in values
+        foreach(reached!, operands(v.definition), operand_domains(v))
+        v.definition isa Carried && union!(whole, read_values(v.definition.from))
+    end
+    foreach((o, dims) -> reached!(o, Domain(dims)), graph.results, graph.result_dims)
+    spans = Dict{Int, UnitRange{Int}}()
+    for (c, (lo, hi)) in bounds
+        span = max(lo, 0):min(hi, last(values[c].dims) - 1)
+        c in whole || length(span) == last(values[c].dims) || (spans[c] = span)
+    end
+    spans
+end
+
+# The crossings of a graph narrowed to the ranges `spans` gives, as their
+# readers read them: at their positions less where each range starts, the
+# last axis dropped where it holds one position. Every other value keeps its id.
+struct Narrowed
+    spans::Dict{Int, UnitRange{Int}}
+end
+
+Base.getindex(::Narrowed, v::Int) = v
+
+remap(o::Read, n::Narrowed) = haskey(n.spans, o.value) ? Read(o.value, within(o.index, n.spans[o.value])) : o
+
+function within(index, span)
+    length(span) == 1 && return index[1:(end - 1)]
+    e = last(index)
+    (index[1:(end - 1)]..., Affine(e.constant - first(span), e.terms))
 end
 
 """

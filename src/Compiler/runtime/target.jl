@@ -413,13 +413,17 @@ the task's stream wrote `x`. The CPU's run in order, and it does nothing.
 written(::Target, x) = nothing
 
 """
-    crossing(target, to, from, values) -> run
+    crossing(target, to, from, values, offset) -> run
 
-A step's run that copies buffer `from`, storage on one of `target`'s
-devices, into buffer `to`, storage on another, as large: how a value read
-on another device than its own gets there (see `Crossed`). `values` names
+A step's run that copies into buffer `to`, storage on another of `target`'s
+devices, as many elements of buffer `from`, storage on one, as `to` holds,
+those after the first `offset`: how a value read on another device than its
+own gets there (see `Crossed`), all of it at offset 0, or a span of it,
+which is all its readers there read (see `storage_span`). `values` names
 the two buffers, `to_value => from_value`, for the run to be pointed
-elsewhere as a `Copy` is (see `repoint!`). It is built with the task on
+elsewhere as a `Copy` is (see `repoint!`); the offset is the run's own,
+where in the source value's storage the span starts, kept as either buffer
+is replaced. It is built with the task on
 `to`'s device, and runs where its lane puts the task (see `on_stream`); each
 buffer knows its own device. Its schedule orders it after what wrote its
 source and before what reads its copy (see `Schedule`). A target with graphs
@@ -427,7 +431,7 @@ says, as it records a run of crossings (see `capture`), whether the crossing
 is recorded or runs as the run is replayed. On the CPU, whose devices are
 labels on the host's memory, it is a copy on the host.
 """
-crossing(::CPUTarget, to, from, values::Pair{Int, Int}) = Copy(to, from, values)
+crossing(::CPUTarget, to, from, values::Pair{Int, Int}, offset::Int) = Copy(to, from, values, offset)
 
 ## Streams.
 

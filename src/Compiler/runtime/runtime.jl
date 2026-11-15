@@ -28,17 +28,24 @@ const Move = @NamedTuple{value::Int, from::UInt, to::UInt, bytes::UInt}
 
 """
 A step of an execution that copies one buffer into another: an input saved
-apart before the kernels, or a staged result into the argument it replaces
-after them. It repoints as a launch does (see `repoint!`), by the values it
-copies to and from, 0 for a buffer of no value.
+apart before the kernels, a staged result into the argument it replaces
+after them, or on the CPU a crossing (see `crossing`). It copies as many
+elements as `to` holds, from `from` after the first `offset`: all of it but
+for a crossing of a span. It repoints as a launch does (see `repoint!`), by
+the values it copies to and from, 0 for a buffer of no value, and keeps its
+offset, which is where in the value's storage the span starts, whatever
+buffer holds it.
 """
 mutable struct Copy
     to::Any
     from::Any
     const values::Pair{Int, Int}
+    const offset::Int
 end
 
-(c::Copy)() = (copyto!(c.to, c.from); nothing)
+Copy(to, from, values) = Copy(to, from, values, 0)
+
+(c::Copy)() = (copyto!(c.to, 1, c.from, c.offset + 1, length(c.to)); nothing)
 
 repoints(::Copy) = true
 
@@ -1298,7 +1305,7 @@ floor_run(::GroupKind, target, p::Plan, g::Group, buffers) = build_floor(target,
 function floor_run(::CrossingKind, target, p::Plan, g::Group, buffers)
     c = only(g.outputs)
     from = crossed_from(p.graph, c)
-    (crossing(target, buffers[c], buffers[from], c => from), CrossingCopy(value_bytes(p.graph.values[c])))
+    (crossing(target, buffers[c], buffers[from], c => from, crossed_offset(p.graph, c)), CrossingCopy(value_bytes(p.graph.values[c])))
 end
 
 "A crossing as the target runs it: a copy of `bytes` between two devices."

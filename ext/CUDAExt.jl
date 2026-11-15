@@ -92,8 +92,9 @@ function Staging(bytes, from::Int)
 end
 
 """
-A crossing on CUDA's target: buffer `from` on one device copied into `to`
-on another through page-locked host memory, chunk by chunk, each chunk's
+A crossing on CUDA's target: buffer `from` on one device, from `offset`
+bytes in, copied into `to` on another, as many bytes as `to` holds, through
+page-locked host memory, chunk by chunk, each chunk's
 download on the lane's stream on the source and its upload on the lane's
 stream on the reader (see `Lane`), so that the copy runs beside both
 devices' kernels, and neither device waits for the host nor the host for
@@ -114,15 +115,17 @@ mutable struct Staged
     to_address::CUDACore.CuPtr{Cvoid}
     from_address::CUDACore.CuPtr{Cvoid}
     const values::Pair{Int, Int}
+    const offset::Int
     const staging::Staging
 end
 
 # The address of buffer `x`, taken with the task on its device.
 address(x) = CUDACore.device!(() -> reinterpret(CUDACore.CuPtr{Cvoid}, pointer(x)), Tempest.Compiler.device_of(x))
 
-function Tempest.Compiler.crossing(::CUDATarget, to, from, values::Pair{Int, Int})
-    sizeof(to) == sizeof(from) || throw(DimensionMismatch("a crossing copies $(sizeof(from)) bytes into $(sizeof(to))"))
-    Staged(to, from, address(to), address(from), values, Staging(sizeof(from), Tempest.Compiler.device_of(from)))
+function Tempest.Compiler.crossing(::CUDATarget, to, from, values::Pair{Int, Int}, offset::Int)
+    bytes = offset * sizeof(eltype(from))
+    bytes + sizeof(to) <= sizeof(from) || throw(DimensionMismatch("a crossing copies $(sizeof(to)) bytes from $bytes bytes into a source of $(sizeof(from))"))
+    Staged(to, from, address(to), address(from), values, bytes, Staging(sizeof(to), Tempest.Compiler.device_of(from)))
 end
 
 Tempest.Compiler.Implement.repoints(::Staged) = true
@@ -144,14 +147,14 @@ end
 # the reader's for the uploads.
 function (c::Staged)()
     s = c.staging
-    bytes = sizeof(c.from)
+    bytes = sizeof(c.to)
     for (i, at) in enumerate(0:CHUNK:(bytes - 1))
         k = mod1(i, length(s.host))
         n = min(CHUNK, bytes - at)
         host = pointer(s.host[k])
         CUDACore.device!(Tempest.Compiler.device_of(c.from)) do
             CUDACore.wait(s.uploaded[k])
-            CUDACore.cuMemcpyDtoHAsync_v2(host, c.from_address + at, n, CUDACore.stream())
+            CUDACore.cuMemcpyDtoHAsync_v2(host, c.from_address + c.offset + at, n, CUDACore.stream())
             CUDACore.record(s.downloaded[k])
         end
         CUDACore.wait(s.downloaded[k])

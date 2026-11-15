@@ -75,7 +75,8 @@ Check the invariants the kernels of `plan` rely on, and throw an
     a `Stat` is a primary fold of the group complete in an earlier phase;
     and a fold a term recomputes is not a member of the group.
  5. Every read joins values on one device but a crossing's, which reads a
-    value on another device than its own; every member of a kernel, and
+    value on another device than its own, one span of its storage (see
+    `storage_span`); every member of a kernel, and
     every value it reads, is on its device, but a crossing's kernel's, whose
     one member is a crossing, reading its source (both stored, by 1); with
     `storage`, a slot holds values of one device, and a result that
@@ -113,6 +114,8 @@ function verify_devices(p::Plan, reads)
         d isa Carried && append!(joined, read_values(d.from))
         if d isa Crossed
             devices[d.operand.value] != devices[v] || invalid(5, "the crossing ", on(v), " reads ", on(d.operand.value), ", on its own device")
+            storage_span(graph.values[d.operand.value], d.operand.index, val.dims) === nothing &&
+                invalid(5, "the crossing ", on(v), " reads ", on(d.operand.value), " other than as one span of its storage")
             continue
         end
         for r in joined
