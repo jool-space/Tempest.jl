@@ -79,8 +79,14 @@ mutable struct Executable{T <: Target}
     # The steps of an execution, in order, each on its device: the inputs
     # saved, each launch, and the staged copies (see `walk`).
     steps::Vector{Step}
-    # The graph `execute!` replays, once captured (see `capture!`).
-    captured::Any
+    # What `replay!` runs, once captured (see `capture!`).
+    captured::Union{Nothing, Captured}
+    # The device each of the plan's labels stands for (see `Placement`), and
+    # each argument's and each result's, where a binding finds, binds and
+    # writes back the one and returns the other (see `on_each_device`).
+    devices::Vector{Union{Nothing, Int}}
+    argument_devices::Vector{Union{Nothing, Int}}
+    result_devices::Vector{Union{Nothing, Int}}
     # Per argument whose storage can be the caller's array (see `point!`):
     # where the storage is used; nothing for one copied. And per such
     # argument, its storage: its buffer, or the caller's array it was
@@ -215,7 +221,7 @@ function prepare(program::Program, @nospecialize(inputs...); target = default_ta
         replaces = (), by_reference = (), point::Bool = false, recompute = (), ride = (), partition::Bool = true, build::Bool = true,
         verify::Bool = verifying())
     refuse_devices(target, inputs, input_paths)
-    s = setup(program; target, devices = argument_devices(program, inputs), measure, replaces, recompute, ride, partition, build)
+    s = setup(program; target, placement = argument_devices(target, program, inputs), measure, replaces, recompute, ride, partition, build)
     prepared(s, decide!(s; verify), inputs...; by_reference, point, verify)
 end
 
@@ -238,7 +244,8 @@ in_tables(f, t::Tables) = Base.ScopedValues.with(f, IR.INTERNED => t.interned, M
 A preparation set up, before it decides: the program, its decider as
 `prepare` makes it, on the program's index graph lowered and rewritten with
 the folds pinned, kept and riding, the results paired with the arguments
-they replace, the value of each argument, whether it builds, and its tables.
+they replace, the value of each argument, whether it builds, its tables,
+and the device each label of its plan stands for (see `Placement`).
 `decide!` reaches its decisions and `prepared` builds them.
 """
 struct Setup{D}
@@ -248,6 +255,7 @@ struct Setup{D}
     input::Dict{Int, Int}
     build::Bool
     tables::Tables
+    devices::Vector{Union{Nothing, Int}}
 end
 
 # `f()` as preparation `s` runs it: within its tables, building as it does
@@ -261,15 +269,15 @@ function running(f, s::Setup, verify)
 end
 
 """
-    setup(program; target, devices, measure, replaces, recompute, ride, partition, build) -> Setup
+    setup(program; target, placement, measure, replaces, recompute, ride, partition, build) -> Setup
 
 `program` set up as `prepare` sets it up, the keywords as `prepare` takes
-them, `devices` the label of each argument's device (see
-`argument_devices`), all on one by default: lowered, rewritten, placed
+them, `placement` where its arguments are (see `Placement`), all at home
+by default: lowered, rewritten, placed
 (see `with_devices`) and partitioned, with its decider, and with tables
 of its own (see `Tables`), which `decide!`, `given` and `prepared` fill.
 """
-function setup(program::Program; target, devices = ones(Int, length(program.arguments)), measure = measuring(), replaces = (),
+function setup(program::Program; target, placement = Placement(target, program), measure = measuring(), replaces = (),
         recompute = (), ride = (), partition::Bool = true, build::Bool = true)
     tables = Tables()
     in_tables(tables) do
@@ -279,8 +287,8 @@ function setup(program::Program; target, devices = ones(Int, length(program.argu
         pairs = replacements(program, replaces)
         # A result that replaces an argument is written where the argument
         # lives, and a gradient of one returned there.
-        pins = [k => devices[a] for (k, a) in [pairs; program.gradients]]
-        graph = phase(() -> with_devices(rewritten, devices; pins), :place)
+        pins = [k => placement.labels[a] for (k, a) in [pairs; program.gradients]]
+        graph = phase(() -> with_devices(rewritten, placement.labels; pins), :place)
         input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
         pinned = Set{Int}(recompute)
         # A value reading an argument a result replaces is not recomputed:
@@ -311,7 +319,7 @@ function setup(program::Program; target, devices = ones(Int, length(program.argu
             union!(pinned, recomputed)
         end
         d = phase(() -> Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride), :decider)
-        Setup(program, d, collect(Pair{Int, Int}, pairs), input, build, tables)
+        Setup(program, d, collect(Pair{Int, Int}, pairs), input, build, tables, placement.devices)
     end
 end
 
@@ -410,17 +418,25 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     ds = ds[order]
     VERIFYING[] && verify(p, s; in_place = k -> writes_in_place(ds[k]))
     clock = lap!(:verify, clock)
+    n = length(program.arguments)
+    # Each value on the device its label stands for, each argument on its
+    # value's, an argument the program does not read at home, and each
+    # result on its value's. What is made for a value, a slot, a buffer or
+    # a group's launches, is made with the task on its device.
+    devices = prep.devices
+    device(v) = devices[p.graph.devices[v]]
+    on(f, v) = on_device(f, target, device(v))
+    argument_devices = Union{Nothing, Int}[haskey(input, k) ? device(input[k]) : devices[1] for k in 1:n]
+    result_devices = Union{Nothing, Int}[device(result_value(k)) for k in eachindex(p.graph.results)]
     if !build
         none(n) = Vector{Any}(nothing, n)
         return Executable(program, p, target, s, Any[], none(length(values)),
-            none(length(program.arguments)), none(length(program.arguments)), none(length(p.graph.results)), nothing,
+            none(n), none(n), none(length(p.graph.results)), nothing,
             Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], Step[], nothing,
-            Vector{Union{Nothing, Uses}}(nothing, length(program.arguments)), none(length(program.arguments)),
-            zeros(UInt, length(program.arguments)), zeros(UInt, length(program.arguments)), fill(false, length(program.arguments)),
-            none(length(program.arguments)), 1, false, reached)
+            devices, argument_devices, result_devices, Vector{Union{Nothing, Uses}}(nothing, n), none(n),
+            zeros(UInt, n), zeros(UInt, n), fill(false, n), none(n), 1, false, reached)
     end
-    slots = Any[allocate(target, UInt8, bytes) for bytes in s.sizes]
-    n = length(program.arguments)
+    slots = Any[on_device(() -> allocate(target, UInt8, bytes), target, devices[s.devices[k]]) for (k, bytes) in enumerate(s.sizes)]
     referenced = Vector{Any}(nothing, n)
     xs = argument_leaves(program, inputs)
     for j in by_reference, k in leaves(program.input_structure[j])
@@ -442,14 +458,14 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     # it, and the launches read it as a vector.
     arguments = Vector{Any}(nothing, n)
     pointed = Vector{Any}(nothing, n)
-    own(k) = (v = values[input[k]]; allocate(target, v.eltype, storage_length(v)))
+    own(k) = (v = values[input[k]]; on(() -> allocate(target, v.eltype, storage_length(v)), input[k]))
     for (k, id) in input
         x, v = xs[k], values[id]
         if referenced[k] !== nothing
             bindable(target, x) && eltype(x) === v.eltype && length(x) == storage_length(v) ||
                 throw(ArgumentError("input $k is bound by reference, but $(typeof(x)) is not storage on $target"))
             arguments[k] = pointed[k] = vec(x)
-        elseif point && pointable(target, x, address_of(x)) && eltype(x) === v.eltype && length(x) == storage_length(v)
+        elseif point && on(() -> pointable(target, x, address_of(x)), id) && eltype(x) === v.eltype && length(x) == storage_length(v)
             pointed[k] = x
         else
             arguments[k] = pointed[k] = own(k)
@@ -460,13 +476,14 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
         root[id] == id || continue
         def = v.definition
         if def isa ConstantArray
-            # Uploaded already if a claim was measured.
-            buffers[id] = get(d.buffers, id, nothing)
-            buffers[id] === nothing && (buffers[id] = upload(target, vec(collect(def.data))))
+            # Uploaded already if a claim was measured: the decider times
+            # at home. A constant read on several devices is a value on each.
+            buffers[id] = p.graph.devices[id] == 1 ? get(d.buffers, id, nothing) : nothing
+            buffers[id] === nothing && (buffers[id] = on(() -> upload(target, vec(collect(def.data))), id))
         elseif s.slots[id] > 0
             buffers[id] = slot_view(slots[s.slots[id]], v.eltype, storage_length(v))
         elseif p.stored[id] && !(def isa Input)
-            buffers[id] = allocate(target, v.eltype, storage_length(v))
+            buffers[id] = on(() -> allocate(target, v.eltype, storage_length(v)), id)
         end
     end
     # The values over an argument's storage take it, the others their root's.
@@ -479,12 +496,14 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     end
     share!(buffers)
     # One buffer per input saved, however many results are it.
-    befores = Dict(v => allocate(target, values[v].eltype, storage_length(values[v])) for v in unique(Base.values(saved)))
+    befores = Dict(v => on(() -> allocate(target, values[v].eltype, storage_length(values[v])), v) for v in unique(Base.values(saved)))
     replaced = Dict(pairs)
-    # What its launches share and nothing else uses (see `Resources`), made
-    # as the first that needs it is built; the launches hold it.
-    resources = Resources(target)
-    build() = concurrently(((g, x),) -> build_group(d, p, g, x, buffers, resources), collect(zip(p.groups, ds)), target)
+    # What its launches share and nothing else uses (see `Resources`), per
+    # device, made as the first that needs it is built; the launches hold it.
+    # Each group is built on its device.
+    resources = [Resources(target) for _ in devices]
+    built_on(g, x) = on_device(() -> build_group(d, p, g, x, buffers, resources[group_device(p, g)]), target, devices[group_device(p, g)])
+    build() = concurrently(((g, x),) -> built_on(g, x), collect(zip(p.groups, ds)), target)
     built = build()
     # An argument's storage, read or written, can be the caller's array when
     # every launch can be pointed elsewhere, unless the caller's array is the
@@ -501,9 +520,12 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     launches = Any[b[1] for b in built]
     saves = Any[(argument = values[v].definition.argument, before = b, copy = Copy(b, buffers[v], 0 => v)) for (v, b) in befores]
     copies = Copy[Copy(buffers[a], buffers[r], a => r) for (r, a) in s.staged]
-    # Every step on the target's device: a program is planned on one.
-    device = device_of(target)
-    steps = Step[Step(run, device) for run in Any[(save.copy for save in saves)..., launches..., copies...]]
+    # Each step on its device: an input saved on the input's, a launch on its
+    # group's, reading from the device its group reads from, another for a
+    # crossing (see `source_device`), and a staged result on its argument's.
+    steps = Step[Step(save.copy, device(last(save.copy.values))) for save in saves]
+    append!(steps, Step(l, devices[group_device(p, g)], devices[source_device(p, g)]) for (l, g) in zip(launches, p.groups))
+    append!(steps, Step(c, device(first(c.values))) for c in copies)
     stored(k) = haskey(replaced, k) ? vec(pointed[replaced[k]]) : haskey(saved, k) ? befores[saved[k]] : buffers[result_value(k)]
     results = Any[reshape(stored(k), p.graph.result_scalar[k] ? () : p.graph.result_dims[k]) for k in eachindex(p.graph.results)]
     # Where each pointable argument's storage is used: the steps that use
@@ -530,8 +552,8 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     at = UInt[x === nothing ? 0 : address_of(x) for x in pointed]
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, kept, arguments, referenced, results, outputs_over(program, results),
-        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, nothing, used, pointed, at, zeros(UInt, n),
-        fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
+        launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, nothing,
+        devices, argument_devices, result_devices, used, pointed, at, zeros(UInt, n), fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
 end
 
 # The address of array `x`'s first element, as a number, as `pointer` gives
@@ -658,31 +680,80 @@ julia> outputs(execute!(ex))
 function bind!(ex::Executable, @nospecialize(inputs...))
     runnable(ex)
     refuse_devices(ex.target, inputs, input_paths)
-    bind_leaves!(ex, leaves(ex.program.input_structure), leaves(inputs))
+    bind_leaves!(ex, leaves(ex.program.input_structure), leaves(inputs), () -> input_paths(inputs))
 end
 
 function bind!(ex::Executable, bindings::Pair{<:Integer}...)
     runnable(ex)
     refuse_devices(ex.target, map(last, bindings), _ -> binding_paths(bindings))
-    foreach(((j, x),) -> bind_leaves!(ex, leaves(ex.program.input_structure[j]), leaves(x)), bindings)
-    ex
+    positions, xs = Any[], Any[]
+    for (j, x) in bindings
+        here, given = leaves(ex.program.input_structure[j]), leaves(x)
+        length(here) == length(given) || throw(ArgumentError("expected $(length(here)) inputs, got $(length(given))"))
+        append!(positions, here)
+        append!(xs, given)
+    end
+    bind_leaves!(ex, positions, xs, () -> binding_paths(bindings))
 end
 
-bind_leaves!(ex, positions, xs) = on_device(() -> bind_each!(ex, positions, xs), ex.target)
-
-function bind_each!(ex, positions, xs)
+# Copy each of `xs` into the buffer of the argument at the same place among
+# `positions`, each on its argument's device; `paths()` names them, where
+# one is on another device than the program was prepared with it on.
+function bind_leaves!(ex, positions, xs, paths)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
-    moves = nothing
-    for (k, x) in zip(positions, xs)
-        k === nothing && continue
+    given = [j for j in eachindex(positions) if positions[j] !== nothing]
+    misplaced = [positions[j] for j in given if !read_on(ex.argument_devices[positions[j]], xs[j])]
+    isempty(misplaced) || refuse_placed(ex, positions, xs, misplaced, paths())
+    moves = Ref{Any}(nothing)
+    function bind_one(j)
+        k, x = positions[j], xs[j]
         ex.back[k] = nothing
-        x === ex.referenced[k] && continue
+        x === ex.referenced[k] && return
         own = own!(ex, k)
-        moves = point_at!(ex, k, own, moves)
+        moves[] = point_at!(ex, k, own, moves[])
         upload!(ex.target, own, vec(x))
     end
-    retarget!(ex, moves)
+    on_each_device(bind_one, j -> ex.argument_devices[positions[j]], ex.target, given)
+    retarget!(ex, moves[])
 end
+
+"""
+    on_each_device(f, device, target, items)
+
+`f(item)` for each of `items` with the calling task on its device,
+`device(item)`: the binding's counterpart to `walk`, which finds, binds and
+writes back a call's arguments and returns its results each on its own
+device, entering each device once, in the order their items first come,
+and each one's items in order. A call on one device enters it once.
+"""
+function on_each_device(f, device, target::Target, items)
+    isempty(items) && return nothing
+    home = device(first(items))
+    if all(x -> device(x) == home, items)
+        on_device(() -> foreach(f, items), target, home)
+        return nothing
+    end
+    entered = Union{Nothing, Int}[]
+    for x in items
+        d = device(x)
+        d in entered && continue
+        push!(entered, d)
+        on_device(() -> foreach(y -> device(y) == d && f(y), items), target, d)
+    end
+    nothing
+end
+
+# Throw for the arguments `misplaced`, on other devices than the program was
+# prepared with them on, naming each by its path among `paths`, as
+# `positions`, the arguments of the leaves `xs`, place them.
+function refuse_placed(ex, positions, xs, misplaced, paths)
+    held = [string(paths[j], " is on ", device_named(device_of(xs[j])), ", where the program was prepared with it on ",
+        device_named(ex.argument_devices[k])) for (j, k) in enumerate(positions) if k !== nothing && k in misplaced]
+    throw(ArgumentError(string("arrays are on other devices than the program was prepared with them on: ", join(held, "; "),
+        ". Bring each to its device, or prepare the program for where they are")))
+end
+
+device_named(d) = d === nothing ? "the host" : string("device ", d)
 
 """
     point!(ex, inputs...) -> ex
@@ -705,61 +776,83 @@ again is the caller's array only once the caller brings the same array twice
 in a row. The executable holds the arrays it reads and writes until it is
 bound again.
 """
-point!(ex::Executable, @nospecialize(inputs...)) = on_device(() -> point_each!(ex, bound(ex, inputs)), ex.target)
+point!(ex::Executable, @nospecialize(inputs...)) = point_each!(ex, bound(ex, inputs))
 
 """
 A call's arrays, one per argument of a program, each with where it lives:
 the address of its first element, as `pointer` gives it, 0 for an array
 without one, and the addresses its elements span (see `extent`). One walk of
-the call's leaves finds them, `compile`'s call checking each against its
-signature as it goes, and binding the call (`point!`) and finding memory it
-shares with an argument the program writes read them. The walk notes the
-arguments on another device than the target's, `device` (see `device_of`),
-and asks them no address: on a machine whose devices read each other's
-memory, asking would open the other's to the target's kernels.
+the call's leaves finds the arrays, `compile`'s call checking each against
+its signature as it goes, and notes those on another device than the plan
+put their argument on, `devices` (see `device_of`); the addresses are asked
+after, of each array on its device (see `located!`): on a machine whose
+devices read each other's memory, asking on another would open its memory
+to that device's kernels. Binding the call (`point!`) and finding memory it
+shares with an argument the program writes read them.
 """
 struct Passed
     arrays::Vector{Any}
     at::Vector{UInt}
     extents::Vector{Union{Nothing, UnitRange{UInt}}}
-    device::Union{Nothing, Int}
+    devices::Vector{Union{Nothing, Int}}
     elsewhere::Vector{Int}
 end
 
-Passed(n::Int, device) = Passed(Vector{Any}(nothing, n), zeros(UInt, n), Vector{Union{Nothing, UnitRange{UInt}}}(nothing, n), device, Int[])
+# The arrays of a call of `ex`, none found yet.
+Passed(ex::Executable) = (n = length(ex.argument_devices);
+    Passed(Vector{Any}(nothing, n), zeros(UInt, n), Vector{Union{Nothing, UnitRange{UInt}}}(nothing, n), ex.argument_devices, Int[]))
 
 # The arrays among `inputs`, given in the structure the program of `ex` was
-# traced with, bound to its arguments. Arrays on another device than its
-# target's throw.
+# traced with, bound to its arguments, their addresses found. Arrays on
+# other devices than the plan's throw.
 Base.@nospecializeinfer function bound(ex::Executable, @nospecialize(inputs))
     p = ex.program
     positions, xs = leaves(p.input_structure), leaves(inputs)
     length(positions) == length(xs) || throw(ArgumentError("expected $(length(positions)) inputs, got $(length(xs))"))
-    b = Passed(length(p.arguments), device_of(ex.target))
+    b = Passed(ex)
     for (k, x) in zip(positions, xs)
         k === nothing || place!(b, k, x)
     end
-    isempty(b.elsewhere) || refuse_devices(ex.target, inputs, input_paths)
+    isempty(b.elsewhere) || refuse_elsewhere(ex, b, positions, inputs, input_paths)
+    located!(b, ex)
+end
+
+# Array `x` as argument `k` of `b`, noted where it is on another device
+# than the plan put the argument on.
+function place!(b::Passed, k::Int, x)
+    b.arrays[k] = x
+    read_on(b.devices[k], x) || push!(b.elsewhere, k)
     b
 end
 
-# Array `x` as argument `k` of `b`: one call a leaf, specialized on the
-# leaf's type, which asks where it lives once.
-function place!(b::Passed, k::Int, x)
-    b.arrays[k] = x
-    read_on(b.device, x) || return (push!(b.elsewhere, k); b)
+# Throw for the arrays of `b` on other devices than the plan's, among
+# `inputs`, the arguments of whose leaves are `positions`: on a target that
+# plans on one device, as a program over several, not planned there (see
+# `refuse_devices`); else naming each and the device it belongs on.
+function refuse_elsewhere(ex, b::Passed, positions, @nospecialize(inputs), paths)
+    refuse_devices(ex.target, inputs, paths)
+    refuse_placed(ex, positions, leaves(inputs), b.elsewhere, paths(inputs))
+end
+
+# The addresses of the arrays of `b`, each asked on its argument's device.
+located!(b::Passed, ex::Executable) = (on_each_device(k -> locate!(b, k, b.arrays[k]), k -> b.devices[k], ex.target, eachindex(b.arrays)); b)
+
+# Where array `x`, argument `k` of `b`, lives: one call a leaf, specialized
+# on the leaf's type, which asks once.
+function locate!(b::Passed, k::Int, x)
     if x isa StridedArray
         at = reinterpret(UInt, pointer(x))
         b.at[k], b.extents[k] = at, extent(x, at)
     else
         b.extents[k] = extent(x)
     end
-    b
+    nothing
 end
 
-# Whether a target on `device` reads array `x`: an array on the host, which
-# it copies where it cannot be its storage, or on its device; the CPU's,
-# on no device, reads a device's arrays by copying them too.
+# Whether a program that put an argument on `device` reads array `x` there:
+# an array on the host, which is copied where it cannot be the storage, or
+# on that device; a program on the host's memory alone reads a device's
+# arrays by copying them too.
 read_on(device, x) = (d = device_of(x)) === nothing || device === nothing || d == device
 
 # Throw where the arrays among `inputs` and `target` are on more than one
@@ -812,15 +905,13 @@ function point_each!(ex::Executable, b::Passed)
     runnable(ex)
     xs = b.arrays
     length(xs) == length(ex.arguments) || throw(ArgumentError("expected $(length(ex.arguments)) arrays, got $(length(xs))"))
-    moves = nothing
-    for k in eachindex(xs)
-        moves = point_leaf!(ex, k, xs[k], b.at[k], moves)
-    end
+    moves = Ref{Any}(nothing)
+    on_each_device(k -> moves[] = point_leaf!(ex, k, xs[k], b.at[k], moves[]), k -> ex.argument_devices[k], ex.target, eachindex(xs))
     for (_, a) in ex.program.writes
         x = xs[a]
         ex.back[a] = x === ex.pointed[a] || x === ex.referenced[a] ? nothing : x
     end
-    retarget!(ex, moves)
+    retarget!(ex, moves[])
 end
 
 # Bind input `x`, whose first element is at `at`, to argument `k`, as
@@ -855,12 +946,10 @@ end
 # that is not its storage (see `point!`), an array not of the target's array
 # type, or not as aligned as its kernels assume, or one waiting to be brought
 # twice in a row, is copied into that array, from the storage it wrote, on
-# the target's device.
+# the argument's device.
 function write_back!(ex::Executable)
-    for (_, a) in ex.program.writes
-        x = ex.back[a]
-        x === nothing || on_device(() -> download!(ex.target, vec(x), ex.arguments[a]), ex.target)
-    end
+    back(a) = (x = ex.back[a]; x === nothing || download!(ex.target, vec(x), ex.arguments[a]))
+    on_each_device(back ∘ last, w -> ex.argument_devices[last(w)], ex.target, ex.program.writes)
     ex
 end
 
@@ -891,14 +980,17 @@ end
 # The results in the program's output structure, as `outputs` gives them.
 outputs_over(program, results) = rebuild(k -> k isa Int ? results[k] : constant_leaf(k), program.output_structure)
 
-# Point the steps at their new storage, and change the captured graph where
-# it records their addresses, step by step, or record it again where the
-# target cannot; an argument whose graph was recorded again waits from then
-# on to be brought twice in a row.
+# Point the steps at their new storage, and change the recording where it
+# records their addresses, step by step, each in its segment, or record the
+# segment again where the target cannot change it; a step a recording holds
+# in several segments, an execution over several devices repeated, is
+# recorded again in each. An argument whose segment was recorded again
+# waits from then on to be brought twice in a row.
 function retarget!(ex::Executable, moves)
     moves === nothing && return ex
     sort!(moves; by = first)
-    changed = true
+    r = ex.captured
+    stale = Set{Int}()
     start = 1
     while start <= length(moves)
         i = moves[start][1]
@@ -910,30 +1002,24 @@ function retarget!(ex::Executable, moves)
         # The step is pointed at the new storage once, by the target or after it.
         pointed = Ref(false)
         repoint() = pointed[] || (foreach(m -> repoint!(ex.steps[i].run, m[3].value, m[4]), mine); pointed[] = true)
-        if ex.captured === nothing
-            repoint()
-        elseif !on_graph(() -> retarget!(ex.target, ex.captured, collect(recorded_steps(ex, i)), [m[3] for m in mine], repoint), ex)
-            foreach(m -> ex.settles[m[2]] = true, mine)
-            changed = false
+        if r !== nothing
+            at = recorded_steps(ex, i)
+            held = unique(segment_at(r, j) for j in at)
+            segment = r.segments[first(held)]
+            changed = length(held) == 1 && on_device(ex.target, segment.device) do
+                retarget!(ex.target, segment.graph, collect(at .- (first(segment.steps) - 1)), [m[3] for m in mine], repoint)
+            end
+            if !changed
+                foreach(m -> ex.settles[m[2]] = true, mine)
+                union!(stale, held)
+            end
         end
         repoint()
         start = stop + 1
     end
-    changed || recapture!(ex)
+    foreach(k -> recapture_segment!(ex.target, r, r.segments[k], ex.steps), sort!(collect(stale)))
     ex
 end
-
-# Record the captured graph again, after its launches were pointed elsewhere.
-function recapture!(ex::Executable)
-    ex.captured === nothing && return ex
-    ex.captured = on_graph(() -> recapture(ex.target, ex.captured, recorded(ex), ex.steps), ex)
-    ex
-end
-
-# `f()` with the calling task on the device where an executable's graph is
-# made, launched and changed: its target's. Its steps run each on its own
-# device as the target records them (see `walk`).
-on_graph(f, ex::Executable) = on_device(f, ex.target)
 
 # What a graph records, step by step: each of the executions a replay runs.
 recorded(ex::Executable) = repeat(ex.steps, ex.repetitions)
@@ -961,8 +1047,10 @@ end
 """
     capture!(ex; repetitions = 1) -> ex
 
-Record what `execute!` launches as one graph, for `replay!` to run, each
-replay `repetitions` executions of the program (for timing). Recording runs
+Record what `execute!` launches, for `replay!` to run, each replay
+`repetitions` executions of the program (for timing): as one graph on one
+device, and over several as a graph per run of steps on one device, each
+crossing between them a step of its own (see `Captured`). Captured runs
 nothing. What varies between replays lives in device buffers: inputs bound by
 copy or by reference, scalars and seeds among them, are read where they are,
 so they need no new capture. Capturing again replaces the graph. On a target
@@ -977,12 +1065,16 @@ replay!(ex)                     # the same graph, on the new values
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
     runnable(ex)
-    on_graph(ex) do
-        ex.captured === nothing || release(ex.target, ex.captured)
-        ex.captured = nothing
-        ex.repetitions = repetitions
-        ex.captured = capture(ex.target, recorded(ex), ex.steps)
-    end
+    release!(ex)
+    ex.repetitions = repetitions
+    ex.captured = record(ex.target, recorded(ex), ex.steps)
+    ex
+end
+
+# Destroy what `capture!` recorded of `ex`, once nothing replays it.
+function release!(ex::Executable)
+    ex.captured === nothing || release_recording(ex.target, ex.captured)
+    ex.captured = nothing
     ex
 end
 
@@ -996,12 +1088,13 @@ bound it to, where that is not its storage. The results are in `outputs(ex)`.
 """
 function replay!(ex::Executable)
     ex.captured === nothing && throw(ArgumentError("nothing to replay: capture! records the program first"))
-    on_graph(() -> replay(ex.target, ex.captured), ex)
+    replay_recording(ex.target, ex.captured)
     write_back!(ex)
 end
 
 function explain(io::IO, ex::Executable)
     explain(io, ex.plan)
+    length(ex.devices) > 1 && println(io, "devices by label: ", join([string(l, " is ", device_named(d)) for (l, d) in enumerate(ex.devices)], ", "))
     ex.target isa CUDATarget && println(io, "products in ", ex.target.precision === :tf32 ? "TF32 where Float32" :
         ex.target.precision === :tf32x3 ? "three TF32 products where Float32" : "full precision",
         "; half-precision products accumulate in Float32",
@@ -1117,6 +1210,29 @@ function build_floor(target, p::Plan, g::Group, buffers)
     launches = Any[floor_launch(target, k, (Tuple(buffer(v) for v in k.slots)..., map(space, k.workspaces)...)) for k in ks]
     (FloorRun(launches, [collect(values(spaces)); collect(values(own))]), FloorKernels(ks))
 end
+
+"""
+    floor_run(kind, target, p, g, buffers) -> (run, description)
+
+What runs group `g` of plan `p` on `buffers` where no implementation's
+claim does, by its kind: the floor's kernels (see `build_floor`), and for a
+crossing the target's copy between its two devices (see `crossing`), which
+no kernel of the floor's makes.
+"""
+floor_run(::GroupKind, target, p::Plan, g::Group, buffers) = build_floor(target, p, g, buffers)
+
+function floor_run(::CrossingKind, target, p::Plan, g::Group, buffers)
+    c = only(g.outputs)
+    from = crossed_from(p.graph, c)
+    (crossing(target, buffers[c], buffers[from], c => from), CrossingCopy(value_bytes(p.graph.values[c])))
+end
+
+"A crossing as the target runs it: a copy of `bytes` between two devices."
+struct CrossingCopy
+    bytes::Int
+end
+
+Base.show(io::IO, c::CrossingCopy) = print(io, "the target's copy of ", Base.format_bytes(c.bytes), " between devices")
 
 # What a group's floor kernels store: what the plan stores, and for a group
 # whose members read its values where a step stored them (see `stepwise`),

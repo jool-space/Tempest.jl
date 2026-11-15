@@ -123,7 +123,7 @@ end
         ours, theirs = scratch(cs[1].executable), scratch(cs[2].executable)
         @test isdisjoint(map(pointer, arrays(ours)), map(pointer, arrays(theirs)))
         if capture
-            leased = [c.executable.captured.graph.memory for c in cs]
+            leased = [only(c.executable.captured.segments).graph.graph.memory for c in cs]
             @test all(x -> x.data[] in leased[1], arrays(ours)) && all(x -> x.data[] in leased[2], arrays(theirs))
             @test isdisjoint(leased[1], leased[2])
         end

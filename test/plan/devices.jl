@@ -22,7 +22,7 @@ end
     ws, x, t = placed_model(T; blocks = 2n)
     for (f, args) in ((placed_half, (ws, x)), (placed_step, (ws, x, t)))
         program = trace(f, args...)
-        labels = C.argument_devices(program, labelled_model(ws, x, t; devices = n)[1:length(args)])
+        labels = C.argument_devices(C.CPUTarget(), program, labelled_model(ws, x, t; devices = n)[1:length(args)]).labels
         p = C.verify(placed_plan(f, args, labels))
         whole = C.plan(C.rewrite(C.lower(program)))
         @test C.execute(p, args...) == C.execute(whole, args...)

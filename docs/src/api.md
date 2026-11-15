@@ -103,6 +103,8 @@ Tempest.Compiler.Split
 Tempest.Compiler.merge_lanes
 Tempest.Compiler.Step
 Tempest.Compiler.walk
+Tempest.Compiler.follow
+Tempest.Compiler.crossing
 Tempest.Compiler.capture
 Tempest.Compiler.replay
 Tempest.Compiler.release

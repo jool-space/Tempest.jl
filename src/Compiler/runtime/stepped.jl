@@ -229,7 +229,11 @@ function step_graph(graph::IndexGraph, stored, g::Group)
         push!(results, total)
     end
     dims = [new[r.value].dims for r in results]
-    body = IndexGraph(new, collect(1:length(leaves)), results, dims, [isempty(d) for d in dims], [new[r.value].eltype for r in results])
+    # The step is on its recurrence's device, whose cycle is placed whole
+    # (see `assigned_devices`): its values take the cycle's label.
+    device = graph.devices[first(g.outputs)]
+    body = IndexGraph(new, collect(1:length(leaves)), results, dims, [isempty(d) for d in dims], [new[r.value].eltype for r in results],
+        Pair{Int, String}[], falses(length(new)), fill(device, length(new)))
     StepGraph(body, leaves, stored_order, Set(filter(once, members)), length(cs), sums)
 end
 

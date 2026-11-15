@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, walk, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, on_device, Step, walk, follow, crossing, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -131,13 +131,35 @@ between two a copy there. CUDA's does not yet, and refuses such arrays.
 plans_across_devices(::Target) = false
 plans_across_devices(::CPUTarget) = true
 
-# The device of each argument of `program` among `inputs`, by label (see
-# `with_devices`): the devices in the order the arguments first meet them,
-# from 1, an argument on the host on the first.
-function argument_devices(program, @nospecialize(inputs))
+"""
+Where a preparation's arguments are: the label of each argument's device
+(see `with_devices`), a fact of the plan, and the device each label stands
+for, as `device_of` numbers it, nothing for the host's memory, a fact of
+the arrays. Label 1 is home: the target's device where it has one, else
+the first device an argument is on, else the host's memory. Arguments on
+the host and values no placed input reaches are there, and the decider
+builds and times there. The devices the other arguments are on follow in
+the order the arguments first meet them, so that a plan and its decisions
+do not depend on which of a machine's devices hold the arrays.
+"""
+struct Placement
+    labels::Vector{Int}
+    devices::Vector{Union{Nothing, Int}}
+end
+
+# Every argument of `program` at home on `target`.
+Placement(target::Target, program) = Placement(ones(Int, length(program.arguments)), Union{Nothing, Int}[device_of(target)])
+
+# Where the arguments of `program` among `inputs` are, on `target`.
+function argument_devices(target::Target, program, @nospecialize(inputs))
     found = map(device_of, argument_leaves(program, inputs))
-    order = unique(filter(!isnothing, found))
-    [d === nothing ? 1 : findfirst(==(d), order) for d in found]
+    devices = Union{Nothing, Int}[device_of(target)]
+    append!(devices, filter(!isnothing, found))
+    unique!(devices)
+    # Without a device of its own the target is at home where the first
+    # argument on a device is, and on the host when none is.
+    length(devices) > 1 && devices[1] === nothing && popfirst!(devices)
+    Placement([d === nothing ? 1 : findfirst(isequal(d), devices) for d in found], devices)
 end
 
 """
@@ -311,14 +333,32 @@ floor_split(::Target, items, positions, adjacent) = nothing
 ## Steps.
 
 """
-    Step(run, device)
+    Step(run, device, from = device)
 
 A step of an execution: `run()`, a kernel's launch or a copy, and the device
-it runs on (see `device_of`), where `walk` puts it.
+it runs on (see `device_of`), where `walk` puts it; and the device it reads
+from, another only for a crossing, a copy from `from` to `device` (see
+`crossing`).
 """
 struct Step
     run::Any
     device::Union{Nothing, Int}
+    from::Union{Nothing, Int}
+end
+
+Step(run, device) = Step(run, device, device)
+
+# Whether step `s` copies between two devices.
+crosses(s::Step) = s.from != s.device
+
+# The last of the steps from `start` on that run where it does: on one
+# device, or crossing between the same two.
+function run_end(steps, start)
+    stop = start
+    while stop < length(steps) && (steps[stop + 1].device, steps[stop + 1].from) == (steps[start].device, steps[start].from)
+        stop += 1
+    end
+    stop
 end
 
 """
@@ -326,43 +366,70 @@ end
 
 `f(step)` for each of `steps` in order, the calling task on the step's
 device: the one place an execution's steps are put on their devices, as
-they run (`execute!`), as a target records them as a graph (`capture`), and
-as it records one again (`retarget!`). Consecutive steps on one device are
-walked in one entry of it (see `on_device`), so an execution on one device,
-as every one is while a program is planned on one, enters it once.
+they run (`execute!`). Consecutive steps on one device, or consecutive
+crossings between the same two, are a run, walked in one entry of its
+device (see `on_device`) after the runs before it on another are ordered
+before it (see `follow`), so an execution on one device, as a program
+planned on one is, enters it once. A recording takes the same runs as its
+segments (see `Captured`).
 """
 function walk(f, target::Target, steps)
     start = 1
     while start <= length(steps)
+        stop = run_end(steps, start)
         device = steps[start].device
-        stop = start
-        while stop < length(steps) && steps[stop + 1].device == device
-            stop += 1
-        end
-        # Steps on a device after steps on another would wait here for
-        # theirs, by an event recorded on the stream they ran on.
+        start > 1 && steps[start - 1].device != device && follow(target, steps[start - 1].device, device)
         on_device(() -> foreach(k -> f(steps[k]), start:stop), target, device)
         start = stop + 1
     end
-    # And here the work of each device would join the caller's stream.
     nothing
 end
 
 # Run step `s` where the task is.
 run_step(s::Step) = (s.run(); nothing)
 
+"""
+    follow(target, before, after)
+
+Order the work launched next on device `after` after what was launched on
+device `before`: called between consecutive runs of an execution's steps
+on two devices (see `walk`), and between segments of a recording on two
+(see `Captured`), with the task where the caller has it. A target whose
+devices run apart orders them here, by an event recorded on `before`'s
+stream and waited for on `after`'s, or by waiting for `before`. A
+crossing's own copy is ordered after what wrote its source either way. The
+CPU runs its steps in order, and does nothing.
+"""
+follow(::Target, before, after) = nothing
+
+"""
+    crossing(target, to, from, values) -> run
+
+A step's run that copies buffer `from`, storage on one of `target`'s
+devices, into buffer `to`, storage on another, as large: how a value read
+on another device than its own gets there (see `Crossed`). `values` names
+the two buffers, `to_value => from_value`, for the run to be pointed
+elsewhere as a `Copy` is (see `repoint!`). It is built with the task on
+`to`'s device; each buffer knows its own. A target with graphs says, as it
+records a segment of crossings (see `capture`), whether the crossing is
+recorded or runs as the segment is replayed. On the CPU, whose devices are
+labels on the host's memory, it is a copy on the host.
+"""
+crossing(::CPUTarget, to, from, values::Pair{Int, Int}) = Copy(to, from, values)
+
 ## Graphs.
 
 """
     capture(target, steps, keep) -> graph
 
-`steps`, each a `Step` that launches work on `target`, captured in order as
-one graph for `replay(target, graph)` to launch again, each step on its
-device as `walk` puts it there; `retarget!` changes the addresses one
-step's work reads. Tempest asks with the task on the target's device, where
-the graph is made, launched and changed. The graph keeps `keep`, what it
-launches, alive until `release(target, graph)` or the collector destroys
-it. A target without graphs replays the steps themselves.
+`steps`, each a `Step` that launches work on `target`, all on one device or
+all crossings between the same two (a segment of a `Captured`), captured
+in order as one graph for `replay(target, graph)` to launch again;
+`retarget!` changes the addresses one step's work reads. Tempest asks with
+the task on the steps' device, where the graph is made, launched and
+changed. The graph keeps `keep`, what it launches, alive until
+`release(target, graph)` or the collector destroys it. A target without
+graphs replays the steps themselves.
 """
 capture(::Target, steps, keep) = steps
 
@@ -395,6 +462,64 @@ replay(target::Target, steps) = walk(run_step, target, steps)
 
 "Destroy `graph`, what `capture` recorded on `target`, once nothing replays it."
 release(::Target, graph) = nothing
+
+"""
+A run of a recording's steps on one device, or of crossings between the
+same two, as `walk` forms them: its device, where its graph is made,
+launched and changed, the positions of its steps among the recording's,
+and the graph the target captured of them (see `capture`), recorded again
+in place where its launches move (see `recapture`).
+"""
+mutable struct Segment
+    const device::Union{Nothing, Int}
+    const steps::UnitRange{Int}
+    graph::Any
+end
+
+"""
+What `capture!` records of an executable: the steps of the executions a
+replay runs, and a segment per run of them, each captured as its device's
+own graph, a target's graph being one device's. A replay launches the
+segments in order, each on its device after the one before it is ordered
+before it (see `follow`). An execution on one device is one segment, its
+graph the target's capture of every step.
+"""
+struct Captured
+    steps::Vector{Step}
+    segments::Vector{Segment}
+end
+
+# `steps` recorded on `target`, a segment per run, each graph keeping `keep` alive.
+function record(target::Target, steps::Vector{Step}, keep)
+    segments = Segment[]
+    start = 1
+    while start <= length(steps)
+        stop = run_end(steps, start)
+        device = steps[start].device
+        push!(segments, Segment(device, start:stop, on_device(() -> capture(target, steps[start:stop], keep), target, device)))
+        start = stop + 1
+    end
+    Captured(steps, segments)
+end
+
+# Launch what `r` recorded, segment by segment.
+function replay_recording(target::Target, r::Captured)
+    for (k, s) in enumerate(r.segments)
+        k > 1 && r.segments[k - 1].device != s.device && follow(target, r.segments[k - 1].device, s.device)
+        on_device(() -> replay(target, s.graph), target, s.device)
+    end
+    nothing
+end
+
+# Segment `s` of what `r` recorded, recorded again after its launches moved.
+recapture_segment!(target::Target, r::Captured, s::Segment, keep) =
+    s.graph = on_device(() -> recapture(target, s.graph, r.steps[s.steps], keep), target, s.device)
+
+# Destroy every segment's graph of what `r` recorded.
+release_recording(target::Target, r::Captured) = foreach(s -> on_device(() -> release(target, s.graph), target, s.device), r.segments)
+
+# The segment that holds position `j` among what `r` recorded.
+segment_at(r::Captured, j) = findlast(s -> first(s.steps) <= j, r.segments)
 
 ## Measuring.
 

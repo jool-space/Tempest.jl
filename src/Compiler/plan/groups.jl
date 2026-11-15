@@ -164,6 +164,14 @@ end
 "The device group `g` of `p` runs on: its members', which are on one (see `with_devices`)."
 group_device(p::Plan, g::Group) = p.graph.devices[first(members(g))]
 
+"The device group `g` of `p` reads from: its own, but for a crossing's, which copies its source from another."
+source_device(p::Plan, g::Group) = source_device(g.kind, p, g)
+source_device(::GroupKind, p::Plan, g::Group) = group_device(p, g)
+source_device(::CrossingKind, p::Plan, g::Group) = p.graph.devices[crossed_from(p.graph, only(g.outputs))]
+
+# The value crossing `c` copies.
+crossed_from(graph, c) = (graph.values[c].definition::Crossed).operand.value
+
 "Where group `g` keeps value `v`, which it computes, as the value's index over the domain; or nothing."
 placement(graph, g::Group, v) = placement(g.kind, graph, g, v)
 

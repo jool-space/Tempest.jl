@@ -182,9 +182,6 @@ end
 scalar_kernel(graph, stored, g::Group, slots) = scalar_kernel(g.kind, graph, stored, g, slots)
 scalar_kernel(::ScanKind, graph, stored, g::Group, slots) = scan_kernel(graph, stored, g, slots)
 scalar_kernel(::RecurrenceKind, graph, stored, g::Group, slots) = recurrence_kernel(graph, stored, g, slots)
-# A crossing on the floor is a copy kernel, which a target whose devices
-# share the host's memory, the CPU's labels, runs as it is.
-scalar_kernel(::CrossingKind, graph, stored, g::Group, slots) = scalar_kernel(PointwiseKind(), graph, stored, g, slots)
 
 function scalar_kernel(::PointwiseKind, graph, stored, g::Group, slots)
     D = g.domain

@@ -8,8 +8,9 @@
 """
 A device's rates for estimates: seconds per launch in a captured graph, bytes
 per second from memory for a launch that moves at most `cache` bytes and for
-one that moves more, the blocks that fill the device, and the relative margin
-within which two measurements tie.
+one that moves more, the blocks that fill the device, the relative margin
+within which two measurements tie, and bytes per second between two of the
+target's devices, which a crossing moves (see `crossing_seconds`).
 """
 struct Rates
     launch::Float64
@@ -18,6 +19,7 @@ struct Rates
     cache::Float64
     blocks::Int
     noise::Float64
+    link::Float64
 end
 
 """
@@ -125,9 +127,18 @@ package_name(implementation) = Base.invokelatest(package_of, implementation)
 
 const NOISE = 0.05
 
+# The bytes per second between two devices, nominal until a target reports
+# its own: a copy staged through page-locked host memory moved 7.7 GB/s
+# between two RTX A6000s in the trial of the devices.
+const LINK = 7.7e9
+
 # A target that cannot measure, or a decider that must not, has nominal
 # rates: no latency, one line for every product (see `line!`).
-rates(::Target) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE)
+rates(::Target) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE, LINK)
+
+# The seconds a crossing of `bytes` takes: a launch, and its bytes over the
+# link between the two devices.
+crossing_seconds(r::Rates, bytes) = r.launch + bytes / r.link
 
 value_bytes(v::Value) = sizeof(v.eltype) * storage_length(v)
 
@@ -228,8 +239,8 @@ end
 floor_estimate(p::Plan, g::Group, split = (items, positions, adjacent) -> nothing) = floor_estimate(g.kind, p, g, split)
 floor_estimate(::RecurrenceKind, p::Plan, g::Group, split) = recurrence_floor_estimate(p, g)
 
-# A crossing is priced as its copy within one device for now: the bytes it
-# reads and writes, not yet over the link between the two.
+# A crossing's work is the bytes it reads and writes; it is priced over the
+# link between its devices (see `floor_seconds`).
 function floor_estimate(::Union{ReductionKind, ScanKind, PointwiseKind, CrossingKind}, p::Plan, g::Group, split)
     points = prod(g.domain; init = 1)
     loaded(m) = unique(l.value for l in loads(g.terms[m]))

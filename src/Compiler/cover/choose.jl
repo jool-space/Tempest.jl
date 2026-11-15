@@ -90,9 +90,10 @@ function Base.show(io::IO, d::Decision)
 end
 
 """
-What an executable's launches share and nothing else uses, by
-implementation: what `resources` made for each, as the first of its launches
-is built. A decider has its own, for the claims it builds to time, which it
+What an executable's launches on one device share and nothing else uses,
+by implementation: what `resources` made for each, as the first of its
+launches is built, with the task on the device. An executable has one per
+device its plan is on. A decider has its own, at home, for the claims it builds to time, which it
 times one at a time; a recurrence's step's decider shares its preparation's.
 """
 struct Resources
@@ -326,18 +327,29 @@ function choice(d::Decider, p::Plan, g::Group, view, implementation, claim, orde
     memory = memory!(d, implementation === nothing ? :floor : package_name(implementation))
     lines = [w.flops + w.recomputed == 0 ? nothing : line!(d, package_name(implementation), w.factor) for w in work]
     price(w) = (regime, @nospecialize(f)) -> price!(d, regime, product_class(d.target, w.factor), f)
-    # A recurrence on the floor runs a step at a time where it can (see
-    # `build_group`), at its steps' price.
-    stepped = implementation === nothing && g.kind isa RecurrenceKind ? stepped_seconds(d, p, g) : nothing
-    seconds_of = stepped === nothing ? sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0) : stepped
+    own = implementation === nothing ? floor_seconds(g.kind, d, p, g) : nothing
+    seconds_of = own === nothing ? sum(map((w, l) -> seconds(w, d.rates, memory, l, price(w)), work, lines); init = 0.0) : own
     o = Choice(implementation, claim, seconds_of, key,
         any(l -> l !== nothing && l.borrowed, lines), order, told.variants)
-    stepped === nothing ? o : run_whole(d, p, g, o)
+    own === nothing ? o : run_whole(d, p, g, o)
 end
 
 """
-A recurrence's floor `o`, run a step at a time, priced at its run timed
-whole where the record holds that time, as a decider measuring close calls
+    floor_seconds(kind, d, p, g) -> seconds or nothing
+
+The price of the floor's run of group `g` where its kind prices it itself
+rather than by its work: a recurrence run a step at a time where it can
+(see `build_group`), at its steps' price, and a crossing over the link
+between its devices; nothing for the rest.
+"""
+floor_seconds(::GroupKind, d::Decider, p::Plan, g::Group) = nothing
+floor_seconds(::RecurrenceKind, d::Decider, p::Plan, g::Group) = stepped_seconds(d, p, g)
+floor_seconds(::CrossingKind, d::Decider, p::Plan, g::Group) = crossing_seconds(d.rates, value_bytes(p.graph.values[only(g.outputs)]))
+
+"""
+A floor `o` its kind prices itself (see `floor_seconds`), as a recurrence's
+run a step at a time, priced at its run timed whole where the record holds
+that time, as a decider measuring close calls
 takes it here: pricing the run planned its step and timed the step's
 kernels already, and the run is their launches. Its steps' price (see
 `stepped_seconds`) stands where no time does.
@@ -939,7 +951,7 @@ resources!(r::Resources, i) = @lock r.lock get!(() -> Base.invokelatest(resource
 
 # Build a choice on `buffers`, with the executable's resources `r`.
 build_choice(target, p::Plan, g::Group, o::Choice, buffers, r::Resources) =
-    o.implementation === nothing ? build_floor(target, p, g, buffers) :
+    o.implementation === nothing ? floor_run(g.kind, target, p, g, buffers) :
     Base.invokelatest(build_claim, o.implementation, o.claim, target, group_view(p, g), buffers, resources!(r, o.implementation))
 
 # Build a choice on the decider's buffers and resources, once, to measure it:
@@ -966,7 +978,7 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers, r::Resources)
         built === nothing || return (built..., x)
         isempty(g.reductions) || error("a recurrence with sums riding its steps runs only a step at a time")
     end
-    (x === nothing || x.choice.implementation === nothing) && return (build_floor(d.target, p, g, buffers)..., x)
+    (x === nothing || x.choice.implementation === nothing) && return (floor_run(g.kind, d.target, p, g, buffers)..., x)
     for o in [x.choice; filter(!=(x.choice), x.options)]
         o.implementation === nothing && break
         built = try
@@ -981,7 +993,7 @@ function build_group(d::Decider, p::Plan, g::Group, x, buffers, r::Resources)
         return (built..., o === x.choice ? x : Decision(o, x.options, :instead, nothing, failures(d, p, g)))
     end
     floor = choice(d, p, g, group_view(p, g), nothing, nothing)
-    (build_floor(d.target, p, g, buffers)..., Decision(floor, x.options, :instead, nothing, failures(d, p, g)))
+    (floor_run(g.kind, d.target, p, g, buffers)..., Decision(floor, x.options, :instead, nothing, failures(d, p, g)))
 end
 
 # Build an option to measure it. An option that fails to build, a claim or

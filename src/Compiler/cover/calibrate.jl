@@ -525,5 +525,5 @@ end
 function target_rates(target)
     measurable(target) || return rates(target)
     r = device_rates(target)
-    Rates(r.launch, r.cached, r.bandwidth, r.cache, Int(r.blocks), NOISE)
+    Rates(r.launch, r.cached, r.bandwidth, r.cache, Int(r.blocks), NOISE, LINK)
 end

@@ -158,7 +158,7 @@ replays(ex::Executable, measure) = ex.reached.settled && ex.reached.how === leve
 # The program prepared again behind its first result, measuring as `measure`
 # says, its timings by `timer`, its arguments bound as `compile` binds them.
 function searched(program, inputs, target, measure, timer)
-    s = setup(program; target, devices = argument_devices(program, inputs), measure)
+    s = setup(program; target, placement = argument_devices(target, program, inputs), measure)
     prepared(s, decide!(s; timer), inputs...; point = true)
 end
 
@@ -371,21 +371,20 @@ Compiled(f, ex::Executable, signature, globals) = Compiled(f, ex, signature, glo
 
 function (c::Compiled)(@nospecialize(args...))
     call = (c.f, args...)
-    ex = c.executable
-    # Its arrays' addresses are asked on the target's device, as they are
-    # bound there and its results read there; its run puts each step on its
-    # own (see `walk`).
-    b = on_device(() -> bound(c, call), ex.target)
-    @lock c.lock called(ex, b, call)
+    # Its arrays' addresses are asked, its arrays bound and its results
+    # read each on its device (see `on_each_device`), and its run puts each
+    # step on its own (see `walk`).
+    b = bound(c, call)
+    @lock c.lock called(c.executable, b, call)
 end
 
 # A call of the compiled function, its arrays `b` as `bound` finds them, run
 # by executable `ex`.
 function called(ex::Executable, b::Passed, @nospecialize(call))
     isempty(ex.program.writes) || refuse_shared(ex, b, call)
-    on_device(() -> point_each!(ex, b), ex.target)
+    point_each!(ex, b)
     ex.captured === nothing ? execute!(ex) : replay!(ex)
-    on_device(() -> returned(ex), ex.target)
+    returned(ex)
 end
 
 # The results of a call apart from the buffers the next call overwrites: a
@@ -398,11 +397,17 @@ end
 function returned(ex::Executable)
     scalar = ex.plan.graph.result_scalar
     out = ex.program.output_structure
-    arrays = Any[k isa Int && !scalar[k] ? copy(ex.results[k]) : nothing for k in leaves(out)]
+    ks = leaves(out)
+    # Each result read on its device.
+    held = [i for (i, k) in enumerate(ks) if k isa Int]
+    device(i) = ex.result_devices[ks[i]]
+    arrays = Vector{Any}(nothing, length(ks))
+    on_each_device(i -> scalar[ks[i]] || (arrays[i] = copy(ex.results[ks[i]])), device, ex.target, held)
+    on_each_device(i -> scalar[ks[i]] && (arrays[i] = Array(ex.results[ks[i]])[]), device, ex.target, held)
     i = 0
     rebuild(out) do k
         i += 1
-        k isa Int ? (scalar[k] ? Array(ex.results[k])[] : arrays[i]) : constant_leaf(k)
+        k isa Int ? arrays[i] : constant_leaf(k)
     end
 end
 
@@ -458,8 +463,7 @@ function changed!(s::Searching)
     end
     s.compiled = Compiled(c.f, ex, c.signature, c.globals, c.lock)
     quiesce(old.target)
-    old.captured === nothing || release(old.target, old.captured)
-    old.captured = nothing
+    release!(old)
     nothing
 end
 
@@ -513,18 +517,18 @@ function bound(c::Compiled, call)
     s = c.signature
     n, m = length(s) - 1, length(call) - 1
     n == m || throw(ArgumentError(compiled_for(c, string("it takes ", n, n == 1 ? " argument" : " arguments", ", not ", m))))
-    b = Passed(length(c.executable.program.arguments), device_of(c.executable.target))
+    b = Passed(c.executable)
     for k in eachindex(s)
         d = match!(b, s[k], call[k])
         d === nothing || throw(ArgumentError(compiled_for(c, differs(d, k == 1 ? "f" : "argument $(k - 1)"))))
     end
-    isempty(b.elsewhere) || refuse_devices(c.executable.target, call, leaf_paths)
+    isempty(b.elsewhere) || refuse_elsewhere(c.executable, b, leaves(c.executable.program.input_structure), call, leaf_paths)
     for (g, value) in c.globals
         now = getglobal(g.mod, g.name)
         isequal(now, value) ||
             throw(ArgumentError(compiled_for(c, string("the global ", g.name, " is ", shown(now), ", not ", shown(value), " as when traced"))))
     end
-    b
+    located!(b, c.executable)
 end
 
 compiled_for(c, difference) = string(c.f, " was compiled for other arguments: ", difference)
