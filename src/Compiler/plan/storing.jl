@@ -153,11 +153,11 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
                 any(u -> u in cycle && !stored[u] && values[u].definition isa Pointwise && outside(u), users[w])
         end
     end
-    # A pointwise value that reads nothing stored is cheaper to recompute.
+    # A pointwise value that reads no value, only constants and indices, is
+    # cheaper to recompute.
     for id in eachindex(values)
         d = values[id].definition
         d isa Pointwise && stored[id] && !(id in results) && !materialized[id] || continue
-        all(o -> !(o isa Read) || !stored[o.value] && values[o.value].definition isa Pointwise, d.operands) || continue
         all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
     end
     # A stored half-precision value widened to Float32 is widened where it is
