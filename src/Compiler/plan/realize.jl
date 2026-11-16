@@ -1,33 +1,44 @@
-# How a value read on another device than its own gets there, chosen for each
-# value once the cut has placed it (see `realizations`): copied there, a
-# crossing of it; made again there from what it reads there; or made in
-# pieces, a range of its last axis on each of several devices, each piece
-# copied to the others, which put the pieces together. A realization is a
-# type with three methods: `link_load`, what it moves over each device's
-# link in each direction, of which the lighter wins; `realize!`, what it adds
-# to the placed graph on a device that reads the value, other than as its own
-# device's value; and `home!`, what it adds for its own device. Another is
-# added here, with its methods, and to the union.
+# How a value read on another device than its own gets there, chosen once the
+# cut has placed the values (see `realizations`). The unit is a chain: an
+# elementwise value read directly on another device, its frontier, with the
+# elementwise values through which what it is computed from reaches it, its
+# interior (see `Chain`). A chain is realized as a whole: copied, each of
+# its values computed where the cut placed it and copied where another
+# device reads it; made again, computed on each device that reads its
+# frontier; or made in pieces, a range of the frontier's last axis computed
+# on each of several devices, each piece copied to the others, which put the
+# pieces together. Wherever a chain is made again or in pieces, over the
+# whole or a range, its values are made there from what they read outside
+# it, its terms, as the terms are realized there. A realization is a type with two methods: `link_load`,
+# what it moves over each device's link in each direction, of which the
+# lighter wins, and `realize!`, what it adds to the placed graph on a device
+# that reads the frontier. Another is added here, with its methods, and to
+# the union.
 
-"A value copied to each other device that reads it, from its own: a crossing."
+"""
+A chain computed where the cut placed its values, each value read on
+another device copied there, a crossing: its frontier to each device that
+reads it, and a value of its interior to the device of the value of the
+chain that reads it. A value of no chain is copied too.
+"""
 struct Copied end
 
 """
-A value made again on each other device that reads it, from what it reads
-there, by its own definition, so that each device computes it by the same
-arithmetic in the same order.
+A chain made again on each device that reads its frontier, from what it
+reads there, by its own definitions, so that each device computes it by the
+same arithmetic in the same order.
 """
 struct Remade end
 
 """
-An elementwise value made in pieces: the range `cuts[q]:(cuts[q + 1] - 1)` of
-its last axis made on device `owners[q]`, by the value's own definition over
-the range, from the ranges of what it reads; each piece copied to each other
-device that reads the value, which reads the pieces put together, a select
-of each by the block of positions it holds. Each element is computed on one
-device, so that every device holds the same bits by construction, and each
-device's link carries its share of the terms and of the pieces rather than
-every term.
+A chain made in pieces: the range `cuts[q]:(cuts[q + 1] - 1)` of its
+frontier's last axis made on device `owners[q]`, each value of the chain
+over the positions the range reads of it, from the ranges of its terms
+there; each piece copied to each other device that reads the frontier,
+which reads the pieces put together, a select of each by the block of
+positions it holds. Each element is computed on one device, so that every
+device holds the same bits by construction, and each device's link carries
+its share of the terms and of the pieces rather than every term.
 """
 struct Pieced
     cuts::Vector{Int}
@@ -36,112 +47,142 @@ end
 
 const Realization = Union{Copied, Remade, Pieced}
 
+"""
+A chain of the placed graph: its frontier, an elementwise value read
+directly on another device than its own or read by another chain, and its
+interior, the elementwise values whose terms lie on several devices through
+which the frontier's terms reach it, each read by the values of the chain
+alone, each at an index, and otherwise only on its own device. `readers`
+holds the devices that read the frontier directly, each with the range of
+its last axis read there, `terms` the devices its terms lie on, and
+`values` the values of the chain, in the graph's order.
+"""
+struct Chain
+    frontier::Int
+    readers::Dict{Int, UnitRange{Int}}
+    terms::BitSet
+    values::Vector{Int}
+end
+
+# The index of a read and the extents of the domain it is read over.
+const Positions = Tuple{Tuple{Vararg{Affine}}, Tuple{Vararg{Int}}}
+
 # A placed graph being realized: the graph, the devices the cut gave its
-# values, the realization of each, and the values realizing them made, each
-# once by its key: what each value is on each device that reads it other
-# than as its own device's value, each piece of a value made in pieces and
-# each piece copied to a device, and each value made over a range.
+# values, which are made from nothing another holds, the chains, the chain
+# each value is of (zero for none), which values of a chain are read on
+# their own device by values of none or by results, and what each value of
+# a chain reads outside it, each operand at the formulas over the value's own
+# domain its reads compose to; the realization of each chain and how many
+# crossings deep each value is where it is made; and the values realizing
+# them, each made once: what each value is on each device that reads it,
+# each value of a chain made at the positions of a read on a device, and each
+# piece's copy on each device.
 struct Realizing
     graph::IndexGraph
     devices::Vector{Int}
+    anywhere::BitVector
+    chains::Vector{Chain}
+    chain_of::Vector{Int}
+    homed::BitVector
+    reads::Vector{Vector{Operand}}
     realized::Vector{Realization}
-    # Whether each value is elementwise with terms on several devices: made
-    # over a range wherever a value made over the range reads it.
-    chained::BitVector
-    made::Dict{Any, Int}
+    depths::Vector{Int}
+    there::Dict{Tuple{Int, Int}, Int}
+    over::Dict{Tuple{Int, Int, Positions}, Int}
+    copies::Dict{Tuple{Int, Int}, Int}
 end
 
-Realizing(graph, devices, realized, chained) = Realizing(graph, devices, realized, chained, Dict{Any, Int}())
-
-# The value `key` names, made by `f()` the first time it is asked for.
-function made!(f, p::Realizing, key)
-    haskey(p.made, key) && return p.made[key]
-    p.made[key] = f()
+# The value `key` names in `memo`, made by `f()` the first time it is asked for.
+function made!(f, memo, key)
+    haskey(memo, key) && return memo[key]
+    memo[key] = f()
 end
+
+frontier(p::Realizing, u) = p.chain_of[u] != 0 && p.chains[p.chain_of[u]].frontier == u
+
+# Whether value `u` is of its chain's interior, as value `v` of a chain is.
+interior(p::Realizing, u, v) = p.chain_of[u] == p.chain_of[v] && !frontier(p, u)
+
+# Whether value `u` is computed where the cut placed it: of no chain, or of a
+# chain copied.
+placed(p::Realizing, u) = p.chain_of[u] == 0 || p.realized[p.chain_of[u]] isa Copied
 
 """
-    across!(p, b, r, here) -> id
+    value_on!(p, b, u, here) -> id
 
-What value `r` is on device `here` in the graph `b` builds, other than as
-its own device's value is: made there once, as `r` is realized.
+What value `u` is on device `here` in the graph `b` builds: a value
+computed where it was placed, itself on its own device; a value made
+anywhere, made again there by its own definition; a chain's frontier, as
+the chain is realized; a value of the interior of a chain made again or in
+pieces, made there whole as the chain is; any other value copied, a
+crossing. Made once for each value and device.
 """
-across!(p::Realizing, b, r, here) = made!(() -> realize!(p.realized[r], p, b, r, here), p, (:there, r, here))
-
-function realize!(::Copied, p::Realizing, b, r, here)
-    source = p.graph.values[r]
-    add!(b, Crossed(Read(b.ids[r], identity_index(source.dims))), source.dims, source.eltype, source.scalar)
-end
-
-function realize!(::Remade, p::Realizing, b, r, here)
-    source = p.graph.values[r]
-    add!(b, remap(source.definition, rerouted!(p, b, operands(source.definition), here)), source.dims, source.eltype, source.scalar)
-end
-
-# A value made in pieces, on a device that reads it: the pieces put together,
-# each the one made there or a crossing of it, selected by the positions of
-# the last axis it holds, from the last piece back, as a concatenation is.
-# Each read of a piece wraps around its range, so that it stays inside the
-# piece where the piece is not selected.
-function realize!(pieced::Pieced, p::Realizing, b, r, here)
-    val = p.graph.values[r]
-    d = Domain(val.dims)
-    axis = length(val.dims)
-    whole = identity_index(val.dims)
-    function placed(q)
-        piece = piece!(p, b, r, pieced, q)
-        dims = b.values[piece].dims
-        held = pieced.owners[q] == here ? piece :
-            made!(() -> add!(b, Crossed(Read(piece, identity_index(dims))), dims, val.eltype), p, (:copied_piece, r, q, here))
-        range = piece_range(pieced, q)
-        kept = ntuple(var, axis - 1)
-        Read(held, length(range) == 1 ? kept : (kept..., fmod(add(var(axis), -first(range), d), length(range), d)))
+function value_on!(p::Realizing, b, u, here)
+    val = p.graph.values[u]
+    placed(p, u) || frontier(p, u) || return made_over!(p, b, u, here, identity_index(val.dims), Domain(val.dims))
+    placed(p, u) && p.devices[u] == here && return b.ids[u]
+    made!(p.there, (u, here)) do
+        p.anywhere[u] && return add!(b, remap(val.definition, rerouted!(p, b, operands(val.definition), here)), val.dims, val.eltype, val.scalar)
+        frontier(p, u) && return realize!(p.realized[p.chain_of[u]], p, b, p.chains[p.chain_of[u]], here)
+        crossed!(b, b.ids[u], val)
     end
-    selected = placed(length(pieced.owners))
-    for q in (length(pieced.owners) - 1):-1:1
-        mask = add!(b, Pointwise(<=, (IndexOperand(var(axis), Int32), Literal(Int32(last(piece_range(pieced, q)))))), val.dims, Bool)
-        selected = Read(add!(b, Pointwise(ifelse, (Read(mask, whole), placed(q), selected)), val.dims, val.eltype), whole)
-    end
-    selected.value
 end
 
-"""
-    home!(realization, p, b, id) -> id or nothing
-
-What value `id` is on its own device in the graph `b` builds: its own
-definition, reading what each value it reads is there, or nothing where it
-reads nothing of another device; made in pieces, the pieces put together
-there, as on every device that reads it.
-"""
-function home!(::Union{Copied, Remade}, p::Realizing, b, id)
-    v = p.graph.values[id]
-    here = p.devices[id]
-    all(r -> p.devices[r] == here, (r for o in operands(v.definition) for r in read_values(o))) && return nothing
-    add!(b, remap(v.definition, rerouted!(p, b, operands(v.definition), here)), v.dims, v.eltype, v.scalar)
-end
-
-home!(::Pieced, p::Realizing, b, id) = across!(p, b, id, p.devices[id])
+# A crossing of new value `id`, of the extents and type of `val`.
+crossed!(b, id, val::Value) = add!(b, Crossed(Read(id, identity_index(val.dims))), val.dims, val.eltype, val.scalar)
 
 # The new ids of the values operands `os` read, read on device `here`: each
-# value on another device as it is there.
+# value not computed there where it was placed as it is there (see
+# `value_on!`).
 function rerouted!(p::Realizing, b, os, here)
     through = Dict{Int, Int}()
     for o in os, u in read_values(o)
-        p.devices[u] == here || (through[u] = across!(p, b, u, here))
+        placed(p, u) && p.devices[u] == here || (through[u] = value_on!(p, b, u, here))
     end
     Rerouted(b.ids, through)
 end
 
+# A chain copied, on a device that reads its frontier other than its own.
+realize!(::Copied, p::Realizing, b, c::Chain, here) = crossed!(b, b.ids[c.frontier], p.graph.values[c.frontier])
+
+function realize!(::Remade, p::Realizing, b, c::Chain, here)
+    val = p.graph.values[c.frontier]
+    made_over!(p, b, c.frontier, here, identity_index(val.dims), Domain(val.dims))
+end
+
+# A chain made in pieces, on a device that reads its frontier: the pieces put
+# together, each the one made there or a crossing of it, selected by the
+# positions of the last axis it holds, from the last piece back, as a
+# concatenation is. Each read of a piece wraps around its range, so that it
+# stays inside the piece where the piece is not selected.
+function realize!(pieced::Pieced, p::Realizing, b, c::Chain, here)
+    val = p.graph.values[c.frontier]
+    d = Domain(val.dims)
+    axis = length(val.dims)
+    whole = identity_index(val.dims)
+    function held(q)
+        piece = piece!(p, b, c, pieced, q)
+        there = pieced.owners[q] == here ? piece : made!(() -> crossed!(b, piece, b.values[piece]), p.copies, (piece, here))
+        range = piece_range(pieced, q)
+        kept = ntuple(var, axis - 1)
+        Read(there, length(range) == 1 ? kept : (kept..., fmod(add(var(axis), -first(range), d), length(range), d)))
+    end
+    selected = held(length(pieced.owners))
+    for q in (length(pieced.owners) - 1):-1:1
+        mask = add!(b, Pointwise(<=, (IndexOperand(var(axis), Int32), Literal(Int32(last(piece_range(pieced, q)))))), val.dims, Bool)
+        selected = Read(add!(b, Pointwise(ifelse, (Read(mask, whole), held(q), selected)), val.dims, val.eltype), whole)
+    end
+    selected.value
+end
+
 piece_range(pieced::Pieced, q) = pieced.cuts[q]:(pieced.cuts[q + 1] - 1)
 
-# Piece `q` of value `r`, made in pieces, on its owner: the value's definition
-# over the piece's range, from the ranges of what it reads there, made once,
-# a value of the backward where `r` is one.
-function piece!(p::Realizing, b, r, pieced::Pieced, q)
-    made!(p, (:piece, r, q)) do
-        dims, at = range_positions(p.graph.values[r].dims, piece_range(pieced, q))
-        on(b, pieced.owners[q], p.graph.backward[r]) do
-            restricted!(p, b, r, pieced.owners[q], at, Domain(dims))
-        end
+# Piece `q` of a chain made in pieces, on its owner: the frontier over the
+# piece's range, a value of the backward where the frontier is one.
+function piece!(p::Realizing, b, c::Chain, pieced::Pieced, q)
+    dims, at = range_positions(p.graph.values[c.frontier].dims, piece_range(pieced, q))
+    on(b, pieced.owners[q], p.graph.backward[c.frontier]) do
+        made_over!(p, b, c.frontier, pieced.owners[q], at, Domain(dims))
     end
 end
 
@@ -156,99 +197,113 @@ function on(f, b, device, backward)
     end
 end
 
-# Elementwise value `u` on device `here` at `index` over `d`: its definition
-# with each operand read at its own index composed with `index`, a value
-# over `d`, made once for each device and index.
-function restricted!(p::Realizing, b, u, here, index, d::Domain)
-    made!(p, (:over, u, here, index, d.extents)) do
+"""
+    made_over!(p, b, u, here, index, d) -> id
+
+Value `u` of a chain made on device `here` at `index` over `d`: its
+definition with each operand read at its own index composed with `index`, a
+value over `d`; a value of the chain's interior it reads made there at the
+composed index in turn, and anything else read as it is there (see
+`value_on!`). Made once for each device and index.
+"""
+function made_over!(p::Realizing, b, u, here, index, d::Domain)
+    made!(p.over, (u, here, (index, d.extents))) do
         val = p.graph.values[u]
         def = val.definition::Pointwise
-        add!(b, Pointwise(def.f, map(x -> over!(p, b, composed(x, index, d), here, d), def.operands)), d.extents, val.eltype)
+        on(b, here, b.in_backward[]) do
+            add!(b, Pointwise(def.f, map(x -> made_operand!(p, b, u, composed(x, index, d), here, d), def.operands)), d.extents, val.eltype, val.scalar)
+        end
     end
 end
 
-# An operand of a value made over a range, read over `d` on device `here`,
-# its formulas the range's: a value made there over the same range, where the
-# value it reads is made over a range wherever it is read so (see
-# `over_range`), and otherwise the value as it is there, read at the
-# formulas.
-function over!(p::Realizing, b, x::Read, here, d::Domain)
-    over_range(p, x.value) && return Read(restricted!(p, b, x.value, here, x.index, d), identity_index(d.extents))
-    remap(x, rerouted!(p, b, (x,), here))
+# An operand of value `u` of a chain made over `d` on device `here`, its
+# formulas composed: a read of a value of the chain's interior, that value
+# made there at the read's formulas; anything else read as it is there.
+function made_operand!(p::Realizing, b, u, x::Read, here, d::Domain)
+    interior(p, x.value, u) || return remap(x, rerouted!(p, b, (x,), here))
+    Read(made_over!(p, b, x.value, here, x.index, d), identity_index(d.extents))
 end
 
-# Whether value `u`, read by a value made over a range, is made over the
-# range too: where it is elementwise and made again, or its terms lie on
-# several devices, as the partial sums of a sum made in pieces are, which
-# each piece adds up over its own range from the ranges of the terms, however
-# the cut placed them.
-over_range(p::Realizing, u) = p.graph.values[u].definition isa Pointwise && (p.realized[u] isa Remade || p.chained[u])
-over!(p::Realizing, b, x::Operand, here, d::Domain) = remap(x, rerouted!(p, b, (x,), here))
+made_operand!(p::Realizing, b, u, x::Operand, here, d::Domain) = remap(x, rerouted!(p, b, (x,), here))
+
+"""
+    home!(p, b, id) -> id, nothing or zero
+
+What value `id` is on its own device in the graph `b` builds, at its place
+in the graph's order: a value computed where it was placed by its own
+definition, reading what each value it reads is there, or nothing where it
+reads only such values on its own device; a value of a chain made again or
+in pieces made there as the chain is, and a frontier made in pieces that
+nothing reads there its pieces, on their owners, and nothing of its own
+there (zero).
+"""
+function home!(p::Realizing, b, id)
+    here = p.devices[id]
+    c = p.chain_of[id]
+    placed(p, id) || p.homed[id] && return value_on!(p, b, id, here)
+    placed(p, id) || return home!(p.realized[c], p, b, p.chains[c])
+    v = p.graph.values[id]
+    all(u -> placed(p, u) && p.devices[u] == here, (u for o in operands(v.definition) for u in read_values(o))) && return nothing
+    add!(b, remap(v.definition, rerouted!(p, b, operands(v.definition), here)), v.dims, v.eltype, v.scalar)
+end
+
+# A chain's frontier made in pieces that nothing reads on its own device, at
+# its place: its pieces made on their owners.
+function home!(pieced::Pieced, p::Realizing, b, c::Chain)
+    foreach(q -> piece!(p, b, c, pieced, q), length(pieced.owners):-1:1)
+    0
+end
+
+"""
+    made_at_home(p) -> BitVector
+
+Whether each value has a place of its own in the graph's order (see
+`home!`): every value computed where it was placed; a value of a chain made
+again or in pieces where a value of no chain or a result reads it on its
+own device; and a frontier made in pieces, the pieces made there. Wherever
+else a chain's values are read, they are made as the chain is realized
+there.
+"""
+made_at_home(p::Realizing) = BitVector(placed(p, u) || p.homed[u] || frontier(p, u) && p.realized[p.chain_of[u]] isa Pieced
+    for u in eachindex(p.graph.values))
 
 """
     realizations(graph, devices, landing) -> Realizing
 
 How each value of `graph`, placed on `devices`, its results pinned by
-`landing` (see `result_devices`), gets to each other device that reads it,
-the values before it first:
+`landing` (see `result_devices`), gets to each other device that reads it:
 
   - a value made from nothing another holds (see `made_anywhere`) is made
     again, where a copy would move it on every call;
-  - an elementwise value no larger than any value it reads, read directly
-    on another device, by a value there or a result pinned there, is
-    realized as the candidate whose heaviest device and direction carries
-    fewer bytes (see `link_load`), of equal ones the one fewer crossings
-    deep, then the one of fewer crossings, then the first of copied, made
-    again and made in pieces: a sum of what each of two devices computed,
-    read on both, is made again on each from the other's term; over more
-    devices it is made in pieces, each device's link carrying its share of
-    the terms and of the pieces rather than every term; and a sum of two
-    devices' terms read on its own device and on a third that holds neither
-    is copied to the third once rather than its terms to it twice;
-  - an elementwise value no other device reads directly is rebuilt with a
-    remade reader where its terms lie on several devices and its own device
-    reads it, as the sum of the first two of three terms is when the sum of
-    all three is remade: no load of its own decides it, since what it is on
-    another device is part of what its reader is there;
+  - a chain (see `Chain`), the chains it reads first, is realized as the
+    candidate whose heaviest device and direction carries fewer bytes (see
+    `link_load`), of equal ones the one fewer crossings deep, then the one
+    of fewer crossings, then the first of copied, made again and made in
+    pieces: a sum of what each of two devices computed, read on both, is
+    made again on each from the other's term; over more devices it is made
+    in pieces, each device's link carrying its share of the terms and of the
+    pieces rather than every term; and a sum of two devices' terms read on
+    its own device and on a third that holds neither is copied to the third
+    once rather than its terms to it twice;
   - every other value is copied.
 
-Its terms are what it is computed from through elementwise values, down to
-values that are not, those made anywhere left out. A value is made in
-pieces over the devices its terms lie on and the devices that read it, as
-many pieces as those or as its last axis holds positions, whichever is
-fewer, in equal ranges of its last axis but for rounding, so that each piece
-is one span of its storage; a value of no axes never is. The pieces, their
-crossings and what they read are values of the placed graph and not of
-`graph`: none is realized again.
+A chain is made in pieces over the devices its terms lie on and the devices
+that read it, as many pieces as those or as its last axis holds positions,
+whichever is fewer, in equal ranges of its last axis but for rounding, so
+that each piece is one span of its storage; a value of no axes never is.
 """
 function realizations(graph::IndexGraph, devices, landing)
     values = graph.values
     anywhere = made_anywhere(graph)
-    reads = direct_reads(graph, devices, landing)
-    realized = Vector{Realization}(undef, length(values))
-    p = Realizing(graph, devices, realized, falses(length(values)))
-    # The devices each value's terms lie on, and how many crossings deep it is
-    # where it is made.
-    terms = Vector{BitSet}(undef, length(values))
-    depths = zeros(Int, length(values))
+    chains, chain_of, homed = chains_of(graph, devices, landing, anywhere)
+    p = Realizing(graph, devices, anywhere, chains, chain_of, homed, [Operand[] for _ in values], Vector{Realization}(undef, length(chains)),
+        zeros(Int, length(values)), Dict{Tuple{Int, Int}, Int}(), Dict{Tuple{Int, Int, Positions}, Int}(), Dict{Tuple{Int, Int}, Int}())
     for (v, val) in enumerate(values)
-        depths[v] = operand_arrivals!(crossings(), p, depths, v, devices[v])
-        if anywhere[v]
-            terms[v] = BitSet()
-            realized[v] = Remade()
-        elseif elementwise(graph, v)
-            terms[v] = mapreduce(r -> terms[r], union, (r for o in operands(val.definition) for r in read_values(o)); init = BitSet())
-            p.chained[v] = length(terms[v]) > 1
-            elsewhere = filter(d -> d != devices[v], keys(reads[v]))
-            if isempty(elsewhere)
-                realized[v] = rebuilt_with_reader(v, devices, terms, reads)
-            else
-                realized[v], depths[v] = lightest(p, depths, v, reads[v], union(terms[v], keys(reads[v])))
-            end
-        else
-            terms[v] = BitSet(devices[v])
-            realized[v] = Copied()
-        end
+        c = chain_of[v]
+        c == 0 || (p.reads[v] = outside_reads(p, v))
+        anywhere[v] && continue
+        p.depths[v] = operand_arrivals!(crossings(), p, v, devices[v])
+        frontier(p, v) && ((p.realized[c], p.depths[v]) = lightest(p, chains[c]))
     end
     p
 end
@@ -261,33 +316,109 @@ function elementwise(graph, v)
     all(r -> value_bytes(graph.values[r]) >= value_bytes(val), (r for o in operands(val.definition) for r in read_values(o)))
 end
 
-# An elementwise value no other device reads directly: remade where its terms
-# lie on several devices and its own device reads it.
-rebuilt_with_reader(v, devices, terms, reads) = length(terms[v]) > 1 && haskey(reads[v], devices[v]) ? Remade() : Copied()
+"""
+    chains_of(graph, devices, landing, anywhere) -> (chains, chain_of, homed)
 
-# Of the candidates for value `v`, read directly on the devices `reads` keys
-# with the ranges of its last axis there, its terms and readers on the
-# devices `touched`, the one whose load is lightest, of equal ones the first;
-# and how many crossings deep it is where it is made.
-function lightest(p::Realizing, depths, v, reads, touched)
-    candidates = Realization[Copied(), Remade()]
-    pieced = pieces(p.graph.values[v], touched)
-    pieced === nothing || push!(candidates, pieced)
-    loads = [link_load(c, p, depths, v, reads) for c in candidates]
-    k = argmin(k -> (heaviest(loads[k]), loads[k].deep, loads[k].crossings), eachindex(loads))
-    (candidates[k], made_depth(candidates[k], depths, v, loads[k]))
+The chains of the placed graph, the readers of each value before it: an
+elementwise value whose terms lie on several devices, read by the values of
+one chain, each at an index, and otherwise only on its own device, is of
+that chain's interior; any other elementwise value read directly on another
+device, or by a chain's values, is the frontier of a chain of its own, which
+those values read as a term. A value's terms are what it is computed from
+through elementwise values, down to values that are not, those made
+anywhere left out. And whether each value of a chain is read on its own
+device by a value of none or a result.
+"""
+function chains_of(graph::IndexGraph, devices, landing, anywhere)
+    values = graph.values
+    terms = Vector{BitSet}(undef, length(values))
+    for (v, val) in enumerate(values)
+        if anywhere[v]
+            terms[v] = BitSet()
+        elseif elementwise(graph, v)
+            terms[v] = mapreduce(r -> terms[r], union, (r for o in operands(val.definition) for r in read_values(o)); init = BitSet())
+        else
+            terms[v] = BitSet(devices[v])
+        end
+    end
+    reads = direct_reads(graph, devices, landing)
+    # Each value's readers, each with whether it reads the value at an index
+    # alone; a state reads what it is carried from, and a result on the device
+    # it lands on, a reader of no chain (zero).
+    users = [Tuple{Int, Bool}[] for _ in values]
+    for (u, val) in enumerate(values)
+        for o in operands(val.definition), r in read_values(o)
+            push!(users[r], (u, o isa Read && o.value == r))
+        end
+        val.definition isa Carried && foreach(r -> push!(users[r], (u, false)), read_values(val.definition.from))
+    end
+    results = [Int[] for _ in values]
+    for (k, o) in enumerate(graph.results), r in read_values(o)
+        push!(results[r], landing[k] == 0 ? devices[r] : landing[k])
+    end
+    chains = Chain[]
+    chain_of = zeros(Int, length(values))
+    homed = falses(length(values))
+    for v in length(values):-1:1
+        !anywhere[v] && elementwise(graph, v) || continue
+        outer = unique!([chain_of[u] for (u, _) in users[v] if chain_of[u] != 0])
+        # Read only at an index by values of chains, and otherwise on its own device.
+        inside = all(((u, indexed),) -> chain_of[u] == 0 ? devices[u] == devices[v] : indexed, users[v]) && all(==(devices[v]), results[v])
+        if length(terms[v]) > 1 && length(outer) == 1 && inside
+            chain_of[v] = only(outer)
+        elseif !isempty(outer) || any(!=(devices[v]), keys(reads[v]))
+            push!(chains, Chain(v, reads[v], terms[v], Int[]))
+            chain_of[v] = length(chains)
+        else
+            continue
+        end
+        pushfirst!(chains[chain_of[v]].values, v)
+        homed[v] = any(((u, _),) -> chain_of[u] == 0 && devices[u] == devices[v], users[v]) || devices[v] in results[v]
+    end
+    chains, chain_of, homed
 end
 
-# How many crossings deep a value is where it is made: on its own device as
-# it was found, and in pieces, on their owners, one fewer than the farthest
-# reader holds it.
-made_depth(::Union{Copied, Remade}, depths, v, load) = depths[v]
-made_depth(::Pieced, depths, v, load) = load.deep - 1
+# What value `v` of a chain reads outside it, each operand at the formulas
+# over `v`'s domain its reads compose to: its own operands that read no value
+# of the chain's interior, and what each value of the interior it reads reads
+# outside it, composed with the read's formulas.
+function outside_reads(p::Realizing, v)
+    val = p.graph.values[v]
+    d = Domain(val.dims)
+    found = Operand[]
+    for x in operands(val.definition)
+        if x isa Read && interior(p, x.value, v)
+            append!(found, (composed(o, x.index, d) for o in p.reads[x.value]))
+        elseif !isempty(read_values(x))
+            push!(found, x)
+        end
+    end
+    unique!(found)
+end
 
-# Value `val` in pieces over `devices`, by label: as many as there are
-# devices or positions of its last axis, whichever is fewer, the first
-# devices taken, in equal ranges but for rounding; nothing where that is one
-# piece, or the value has no axes.
+# Of the candidates for chain `c`, the one whose load is lightest, of equal
+# ones the first; and how many crossings deep its frontier is where it is
+# made.
+function lightest(p::Realizing, c::Chain)
+    candidates = Realization[Copied(), Remade()]
+    pieced = pieces(p.graph.values[c.frontier], union(c.terms, keys(c.readers)))
+    pieced === nothing || push!(candidates, pieced)
+    loads = [link_load(r, p, c) for r in candidates]
+    k = argmin(k -> (heaviest(loads[k]), loads[k].deep, loads[k].crossings), eachindex(loads))
+    (candidates[k], made_depth(candidates[k], p, c, loads[k]))
+end
+
+# How many crossings deep a chain's frontier is where it is made: on its own
+# device as the cut placed it, and in pieces, on their owners, one fewer than
+# the farthest reader holds it.
+made_depth(::Union{Copied, Remade}, p::Realizing, c::Chain, load) = p.depths[c.frontier]
+
+made_depth(::Pieced, p::Realizing, c::Chain, load) = load.deep - 1
+
+# A frontier of value `val` in pieces over `devices`, by label: as many as
+# there are devices or positions of its last axis, whichever is fewer, the
+# first devices taken, in equal ranges but for rounding; nothing where that
+# is one piece, or the value has no axes.
 function pieces(val::Value, devices)
     isempty(val.dims) && return nothing
     k = min(length(devices), last(val.dims))
@@ -296,10 +427,10 @@ function pieces(val::Value, devices)
 end
 
 """
-What a candidate realization of a value moves between devices: the bytes
+What a candidate realization of a chain moves between devices: the bytes
 over each device's link in each direction, `(device, :out)` and `(device,
-:in)`, how many crossings deep the farthest reader holds the value, and how
-many crossings it makes.
+:in)`, how many crossings deep the farthest reader holds the frontier, and
+how many crossings it makes.
 """
 struct LinkLoad
     bytes::Dict{Tuple{Int, Symbol}, Int}
@@ -325,108 +456,100 @@ function load_of(p::Realizing, crossed, deep)
 end
 
 """
-    link_load(realization, p, depths, v, reads) -> LinkLoad
+    link_load(realization, p, c) -> LinkLoad
 
-What realizing value `v` that way moves, read directly on the devices
-`reads` keys, the ranges of its last axis read there: copied, it is
-computed on its own device from what it reads there and crossed to each
-other device, the range read there; made again, it is computed on each
-other device from what it reads there, and on its own where its own device
-reads it; made in pieces, each piece is computed on its owner from the
-ranges of what it reads there and crossed whole to each other device that
-reads the value. What a value reads on a device it is not on arrives as
-that value is realized (see `arrive!`). The ranges are the reads' own, as
-the crossings will be narrowed to them (see `narrowed_crossings`).
+What realizing chain `c` that way moves: copied, each value of the chain is
+computed where the cut placed it, from what it reads there, and the
+frontier crossed to each other device that reads it, the range read there;
+made again, it is made on each device that reads
+the frontier; made in pieces, each piece is made on its owner and crossed
+whole to each other device that reads the frontier. Wherever the chain is
+made, what crosses is what its values read outside it, at the ranges of the
+terms the positions made reach (see `made_arrivals!`), as the crossings
+will be narrowed to them (see `narrowed_crossings`).
 """
-function link_load(::Copied, p::Realizing, depths, v, reads)
+function link_load(::Copied, p::Realizing, c::Chain)
     crossed = crossings()
-    home = p.devices[v]
-    operand_arrivals!(crossed, p, depths, v, home)
-    for d in keys(reads)
-        d == home || reach!(crossed, (v, home, d), reads[d])
+    foreach(u -> operand_arrivals!(crossed, p, u, p.devices[u]), c.values)
+    home = p.devices[c.frontier]
+    for d in keys(c.readers)
+        d == home || reach!(crossed, (c.frontier, home, d), c.readers[d])
     end
-    load_of(p, crossed, depths[v] + 1)
+    load_of(p, crossed, p.depths[c.frontier] + 1)
 end
 
-function link_load(::Remade, p::Realizing, depths, v, reads)
+function link_load(::Remade, p::Realizing, c::Chain)
     crossed = crossings()
-    deep = maximum(d -> operand_arrivals!(crossed, p, depths, v, d), keys(reads))
+    val = p.graph.values[c.frontier]
+    deep = maximum(d -> made_arrivals!(crossed, p, c.frontier, d, identity_index(val.dims), Domain(val.dims)), keys(c.readers))
     load_of(p, crossed, deep)
 end
 
-function link_load(pieced::Pieced, p::Realizing, depths, v, reads)
+function link_load(pieced::Pieced, p::Realizing, c::Chain)
     crossed = crossings()
     deep = 0
     for (q, owner) in enumerate(pieced.owners)
-        dims, at = range_positions(p.graph.values[v].dims, piece_range(pieced, q))
-        made = over_arrivals!(crossed, p, depths, v, owner, at, Domain(dims))
-        for d in keys(reads)
-            d == owner || reach!(crossed, (v, owner, d), piece_range(pieced, q))
+        dims, at = range_positions(p.graph.values[c.frontier].dims, piece_range(pieced, q))
+        made = made_arrivals!(crossed, p, c.frontier, owner, at, Domain(dims))
+        for d in keys(c.readers)
+            d == owner || reach!(crossed, (c.frontier, owner, d), piece_range(pieced, q))
         end
         deep = max(deep, made + 1)
     end
     load_of(p, crossed, deep)
 end
 
-# The crossings value `v` made on device `here` makes to read what it reads
-# there, into `crossed`; how many crossings deep it is there.
-function operand_arrivals!(crossed, p::Realizing, depths, v, here)
-    val = p.graph.values[v]
-    maximum((arrive!(crossed, p, depths, u, here, o, d) for (o, d) in zip(operands(val.definition), operand_domains(val))
-        for u in read_values(o)); init = 0)
+# The crossings value `u` of a chain made on device `here` at `index` over
+# `d` makes to read what it reads outside the chain there, into `crossed`;
+# how many crossings deep it is there.
+function made_arrivals!(crossed, p::Realizing, u, here, index, d)
+    maximum((arrive!(crossed, p, w, here, composed(o, index, d), d) for o in p.reads[u] for w in read_values(o)); init = 0)
 end
 
-# The same of elementwise value `v` read at `index` over `d`: of its operands
-# read at their indices composed with `index`.
-function range_arrivals!(crossed, p::Realizing, depths, v, here, index, d)
+# The same of value `v` computed on device `here` from its operands, a value
+# of a chain's interior it reads where the cut placed it.
+function operand_arrivals!(crossed, p::Realizing, v, here)
     val = p.graph.values[v]
-    maximum((arrive!(crossed, p, depths, u, here, composed(o, index, d), d) for o in operands(val.definition)
+    maximum((arrive!(crossed, p, u, here, o, d) for (o, d) in zip(operands(val.definition), operand_domains(val))
         for u in read_values(o)); init = 0)
 end
-
-# The same of elementwise value `v` made over a range, `index` over `d`:
-# what it reads made over the range in turn, where it is (see `over_range`).
-function over_arrivals!(crossed, p::Realizing, depths, v, here, index, d)
-    val = p.graph.values[v]
-    maximum((over_arrive!(crossed, p, depths, u, here, composed(o, index, d), d) for o in operands(val.definition)
-        for u in read_values(o)); init = 0)
-end
-
-over_arrive!(crossed, p::Realizing, depths, u, here, o, d) = over_range(p, u) && o isa Read && o.value == u ?
-    over_arrivals!(crossed, p, depths, u, here, o.index, d) : arrive!(crossed, p, depths, u, here, o, d)
 
 """
-    arrive!(crossed, p, depths, u, here, o, d) -> crossings deep
+    arrive!(crossed, p, u, here, o, d) -> crossings deep
 
 The crossings a read `o` over domain `d` on device `here` makes of value
 `u`, which it reads at its own index or gathers through, into `crossed`;
-how many crossings deep `u` is there. A value made again is read as what it
-is made from, on `here` or on its own device alike, at the read's index
-composed with its own reads': what crosses for it is what crosses for its
-terms, which the candidates for a value made from it differ by. A value
-made in pieces is read as its pieces put together, each piece made
-elsewhere crossing whole. Any other value is read in place on its own
-device, and copied, elsewhere, crosses the range of its last axis the read
-reaches, the whole where the read gathers through it.
+how many crossings deep `u` is there. A value made anywhere is made there
+of nothing that crosses. A chain's frontier is read as its chain is
+realized: made again, as the chain made there at what the read reaches; in
+pieces, as the pieces put together, each piece made elsewhere crossing
+whole; copied, as any other value, read in place where the cut placed it
+and elsewhere crossing the range of its last axis the read reaches, the
+whole where the read gathers through it.
 """
-arrive!(crossed, p::Realizing, depths, u, here, o, d) = arrive!(p.realized[u], crossed, p, depths, u, here, o, d)
+function arrive!(crossed, p::Realizing, u, here, o, d)
+    p.anywhere[u] && return 0
+    frontier(p, u) && return arrive!(p.realized[p.chain_of[u]], crossed, p, u, here, o, d)
+    arrive!(Copied(), crossed, p, u, here, o, d)
+end
 
-function arrive!(::Copied, crossed, p::Realizing, depths, u, here, o, d)
-    p.devices[u] == here && return depths[u]
+function arrive!(::Copied, crossed, p::Realizing, u, here, o, d)
+    p.devices[u] == here && return p.depths[u]
     reach!(crossed, (u, p.devices[u], here), read_range(p.graph, u, o, d))
-    depths[u] + 1
+    p.depths[u] + 1
 end
 
-function arrive!(::Remade, crossed, p::Realizing, depths, u, here, o, d)
-    p.graph.values[u].definition isa Pointwise && o isa Read && o.value == u || return operand_arrivals!(crossed, p, depths, u, here)
-    range_arrivals!(crossed, p, depths, u, here, o.index, d)
+function arrive!(::Remade, crossed, p::Realizing, u, here, o, d)
+    o isa Read && o.value == u && return made_arrivals!(crossed, p, u, here, o.index, d)
+    val = p.graph.values[u]
+    made_arrivals!(crossed, p, u, here, identity_index(val.dims), Domain(val.dims))
 end
 
-function arrive!(pieced::Pieced, crossed, p::Realizing, depths, u, here, o, d)
+function arrive!(pieced::Pieced, crossed, p::Realizing, u, here, o, d)
     for (q, owner) in enumerate(pieced.owners)
         owner == here || reach!(crossed, (u, owner, here), piece_range(pieced, q))
     end
-    depths[u] + any(!=(here), pieced.owners)
+    p.depths[u] + any(!=(here), pieced.owners)
 end
 
 # Operand `x` of an elementwise value read at `index` over `d`: read over `d`.

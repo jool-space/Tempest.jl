@@ -215,6 +215,23 @@ end
     end
 end
 
+# A chain is realized as a whole. A sum of two devices' terms, added to a
+# third's, the whole read on the third device and a fourth: copied, each sum
+# computed where the cut placed it and copied where it is read, each device
+# and direction carries one matrix, 64 bytes, where made again or in pieces
+# the third would receive both of the first two's terms. Read on a fourth and
+# a fifth, it is made in pieces over the five.
+@testset "a chain is copied as the cut placed its values, or made in pieces" begin
+    f(a, b, c, d, e) = (s = (a .+ b) .+ c; (sum(s .* d; dims = 3), sum(s .* e; dims = 3)))
+    args = (rand(Float32, 4, 4), rand(Float32, 4, 4), rand(Float32, 4, 4), rand(Float32, 4, 4, 5), rand(Float32, 4, 4, 5))
+    for (labels, heaviest, crossings) in (([1, 2, 3, 3, 4], 64, 3), ([1, 2, 3, 4, 5], 96, 16))
+        p = C.verify(placed_plan(f, args, labels))
+        @test maximum(values(link_bytes(p))) == heaviest
+        @test length(planned_crossings(p)) == crossings
+        @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(trace(f, args...)))), args...)
+    end
+end
+
 # Terms all on one device are joined there once, and the result copied.
 @testset "a sum of one device's terms is computed once and copied" begin
     f(a, b, c) = (s = a .+ b; (sum(s), sum(s .* c; dims = 3)))

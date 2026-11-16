@@ -68,8 +68,9 @@ function add!(b::Builder, d::Definition, dims, T, scalar = false)
 end
 
 # The graph with old value `id` replaced by the value `f(builder, id)` returns
-# the id of (or kept, for `nothing`), leaving out the values `keep` excludes;
-# and each old value's new id.
+# the id of (or kept, for `nothing`, and none, for zero, where what `f` adds
+# stands for it but no value is it), leaving out the values `keep` excludes;
+# and each old value's new id, zero for one left out.
 function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
     b = Builder(Value[], zeros(Int, length(graph.values)), Pair{Int, String}[], BitVector(), Ref(false), Int[], Ref(1))
     for (id, v) in enumerate(graph.values)

@@ -35,8 +35,8 @@ function with_devices(graph::IndexGraph, arguments; pins = Pair{Int, Int}[])
     placed = IndexGraph(graph.values, graph.arguments, graph.results, graph.result_dims, graph.result_scalar, graph.result_eltype,
         graph.rewrites, graph.backward, devices)
     p = realizations(graph, devices, landing)
-    rebuilt, ids = rebuild((b, id) -> home!(p.realized[id], p, b, id), placed)
-    narrowed_crossings(landed(rebuilt, ids, graph.results, landing, devices, (b, r, here) -> across!(p, b, r, here)))
+    rebuilt, ids = rebuild((b, id) -> home!(p, b, id), placed, made_at_home(p))
+    narrowed_crossings(landed(rebuilt, ids, graph.results, landing, devices, (b, r, here) -> value_on!(p, b, r, here)))
 end
 
 # The device each result is pinned to, by `pins`, zero for one that is not.
