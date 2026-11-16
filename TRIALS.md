@@ -530,6 +530,103 @@ vector being pieced by bytes alone; `prepare` by reference still taking
 two arguments over one memory; and the plans' fingerprint harness, which
 does not finish on the fuzzer's seeds 41 to 200.
 
+The accounting of the reduce, 16 November (`account.jl`, `account-link.jl`,
+`arrange.jl`, `probe-queue.jl`, `reduce-fmap.jl` and their outputs there;
+main ff1d98c). Landed since the paragraph above: the value made in pieces
+(9964758); the chain as the unit a realization is decided and built for,
+an elementwise value read on another device with the elementwise values
+its terms reach it through, copied, made again or made in pieces as a
+whole, the load and what is built read off one description (464e09b); the
+kernels in the order they are estimated to start, chosen once each is
+decided, a piece's sum running within 0 to 3 ms of its terms' arrival
+where every sum had ended at 39 to 42 ms (`run_order`, 26e735a); and the
+order on a link (ff1d98c, below). The goal's program with `Functors.fmap`
+over the trees, Functors stacked on the load path, compiles to the plan of
+the hand tree map: the same segments, the same digests after 1 step and
+100, 78.3 ms on two devices and 57.9 on three. The accounting: every step
+of the recorded schedule timed alone, the plan's crossings run alone on
+their lanes with no kernels, a model of the link fixed on that exchange
+and on nothing of the step, and the schedule simulated with both, against
+the step measured, live, replayed and as a compiled call. The link inside
+the step moves its bytes at the rate of the exchange, 7.1 to 7.8 GB/s a
+device and direction, hop by hop the same beside kernels as without. Two
+devices: 72.5 ms predicted from the parts alone and 78.1 a compiled call
+(noise 1.2, the 10th to the 90th percentile of 40), the 5.6 between made
+of parts each measured apart from the step and none fitted to it: the
+host's launches and the second device reaching its first 0.7; the
+kernels slowing under load 3.6, a kernel bound by compute running 3 to
+10% faster from idle than after the 30 ms spin the parts were timed
+behind, 4 to 15% slower for the first 10 to 30 ms straight after a step,
+and near 20% slower after 40 to 80 ms of load, where one bound by memory
+is flat, and no ramp of the clock from idle, as was first supposed; and
+a copy in flight on a kernel's own device 0.6, a kernel bound by memory
+3 to 4% slower beside downloads, 6 to 8% beside uploads and 7 to 10%
+beside both, one bound by compute 1 to 2%; 0.7 is left, inside the
+noise, 1.2 with the steps back to back against 0.6 there. Compute alone
+is 70.1 ms and the link alone 29.4. Three devices did not
+close, 56.6 predicted and 60.7 measured (57.3 to 64.4), the crossings
+alone taking 39 ms in one run and 54 in four, and more hardware
+connections changed nothing. A probe with the driver alone found why: a
+device copies one chunk at a time in each direction; a copy that is ready
+never waits behind one blocked on an event; but of two streams with
+copies ready the driver stays with one until it has none, and picks it by
+a rule of its own, not the order of submission. With a lane's downloads
+on a stream of their own, a device's two lanes out were two streams, and
+the driver drained one lane's backlog while the other lane's reader stood
+with its link in idle: the step 56.8 to 62.3 ms by the driver's choice,
+which a serial model of the link with that run's order fed in follows to
+about 1 ms. Of the arrangements simulated and run on the plan's
+crossings, the one that matches first come first served on every link,
+no link idle while a copy for it is ready, needs no estimate: every
+download leaving a device on one stream of that device, in the order
+their sources are written, the uploads a stream for each ordered pair as
+before; fixing the uploads' order too is worse, an upload waiting behind
+one whose download has not ended. Built so: a device's link out is made
+once for a schedule and shared by every lane from it (`link`, `lane`),
+each crossing is a run of its own, launched in plan order, and the plan's
+order takes a crossing as two hops, out over its source's link first in
+first out and in over its reader's. Three devices after: 55.9 ms a
+compiled call (54.8 to 57.1), 53.8 predicted, the crossings alone 38.6 ms
+in every run, compute alone 40.2 and the link alone 38.5, each device
+sending and receiving 256 MiB; taken again on the replayed path with the
+host's launches timed, 54.2 predicted and 54.6 measured (53.6 to 55.3),
+0.4 between where the noise is 0.9, the host launching the 146 crossings
+over 9.5 ms and holding six kernels back by at most 0.5, the kernels'
+slowing and the copies beside them moving the prediction 0.8 more, the
+path that binds being a link and not a device's work. Two devices are as
+before. On the recording of three devices, 396 steps in 182 segments,
+each crossing waits for one event, recorded directly after the step that
+writes its source in that device's graph, no crossing waits for a step
+of any lane, and nothing ahead of a crossing on its device's link out
+has a source written later than its own. NCCL stays as measured above
+and not taken, the reduce being the value made in pieces over staged
+copies, by the user's word on the goal's third item. The replicas are alike to
+the bit after 1 step and after 100 on two devices and on three, and after
+100 steps stand 3.7e-7 from the whole batch's training with ReLU and
+1.8e-8 with `tanh`, where a compiled Float32 gradient stands 3e-4 from a
+Float64 one. The whole suite passes here (34,498, 17 broken) and the
+device tests on trizzle (842, 1 broken). Open, named by their builders:
+the rebuild of a placed graph walks values, not chains, and a chain is
+realized whole, never some of its sums copied and others in pieces; the
+order the kernels run in is chosen inside `storage`; of two kernels that
+can start at once the one another stream can soonest follow goes first,
+and of two crossings written at once the one that can be in first, both
+priorities chosen, not costs the cover shares; the estimates the order
+rests on run 16% short on a device's graphs and near 2 times short on
+small kernels, and the order changes under those factors; a crossing's
+hop is taken to last the crossing's whole estimate, long for a value over
+one staging chunk of 8 MiB; a crossing a run of its own cuts a device's
+kernels into 36 graphs where 24; what rule the driver picks a stream by;
+that a crossing's wait sits directly after its source's writer is checked
+by a script and by no test, `steps_recorded` not returning a step's
+record node; a kernel's time depending on what its device did in the
+tens of milliseconds before, which no estimate knows;
+fusion across a crossing by time, the hand program that sums on one
+device still 76 ms where it was 69; and from before, a copy to several
+readers, a concatenation for the pieces, whether a call spins at its end,
+the link in seconds for a short vector, `prepare` by reference over one
+memory, and the fingerprint harness on seeds 41 to 200.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
