@@ -220,17 +220,17 @@ function assign!(x::TracedArray, bc::Broadcast.Broadcasted)
     x
 end
 
-Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted) = assign!(x, bc)
-Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted{Nothing}) = assign!(x, bc)
-Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted{<:Broadcast.AbstractArrayStyle{0}}) = assign!(x, bc)
-Base.copyto!(x::TracedArray, bc::Broadcast.Broadcasted{TracedStyle}) = assign!(x, bc)
+# Base writes a broadcast by the style of the destination and the broadcast
+# combined, which is `TracedStyle` wherever either is traced, whatever array
+# the other side holds: the one place every such write comes through.
+Broadcast.materialize!(::TracedStyle, x::TracedArray, bc::Broadcast.Broadcasted) = assign!(x, bc)
 
 # An array the function allocates itself, as `zeros(Float32, n)` does, is a
 # constant of the program and holds numbers: what a traced broadcast computes
 # is the program's, and is written into arrays allocated from traced ones.
 const PLAIN_WRITE = "a traced value cannot be written into an array the function allocates itself, such as `zeros(Float32, n)`; allocate it from a traced array: `similar(x, …)`, `zero(x)` or `fill!(similar(x, …), v)`"
 
-Base.copyto!(::AbstractArray, ::Broadcast.Broadcasted{TracedStyle}) = throw(ArgumentError(PLAIN_WRITE))
+Broadcast.materialize!(::TracedStyle, ::AbstractArray, ::Broadcast.Broadcasted) = throw(ArgumentError(PLAIN_WRITE))
 
 # So is one traced number written into an element of such an array, which
 # needs no method here: Base's `setindex!` converts it to the element type,

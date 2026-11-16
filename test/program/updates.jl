@@ -46,6 +46,31 @@
     @test same(x -> (y = fill!(similar(x, size(x, 2)), 0); y .= x[1, :]; y), x)
 end
 
+# An array of another package's, with a broadcast style of its own and a
+# `copyto!` for any destination of that style's broadcasts, as StaticArrays'
+# and GPUArrays' arrays have.
+struct Styled{T, N} <: AbstractArray{T, N}
+    data::Array{T, N}
+end
+Base.size(a::Styled) = size(a.data)
+Base.getindex(a::Styled, i::Int...) = a.data[i...]
+struct StyledStyle{N} <: Broadcast.AbstractArrayStyle{N} end
+StyledStyle{M}(::Val{N}) where {M, N} = StyledStyle{N}()
+Base.BroadcastStyle(::Type{<:Styled{<:Any, N}}) where {N} = StyledStyle{N}()
+Base.copyto!(dest::AbstractArray, bc::Broadcast.Broadcasted{<:StyledStyle}) = copyto!(dest, convert(Broadcast.Broadcasted{Nothing}, bc))
+
+# Written into a traced array, its broadcast is the program's write, by the
+# style the traced array gives the two together.
+@testset "a broadcast of another array style written into a traced array" begin
+    x, s = data(4, 3), Styled(data(4, 3; scale = 0.3))
+    same(f, args...) = interpret(trace(f, args...), args...) == f(args...)
+    @test same(x -> (y = similar(x); y .= s; y), x)
+    @test same(x -> (y = copy(x); y .+= 2 .* s; y), x)
+    @test same(x -> (y = copy(x); view(y, :, 2) .= s[:, 1]; y), x)
+    @test same(x -> (y = similar(x); y .= x .* s; y), x)
+    @test_throws ArgumentError trace(x -> (y = zeros(size(x)); y .= x .* s; y), x)
+end
+
 # An array of `CartesianIndex{N}` among other indices stands for `N` axes, as
 # in Base: the array with those axes merged, at the linear indices it holds,
 # traced or not, read and written.
