@@ -199,8 +199,10 @@ Tempest.Compiler.IR.Stat
 Tempest.Compiler.IR.Recomputed
 Tempest.Compiler.IR.Cast
 Tempest.Compiler.IR.mentions
+Tempest.Compiler.IR.mentions_within
 Tempest.Compiler.IR.reached_elements
 Tempest.Compiler.IR.sector_elements
+Tempest.Compiler.IR.SECTOR_BYTES
 ```
 
 ### Masks
