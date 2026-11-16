@@ -46,10 +46,11 @@ struct Storage
 end
 
 """
-    storage(plan, replaces = []; in_place = k -> true) -> (plan, order, storage)
+    storage(plan, replaces = []; in_place = k -> true, seconds = k -> 0.0) -> (plan, order, storage)
 
 The plan's storage, and the plan with its kernels in the order they run (the
-plan's kernel `order[k]` runs `k`th). `replaces` pairs result values with the
+plan's kernel `order[k]` runs `k`th), kernel `k` estimated to take
+`seconds(k)` (see `run_order`). `replaces` pairs result values with the
 argument values they replace; `in_place(k)` says whether the realization of
 kernel `k` reads each element a set of outputs needs before it writes any of
 them. A kernel that writes a result into an argument's storage, or a fold by
@@ -60,7 +61,7 @@ each value takes the smallest slot free for its kernel that fits it, or else
 grows the largest free slot, or else a new one; a slot is free for a kernel
 once every kernel using what it holds runs before it (see `plan_order`).
 """
-function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
+function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true, seconds = k -> 0.0)
     graph = p.graph
     reads = [group_reads(graph, g) for g in p.groups]
     needs = [Set(p.owner[r] for r in rs if p.owner[r] > 0 && p.owner[r] != k) for (k, rs) in enumerate(reads)]
@@ -137,7 +138,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true)
         b = base(v)
         b === nothing || v in results || b in results || p.owner[b] == 0 || overwrite!([v => b])
     end
-    order = kernel_order(needs)
+    order = run_order(needs, streams, map(seconds, eachindex(p.groups)))
     position = invperm(order)
     p = Plan(graph, p.stored, p.groups[order], map(o -> o == 0 ? 0 : position[o], p.owner))
     n = length(graph.values)
@@ -312,27 +313,6 @@ function take_free!(pool::SlotPool, σ, bytes)
         deleteat!(each, i)
     end
     0
-end
-
-# Kernels in an order where each runs after those it needs, otherwise in their
-# own order: each time the first kernel whose needs have run, the kernels
-# ready kept in a heap. Nothing for a cycle.
-function kernel_order(needs)
-    waiting = map(length, needs)
-    after = [Int[] for _ in needs]
-    foreach(k -> foreach(j -> push!(after[j], k), needs[k]), eachindex(needs))
-    ready = Int[]
-    foreach(k -> waiting[k] == 0 && heap_push!(ready, k), eachindex(needs))
-    order = Int[]
-    while !isempty(ready)
-        k = heap_pop!(ready)
-        push!(order, k)
-        for j in after[k]
-            waiting[j] -= 1
-            waiting[j] == 0 && heap_push!(ready, j)
-        end
-    end
-    length(order) == length(needs) ? order : nothing
 end
 
 # Whether any kernel of `js` runs after kernel `k`, by the kernels that need

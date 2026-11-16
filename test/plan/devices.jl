@@ -369,10 +369,13 @@ end
     @test C.verify(q, s) === q
 end
 
-# Devices run at once: each runs its own kernels that wait for no other
-# device before those that do, so that none holds its own work behind a
-# crossing it could have run beside; and devices that compute alike, the
-# replicas of data parallelism, run their kernels in the same order.
+# Devices run at once: each runs a kernel that waits for a crossing once the
+# crossing is estimated there, and what it can before it, so that none holds
+# its own work behind a crossing it could have run beside. What waits and
+# no other device waits for, each replica's update, runs after what waits
+# for nothing; what another device waits for runs as soon as it can, before
+# or after. Devices that compute alike, the replicas of data parallelism,
+# run their kernels in the same order.
 @testset "each device runs what waits for no crossing first, $n devices" for n in (2, 3)
     # Weights whose last axes share out evenly, so that pieces are alike.
     ws, x, t = placed_model(Float32; width = 12, tokens = 96)
@@ -382,8 +385,10 @@ end
     up = C.ancestors(g)
     waits(k) = any(m -> any(u -> C.crossing(g, u), findall(up[m])), C.members(p.groups[k]))
     kernels(d) = [k for (k, group) in enumerate(p.groups) if C.group_device(p, group) == d && !(group.kind isa C.CrossingKind)]
+    crossed = Set(C.crossed_from(g, only(group.outputs)) for group in p.groups if group.kind isa C.CrossingKind)
+    awaited(k) = any(in(crossed), C.members(p.groups[k]))
     for d in 1:n
-        w = map(waits, kernels(d))
+        w = [waits(k) for k in kernels(d) if !(waits(k) && awaited(k))]
         @test w == sort(w)
     end
     # Each kernel as any device runs it: its kind, whether it waits, and its members' definitions.
@@ -393,20 +398,44 @@ end
     @test all(d -> replica(d) == replica(1), 2:n)
 end
 
-@testset "kernels two devices interleave are ordered in runs" begin
-    # Each kernel's needs, its device, and the crossings it comes after: one
-    # for each read of another device's kernel, through those it reads too.
-    # Two chains of two kernels, one on each device, and a fifth reading both.
-    needs = [Set{Int}(), Set{Int}(), Set([1]), Set([2]), Set([3, 4])]
-    @test C.in_runs([1, 2, 3, 4, 5], needs, [1, 2, 1, 2, 1], [0, 0, 0, 0, 1]) == [1, 3, 2, 4, 5]
-    # A device's kernel that reads another's waits for it, and no longer.
-    @test C.in_runs([1, 2, 3, 4, 5], [Set{Int}(), Set{Int}(), Set([2]), Set([2]), Set([3, 4])], [1, 2, 1, 2, 1], [0, 0, 1, 0, 2]) == [1, 2, 4, 3, 5]
-    # One that waits holds back none of its device's that does not.
-    @test C.in_runs([1, 2, 3, 4], [Set{Int}(), Set{Int}(), Set([2]), Set([1])], [1, 2, 1, 1], [0, 0, 1, 0]) == [1, 4, 2, 3]
-    # Nor where it comes first in the order, ready in this walk as soon as the
-    # other device's kernel is taken: the devices run at once, and the second's
-    # kernel that waits for the first's would hold back its own after it.
-    @test C.in_runs([1, 2, 3, 4], [Set{Int}(), Set{Int}(), Set([1, 2]), Set([2])], [1, 2, 2, 2], [0, 0, 1, 0]) == [1, 2, 4, 3]
+# Kernels by stream and estimated seconds: each device's own stream `(d, d)`,
+# a crossing's the lane `(a, b)` from its source's device to its reader's.
+@testset "kernels run as they are estimated to start" begin
+    run(needs, streams, seconds) = C.run_order(map(Set{Int}, needs), streams, seconds)
+    # A chain on each device, the second's crossing to the first, read there
+    # last: the second's first kernel starts first, as the first device
+    # begins on what follows it sooner, then each device's kernel after.
+    @test run([[], [], [1], [2], [4], [3, 5]], [(1, 1), (2, 2), (1, 1), (2, 2), (2, 1), (1, 1)], ones(6)) == [2, 1, 4, 3, 5, 6]
+    # A device's sum of its own term (1) and one another device crosses to it
+    # (6 on lane (2, 1), estimated there at 2.5), its sum (5) crossing back
+    # (8) to be read there (9): the device runs what nothing waits for (2, 3)
+    # while the crossing is under way, the sum once it is there and the device
+    # free, before the work left (4), and so does the other device.
+    needs = [[], [], [], [], [1, 6], [7], [], [5], [8]]
+    streams = [(1, 1), (1, 1), (1, 1), (1, 1), (1, 1), (2, 1), (2, 2), (1, 2), (2, 2)]
+    order = run(needs, streams, [1, 1, 1, 1, 1, 1.5, 1, 1, 1])
+    @test filter(k -> streams[k] == (1, 1), order) == [1, 2, 3, 5, 4]
+    # Not before it is there: estimated to arrive later, the sum runs last.
+    order = run(needs, streams, [1, 1, 1, 1, 1, 3.5, 1, 1, 1])
+    @test filter(k -> streams[k] == (1, 1), order) == [1, 2, 3, 4, 5]
+    # Every estimate twice as long, crossings with them: the same order.
+    @test run(needs, streams, 2 .* [1, 1, 1, 1, 1, 1.5, 1, 1, 1]) == run(needs, streams, [1, 1, 1, 1, 1, 1.5, 1, 1, 1])
+    # Two lanes into one device share its link in: the crossing whose source
+    # is written first goes first, though later in the plan's order, and the
+    # other after it.
+    @test run([[], [1], [], [3], [2, 4]], [(1, 1), (1, 3), (2, 2), (2, 3), (3, 3)], [2, 1, 1, 1, 1]) == [1, 3, 4, 2, 5]
+    # On one stream, the plan's order wherever it lets them, whatever the estimates.
+    first_ready(needs) = (order = Int[]; while length(order) < length(needs)
+        push!(order, findfirst(k -> !(k in order) && all(in(order), needs[k]), eachindex(needs)))
+    end; order)
+    rng = Random.Xoshiro(3)
+    for _ in 1:50
+        n = rand(rng, 2:30)
+        needs = [Set(filter(_ -> rand(rng) < 0.2, 1:(k - 1))) for k in 1:n]
+        shuffled = randperm(rng, n)
+        permuted = [Set(shuffled[j] for j in needs[k]) for k in invperm(shuffled)]
+        @test C.run_order(permuted, fill((1, 1), n), rand(rng, n)) == first_ready(permuted)
+    end
 end
 
 @testset "a program on one device plans as it did" begin

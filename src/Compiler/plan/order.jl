@@ -112,3 +112,99 @@ function plan_order(p::Plan)
     touches = Touches[(reads = sort!(collect(group_reads(p.graph, g))), writes = [v for v in members(g) if p.stored[v]]) for g in p.groups]
     stream_order([group_stream(p, g) for g in p.groups], touches)
 end
+
+"""
+    run_order(needs, streams, seconds) -> order
+
+Kernels in the order they run (`order[i]` runs `i`th), kernel `k` needing
+those of `needs[k]`, on stream `streams[k]` (see `group_stream`), estimated
+to take `seconds[k]`: as they would start if the streams ran each its own
+in that order, at once, every kernel taking its time.
+
+A device runs one kernel at a time. A crossing takes its time on its
+source's link out and its reader's link in, one crossing at a time on each:
+two lanes that share a direction share its rate, each crossing after the
+last on it. A kernel can start once those it needs have ended and its
+device, or a crossing its two directions, are free. The next taken is the
+one that can start first; of two that can at once, the one after which
+another stream can begin on what follows it soonest (see `awaited`); and
+then the first in the plan's order.
+
+So a kernel reading a crossing runs once the crossing is estimated there,
+and its device runs what it can before it; once it can run, it runs before
+what nothing on another stream waits for, and what a crossing copies is
+computed as soon as its device can, the link kept busy beside the work. On
+one stream every kernel whose needs have run can start as the one before it
+ends, and none is awaited by another stream: the kernels run in the plan's
+order wherever it lets them. The estimates order the kernels only; the
+waits between streams follow from the order whatever it is (see
+`stream_order`), so an estimate that is wrong costs time, never a result.
+"""
+function run_order(needs, streams, seconds)
+    n = length(needs)
+    after = [Int[] for _ in 1:n]
+    foreach(k -> foreach(j -> push!(after[j], k), needs[k]), 1:n)
+    soon = awaited(after, streams, seconds)
+    # What each stream holds: its device, or a crossing's two directions.
+    holds(σ) = first(σ) == last(σ) ? ((first(σ), :run),) : ((first(σ), :out), (last(σ), :in))
+    free = Dict{Tuple{Any, Symbol}, Float64}()
+    numbers = unique(streams)
+    on = indexin(streams, numbers)
+    held = [holds(σ) for σ in numbers]
+    # Each stream's kernels whose needs have run: by the time they can
+    # start, those that can as soon as the stream is free by `soon`.
+    later = [Tuple{Float64, Float64, Int}[] for _ in numbers]
+    now = [Tuple{Float64, Int}[] for _ in numbers]
+    ready = zeros(n)
+    waiting = map(length, needs)
+    foreach(k -> waiting[k] == 0 && heap_push!(later[on[k]], (0.0, soon[k], k)), 1:n)
+    order = Int[]
+    while length(order) < n
+        best, at = (Inf, Inf, typemax(Int)), 0
+        for s in eachindex(numbers)
+            isempty(later[s]) && isempty(now[s]) && continue
+            t = maximum(r -> get(free, r, 0.0), held[s])
+            while !isempty(later[s]) && first(first(later[s])) <= t
+                _, l, k = heap_pop!(later[s])
+                heap_push!(now[s], (l, k))
+            end
+            key = isempty(now[s]) ? first(later[s]) : (t, first(now[s])...)
+            key < best && ((best, at) = (key, s))
+        end
+        at == 0 && error("kernels depend on each other in a cycle")
+        start, _, k = best
+        isempty(now[at]) ? heap_pop!(later[at]) : heap_pop!(now[at])
+        push!(order, k)
+        ends = start + seconds[k]
+        foreach(r -> free[r] = ends, held[at])
+        for j in after[k]
+            ready[j] = max(ready[j], ends)
+            waiting[j] -= 1
+            waiting[j] == 0 && heap_push!(later[on[j]], (ready[j], soon[j], j))
+        end
+    end
+    order
+end
+
+# How soon after each kernel ends another stream can begin on what follows
+# it, by the estimates: none for one a kernel on another stream reads, the
+# time its own stream takes on the way for one whose followers lead to such
+# a kernel, the least of its followers', and Inf for one nothing on another
+# stream follows (see `run_order`).
+function awaited(after, streams, seconds)
+    n = length(after)
+    # The kernels in an order where each comes after what it needs.
+    waiting = zeros(Int, n)
+    foreach(js -> foreach(j -> waiting[j] += 1, js), after)
+    order = filter(k -> waiting[k] == 0, collect(1:n))
+    for k in order, j in after[k]
+        waiting[j] -= 1
+        waiting[j] == 0 && push!(order, j)
+    end
+    length(order) == n || error("kernels depend on each other in a cycle")
+    soon = fill(Inf, n)
+    for k in Iterators.reverse(order)
+        soon[k] = minimum(j -> streams[j] == streams[k] ? seconds[j] + soon[j] : 0.0, after[k]; init = Inf)
+    end
+    soon
+end

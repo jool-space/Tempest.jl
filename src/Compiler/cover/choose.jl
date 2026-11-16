@@ -81,6 +81,16 @@ struct Decision
     failed::Vector{Failure}
 end
 
+"""
+    estimated(x) -> seconds
+
+The seconds a group decided as `x` is estimated to take: its choice's
+estimate, as the cover priced it, never a time measured; none for a group
+without a decision. What orders the kernels as they run (see `run_order`).
+"""
+estimated(x::Decision) = x.choice.estimate
+estimated(::Nothing) = 0.0
+
 function Base.show(io::IO, d::Decision)
     print(io, "estimated ", round(1.0e6 * d.choice.estimate; sigdigits = 3), " μs")
     d.measured === nothing || print(io, ", measured ", round(1.0e6 * d.measured; sigdigits = 3), " μs")

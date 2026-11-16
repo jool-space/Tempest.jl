@@ -361,7 +361,7 @@ function plan_step(d::Decider, p::Plan, g::Group)
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
     first_sum = length(s.leaves) - length(s.sums)
     replaces = [bp.graph.results[length(s.stored) + j].value => first_sum + j for j in eachindex(s.sums)]
-    bp, order, st = storage(bp, replaces; in_place = k -> writes_in_place(ds[k]))
+    bp, order, st = storage(bp, replaces; in_place = k -> writes_in_place(ds[k]), seconds = k -> estimated(ds[k]))
     ds = ds[order]
     VERIFYING[] && verify(bp, st; in_place = k -> writes_in_place(ds[k]))
     SteppedPlan(s, bd, bp, ds, st, values[c].dims[cd.axis], reached)

@@ -426,7 +426,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
         saved[k] = input[a]
     end
     writes_in_place(x) = x !== nothing && all(o -> o.implementation === nothing || Base.invokelatest(in_place, o.implementation, o.claim), x.options)
-    p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]))
+    p, order, s = storage(p, [result_value(k) => input[a] for (k, a) in pairs]; in_place = k -> writes_in_place(ds[k]), seconds = k -> estimated(ds[k]))
     clock = lap!(:storage, clock)
     ds = ds[order]
     VERIFYING[] && verify(p, s; in_place = k -> writes_in_place(ds[k]))
