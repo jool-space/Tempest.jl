@@ -139,7 +139,7 @@ function proposal_key(p::Plan, a::Around, q::Proposal, texts = Dict{Int, String}
     foreach(v -> union!(around, held(p, a, v)), fixes(q))
     io = IOBuffer()
     for j in sort!(collect(around); by = j -> a.places[j])
-        print(io, get!(() -> group_text(p, p.groups[j]), texts, j))
+        print(io, get!(() -> "| " * numbered_text(p, p.groups[j]), texts, j))
     end
     key_text(io, p, q)
     print(io, " || ", join(map(v -> "%$v", fixes(q)), " "))
@@ -167,15 +167,6 @@ function edit_key(known, p::Plan, t::Plan)
     added = sort!([canonical(t, g) for (g, id) in zip(t.groups, ids_t) if !(id in in_p)])
     removed = sort!([canonical(p, g) for (g, id) in zip(p.groups, ids_p) if !(id in in_t)])
     string(join(added, " | "), " || ", join(removed, " | "))
-end
-
-group_text(p::Plan, g::Group) = sprint() do io
-    print(io, "| ", g.kind, " ", g.domain)
-    for m in members(g)
-        v = p.graph.values[m]
-        what = m in g.reductions ? fold_key(v.definition) : "value"
-        print(io, "; %", m, " ", what, " ", v.eltype, v.dims, p.stored[m] ? " stored" : "", " = ", g.terms[m])
-    end
 end
 
 # Every stored value of a kernel that another kernel reads, joined into the
