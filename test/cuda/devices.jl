@@ -379,3 +379,52 @@ end
         @test Set((s.from, s.device) for s in copies) == Set((a, b) for a in 0:(n - 1), b in 0:(n - 1) if a != b)
     end
 end
+
+# The recording of data parallelism over the devices there are, three at
+# most: a crossing waits for one event, the signal of the step that wrote its
+# source, or for none where its lane is ordered after that step already (see
+# `stream_schedule`); and each signal a crossing waits for is recorded in its
+# device's graph directly after its step, on that step's nodes alone and
+# before any later step of the segment, so that the crossing starts once its
+# source is written, not once the segment ends.
+@testset "a crossing waits for the signal recorded directly after its source's writer" begin
+    n = min(CUDACore.ndevices(), 3)
+    if n < 2
+        @test_skip "needs two devices"
+    else
+        CX = Base.get_extension(Tempest, :CUDAExt)
+        on(d, a) = CUDACore.device!(() -> CuArray(a), d)
+        rs, xs, ts = replicas_of(placed_model(Float32; tokens = 96)..., n)
+        args = (Tuple(map(w -> map(a -> on(k - 1, a), w), r) for (k, r) in enumerate(rs)),
+            Tuple(on(k - 1, a) for (k, a) in enumerate(xs)), Tuple(on(k - 1, a) for (k, a) in enumerate(ts)))
+        ex = capture!(prepare(trace(replicated_sgd!, rs, xs, ts), args...))
+        r, steps, touches = ex.captured, ex.steps, ex.touches
+        # The step that wrote what crossing `k` copies.
+        writer(k) = only(unique(findlast(j -> key in touches[j].writes, 1:(k - 1)) for key in touches[k].reads))
+        # The nodes `node` depends on, at any remove.
+        function before(node)
+            seen, todo = Set{CUDACore.CUgraphNode}(), CX.dependencies(node)
+            while !isempty(todo)
+                x = pop!(todo)
+                x in seen || (push!(seen, x); append!(todo, CX.dependencies(x)))
+            end
+            seen
+        end
+        # Whether step `j`'s signal is recorded in its graph right after it.
+        function recorded_after(j)
+            segment, i = r.at[j]
+            g = r.segments[segment].graph
+            g isa CX.Graph || return false
+            record = g.signals[i]
+            nodes(places) = Set(x.node for p in places for x in g.nodes[p])
+            deps = CX.dependencies(record.node)
+            record.kind == CUDACore.CU_GRAPH_NODE_TYPE_EVENT_RECORD && record.params == r.schedule.steps[j].signal.handle &&
+                !isempty(deps) && deps ⊆ nodes(i:i) && isdisjoint(before(record.node), nodes((i + 1):length(g.nodes)))
+        end
+        crossing = findall(C.crosses, steps)
+        waiting = filter(k -> !isempty(r.schedule.steps[k].waits), crossing)
+        @test length(crossing) >= n * (n - 1) && !isempty(waiting)
+        @test filter(k -> r.schedule.steps[k].waits != [r.schedule.steps[writer(k)].signal], waiting) == []
+        @test filter(k -> !recorded_after(writer(k)), waiting) == []
+    end
+end

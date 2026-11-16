@@ -283,6 +283,9 @@ mutable struct Graph
     graph::CUDACore.CuGraph
     steps::Vector{Tempest.Compiler.Scheduled}
     nodes::Vector{Vector{Any}}
+    # Per step, the node recording its signal (a `Node`), or `nothing` where
+    # it signals nothing (see `steps_recorded`).
+    signals::Vector{Any}
     # Per step and value, where its address is in the step's kernels, and
     # the alignments it was learned at.
     slots::Dict{Tuple{Int, Int}, Vector{Tuple{Int, Int, Int, Int}}}
@@ -340,6 +343,10 @@ function node_record(node)
         p = Ref{CUDACore.CUDA_MEMCPY3D}()
         CUDACore.cuGraphMemcpyNodeGetParams(node, p)
         return Node(node, kind[], p[])
+    elseif kind[] == CUDACore.CU_GRAPH_NODE_TYPE_EVENT_RECORD
+        e = Ref{CUDACore.CUevent}()
+        CUDACore.cuGraphEventRecordNodeGetEvent(node, e)
+        return Node(node, kind[], e[])
     end
     Node(node, kind[], nothing)
 end
@@ -365,6 +372,7 @@ end
 # no step's: the driver takes a wait or a record in a capture only as an
 # external one, a node waiting for the record launched last before the graph
 # or recording at each launch, and refuses those flags outside a capture.
+# Per step, the node recording its signal is kept, as the graph has it.
 function steps_recorded(target, steps)
     graph = CUDACore.CuGraph()
     after = CUDACore.CuGraphNode[]
@@ -374,10 +382,12 @@ function steps_recorded(target, steps)
         after = captured!(f, graph; after)
         push!(marks, (step, CUDACore.CUgraphNode[n.handle for n in after]))
     end
+    signals = Any[]
     for s in steps
         isempty(s.waits) || mark!(() -> foreach(e -> CUDACore.cuStreamWaitEvent(CUDACore.stream(), e, CUDACore.CU_EVENT_WAIT_EXTERNAL), s.waits), false)
         mark!(() -> s.step.run(), true)
         s.signal === nothing || mark!(() -> CUDACore.cuEventRecordWithFlags(s.signal, CUDACore.stream(), CUDACore.CU_EVENT_RECORD_EXTERNAL), false)
+        push!(signals, s.signal === nothing ? nothing : node_record(only(last(marks)[2])))
     end
     seen = Set{CUDACore.CUgraphNode}()
     nodes = Vector{Any}[]
@@ -392,7 +402,7 @@ function steps_recorded(target, steps)
         end
         step && push!(nodes, Any[node_record(n) for n in reverse!(mine)])
     end
-    graph, nodes
+    graph, nodes, signals
 end
 
 # `f` captured into `graph`, after `after`. A capture that starts while CUDA.jl
@@ -415,9 +425,9 @@ end
 # repointing its copies alone.
 function Tempest.Compiler.capture(target::CUDATarget, steps, keep)
     Tempest.Compiler.crosses(first(steps).step) && return steps
-    graph, nodes = steps_recorded(target, steps)
+    graph, nodes, signals = steps_recorded(target, steps)
     exec = CUDACore.instantiate(graph)
-    g = finalizer(g -> (finalize(g.exec); finalize(g.graph)), Graph(exec, graph, steps, nodes, Dict(), Dict(), Set{Int}()))
+    g = finalizer(g -> (finalize(g.exec); finalize(g.graph)), Graph(exec, graph, steps, nodes, signals, Dict(), Dict(), Set{Int}()))
     GRAPHS[g] = keep
     g
 end
