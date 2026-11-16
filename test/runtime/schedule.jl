@@ -87,6 +87,31 @@ end
     @test s.runs == [[1, 4], [2], [3], [5]]
 end
 
+# Of two crossings leaving one device, the one whose source is written first
+# is launched first, whatever lanes they take: a device's link takes its
+# crossings in the order they are launched (see `link`).
+function launched_in_source_order(steps, touches, runs)
+    launched = reduce(vcat, runs)
+    writer(k) = something(findlast(j -> !isempty(intersect(touches[j].writes, touches[k].reads)), 1:(k - 1)), 0)
+    all(d -> issorted([writer(k) for k in launched if C.crosses(steps[k]) && steps[k].from == d]), unique(s.from for s in steps))
+end
+
+@testset "crossings leave a device in the order their sources are written" begin
+    # Two lanes from one device, the first taken again for a source written
+    # after the second's: each crossing is a run of its own, launched in
+    # plan order.
+    steps = [kernel(0), across(0, 1), kernel(0), across(0, 2), kernel(0), across(0, 1)]
+    touches = [touching([], [1]), touching([1], [2]), touching([], [3]), touching([3], [4]), touching([], [5]), touching([5], [6])]
+    s = checked(steps, touches)
+    @test s.runs == [[1, 3, 5], [2], [4], [6]]
+    @test launched_in_source_order(steps, touches, s.runs)
+    # The goal's spelling over three replicas, two lanes from each device.
+    args = replicas_of(placed_model(Float32; width = 12, tokens = 96)..., 3)
+    ex = prepare(trace(replicated_sgd!, args...), labelled_replicas(args...)...; target = T.CPUTarget())
+    @test launched_in_source_order(ex.steps, ex.touches, ex.schedule.runs)
+    @test unordered(ex) == []
+end
+
 @testset "the check finds a wait left out" begin
     steps = [kernel(0), across(0, 1), kernel(0)]
     touches = [touching([], [1]), touching([1], [2]), touching([], [1])]

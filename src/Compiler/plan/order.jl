@@ -121,14 +121,20 @@ those of `needs[k]`, on stream `streams[k]` (see `group_stream`), estimated
 to take `seconds[k]`: as they would start if the streams ran each its own
 in that order, at once, every kernel taking its time.
 
-A device runs one kernel at a time. A crossing takes its time on its
-source's link out and its reader's link in, one crossing at a time on each:
-two lanes that share a direction share its rate, each crossing after the
-last on it. A kernel can start once those it needs have ended and its
-device, or a crossing its two directions, are free. The next taken is the
-one that can start first; of two that can at once, the one after which
-another stream can begin on what follows it soonest (see `awaited`); and
-then the first in the plan's order.
+A device runs one kernel at a time. A crossing is two hops: out of its
+source's device, over the link out that every crossing from that device
+shares, then into its reader's, over the link in that every crossing to it
+shares. Each hop is taken to last the crossing's estimate, and the second
+to begin once the first has ended: right for a crossing of one staging
+chunk, long for a larger one, whose hops overlap chunk by chunk. A link out takes its crossings in the order
+their sources are written, each once its source is and the link is free,
+so that none waits behind one whose source is not, as a target launches
+them (see `link`), and of those whose sources are written at once the one
+that can be in first; a link in takes each once it is out and the link is
+free. A kernel can start once those it needs have ended and its device is
+free. The next taken is the one that can start first; of two that can at
+once, the one after which another stream can begin on what follows it
+soonest (see `awaited`); and then the first in the plan's order.
 
 So a kernel reading a crossing runs once the crossing is estimated there,
 and its device runs what it can before it; once it can run, it runs before
@@ -145,42 +151,76 @@ function run_order(needs, streams, seconds)
     after = [Int[] for _ in 1:n]
     foreach(k -> foreach(j -> push!(after[j], k), needs[k]), 1:n)
     soon = awaited(after, streams, seconds)
-    # What each stream holds: its device, or a crossing's two directions.
-    holds(σ) = first(σ) == last(σ) ? ((first(σ), :run),) : ((first(σ), :out), (last(σ), :in))
+    # Where each kernel waits its turn: its device, or for a crossing its
+    # source's link out; and when each is free.
+    turn(σ) = first(σ) == last(σ) ? (first(σ), :run) : (first(σ), :out)
     free = Dict{Tuple{Any, Symbol}, Float64}()
-    numbers = unique(streams)
-    on = indexin(streams, numbers)
-    held = [holds(σ) for σ in numbers]
-    # Each stream's kernels whose needs have run: by the time they can
-    # start, those that can as soon as the stream is free by `soon`.
+    numbers = unique(map(turn, streams))
+    on = indexin(map(turn, streams), numbers)
+    out = [last(t) === :out for t in numbers]
+    # Each device's kernels whose needs have run: by the time they can
+    # start, those that can as soon as the device is free by `soon`. Each
+    # link out's crossings whose sources are written, first in, first out,
+    # each with how many kernels were taken as its source was.
     later = [Tuple{Float64, Float64, Int}[] for _ in numbers]
     now = [Tuple{Float64, Int}[] for _ in numbers]
+    written = [Tuple{Int, Int}[] for _ in numbers]
     ready = zeros(n)
     waiting = map(length, needs)
-    foreach(k -> waiting[k] == 0 && heap_push!(later[on[k]], (0.0, soon[k], k)), 1:n)
     order = Int[]
+    arrive!(k) = out[on[k]] ? push!(written[on[k]], (length(order), k)) : heap_push!(later[on[k]], (ready[k], soon[k], k))
+    foreach(k -> waiting[k] == 0 && arrive!(k), 1:n)
+    # Where in link out `s`'s queue its next crossing is: of those first,
+    # whose sources were written at once, the one that can be in first, then
+    # by `soon`.
+    function next_out(s)
+        q = written[s]
+        best, at = (Inf, Inf, typemax(Int)), 0
+        for i in eachindex(q)
+            first(q[i]) == first(q[1]) || break
+            k = last(q[i])
+            gone = max(ready[k], get(free, numbers[s], 0.0)) + seconds[k]
+            key = (max(gone, get(free, (last(streams[k]), :in), 0.0)) + seconds[k], soon[k], k)
+            key < best && ((best, at) = (key, i))
+        end
+        at
+    end
+    next = zeros(Int, length(numbers))
     while length(order) < n
         best, at = (Inf, Inf, typemax(Int)), 0
         for s in eachindex(numbers)
-            isempty(later[s]) && isempty(now[s]) && continue
-            t = maximum(r -> get(free, r, 0.0), held[s])
-            while !isempty(later[s]) && first(first(later[s])) <= t
-                _, l, k = heap_pop!(later[s])
-                heap_push!(now[s], (l, k))
+            t = get(free, numbers[s], 0.0)
+            if out[s]
+                isempty(written[s]) && continue
+                next[s] = next_out(s)
+                k = last(written[s][next[s]])
+                key = (max(ready[k], t), soon[k], k)
+            else
+                isempty(later[s]) && isempty(now[s]) && continue
+                while !isempty(later[s]) && first(first(later[s])) <= t
+                    _, l, k = heap_pop!(later[s])
+                    heap_push!(now[s], (l, k))
+                end
+                key = isempty(now[s]) ? first(later[s]) : (t, first(now[s])...)
             end
-            key = isempty(now[s]) ? first(later[s]) : (t, first(now[s])...)
             key < best && ((best, at) = (key, s))
         end
         at == 0 && error("kernels depend on each other in a cycle")
         start, _, k = best
-        isempty(now[at]) ? heap_pop!(later[at]) : heap_pop!(now[at])
+        if out[at]
+            deleteat!(written[at], next[at])
+            free[numbers[at]] = start + seconds[k]
+            into = (last(streams[k]), :in)
+            ends = free[into] = max(start + seconds[k], get(free, into, 0.0)) + seconds[k]
+        else
+            isempty(now[at]) ? heap_pop!(later[at]) : heap_pop!(now[at])
+            ends = free[numbers[at]] = start + seconds[k]
+        end
         push!(order, k)
-        ends = start + seconds[k]
-        foreach(r -> free[r] = ends, held[at])
         for j in after[k]
             ready[j] = max(ready[j], ends)
             waiting[j] -= 1
-            waiting[j] == 0 && heap_push!(later[on[j]], (ready[j], soon[j], j))
+            waiting[j] == 0 && arrive!(j)
         end
     end
     order

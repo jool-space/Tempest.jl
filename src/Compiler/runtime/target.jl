@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, written, crossing, stream, on_stream, event, record!, wait!, Scheduled, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, written, crossing, stream, lane, link, on_stream, event, record!, wait!, Scheduled, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -381,8 +381,8 @@ floor_split(::Target, items, positions, adjacent) = nothing
 A step of an execution: `run()`, a kernel's launch or a copy, and the device
 it runs on (see `device_of`); and the device it reads from, another only for
 a crossing, a copy from `from` to `device` (see `crossing`). The two name
-the stream it runs on (see `stream`): a device's own, or the lane of the
-ordered pair of devices a crossing copies between.
+the stream it runs on: a device's own (see `stream`), or the lane of the
+ordered pair of devices a crossing copies between (see `lane`).
 """
 struct Step
     run::Any
@@ -436,15 +436,38 @@ crossing(::CPUTarget, to, from, values::Pair{Int, Int}, offset::Int) = Copy(to, 
 ## Streams.
 
 """
-    stream(target, from, to) -> stream
+    stream(target, device) -> stream
 
-What the steps of one stream run on (see `stream_of`): with `from == to`, a
-device's own, its kernels and copies in order; else the lane of the ordered
-pair, the crossings from `from` to `to` in order. Made once for each
-schedule, with the task on `to`'s device. By default the pair itself, whose
-steps run with the task on `to` (see `on_stream`).
+What a device's own steps run on (see `stream_of`), its kernels and copies
+in order. Made once for each schedule, with the task on the device. By
+default the pair `(device, device)`, whose steps run with the task on the
+device (see `on_stream`).
 """
-stream(::Target, from, to) = (from, to)
+stream(::Target, device) = (device, device)
+
+"""
+    lane(target, from, to, out) -> stream
+
+What the crossings from device `from` to device `to` run on (see
+`stream_of`), in order: the lane of the ordered pair, which leaves `from`
+by `out`, its link (see `link`). Made once for each schedule, with the task
+on `to`'s device. By default the pair `(from, to)`, whose steps run with
+the task on `to` (see `on_stream`).
+"""
+lane(::Target, from, to, out) = (from, to)
+
+"""
+    link(target, device) -> link
+
+What the crossings leaving `device` go out by, every lane from it the same
+(see `lane`): it takes them one at a time, in the order they are
+launched, which is the order their sources are written (see `walk` and
+`run_order`), so that none waits behind one whose source is not. Made once
+for each schedule, for each device a crossing leaves, with the task on it.
+By default nothing: the CPU's crossings are copies on the host, which run
+as they are launched.
+"""
+link(::Target, device) = nothing
 
 """
     on_stream(f, target, stream)

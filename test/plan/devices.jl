@@ -374,8 +374,12 @@ end
 # its own work behind a crossing it could have run beside. What waits and
 # no other device waits for, each replica's update, runs after what waits
 # for nothing; what another device waits for runs as soon as it can, before
-# or after. Devices that compute alike, the replicas of data parallelism,
-# run their kernels in the same order.
+# or after. Two replicas of data parallelism run their kernels in the same
+# order. Three need not: each sends its piece of a sum to the other two at
+# once, one at a time over its link out, and which it sends to first is a
+# tie-break; unless each sends to the same neighbour first, some device's
+# link in takes two at once, so that one replica's pieces arrive later than
+# the others' and it runs other kernels first.
 @testset "each device runs what waits for no crossing first, $n devices" for n in (2, 3)
     # Weights whose last axes share out evenly, so that pieces are alike.
     ws, x, t = placed_model(Float32; width = 12, tokens = 96)
@@ -395,11 +399,12 @@ end
     summary(v) = (d = g.values[v].definition; (typeof(d), d isa C.Pointwise ? d.f : d isa C.Reduction ? d.fold : nothing, g.values[v].dims))
     alike(k) = (C.kind_name(p.groups[k].kind), waits(k), sort!(map(summary, C.members(p.groups[k])); by = repr))
     replica(d) = [alike(k) for k in kernels(d) if !(any(m -> g.values[m].scalar, C.members(p.groups[k])))]
-    @test all(d -> replica(d) == replica(1), 2:n)
+    n == 2 && @test replica(2) == replica(1)
 end
 
 # Kernels by stream and estimated seconds: each device's own stream `(d, d)`,
-# a crossing's the lane `(a, b)` from its source's device to its reader's.
+# a crossing's the lane `(a, b)` from its source's device to its reader's,
+# its seconds those of each of its two hops, out of `a` and into `b`.
 @testset "kernels run as they are estimated to start" begin
     run(needs, streams, seconds) = C.run_order(map(Set{Int}, needs), streams, seconds)
     # A chain on each device, the second's crossing to the first, read there
@@ -413,17 +418,27 @@ end
     # free, before the work left (4), and so does the other device.
     needs = [[], [], [], [], [1, 6], [7], [], [5], [8]]
     streams = [(1, 1), (1, 1), (1, 1), (1, 1), (1, 1), (2, 1), (2, 2), (1, 2), (2, 2)]
-    order = run(needs, streams, [1, 1, 1, 1, 1, 1.5, 1, 1, 1])
+    order = run(needs, streams, [1, 1, 1, 1, 1, 0.75, 1, 1, 1])
     @test filter(k -> streams[k] == (1, 1), order) == [1, 2, 3, 5, 4]
     # Not before it is there: estimated to arrive later, the sum runs last.
-    order = run(needs, streams, [1, 1, 1, 1, 1, 3.5, 1, 1, 1])
+    order = run(needs, streams, [1, 1, 1, 1, 1, 1.75, 1, 1, 1])
     @test filter(k -> streams[k] == (1, 1), order) == [1, 2, 3, 4, 5]
     # Every estimate twice as long, crossings with them: the same order.
-    @test run(needs, streams, 2 .* [1, 1, 1, 1, 1, 1.5, 1, 1, 1]) == run(needs, streams, [1, 1, 1, 1, 1, 1.5, 1, 1, 1])
+    @test run(needs, streams, 2 .* [1, 1, 1, 1, 1, 0.75, 1, 1, 1]) == run(needs, streams, [1, 1, 1, 1, 1, 0.75, 1, 1, 1])
     # Two lanes into one device share its link in: the crossing whose source
     # is written first goes first, though later in the plan's order, and the
     # other after it.
     @test run([[], [1], [], [3], [2, 4]], [(1, 1), (1, 3), (2, 2), (2, 3), (3, 3)], [2, 1, 1, 1, 1]) == [1, 3, 4, 2, 5]
+    # Two lanes out of one device share its link out, which takes them in
+    # the order their sources are written: the crossing to the third device
+    # (6), whose source is written first, goes out first though the third's
+    # link in is held by the second's crossing (4) and the other lane's (5)
+    # is free to land, its upload waiting until that link is free.
+    needs = [[], [1], [], [3], [2], [1], [4, 6], [5]]
+    streams = [(1, 1), (1, 1), (2, 2), (2, 3), (1, 2), (1, 3), (3, 3), (2, 2)]
+    order = run(needs, streams, [1, 1, 0.5, 3, 1, 1, 1, 1])
+    @test filter(k -> first(streams[k]) == 1 && last(streams[k]) != 1, order) == [6, 5]
+    @test last(order) == 7
     # On one stream, the plan's order wherever it lets them, whatever the estimates.
     first_ready(needs) = (order = Int[]; while length(order) < length(needs)
         push!(order, findfirst(k -> !(k in order) && all(in(order), needs[k]), eachindex(needs)))

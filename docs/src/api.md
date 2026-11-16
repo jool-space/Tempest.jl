@@ -108,6 +108,8 @@ Tempest.Compiler.crosses
 Tempest.Compiler.written
 Tempest.Compiler.crossing
 Tempest.Compiler.stream
+Tempest.Compiler.lane
+Tempest.Compiler.link
 Tempest.Compiler.on_stream
 Tempest.Compiler.event
 Tempest.Compiler.record!

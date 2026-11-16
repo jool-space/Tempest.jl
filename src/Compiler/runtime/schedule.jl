@@ -1,7 +1,8 @@
 # The order an execution's steps need between streams. A device runs its own
 # steps on one stream, in order; a crossing runs on a lane of its own, the
 # stream of its ordered pair of devices, so that it copies beside the kernels
-# of both. Whatever two streams touch of one storage is ordered between them
+# of both, and leaves its source by the link every lane from there shares, in
+# the order the crossings are launched (see `link`). Whatever two streams touch of one storage is ordered between them
 # by a wait (see plan/order.jl). What a step touches is known where the steps
 # are made (see `step_touches`); the waits and the runs a recording launches
 # are derived from it alone (see `stream_schedule`), and an execution runs by
@@ -75,24 +76,29 @@ of one stream's steps in order: a step joins its stream's last run unless it
 waits for a step of a run launched after that one began, so that what it
 waits for is launched before it. A wait binds to what was launched before
 it: launched later, a graph that waits for a crossing a graph of its own
-device feeds would wait for the crossing of the execution before. One
+device feeds would wait for the crossing of the execution before. A
+crossing is a run of its own, launched in plan order, so that the crossings
+leaving one device reach its link in the order their sources are written
+(see `link` and `run_order`): what a run is for, one graph of its steps, a
+crossing does without, running as it is replayed (see `capture`). One
 device's steps are one run.
 """
 function stream_schedule(steps::Vector{Step}, touches::Vector{Touches})
     (; on, waits) = stream_order(map(stream_of, steps), touches)
-    (; waits, runs = stream_runs(on, waits))
+    (; waits, runs = stream_runs(on, waits, map(crosses, steps)))
 end
 
 # The runs of steps on streams `on`, waiting for `waits`: each step joins its
-# stream's last run unless it waits for one of a run begun after it.
-function stream_runs(on, waits)
+# stream's last run unless it waits for one of a run begun after it, or is
+# `alone`.
+function stream_runs(on, waits, alone)
     runs = Vector{Int}[]
     starts = Int[]
     run_of = zeros(Int, length(on))
     current = Dict{Int, Int}()
     for k in eachindex(on)
         r = get(current, on[k], 0)
-        if r == 0 || any(j -> starts[run_of[j]] > starts[r], waits[k])
+        if r == 0 || alone[k] || any(j -> starts[run_of[j]] > starts[r], waits[k])
             push!(runs, Int[])
             push!(starts, k)
             r = current[on[k]] = length(runs)
@@ -142,12 +148,12 @@ struct LaneEnds
 end
 
 """
-An execution's steps as they run, each on its stream (see `stream`), in plan
-order, with the waits that order it after steps on other streams (see
-`stream_schedule`); the runs of each stream's steps, in the order they are
-launched; and per lane its ends, which order a call's crossings after what
-was launched before the call on either device, and what is launched after
-the call on either after the crossings (see `walk`).
+An execution's steps as they run, each on its stream (see `stream` and
+`lane`), in plan order, with the waits that order it after steps on other
+streams (see `stream_schedule`); the runs of each stream's steps, in the
+order they are launched; and per lane its ends, which order a call's
+crossings after what was launched before the call on either device, and
+what is launched after the call on either after the crossings (see `walk`).
 """
 struct Schedule
     steps::Vector{Scheduled}
@@ -156,14 +162,16 @@ struct Schedule
 end
 
 # The schedule of `steps`, which touch `touches`, on `target`, its streams
-# and events made where their steps run.
+# and events made where their steps run, and the link out of each device a
+# crossing leaves made once, for every lane from it.
 function Schedule(target::Target, steps::Vector{Step}, touches::Vector{Touches})
     (; waits, runs) = stream_schedule(steps, touches)
     pairs = filter(σ -> first(σ) != last(σ), unique(map(stream_of, steps)))
     devices = unique([map(last ∘ stream_of, steps); map(first, pairs)])
     streams = Dict{Any, Any}()
-    foreach(d -> streams[(d, d)] = on_device(() -> stream(target, d, d), target, d), devices)
-    foreach(σ -> streams[σ] = on_device(() -> stream(target, σ...), target, last(σ)), pairs)
+    foreach(d -> streams[(d, d)] = on_device(() -> stream(target, d), target, d), devices)
+    links = Dict(d => on_device(() -> link(target, d), target, d) for d in unique(map(first, pairs)))
+    foreach(σ -> streams[σ] = on_device(() -> lane(target, σ..., links[first(σ)]), target, last(σ)), pairs)
     made(σ) = on_stream(() -> event(target, streams[σ]), target, streams[σ])
     waited = falses(length(steps))
     foreach(w -> waited[w] .= true, waits)

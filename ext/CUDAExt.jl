@@ -95,8 +95,8 @@ end
 A crossing on CUDA's target: buffer `from` on one device, from `offset`
 bytes in, copied into `to` on another, as many bytes as `to` holds, through
 page-locked host memory, chunk by chunk, each chunk's
-download on the lane's stream on the source and its upload on the lane's
-stream on the reader (see `Lane`), so that the copy runs beside both
+download on the source's link out and its upload on the lane's stream on
+the reader (see `Lane`), so that the copy runs beside both
 devices' kernels, and neither device waits for the host nor the host for
 either: the copy between two devices that every pair of them can make,
 where a kernel or a copy between devices can touch only a peer's memory. It
@@ -143,8 +143,8 @@ function Tempest.Compiler.Implement.repoint!(c::Staged, value, buffer)
 end
 
 # Run on its lane (see `on_stream`): the task on the reader's device, and
-# each device's stream the lane's there, the source's for the downloads and
-# the reader's for the uploads.
+# each device's stream the lane's there, the source's link out for the
+# downloads and the reader's stream for the uploads.
 function (c::Staged)()
     s = c.staging
     bytes = sizeof(c.to)
@@ -176,25 +176,34 @@ end
 
 """
 The lane of an ordered pair of devices, where the crossings from one to the
-other run beside both devices' kernels, in order: a stream on the source,
-which its downloads take, and a stream on the reader, which its uploads
-take, each a stream of its own that CUDA.jl's operations never use. A
-crossing's upload waits for its download, so that what is launched on the
-lane after a wait on the source's stream waits for it too, and the lane's
-work ends on the reader's stream.
+other run beside both devices' kernels, in order: the source's link out,
+which the downloads of every lane from the source take (see `link`), and a
+stream on the reader, which this lane's uploads take, each a stream of its
+own that CUDA.jl's operations never use. A device copies one chunk at a time
+in each direction, and of two streams with copies ready keeps to one until
+it has none: a stream per lane on the source would have the link drain one
+lane's backlog while another's reader waits, where one stream, launched in
+the order the sources are written, takes each download once its source is.
+The uploads into a reader are a stream per lane, each taken once it is
+downloaded. A crossing's upload waits for its download, so that what is
+launched on the lane after a wait on the link out waits for it too, and the
+lane's work ends on the reader's stream.
 """
 struct Lane
     from::Int
     to::Int
-    download::CUDACore.CuStream
+    out::CUDACore.CuStream
     upload::CUDACore.CuStream
 end
 
-function Tempest.Compiler.stream(target::CUDATarget, from::Int, to::Int)
-    from == to && return Own(to)
-    download = Tempest.Compiler.on_device(() -> CUDACore.CuStream(; flags = CUDACore.STREAM_NON_BLOCKING), target, from)
+Tempest.Compiler.stream(::CUDATarget, device::Int) = Own(device)
+
+# A device's link out: a stream of its own on it.
+Tempest.Compiler.link(::CUDATarget, ::Int) = CUDACore.CuStream(; flags = CUDACore.STREAM_NON_BLOCKING)
+
+function Tempest.Compiler.lane(target::CUDATarget, from::Int, to::Int, out::CUDACore.CuStream)
     upload = Tempest.Compiler.on_device(() -> CUDACore.CuStream(; flags = CUDACore.STREAM_NON_BLOCKING), target, to)
-    Lane(from, to, download, upload)
+    Lane(from, to, out, upload)
 end
 
 Tempest.Compiler.on_stream(f, target::CUDATarget, s::Own) = Tempest.Compiler.on_device(f, target, s.device)
@@ -203,7 +212,7 @@ Tempest.Compiler.on_stream(f, target::CUDATarget, s::Own) = Tempest.Compiler.on_
 # task's, as a crossing's run takes them (see `Staged`).
 function Tempest.Compiler.on_stream(f, target::CUDATarget, l::Lane)
     Tempest.Compiler.on_device(target, l.from) do
-        CUDACore.stream!(l.download) do
+        CUDACore.stream!(l.out) do
             Tempest.Compiler.on_device(() -> CUDACore.stream!(f, l.upload), target, l.to)
         end
     end
@@ -216,7 +225,7 @@ Tempest.Compiler.event(::CUDATarget, stream) = CUDACore.CuEvent(CUDACore.EVENT_D
 Tempest.Compiler.record!(::CUDATarget, ::Own, e) = CUDACore.cuEventRecord(e, CUDACore.stream())
 Tempest.Compiler.record!(::CUDATarget, l::Lane, e) = CUDACore.cuEventRecord(e, l.upload)
 Tempest.Compiler.wait!(::CUDATarget, ::Own, e) = CUDACore.cuStreamWaitEvent(CUDACore.stream(), e, 0)
-Tempest.Compiler.wait!(target::CUDATarget, l::Lane, e) = Tempest.Compiler.on_device(() -> CUDACore.cuStreamWaitEvent(l.download, e, 0), target, l.from)
+Tempest.Compiler.wait!(target::CUDATarget, l::Lane, e) = Tempest.Compiler.on_device(() -> CUDACore.cuStreamWaitEvent(l.out, e, 0), target, l.from)
 
 const THREADS = 256
 
@@ -605,7 +614,7 @@ Tempest.Compiler.time_launch(target::CUDATarget, launch) = Tempest.Compiler.on_d
 # device, where its timing runs.
 function timed_steps(target, launch, n)
     d = Tempest.Compiler.home_device(target)
-    fill(Tempest.Compiler.Scheduled(Tempest.Compiler.Step(launch, d), Tempest.Compiler.stream(target, d, d), Any[], nothing), n)
+    fill(Tempest.Compiler.Scheduled(Tempest.Compiler.Step(launch, d), Tempest.Compiler.stream(target, d), Any[], nothing), n)
 end
 
 function timed_launch(target, launch)
