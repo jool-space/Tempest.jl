@@ -562,13 +562,18 @@ is flat, and no ramp of the clock from idle, as was first supposed; and
 a copy in flight on a kernel's own device 0.6, a kernel bound by memory
 3 to 4% slower beside downloads, 6 to 8% beside uploads and 7 to 10%
 beside both, one bound by compute 1 to 2%. That is 77.1 predicted, and
-1.0 is left of the compiled call, inside its noise; 0.9 of the replayed
-step where the noise is 0.8; and 1.2 to 1.5 with the calls back to back
-where it is 0.8, the devices taking 0.3 ms longer a step when a call
-follows the last with no wait for the devices between, the host between
-two calls being 0.02 ms, which nothing measured explains: half a
-millisecond in 78 not named, where the same kernels alone vary 1.5% from
-round to round. Compute alone
+1.0 is left of the compiled call, inside its noise, and 0.9 of the
+replayed step where the noise is 0.8. Calls back to back are the same
+step: with what the host does between two calls varied in a shuffled
+order and paired by round (`variants.jl`), a wait for the devices
+between calls, a spin as long, the driver's part of the wait alone and
+the host's alone each stand within 0.1 ms of nothing between, on two
+devices and on three; the 0.3 to 0.5 ms first read between the two loops
+was the step drifting upward through a session whose loops ran in a
+fixed order. Only a rest moves it, 1.0 ms less after 5 ms of rest on two
+devices and 0.6 on three, the kernels of the first 40 ms running faster,
+the devices at 86 to 88 degrees and held by their power cap while they
+work. Compute alone
 is 70.1 ms and the link alone 29.4. Three devices did not
 close, 56.6 predicted and 60.7 measured (57.3 to 64.4), the crossings
 alone taking 39 ms in one run and 54 in four, and more hardware
@@ -600,9 +605,16 @@ host's launches timed, 54.2 predicted and 54.6 measured (53.6 to 55.3),
 over 9.5 ms and holding six kernels back by at most 0.5, the kernels'
 slowing and the copies beside them moving the prediction 0.8 more, the
 path that binds being a link and not a device's work, back to back the
-same; in two later sessions the step itself stood at 57.5 ms, every way
-of timing it agreeing within the session, the cause not measured. Two
-devices are as before. On the recording of three devices, 396 steps in
+same. The step moves with the devices' state and the accounting moves
+with it (`session-host.jl`): after five idle minutes, the devices at 58
+degrees while they work, 54.8 ms a compiled call where 54.5 to 55.9 is
+predicted, the kernels alone 40.0 to 40.4 ms a device and the crossings
+alone 38.7; straight after five minutes of load, at 84 to 87 degrees
+under the power cap, 57.0 where 56.4 to 57.1 is predicted, the kernels
+alone 41.2 to 41.5 and the crossings alone 41.1, which is the 57.5 two
+later sessions had shown; why the link is 6% slower on hot devices, and
+the host 0.013 ms slower to launch each crossing, is not known, and both
+are in the parts. Two devices are as before. On the recording of three devices, 396 steps in
 182 segments, each crossing waits for one event, recorded directly after
 the step that writes its source in that device's graph, no crossing waits
 for a step of any lane, and nothing ahead of a crossing on its device's
@@ -630,9 +642,10 @@ small kernels, and the order changes under those factors; a crossing's
 hop is taken to last the crossing's whole estimate, long for a value over
 one staging chunk of 8 MiB; a crossing a run of its own cuts a device's
 kernels into 36 graphs where 24; what rule the driver picks a stream by;
-the half millisecond of two devices back to back, and the 3 ms between
-sessions on three; a kernel's time depending on what its device did in
-the tens of milliseconds before, which no estimate knows;
+a kernel's time depending on what its device did in the tens of
+milliseconds before and on how hot it is, which no estimate knows; one
+call in about 200 holding a pause of the host's collector of 69 to
+237 ms, from what a call allocates;
 fusion across a crossing by time, the hand program that sums on one
 device still 76 ms where it was 69; and from before, a copy to several
 readers, a concatenation for the pieces, whether a call spins at its end,
