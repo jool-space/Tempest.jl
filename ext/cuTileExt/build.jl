@@ -4,7 +4,7 @@ function pointwise_kernel(c::Context)
     k = TileKernel("pointwise", (), c.s.occupancy)
     indices, k.grid, _, _ = block_indices!(k.body, c)
     names = emit_tiles!(k, k.body, c, [c.g.terms[m] for m in c.g.outputs], Dict{Term, Any}(), indices...)
-    store_outputs!(k, k.body, c, c.g.outputs, names, indices...)
+    store_values!(k, k.body, c, c.g.outputs, names, indices...)
     scatter_tiles!(k, k.body, c, keyed_folds(c), names, indices)
     [k]
 end

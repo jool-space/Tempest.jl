@@ -191,7 +191,6 @@ Context(g, s) = Context(g, s, Dict{Int, Tuple{Symbol, Vector{Int}, Tuple}}())
 
 tile(c::Context) = tiles(c.s)
 groups(c::Context) = groups(c.s)
-reduced_dims(c::Context) = code(c.s) == 3 ? (1, 2) : only(swept(c.s))
 
 value_spec(c::Context, v::View) = spec(v, extent(c.s))
 
@@ -358,19 +357,6 @@ block_number(e::Affine, indices) =
 block_number(a::Var, indices) = :($(indices[a.n]) - Int32(1))
 block_number(a::Div, indices) = :(fld($(block_number(a.e, indices)), Int32($(a.d))))
 block_number(a::Mod, indices) = :(mod($(block_number(a.e, indices)), Int32($(a.d))))
-
-# The workspace views of split schedules (partials, statistics) stay two-axis.
-function load_expr(sym, spans, ta, tb, ia, ib)
-    shape = (spans[1] ? ta : 1, spans[2] ? tb : 1)
-    index = (spans[1] ? ia : :(Int32(1)), spans[2] ? ib : :(Int32(1)))
-    :($(tile_load)($sym; index = ($(index...),), shape = $shape, padding_mode = $(ct.PaddingMode.Zero)))
-end
-
-store_expr(sym, spans, ta, tb, ia, ib, value) = :($(tile_store)(
-    $sym;
-    index = ($(spans[1] ? ia : :(Int32(1))), $(spans[2] ? ib : :(Int32(1)))),
-    tile = $(ct.broadcast_to)($(tile_of(value)), $((spans[1] ? ta : 1, spans[2] ? tb : 1))),
-))
 
 # A function over tiles and numbers, as an expression of cuTile's broadcast.
 # A bare number there takes the element type of a tile of its kind, so that a
@@ -820,8 +806,6 @@ function as_rows(c::Context, v, T, value)
     full = map((s, t) -> s ? t : 1, v.spans, tile(c))
     :(maximum($(ct.broadcast_to)($value, $(Base.setindex(full, rows, 1))); dims = 1))
 end
-
-store_outputs!(k, st, c, ms, names, indices...) = store_values!(k, st, c, ms, names, indices...)
 
 # The one product rule of the fold algebra: a sum over tile axis `p` whose
 # contribution is `x * y`, where x and y both span `p` and each spans one

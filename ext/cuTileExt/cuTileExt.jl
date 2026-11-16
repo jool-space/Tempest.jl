@@ -94,14 +94,6 @@ end
 TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision) =
     TileSchedule(sketch, tiling, splits, occupancy, swizzle, precision, PLAIN)
 
-# The two-axis sketches over groups A and B, `reduced` naming the reduced one
-# (1 or 2), both (3) or neither (0).
-TileSchedule(sketch, A, B, extent, reduced, tile, splits, occupancy) = TileSchedule(
-    sketch,
-    [TileAxis(collect(A), extent[1], tile[1], reduced in (1, 3)), TileAxis(collect(B), extent[2], tile[2], reduced in (2, 3))],
-    splits, occupancy, 0, :full,
-)
-
 extent(s::TileSchedule) = Tuple(ax.extent for ax in s.tiling)
 tiles(s::TileSchedule) = Tuple(ax.tile for ax in s.tiling)
 groups(s::TileSchedule) = Tuple(ax.axes for ax in s.tiling)
@@ -139,7 +131,6 @@ function step_indices(s::TileSchedule, indices, t)
     end
     Tuple(ix)
 end
-kept_tiles(s::TileSchedule) = prod((cld(ax.extent, ax.tile) for ax in s.tiling if !ax.reduced); init = 1)
 
 function Base.show(io::IO, s::TileSchedule)
     if s.sketch === :product
