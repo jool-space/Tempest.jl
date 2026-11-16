@@ -324,8 +324,8 @@ function cover(d::Decider)
     # A proposal's comparison with the plan it is priced in, and the
     # implementation that claims its group: by key, once, where its kind
     # can be priced (`priceable`).
-    priced = Dict{String, Any}()
-    known = IdDict{Plan, Any}()
+    priced = Dict{String, Union{Nothing, Tuple{Comparison, Union{Nothing, Implementation}}}}()
+    known = IdDict{Plan, Tuple{Vector{GroupIdentity}, Set{GroupIdentity}}}()
     function can_price(p, q, i)
         p === nothing && return false
         i === nothing || claimant(d, p, q, i) !== nothing || return false
@@ -341,11 +341,11 @@ function cover(d::Decider)
     # cover's time. Priced in order, once per key, as before.
     texts = Dict{Int, String}()
     keyed = [(q, i, proposal_key(base, a, q, texts)) for (q, i) in proposed]
-    firsts = Dict{String, Any}()
+    firsts = Dict{String, Proposal}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
     clock = lap!(:cover_keys, clock)
     planned = Dict(k => Threads.@spawn(plan_of(trial(based, Proposal[], Proposal[q]))) for (k, q) in firsts)
-    trials = Dict(k => fetch_result(t) for (k, t) in planned)
+    trials = Dict{String, Union{Nothing, Plan}}(k => fetch_result(t) for (k, t) in planned)
     # Whether each trial can be priced, by its key's first proposal as it is
     # priced below; and what the implementations offer for the groups of
     # those that can, found side by side as the starting plan's are (see
@@ -356,7 +356,7 @@ function cover(d::Decider)
     clock = lap!(:cover_trials, clock)
     search_ahead!(d, base, keyed, trials, pricing)
     clock = lap!(:cover_search_ahead, clock)
-    ranked = Tuple{Float64, Any, Union{Nothing, Implementation}, String}[]
+    ranked = Tuple{Float64, Proposal, Union{Nothing, Implementation}, String}[]
     for (q, i, k) in keyed
         x = get!(() -> priced_plan(trials[k], base, q, i, pricing[k]), priced, k)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
@@ -457,7 +457,7 @@ end
 function search_ahead!(d::Decider, base::Plan, keyed, trials, pricing)
     d.measure in (:close, :all) || return nothing
     shared = Set(group_identity(base, g) for g in base.groups)
-    ahead, seen, searched = Any[], Set{GroupIdentity}(), Set{String}()
+    ahead, seen, searched = Tuple{Plan, Group, Vector{Choice}}[], Set{GroupIdentity}(), Set{String}()
     for (_, _, k) in keyed
         k in searched && continue
         push!(searched, k)
