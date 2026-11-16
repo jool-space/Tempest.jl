@@ -619,8 +619,32 @@ device's downloads and uploads alone run at the same rate cool, in the
 first seconds after five minutes of load at 81 to 84 degrees, and while
 it cools, to 0.2%, the power cap clearing within a second of the load's
 end; and the host's core is no slower, a fixed loop 6.45 ms in every
-state. Several devices copying at once, and copies while the load runs,
-were not tried. And how far the prediction itself spreads
+state. Found then, heat against the process two by two and five fresh
+processes (`twobytwo.jl`, `numa.jl`): it is neither, but where the
+staging memory lies. The machine has two NUMA nodes, devices 0 and 1 on
+the first and device 2 on the second; a plan's page-locked staging is
+committed, all of it, on the node the Julia thread was on while the plan
+was built, the first in some processes and the second in others; and a
+device copies 6 to 9% slower to and from the other node's memory, 6.9
+GB/s down and 7.1 up where 7.5. So the crossings alone take 38.6 to
+39.0 ms with the staging on the first node, one device far, and 40.3 to
+40.8 on the second, two far, in a fresh cool process, a process pinned
+to a node by `taskset` giving each; heat adds 0.25 to 0.5 ms and a load
+having run in the process nothing. The two sessions above match the two
+layouts by their devices' rates. Built on branch `staging-node`
+(731119a), not landed, the user's to decide: a crossing's staging
+allocated on its source's node, by the thread's memory policy set for
+the allocation and put back, the system call by its number on two
+architectures since the C library does not wrap it, nothing done on one
+node or elsewhere; the crossings alone then 37.8 to 38.1 ms wherever the
+thread runs, the replicas' digests unchanged. Left after it: a device's
+rate still moves 4% with the thread's node, 7.7 GB/s near and 7.3 to 7.4
+far, likely the driver's own host memory, placed when a context is made.
+Also seen: all six links busy give 7.5 GB/s where one device alone gives
+8.5 down and 8.0 up; a load on a device slows its uploads 1.2 to 1.6%
+and not its downloads; and a driver call alone runs 1.5 to 3 times
+slower after another process's load, not known why, the crossings' own
+launches unmoved. And how far the prediction itself spreads
 (`spread-predict.jl`): with each part drawn from one of its own rounds,
 77.4 ms on two devices (76.7 to 78.2, the 10th to the 90th percentile)
 and 55.6 on three (55.0 to 56.0), so that of two devices' step less its
