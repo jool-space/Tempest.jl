@@ -102,8 +102,18 @@ Base.@nospecializeinfer function holds_handle(@nospecialize(x), seen)
         x in seen && return false
         push!(seen, x)
     end
-    x isa Union{AbstractArray, Tuple, NamedTuple, AbstractSet} && return any(y -> holds_handle(y, seen), x)
-    x isa AbstractDict && return any(((k, v),) -> holds_handle(k, seen) || holds_handle(v, seen), x)
+    # A container's elements, a dictionary's pairs, are walked in a loop, each
+    # by a call on whatever it is. `any` over a container of unknown type would
+    # be inferred against each of the few methods `any` has, Tempest's own for
+    # traced arrays among them though a traced array never gets this far, and
+    # that inference, with every caller of this walk, is voided whenever a
+    # package loaded later adds a method of `any`.
+    if x isa Union{AbstractArray, Tuple, NamedTuple, AbstractSet, AbstractDict}
+        for y in x
+            holds_handle(y, seen) && return true
+        end
+        return false
+    end
     any(k -> isdefined(x, k) && holds_handle(getfield(x, k), seen), 1:fieldcount(T))
 end
 
@@ -159,7 +169,18 @@ function holds_traced(@nospecialize(x))
     x isa AbstractArray{<:Number} && !(x isa TracedArray) || return false
     T = eltype(x)
     isconcretetype(T) && !(T <: Traced) && return false
-    any(v -> v isa Traced, x)
+    holds_element(Traced, x)
+end
+
+# Whether some element of host array `x` is a `T`, found by a loop, as
+# `holds_handle` walks: `any` over an array of unknown type would be inferred
+# against Tempest's own `any` for traced arrays, though a traced array never
+# comes here, and voided when a package loaded later adds a method of `any`.
+function holds_element(::Type{T}, @nospecialize(x::AbstractArray)) where {T}
+    for v in x
+        v isa T && return true
+    end
+    false
 end
 
 # A range is the index itself: it stays a range, and lowers to a formula

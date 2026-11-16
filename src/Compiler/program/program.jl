@@ -311,7 +311,7 @@ nested(@nospecialize(x::Vector)) = !(eltype(x) <: Number) || holds_traced(x)
 # Julia's run returns it, an array of numbers or arrays on the host. An array
 # of more axes is opened by its last, each slice an array of one axis fewer.
 nested(@nospecialize(x::AbstractArray)) =
-    holds_traced(x) || !(x isa TracedArray) && !(eltype(x) <: Number) && any(v -> v isa TracedArray, x)
+    holds_traced(x) || !(x isa TracedArray) && !(eltype(x) <: Number) && holds_element(TracedArray, x)
 
 parts(x) = NamedTuple{fieldnames(typeof(x))}(ntuple(k -> getfield(x, k), fieldcount(typeof(x))))
 parts(x::AbstractVector) = Tuple(x)
