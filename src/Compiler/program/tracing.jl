@@ -256,6 +256,10 @@ function record_map(@nospecialize(f), @nospecialize(args...))
 end
 
 # Primitive scalar functions. Each has a derivative rule in `differentiate.jl`.
+# `>`, `>=` and `!=` are not among them: Base states each once for every type,
+# as `<`, `<=` and `==` with the operands swapped or the result negated, and a
+# method of Tempest's beside that one would void every caller Julia compiled
+# against it.
 const UNARY = (
     :-, :abs, :abs2, :sign, :exp, :exp2, :exp10, :expm1, :log, :log2, :log10, :log1p,
     :sqrt, :cbrt, :sin, :cos, :tan, :sinh, :cosh, :tanh, :asin, :acos, :atan, :asinh,
@@ -264,7 +268,7 @@ const UNARY = (
 )
 const BINARY = (
     :+, :-, :*, :/, :^, :max, :min, :atan, :copysign, :flipsign, :rem, :mod, :div, :fld,
-    :cld, :<, :<=, :>, :>=, :(==), :!=, :isless, :&, :|, :xor,
+    :cld, :<, :<=, :(==), :isless, :&, :|, :xor,
 )
 
 for f in UNARY
