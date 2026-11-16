@@ -225,7 +225,8 @@ end
 
 # Work the library does while it precompiles, without a GPU: preparing
 # attention programs for CUDA without building them, which traces and plans
-# the templates, matches them, estimates and decides.
+# the templates, matches them, estimates and decides. Its target names device
+# 0, as cuBLASExt's do.
 
 using PrecompileTools: PrecompileTools, @setup_workload, @compile_workload
 
@@ -238,7 +239,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
         @compile_workload begin
             for causal in (false, true), statistics in (false, true)
                 program = Tempest.Compiler.trace((q, k, v) -> attention(q, k, v; causal, statistics), q, k, v)
-                ex = Tempest.Compiler.prepare(program, q, k, v; target = CUDATarget(cuDNNAttention()), build = false)
+                ex = Tempest.Compiler.prepare(program, q, k, v; target = CUDATarget(cuDNNAttention(); device = 0), build = false)
                 Tempest.explain(devnull, ex)
             end
         end

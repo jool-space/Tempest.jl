@@ -9,7 +9,8 @@
 # for each intrinsic signature and tile type, which one kernel of each kind
 # leaves to the session (1.6 s of attention's). Not tileiras, which compiles
 # no Julia and would keep its CUBINs in the object cache. Loading and
-# launching need a device, so they compile in the session.
+# launching need a device, so they compile in the session. Its targets name
+# device 0, as cuBLASExt's do.
 
 using PrecompileTools: PrecompileTools, @setup_workload, @compile_workload
 
@@ -72,7 +73,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
             ((q, k) -> sum(abs2, grouped(q, k, k)), (sample(16, 4, 32, 2), sample(16, 2, 32, 2))),
         ]
         @compile_workload begin
-            for (f, args) in losses, target in (CUDATarget(cuTileGenerator()), CUDATarget(cuTileGenerator(); precision = :tf32))
+            for (f, args) in losses, target in (CUDATarget(cuTileGenerator(); device = 0), CUDATarget(cuTileGenerator(); precision = :tf32, device = 0))
                 program = Tempest.Compiler.trace((xs...) -> Tempest.withgradient(f, xs...), args...)
                 ex = Tempest.Compiler.prepare(program, args...; target, build = false)
                 explain(devnull, ex)
