@@ -62,8 +62,26 @@ grows the largest free slot, or else a new one; a slot is free for a kernel
 once every kernel using what it holds runs before it (see `plan_order`).
 """
 function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true, seconds = k -> 0.0)
+    reads = [group_reads(p.graph, g) for g in p.groups]
+    writes = overwriting(p, reads, replaces, in_place)
+    order = run_order(writes.needs, writes.streams, map(seconds, eachindex(p.groups)))
+    position = invperm(order)
+    ordered = Plan(p.graph, p.stored, p.groups[order], map(o -> o == 0 ? 0 : position[o], p.owner))
+    # What each kernel reads, by its place in the order they run, in order.
+    reading = [sort!(collect(reads[j])) for j in order]
+    placed = slotting(ordered, reading, order, writes.overwrites, in_place)
+    ordered, order, Storage(placed.lifetimes, placed.slots, placed.pool.sizes, placed.pool.devices, writes.donated, writes.staged,
+        writes.overwrites, placed.reused)
+end
+
+# What kernels of `p` write over storage they or others read, kernel `k`
+# reading the values `reads[k]`, and the needs that order them so: each
+# kernel's stream, the kernels each needs, the results written into the
+# arguments they replace (`donated`) and those copied there after the last
+# kernel (`staged`), and the folds by key written over the contents they
+# start from (`overwrites`).
+function overwriting(p::Plan, reads, replaces, in_place)
     graph = p.graph
-    reads = [group_reads(graph, g) for g in p.groups]
     needs = [Set(p.owner[r] for r in rs if p.owner[r] > 0 && p.owner[r] != k) for (k, rs) in enumerate(reads)]
     # The kernels that read each value, and those that need each kernel.
     readers = Dict{Int, Vector{Int}}()
@@ -138,12 +156,17 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true, sec
         b = base(v)
         b === nothing || v in results || b in results || p.owner[b] == 0 || overwrite!([v => b])
     end
-    order = run_order(needs, streams, map(seconds, eachindex(p.groups)))
-    position = invperm(order)
-    p = Plan(graph, p.stored, p.groups[order], map(o -> o == 0 ? 0 : position[o], p.owner))
+    (; needs, streams, donated, staged, overwrites)
+end
+
+# The slots of the stored values of `p`, its kernels in the order they run,
+# the `k`th reading `reading[k]` and being the plan's kernel `order[k]` before
+# it was so ordered; with each value's lifetime, the pool the slots were taken
+# from, and the values that took the slot of one their kernel reads last.
+function slotting(p::Plan, reading, order, overwrites, in_place)
+    graph = p.graph
+    results = Set(o.value for o in graph.results if o isa Read)
     n = length(graph.values)
-    # What each kernel reads, by its place in the order they run, in order.
-    reading = [sort!(collect(reads[j])) for j in order]
     ordering = plan_order(p)
     # Each value's last kernel, and on each stream its last that uses it.
     last = copy(p.owner)
@@ -156,7 +179,6 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true, sec
     lifetimes = [p.owner[v] > 0 ? (p.owner[v]:last[v]) : (1:0) for v in 1:n]
     slots = zeros(Int, n)
     pool = SlotPool(ordering)
-    sizes = pool.sizes
     over = Dict(overwrites)
     reused, taken = Pair{Int, Int}[], Set{Tuple{Int, Int}}()
     # A value its kernel reads for the last time, at the address the kernel
@@ -193,7 +215,7 @@ function storage(p::Plan, replaces = Pair{Int, Int}[]; in_place = k -> true, sec
         end
         slots[v] = place!(pool, value_bytes(graph.values[v]), p.owner[v], view(users, :, v), graph.devices[v])
     end
-    p, order, Storage(lifetimes, slots, sizes, pool.devices, donated, staged, overwrites, reused)
+    (; lifetimes, slots, pool, reused)
 end
 
 """
