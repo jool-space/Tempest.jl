@@ -631,8 +631,7 @@ GB/s down and 7.1 up where 7.5. So the crossings alone take 38.6 to
 40.8 on the second, two far, in a fresh cool process, a process pinned
 to a node by `taskset` giving each; heat adds 0.25 to 0.5 ms and a load
 having run in the process nothing. The two sessions above match the two
-layouts by their devices' rates. Built on branch `staging-node`
-(731119a), not landed, the user's to decide: a crossing's staging
+layouts by their devices' rates. Built and landed (e8934bd): a crossing's staging
 allocated on its source's node, by the thread's memory policy set for
 the allocation and put back, the system call by its number on two
 architectures since the C library does not wrap it, nothing done on one
