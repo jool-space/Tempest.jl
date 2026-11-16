@@ -612,9 +612,25 @@ predicted, the kernels alone 40.0 to 40.4 ms a device and the crossings
 alone 38.7; straight after five minutes of load, at 84 to 87 degrees
 under the power cap, 57.0 where 56.4 to 57.1 is predicted, the kernels
 alone 41.2 to 41.5 and the crossings alone 41.1, which is the 57.5 two
-later sessions had shown; why the link is 6% slower on hot devices, and
-the host 0.013 ms slower to launch each crossing, is not known, and both
-are in the parts. Two devices are as before. On the recording of three devices, 396 steps in
+later sessions had shown; why the crossings alone are 6% slower after
+load, and the host 0.013 ms slower to launch each, is not known, and
+both are in the parts. Looked for and not found (`hotlink.jl`): one
+device's downloads and uploads alone run at the same rate cool, in the
+first seconds after five minutes of load at 81 to 84 degrees, and while
+it cools, to 0.2%, the power cap clearing within a second of the load's
+end; and the host's core is no slower, a fixed loop 6.45 ms in every
+state. Several devices copying at once, and copies while the load runs,
+were not tried. And how far the prediction itself spreads
+(`spread-predict.jl`): with each part drawn from one of its own rounds,
+77.4 ms on two devices (76.7 to 78.2, the 10th to the 90th percentile)
+and 55.6 on three (55.0 to 56.0), so that of two devices' step less its
+prediction zero lies inside one run's spread, +0.6 (-0.2 to +1.4), and
+outside the medians', +0.8 (+0.3 to +1.1): the median step is 0.3 to
+1.1 ms slower than its parts say, not named. On three the prediction
+stands 0.2 to 1.5 ms above the step, the slowing under load being an
+upper bound put on every kernel bound by compute. The accounting holds
+to about 1 ms in 55 and in 78, and no closer. Two devices are as before.
+On the recording of three devices, 396 steps in
 182 segments, each crossing waits for one event, recorded directly after
 the step that writes its source in that device's graph, no crossing waits
 for a step of any lane, and nothing ahead of a crossing on its device's
