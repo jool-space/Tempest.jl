@@ -45,7 +45,7 @@ struct Apply <: Term
     # The variables it mentions, from its parts' (see `variables`).
     variables::UInt64
     # Compiled once, whatever the function and the arguments' number and kinds.
-    Base.@nospecializeinfer function Apply(@nospecialize(f), @nospecialize(args), eltype)
+    Base.@nospecializeinfer function Apply(@nospecialize(f), @nospecialize(args::Tuple{Vararg{Term}}), eltype)
         commutative(f) && length(args) > 1 && (args = Tuple(sort!(collect(Term, args)::Vector{Term}; lt = (a, b) -> term_order(a, b) < 0, alg = InsertionSort)))
         intern(new(f, args, eltype, hash(f, hash(args, hash(eltype, 0x5d3e7a6b1c4f9e21))),
             mapreduce(variables, |, args; init = UInt64(0))))
