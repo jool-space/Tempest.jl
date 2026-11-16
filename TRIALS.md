@@ -457,6 +457,79 @@ sum where each replica needs it without crossing twice; a replica the
 compiler keeps, made where the weights change rather than passed; more
 than two shards.
 
+The reduce beside the work, 15 and 16 November (`reduce.jl`, and
+`streams-*`, `lanes-*`, `three-*`, `order-*`, `pieces-*` there; main
+a641cbc). The goal: a step of data-parallel SGD written as a plain program,
+a replica of the weights on each device, the loss a mean over a generator
+of shards, the gradients reduced by a map over their trees and each replica
+updated from the sum, bound only by each device's work and the link, the
+replicas alike to the bit. First a number: the gradient of two half batches
+on one device stood 1.3e-4 from the whole batch's, and it is Float32
+through ReLU, not a wrong gradient: each compiled gradient is 3e-4 from a
+Float64 one in the same leaves, a few pre-activations in 33 million
+rounding across zero, and with `tanh` every leaf is within 1e-6. Then, by
+hand on the two A6000s: a staged copy on streams of its own runs beside
+both devices' kernels, a load of 57 ms on each and a copy of 192 MiB
+taking 57 ms together where the copy alone takes 27, neither slowing the
+other; a lane a direction is enough; a graph holds the order as external
+event nodes, a wait binding to the record launched last before its graph;
+and NCCL moves no more with both directions busy and slows 1.7 to 1.9
+times beside kernels bound by memory, so it is not taken. Built on that:
+each step records the storage it reads and writes, and one derivation
+gives the waits between streams, a device's own and the lane of each
+ordered pair, and the runs a recording launches, cut only where a step
+waits for one launched later (`stream_order`, `Schedule`); a call's two
+ends order its lanes after what came before it and what comes after it
+after them; on CUDA a crossing copies on its lane's two streams by
+addresses, so that CUDA.jl never takes a lane for an array's stream; a
+value takes a slot only where the program already orders every kernel
+that used what the slot held before its own, so that storage never makes
+one stream wait for another, 192 MiB more on the device that receives; a
+value read on another device is realized as a copy or made again there,
+whichever loads the heaviest device and direction less (`realizations`),
+so that a sum of what each device computed, read on each, is computed on
+each from the others' terms, one hop where the sum crossed back had two;
+a crossing copies only the span of its source that its readers read; a
+set the cover fixes holds only values that come after the same crossings,
+as a grown kernel did, and each device runs what waits for fewer
+crossings first, where device 1's backward had stalled behind device 0's
+gradients. Two devices, the goal's spelling: 79.0 ms a compiled call and
+71.8 to 73.5 polled until both devices are idle, the gradients left on
+their devices being 71.3 and the whole batch on one device 122; the
+4.4 ms between are the host blocked in synchronize rather than polling,
+the devices' crossings finishing later the less the host does. The hand
+program of the paragraph above, the sum crossing back, 122.5 then, is
+77.4. Three devices, three shards of 2730 tokens: 77.0 ms where the
+gradients alone take 46.0, bound by the link, each device sending and
+receiving two gradients, 384 MiB a direction, where a device's link
+carries 7.5 to 8 GB/s each way and nothing shared limits it. The replicas
+are alike to the bit after 1 step and after 100, on two devices and on
+three, and after 100 steps stand 3.7e-7 from the whole batch's training
+with ReLU and 1.9e-8 with `tanh`; the weights are not the bits of a
+reduce on one device, the update contracting to a fused multiply-add in
+one plan and not the other, though the reduced gradient is. By hand on
+three devices the scheme that keeps to the link is neither the exchange
+nor NCCL: each device sums a third of every gradient, the others'
+thirds sent to it and the summed third sent on, the last reduced gradient
+on every device 4.0 to 4.5 ms after the last is written, where the
+exchange is 20.8 and NCCL 6.3 and slowing the work 3 ms. In the plan that
+is an elementwise value made in pieces, a range of its last axis on each
+device, a third realization beside the two: built on branch `pieced`
+(9d44ba6), not landed, 64.4 ms a step on three devices, each device
+sending and receiving 256 MiB, plans on one and two devices unchanged.
+Open: the pieces, whose builder names the cleaner form, the sum of terms
+across devices a value of its own and the pieces put together by a
+concatenation rather than nested selects; a copy to several readers, a
+piece being downloaded once for each today, 256 MiB out where 192; the
+kernels' order by estimated time, a piece's sum running after its
+owner's whole backward while two devices wait for it, and the hand
+program that only sums on one device slower by 8 ms, 69.1 to 77.3, since
+a backward kernel fused with a sum that waits for a crossing had paid
+there; whether a call spins at its end; the link in seconds, a short
+vector being pieced by bytes alone; `prepare` by reference still taking
+two arguments over one memory; and the plans' fingerprint harness, which
+does not finish on the fuzzer's seeds 41 to 200.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
