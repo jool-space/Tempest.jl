@@ -208,6 +208,53 @@ function shifted_maps(p::Plan)
 end
 
 """
+    proposals(d, base) -> [(proposal, implementation or nothing)]
+
+What the cover weighs against the generator's plan `base`, each with what
+proposes it, nothing for the planner's own: the implementations'
+candidates, the planner's joins of a stored value into a kernel that reads
+it, its maps recomputed where they are read shifted, its folds recomputed
+where an implementation recomputes folds, its maps stored apart from a
+kernel that applies a function an implementation cannot lower or a claim
+on which failed to build, and its sums riding a recurrence's steps.
+"""
+function proposals(d::Decider, base::Plan)
+    found = Tuple{Proposal, Union{Nothing, Implementation}}[]
+    # Each proposal once, by what it is and by the values it fixes, found by
+    # a lookup rather than by a pass over the proposals before it, as many as
+    # a program has layers.
+    proposed, fixing = Set{Proposal}(), Set{Vector{Int}}()
+    for i in implementations(d.target), x in Base.invokelatest(candidates, i, d.target, base)
+        q = proposal(x)
+        q in proposed && continue
+        push!(found, (q, i))
+        push!(proposed, q)
+        push!(fixing, fixes(q))
+    end
+    for q in joins(base)
+        q.group in fixing && continue
+        push!(found, (q, nothing))
+        push!(fixing, q.group)
+    end
+    foreach(q -> push!(found, (q, nothing)), shifted_maps(base))
+    if any_recomputes_folds(d.target)
+        for v in sort!(collect(recomputable_folds(d.graph, d.kept; pinned = d.pinned)))
+            push!(found, (Recompute(v), nothing))
+        end
+    end
+    for g in base.groups
+        isempty(failures(d, base, g)) && !unlowered(d, base, g) && continue
+        for v in recomputed_maps(base, g)
+            Store(v) in proposed && continue
+            push!(found, (Store(v), nothing))
+            push!(proposed, Store(v))
+        end
+    end
+    measures(d) && foreach(((v, within, how),) -> push!(found, (Ride(v, within, how), nothing)), rides(base))
+    found
+end
+
+"""
     cover(decider) -> (plan, considered)
 
 The planner's groups, with every fold stored, and the proposals: those
@@ -239,38 +286,7 @@ function cover(d::Decider)
     clock = lap!(:cover_start, clock)
     search!(d, base)
     clock = lap!(:cover_search, clock)
-    proposals = Tuple{Proposal, Union{Nothing, Implementation}}[]
-    # Each proposal once, by what it is and by the values it fixes, found by
-    # a lookup rather than by a pass over the proposals before it, as many as
-    # a program has layers.
-    proposed, fixing = Set{Proposal}(), Set{Vector{Int}}()
-    for i in implementations(d.target), x in Base.invokelatest(candidates, i, d.target, base)
-        q = proposal(x)
-        q in proposed && continue
-        push!(proposals, (q, i))
-        push!(proposed, q)
-        push!(fixing, fixes(q))
-    end
-    for q in joins(base)
-        q.group in fixing && continue
-        push!(proposals, (q, nothing))
-        push!(fixing, q.group)
-    end
-    foreach(q -> push!(proposals, (q, nothing)), shifted_maps(base))
-    if any_recomputes_folds(d.target)
-        for v in sort!(collect(recomputable_folds(d.graph, d.kept; pinned = d.pinned)))
-            push!(proposals, (Recompute(v), nothing))
-        end
-    end
-    for g in base.groups
-        isempty(failures(d, base, g)) && !unlowered(d, base, g) && continue
-        for v in recomputed_maps(base, g)
-            Store(v) in proposed && continue
-            push!(proposals, (Store(v), nothing))
-            push!(proposed, Store(v))
-        end
-    end
-    measures(d) && foreach(((v, within, how),) -> push!(proposals, (Ride(v, within, how), nothing)), rides(base))
+    proposed = proposals(d, base)
     clock = lap!(:cover_proposals, clock)
     # What the starting plan stores: a set that does not form one group
     # there, where a trial would first form it, is not tried. A set holding a
@@ -324,7 +340,7 @@ function cover(d::Decider)
     # on the threads there are: a trial is pure, and planning is most of the
     # cover's time. Priced in order, once per key, as before.
     texts = Dict{Int, String}()
-    keyed = [(q, i, proposal_key(base, a, q, texts)) for (q, i) in proposals]
+    keyed = [(q, i, proposal_key(base, a, q, texts)) for (q, i) in proposed]
     firsts = Dict{String, Any}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
     clock = lap!(:cover_keys, clock)
@@ -338,27 +354,7 @@ function cover(d::Decider)
     foreach(((q, i, k),) -> haskey(pricing, k) || (pricing[k] = can_price(trials[k], q, i)), keyed)
     offer!(d, [(trials[k], g) for (k, can) in pricing if can for g in trials[k].groups])
     clock = lap!(:cover_trials, clock)
-    # The groups by which the trials priced below differ from the starting
-    # plan, searched together as the starting plan's are: each stage's kernels
-    # compile side by side for every trial, rather than group by group as
-    # each trial is priced.
-    if d.measure in (:close, :all)
-        shared = Set(group_identity(base, g) for g in base.groups)
-        ahead, seen, searched = Any[], Set{GroupIdentity}(), Set{String}()
-        for (q, i, k) in keyed
-            k in searched && continue
-            push!(searched, k)
-            p = trials[k]
-            pricing[k] || continue
-            for g in p.groups
-                id = group_identity(p, g)
-                (id in shared || id in seen || haskey(d.decided, canonical(p, g))) && continue
-                push!(seen, id)
-                push!(ahead, (p, g, options!(d, p, g)))
-            end
-        end
-        search!(d, ahead)
-    end
+    search_ahead!(d, base, keyed, trials, pricing)
     clock = lap!(:cover_search_ahead, clock)
     ranked = Tuple{Float64, Any, Union{Nothing, Implementation}, String}[]
     for (q, i, k) in keyed
@@ -451,6 +447,31 @@ function cover(d::Decider)
     foreach(t -> try wait(t) catch end, spawned)
     lap!(:cover_loop, clock)
     current.plan, considered
+end
+
+# The groups by which the trials of the starting plan `base` that are priced
+# (`pricing`, by key) differ from it, searched together as the starting
+# plan's are, by a decider that measures: each stage's kernels compile side
+# by side for every trial, rather than group by group as each trial is
+# priced. `keyed` holds each proposal with its key, `trials` each key's plan.
+function search_ahead!(d::Decider, base::Plan, keyed, trials, pricing)
+    d.measure in (:close, :all) || return nothing
+    shared = Set(group_identity(base, g) for g in base.groups)
+    ahead, seen, searched = Any[], Set{GroupIdentity}(), Set{String}()
+    for (_, _, k) in keyed
+        k in searched && continue
+        push!(searched, k)
+        p = trials[k]
+        pricing[k] || continue
+        for g in p.groups
+            id = group_identity(p, g)
+            (id in shared || id in seen || haskey(d.decided, canonical(p, g))) && continue
+            push!(seen, id)
+            push!(ahead, (p, g, options!(d, p, g)))
+        end
+    end
+    search!(d, ahead)
+    nothing
 end
 
 """
