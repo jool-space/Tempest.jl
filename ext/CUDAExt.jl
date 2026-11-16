@@ -65,6 +65,43 @@ Tempest.Compiler.written(::CUDATarget, x) = CUDACore.with_managed_arrays(Returns
 const CHUNK = 8 << 20
 const STAGES = 2
 
+# The NUMA node a device is attached to, as Linux reports it for the device's
+# PCI address, or `nothing` where there is no node to choose: one node online,
+# none reported for the device (-1, as on GB10), or a system other than Linux.
+function host_node(device::Int)
+    online = "/sys/devices/system/node/online"
+    Sys.islinux() && isfile(online) && occursin(r"[-,]", read(online, String)) || return nothing
+    pci(a, pad) = string(CUDACore.attribute(CUDACore.CuDevice(device), a); base = 16, pad)
+    address = join((pci(CUDACore.DEVICE_ATTRIBUTE_PCI_DOMAIN_ID, 4), pci(CUDACore.DEVICE_ATTRIBUTE_PCI_BUS_ID, 2), pci(CUDACore.DEVICE_ATTRIBUTE_PCI_DEVICE_ID, 2)), ':')
+    path = "/sys/bus/pci/devices/$address.0/numa_node"
+    node = isfile(path) ? parse(Int, readchomp(path)) : -1
+    node < 0 ? nothing : node
+end
+
+# set_mempolicy(2) and get_mempolicy(2), which the C library does not wrap,
+# by their numbers on the architectures CUDA runs Linux on.
+const MEMPOLICY = Sys.islinux() ? get((x86_64 = (238, 239), aarch64 = (237, 236)), Sys.ARCH, nothing) : nothing
+
+# `f()` with the pages the thread commits preferring `node`, the thread's
+# policy the default again after: where there is a node, the system's numbers
+# are known, and the thread has no policy of its own (one given the process
+# by `numactl`, say), which is left to decide. `f` must not yield, as the
+# policy is the thread's and a task may resume on another.
+function near(f, node)
+    (node === nothing || MEMPOLICY === nothing) && return f()
+    set, query = MEMPOLICY
+    mode = Ref{Cint}(-1)
+    (@ccall syscall(query::Clong; mode::Ptr{Cint}, C_NULL::Ptr{Culong}, 0::Culong, C_NULL::Ptr{Cvoid}, 0::Culong)::Clong) == 0 && mode[] == 0 || return f()
+    mask = zeros(Culong, node ÷ 64 + 1)
+    mask[end] = one(Culong) << (node % 64)
+    (@ccall syscall(set::Clong; 1::Cint, mask::Ptr{Culong}, (64length(mask) + 1)::Culong)::Clong) == 0 || return f()
+    try
+        f()
+    finally
+        @ccall syscall(set::Clong; 0::Cint, C_NULL::Ptr{Culong}, 0::Culong)::Clong
+    end
+end
+
 """
 The page-locked host memory a crossing copies through, a buffer per stage,
 mapped in every context, and per buffer an event on each device: its
@@ -79,10 +116,17 @@ mutable struct Staging
 end
 
 # Staging for `bytes` from device `from` to the task's: as many chunks as the
-# bytes fill, up to `STAGES`. It is freed once the last copy through it is done.
+# bytes fill, up to `STAGES`, committed by the driver as it allocates them on
+# the source's node, not wherever the thread happened to be: an RTX A6000
+# copies to and from the other node's memory 6–9% slower, the download the
+# more (6.9 GB/s down, 7.1 up, 7.5 near). Devices on one node share it, and
+# of two the source's keeps the download near. It is freed once the last copy
+# through it is done.
 function Staging(bytes, from::Int)
     n = min(STAGES, cld(bytes, CHUNK))
-    host = [CUDACore.alloc(CUDACore.HostMemory, min(bytes, CHUNK), CUDACore.MEMHOSTALLOC_PORTABLE) for _ in 1:n]
+    host = near(host_node(from)) do
+        [CUDACore.alloc(CUDACore.HostMemory, min(bytes, CHUNK), CUDACore.MEMHOSTALLOC_PORTABLE) for _ in 1:n]
+    end
     downloaded = CUDACore.device!(() -> [CUDACore.CuEvent(CUDACore.EVENT_DISABLE_TIMING) for _ in 1:n], from)
     uploaded = [CUDACore.CuEvent(CUDACore.EVENT_DISABLE_TIMING) for _ in 1:n]
     CUDACore.resource_finalizer(Staging(host, downloaded, uploaded)) do s

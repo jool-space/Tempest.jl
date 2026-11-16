@@ -428,3 +428,28 @@ end
         @test filter(k -> !recorded_after(writer(k)), waiting) == []
     end
 end
+
+# A crossing's page-locked staging is on the NUMA node of its source device,
+# whatever node the thread runs on, as /proc/self/numa_maps counts its pages:
+# over devices of two nodes, some staging is on a node the thread is not on.
+# Where no device reports a node (one node, as GB10), none is chosen.
+@testset "a crossing's staging is on its source's node" begin
+    CX = Base.get_extension(Tempest, :CUDAExt)
+    devices = 0:(CUDACore.ndevices() - 1)
+    nodes = Dict(d => CX.host_node(d) for d in devices)
+    if all(isnothing, values(nodes))
+        @test_skip "needs devices on NUMA nodes the system reports"
+    else
+        # The nodes of the pages of the mapping at `p`, from its `N<node>=<pages>` counts.
+        function page_nodes(p)
+            at = string(UInt(p); base = 16) * " "
+            line = only(l for l in eachline("/proc/self/numa_maps") if startswith(l, at))
+            Set(parse(Int, m[1]) for m in eachmatch(r"\bN(\d+)=\d+", line))
+        end
+        for from in devices, to in devices
+            (from == to || nodes[from] === nothing) && continue
+            s = CUDACore.device!(() -> CX.Staging(2CX.CHUNK, from), to)
+            @test all(h -> page_nodes(pointer(h)) == Set(nodes[from]), s.host)
+        end
+    end
+end
