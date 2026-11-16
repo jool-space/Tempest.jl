@@ -1120,13 +1120,17 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
     # read load is. A product's tiles reuse what they read through the cache,
     # by design, and are priced on their line.
     kept = [ax for ax in s.tiling if !ax.reduced]
+    # The blocks that read what one block reads through load `t`.
+    function readers(t)
+        along = prod(ax -> reading_blocks(t, ax, g.domain), kept; init = 1)
+        split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
+        along * split
+    end
     function times_read(v)
         s.sketch === :product && return 1
         n = 1
         for (_, t) in loads_of(v)
-            along = prod(ax -> reading_blocks(t, ax, g.domain), kept; init = 1)
-            split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
-            n = max(n, along * split)
+            n = max(n, readers(t))
         end
         n
     end
@@ -1143,9 +1147,7 @@ function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
         n = prod(g.values[v].dims; init = 1)
         again = 0.0
         for t in unique(l for (_, l) in loads_of(v))
-            along = prod(ax -> reading_blocks(t, ax, g.domain), kept; init = 1)
-            split = s.splits > 1 && !any(a -> mentions(t, a), swept_axes) ? s.splits : 1
-            again += reached_at(t) / n * (along * split - 1)
+            again += reached_at(t) / n * (readers(t) - 1)
         end
         min(again, times_read(v) - 1)
     end
