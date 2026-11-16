@@ -196,9 +196,15 @@ constant!(tape::Tape, x::LinearAlgebra.AdjOrTrans{<:Integer, <:AbstractRange}) =
 operand_id(tape, x::Union{Traced, TracedArray}) = x.id
 operand_id(tape, x::Number) = constant!(tape, x)
 
+# The tape of the traced operands among `args`, or among a broadcast's: a
+# map of traced operands has one, and so has a broadcast of `TracedStyle`,
+# which a traced operand gave its style.
 function tape_of(args...)
     for a in args
         a isa Union{Traced, TracedArray} && return a.tape
+        a isa Broadcast.Broadcasted || continue
+        tape = tape_in(a)
+        tape === nothing || return tape
     end
     error("no traced operand")
 end
@@ -287,8 +293,8 @@ end
 
 Base.:+(x::Traced) = x
 Base.:^(x::Traced, p::Integer) = record_map(^, x, p)
-Base.ifelse(c::Traced, a, b) = record_map(ifelse, c, a, b)
-Base.ifelse(c::Traced, a::Real, b::Real) = record_map(ifelse, c, a, b)
+# A traced choice is between operands of a map: numbers and traced arrays.
+Base.ifelse(c::Traced, a::Union{Number, TracedArray}, b::Union{Number, TracedArray}) = record_map(ifelse, c, a, b)
 Base.muladd(a::Traced, b::Real, c::Real) = record_map(muladd, a, b, c)
 Base.muladd(a::Real, b::Traced, c::Real) = record_map(muladd, a, b, c)
 Base.muladd(a::Real, b::Real, c::Traced) = record_map(muladd, a, b, c)
@@ -484,7 +490,7 @@ reads_element(x) = false
 # hold, so it is broadcast element by element, as a number is.
 function Base.copy(@nospecialize(bc::Broadcast.Broadcasted{TracedStyle}))
     reads_element(bc) && return copy(convert(Broadcast.Broadcasted{Broadcast.DefaultArrayStyle{ndims(bc)}}, bc))
-    tape = tape_in(bc)
+    tape = tape_of(bc)
     dims = broadcast_dims_of(bc)
     y = broadcast_handle(bc, tape)
     isempty(dims) && return number(y)
@@ -498,7 +504,7 @@ number(y::Traced) = node(y).scalar ? y : Traced(y.tape, record!(y.tape, Reshape(
 # Julia array, keeps a result of no dimensions an array by writing it into one
 # (`broadcast_preserving_zero_d`).
 function Base.similar(@nospecialize(bc::Broadcast.Broadcasted{<:Union{TracedStyle, TracedNumberStyle}}), ::Type{T}, dims) where {T}
-    tape = tape_in(bc)
+    tape = tape_of(bc)
     TracedArray(tape, record!(tape, Constant(zero(element_type(T))), (), map(length, dims), element_type(T)))
 end
 
