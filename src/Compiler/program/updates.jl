@@ -232,18 +232,10 @@ const PLAIN_WRITE = "a traced value cannot be written into an array the function
 
 Base.copyto!(::AbstractArray, ::Broadcast.Broadcasted{TracedStyle}) = throw(ArgumentError(PLAIN_WRITE))
 
-# So is one traced number written into an element of such an array, one of
-# plain numbers (see `plain_needed`); a view and a Cartesian index come here
-# through the array's own integer indices.
-function Base.setindex!(y::Array{T}, v::Traced, i::Int) where {T <: Number}
-    v isa T || throw(ArgumentError(plain_needed(T, v)))
-    invoke(setindex!, Tuple{Array{T}, Any, Int}, y, v, i)
-end
-
-function Base.setindex!(y::Array{T}, v::Traced, i::Int, j::Int, I::Int...) where {T <: Number}
-    v isa T || throw(ArgumentError(plain_needed(T, v)))
-    invoke(setindex!, Tuple{Array{T}, Any, Int, Int, Vararg{Int}}, y, v, i, j, I...)
-end
+# So is one traced number written into an element of such an array, which
+# needs no method here: Base's `setindex!` converts it to the element type,
+# which a traced number never is, and the trace explains the `TypeError`
+# (see `plain_error`), as for `push!` or a typed field.
 
 # A host array of traced numbers (see `HOST_CONTAINER`) written into a
 # traced array is written as Base's loop writes it, each number at its
