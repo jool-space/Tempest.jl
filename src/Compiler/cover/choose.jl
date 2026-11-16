@@ -271,8 +271,12 @@ struct GroupIdentity
     stored::Vector{Bool}
 end
 
-Base.:(==)(a::GroupIdentity, b::GroupIdentity) = all(f -> getfield(a, f) == getfield(b, f), fieldnames(GroupIdentity))
-Base.hash(i::GroupIdentity, h::UInt) = foldl((h, f) -> hash(getfield(i, f), h), fieldnames(GroupIdentity); init = h)
+# Equal and hashed field by field, in their order, each by its own type.
+Base.:(==)(a::GroupIdentity, b::GroupIdentity) =
+    a.kind == b.kind && a.domain == b.domain && a.reductions == b.reductions && a.outputs == b.outputs && a.terms == b.terms &&
+    a.stored == b.stored
+Base.hash(i::GroupIdentity, h::UInt) =
+    hash(i.stored, hash(i.terms, hash(i.outputs, hash(i.reductions, hash(i.domain, hash(i.kind, h))))))
 
 group_identity(p::Plan, g::Group) = GroupIdentity(kind_name(g.kind), g.domain, copy(g.reductions), copy(g.outputs),
     Any[get(g.terms, m, nothing) for m in members(g)], Bool[p.stored[m] for m in members(g)])
