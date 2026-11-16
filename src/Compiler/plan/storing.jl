@@ -11,6 +11,7 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     graph = with_stored_results(graph)
     values = graph.values
     n = length(values)
+    users = readers(graph)
     # What the results read, directly or through others: nothing else runs.
     # A state read keeps what it is carried from, after it, to a fixpoint: a
     # state whose next value only another state's reads, as crossing states'
@@ -41,9 +42,9 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     between = Dict{Int, Set{Int}}()
     # What riding asks of each recurrence, once: asked of each for each value
     # riding, Qwen3.5-4B's 96 took 12 s a plan.
-    read_by, feeds = readers(graph), feeding(graph)
+    feeds = feeding(graph)
     reachings = Dict{Int, Reaching}()
-    reaching(k) = get!(() -> reaching_from(graph, recurring[k].values, read_by, feeds), reachings, k)
+    reaching(k) = get!(() -> reaching_from(graph, recurring[k].values, users, feeds), reachings, k)
     for r in ride
         found = nothing
         for (k, e) in enumerate(recurring)
@@ -112,7 +113,6 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     # used many times, as its gradient accumulates over each use. Recomputed,
     # the last one's reader would load every term, a kernel growing with the
     # uses; stored, each is written beside the fold it adds.
-    users = readers(graph)
     for id in 1:n
         live[id] && !stored[id] && !(id in recomputed || after[id]) && accumulates(values, id) || continue
         any(r -> live[r] && accumulates(values, r), users[id]) && (stored[id] = true)
@@ -126,34 +126,31 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     # nothing reads: Qwen3.5-4B's delta rule, its outputs riding the steps,
     # had stored 2 MiB of state a step it never read again. One that keeps
     # them in storage between steps keeps its own (see `recurrence_carry`).
-    if !isempty(recurring)
-        users = readers(graph)
-        for recurrence in recurring
-            cs, fs, cycle = recurrence.states, recurrence.from, recurrence.values
-            # What rides the steps, and what it computes there, are read
-            # within them.
-            c = first(cs)
-            within = union(Set(cycle), first.(get(riders, c, Pair{Int, Meeting}[])), get(between, c, Set{Int}()))
-            outside(w) = any(u -> live[u] && !(u in within), users[w])
-            foreach(w -> stored[w] = true, cs)
-            for w in cycle
-                w in cs && continue
-                d = values[w].definition
-                # A value a state is carried from that another of the step
-                # reads, as an LSTM's hidden state reads its cell's, is
-                # stored where the step reads it.
-                stored[w] = w in results || materialized[w] || outside(w) ||
-                    w in fs && any(u -> live[u] && u in cycle && !(u in cs), users[w])
-                # A result, or what a gather reads, is stored whatever it reads.
-                stored[w] && !(w in fs) && !(w in results) && !materialized[w] && d isa Pointwise &&
-                    all(o -> !(o isa Read) || stored[o.value], d.operands) && (stored[w] = false)
-            end
-            # A state is read outside where a map of the cycle that reads it
-            # is, recomputed by its reader there.
-            for w in cs
-                stored[w] = w in results || materialized[w] || outside(w) ||
-                    any(u -> u in cycle && !stored[u] && values[u].definition isa Pointwise && outside(u), users[w])
-            end
+    for recurrence in recurring
+        cs, fs, cycle = recurrence.states, recurrence.from, recurrence.values
+        # What rides the steps, and what it computes there, are read
+        # within them.
+        c = first(cs)
+        within = union(Set(cycle), first.(get(riders, c, Pair{Int, Meeting}[])), get(between, c, Set{Int}()))
+        outside(w) = any(u -> live[u] && !(u in within), users[w])
+        foreach(w -> stored[w] = true, cs)
+        for w in cycle
+            w in cs && continue
+            d = values[w].definition
+            # A value a state is carried from that another of the step
+            # reads, as an LSTM's hidden state reads its cell's, is
+            # stored where the step reads it.
+            stored[w] = w in results || materialized[w] || outside(w) ||
+                w in fs && any(u -> live[u] && u in cycle && !(u in cs), users[w])
+            # A result, or what a gather reads, is stored whatever it reads.
+            stored[w] && !(w in fs) && !(w in results) && !materialized[w] && d isa Pointwise &&
+                all(o -> !(o isa Read) || stored[o.value], d.operands) && (stored[w] = false)
+        end
+        # A state is read outside where a map of the cycle that reads it
+        # is, recomputed by its reader there.
+        for w in cs
+            stored[w] = w in results || materialized[w] || outside(w) ||
+                any(u -> u in cycle && !stored[u] && values[u].definition isa Pointwise && outside(u), users[w])
         end
     end
     # A pointwise value that reads nothing stored is cheaper to recompute.
@@ -198,9 +195,9 @@ widened(graph, d) = d isa Pointwise && d.f isa Cast{Float32} && length(d.operand
 # its axes. It is stored, so that what reads it reads the slice and not the
 # whole fold, which the fold's group need not write (see `slice_placement`).
 function fold_slice(values, d::Pointwise)
-    d.f === identity && length(d.operands) == 1 && only(d.operands) isa Read || return false
+    d.f === identity && length(d.operands) == 1 || return false
     o = only(d.operands)
-    values[o.value].definition isa Reduction && any(e -> isempty(e.terms), o.index)
+    o isa Read && values[o.value].definition isa Reduction && any(e -> isempty(e.terms), o.index)
 end
 
 # Whether stored pointwise value `id` is read only within one group over its
@@ -291,11 +288,15 @@ end
 # fold permutes the kept axes of its iteration; its reduced axes stay.
 function permuted(v::Value, p)
     dims = Tuple(v.dims[findfirst(==(j), p)] for j in eachindex(p))
-    d = v.definition
-    if d isa Pointwise
-        σ = Tuple(var(p[j]) for j in eachindex(p))
-        return Value(Pointwise(d.f, map(o -> through(o, σ, Domain(dims)), d.operands)), dims, v.eltype, v.scalar)
-    end
+    Value(permuted(v.definition, p, dims), dims, v.eltype, v.scalar)
+end
+
+function permuted(d::Pointwise, p, dims)
+    σ = Tuple(var(p[j]) for j in eachindex(p))
+    Pointwise(d.f, map(o -> through(o, σ, Domain(dims)), d.operands))
+end
+
+function permuted(d::Reduction, p, dims)
     kept = Tuple(k for k in eachindex(d.iteration) if !(k in d.reduced))
     iteration = collect(d.iteration)
     σ = Vector{Affine}(map(var, 1:length(d.iteration)))
@@ -305,5 +306,5 @@ function permuted(v::Value, p)
     end
     iteration = Tuple(iteration)
     operand = through(d.operand, Tuple(σ), Domain(iteration))
-    Value(Reduction(d.fold, operand, iteration, d.reduced), dims, v.eltype, v.scalar)
+    Reduction(d.fold, operand, iteration, d.reduced)
 end
