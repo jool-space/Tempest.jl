@@ -762,7 +762,13 @@ broken on the H100s and 875 and 1 on trizzle. A decider now knows the
 device each of its graph's labels stands for, and kept decisions are
 keyed by them. Open: the rates file names a link by CUDA's device
 numbers, which `CUDA_VISIBLE_DEVICES` renumbers, so that a kept link can
-come to describe another pair;
+come to describe another pair; the whole suite on the H100s at 2659939
+passed but for one worker lost in `cuda/promotion` (34,586 passed, 18
+broken, 1 error): a segmentation fault inside Julia's own LLVM
+(`SelectionDAG::FoldConstantArithmetic`, compiling a `Dict` lookup of
+the session's for the host, a Xeon with AVX-512 FP16 and BF16), seen
+once in two runs of the suite and in none of three of the file alone,
+the trace in `suite-final.log`;
 a kernel reading the other device's memory in place, a crossing with no
 copy at all, measured at the copy's rate and not built; whether two
 direct copies leaving one device share the link as two staged ones
