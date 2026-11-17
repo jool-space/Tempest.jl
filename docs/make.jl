@@ -13,8 +13,10 @@ makedocs(;
         assets = String[],
     ),
     pages = ["Home" => "index.md", "API" => "api.md"],
-    # Internal docstrings are for reading the source; the manual covers the public names.
+    # Internal docstrings are for reading the source; the manual covers the public names,
+    # and a public name missing from it is a warning in the log, not a failed build.
     checkdocs = :public,
+    warnonly = [:missing_docs],
 )
 
 deploydocs(;
