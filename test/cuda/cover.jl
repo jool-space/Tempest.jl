@@ -125,12 +125,17 @@ end
 # in 15 kernels, where another recomputed them, in 10, and a smaller fold
 # there by 247 μs against 249. Measured, at TF32, it rests on the device's
 # times: the GB10 recomputes both, which pays by three times or so, and an
-# RTX 6000 Ada one. So what is asserted holds on any device: both proposals
-# are made; with every comparison measured, since measuring close calls
-# alone keeps an estimate that is no close call, as the forward's 337 μs
-# against 1020 was on the GB10, each is taken or refused by its own
-# measurement; a fold taken is not stored, and with both taken nothing the
-# size of the scores is; and the plan agrees with the interpreter.
+# RTX 6000 Ada one. Measured, a comparison is decided by its times where
+# they part beyond the noise and by its estimates where they do not: on an
+# H100 the gradient's fold recomputed was timed at 73.1 μs against 70.3
+# stored, a tie, and taken on estimates of 31.9 against 61.6. So what is
+# asserted holds on any device: both proposals are made; with every option
+# measured, since measuring close calls alone keeps an estimate that is no
+# close call, as the forward's 337 μs against 1020 was on the GB10, each
+# comparison is decided by measurement exactly where its sides' times part,
+# and each proposal is taken or refused as its comparison decides; a fold
+# taken is not stored, and with both taken nothing the size of the scores
+# is; and the plan agrees with the interpreter.
 @testset "attention's scores are proposed for recomputing in a step that replaces its weights" begin
     function step(x, wq, wk, wv)
         heads(w) = reshape(w * x, 64, 4, 1024, 2)
@@ -150,7 +155,9 @@ end
     @test agree(filter(!isnothing, C.leaves(outputs(execute!(estimated)))), reference; rtol = 1.0e-2)
     measured = prepared(:all)
     @test length(unique(c.proposal.value for c in recomputes(measured))) == 2
-    @test all(c -> c.comparison.how === :measured && c.accepted == C.cheaper(c.comparison), recomputes(measured))
+    took(side) = sum(x -> x[3].measured, side; init = 0.0)
+    parted(c) = C.past(maximum(took, c.sides), minimum(took, c.sides), C.NOISE)
+    @test all(c -> (c.comparison.how === :measured) == parted(c.comparison) && c.accepted == C.cheaper(c.comparison), recomputes(measured))
     recomputed = unique(c.proposal.value for c in recomputes(measured) if c.accepted)
     @test !any(v -> measured.plan.stored[v], recomputed)
     @test length(recomputed) < 2 || !any(v -> measured.plan.stored[v] && pairs(measured, v), eachindex(measured.plan.graph.values))
