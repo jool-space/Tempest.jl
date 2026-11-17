@@ -432,13 +432,16 @@ end
 # A crossing's page-locked staging is on the NUMA node of its source device,
 # whatever node the thread runs on, as /proc/self/numa_maps counts its pages:
 # over devices of two nodes, some staging is on a node the thread is not on.
-# Where no device reports a node (one node, as GB10), none is chosen.
+# Where no device reports a node (one node, as GB10), none is chosen, nor
+# where the system refuses the thread a memory policy, as a container does.
 @testset "a crossing's staging is on its source's node" begin
     CX = Base.get_extension(Tempest, :CUDAExt)
     devices = 0:(CUDACore.ndevices() - 1)
     nodes = Dict(d => CX.host_node(d) for d in devices)
     if all(isnothing, values(nodes))
         @test_skip "needs devices on NUMA nodes the system reports"
+    elseif CX.thread_policy() != 0
+        @test_skip "needs a thread the system lets choose its memory's node"
     else
         # The nodes of the pages of the mapping at `p`, from its `N<node>=<pages>` counts.
         function page_nodes(p)

@@ -82,16 +82,26 @@ end
 # by their numbers on the architectures CUDA runs Linux on.
 const MEMPOLICY = Sys.islinux() ? get((x86_64 = (238, 239), aarch64 = (237, 236)), Sys.ARCH, nothing) : nothing
 
-# `f()` with the pages the thread commits preferring `node`, the thread's
-# policy the default again after: where there is a node, the system's numbers
-# are known, and the thread has no policy of its own (one given the process
-# by `numactl`, say), which is left to decide. `f` must not yield, as the
-# policy is the thread's and a task may resume on another.
-function near(f, node)
-    (node === nothing || MEMPOLICY === nothing) && return f()
-    set, query = MEMPOLICY
+# The memory policy of the calling thread, 0 where it has none of its own, or
+# `nothing` where there is none to ask for: a system whose numbers are not
+# known, or one that refuses the question, as a container does a process
+# without the capability.
+function thread_policy()
+    MEMPOLICY === nothing && return nothing
     mode = Ref{Cint}(-1)
-    (@ccall syscall(query::Clong; mode::Ptr{Cint}, C_NULL::Ptr{Culong}, 0::Culong, C_NULL::Ptr{Cvoid}, 0::Culong)::Clong) == 0 && mode[] == 0 || return f()
+    asked = @ccall syscall(last(MEMPOLICY)::Clong; mode::Ptr{Cint}, C_NULL::Ptr{Culong}, 0::Culong, C_NULL::Ptr{Cvoid}, 0::Culong)::Clong
+    asked == 0 ? Int(mode[]) : nothing
+end
+
+# `f()` with the pages the thread commits preferring `node`, the thread's
+# policy the default again after: where there is a node, and the thread has
+# no policy of its own (one given the process by `numactl`, say), which is
+# left to decide, as is a system that tells of none (see `thread_policy`).
+# `f` must not yield, as the policy is the thread's and a task may resume on
+# another.
+function near(f, node)
+    (node === nothing || thread_policy() != 0) && return f()
+    set = first(MEMPOLICY)
     mask = zeros(Culong, node ÷ 64 + 1)
     mask[end] = one(Culong) << (node % 64)
     (@ccall syscall(set::Clong; 1::Cint, mask::Ptr{Culong}, (64length(mask) + 1)::Culong)::Clong) == 0 || return f()
