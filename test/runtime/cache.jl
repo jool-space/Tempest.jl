@@ -170,3 +170,24 @@ end
 @testset "the precompile workload" begin
     @test T.workload() === nothing
 end
+
+# The extensions' workloads prepare for CUDA where a package is built, which
+# may be where no device is visible: a preparation that builds nothing, for a
+# device named and of arguments on the host, asks the driver nothing. In a
+# process of its own, which sees no device.
+@testset "a preparation that builds nothing needs no device" begin
+    script = """
+        using Tempest, CUDACore
+        import cuBLAS, cuDNN, cuTile
+        f(w, x) = sum(abs2, tanh.(w * x))
+        w, x = Float32.(reshape(sin.(1:32), 4, 8)), Float32.(reshape(cos.(1:48), 8, 6))
+        program = Tempest.Compiler.trace((xs...) -> Tempest.withgradient(f, xs...), w, x)
+        for precision in (:full, :tf32)
+            ex = Tempest.Compiler.prepare(program, w, x; target = Tempest.CUDATarget(; device = 0, precision), build = false)
+            explain(devnull, ex)
+        end
+        """
+    child = addenv(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`, "CUDA_VISIBLE_DEVICES" => "")
+    output = IOBuffer()
+    @test success(run(pipeline(ignorestatus(child); stdout = output, stderr = output))) || (print(String(take!(output))); false)
+end

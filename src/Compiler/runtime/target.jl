@@ -199,8 +199,11 @@ end
 
 # Throw where `devices` of `target` are of more than one kind: a decider
 # times its claims at home, and a time is the kernel's on every device of
-# the kind alone.
+# the kind alone. One device is of one kind and is not asked its name, so
+# that a program is placed on a named device where there is no driver to
+# ask, as a precompile workload's is.
 function refuse_kinds(target::Target, devices)
+    length(devices) > 1 || return
     names = [device_name(target, d) for d in devices]
     allequal(names) && return
     held = join([string(device_named(d), " is ", repr(n)) for (d, n) in zip(devices, names)], ", ")
