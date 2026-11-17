@@ -7,7 +7,7 @@
 # `accumulate!` and `merge_lanes` of the floor's code. The CPU's definitions are here; a package that adds a
 # target defines them for its type (see CUDAExt).
 
-public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, written, crossing, stream, lane, link, on_stream, event, record!, wait!, Scheduled, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
+public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, taken, crossing, stream, lane, link, on_stream, task_stream, event, record!, wait!, Scheduled, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
     toolchain, measurable, time_launch, time_crossing, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
@@ -405,15 +405,20 @@ graphs says how a run of crossings is recorded (see `capture`).
 crosses(s::Step) = s.from != s.device
 
 """
-    written(target, x)
+    taken(target, x)
 
-Make `x`, a result of the call that has just run, storage on the device the
-task is on, read after the call by whatever reads it next, on any stream
-or task: called as each execution and replay ends. A target whose launches
-its arrays' package does not see says here that the launches just made on
-the task's stream wrote `x`. The CPU's run in order, and it does nothing.
+Take `x`, an array a call shares with its caller, a result or an argument
+bound by reference, for the launches the call is about to make, with the
+task on the array's device: the launches read and write it by its address,
+unseen by the package whose array it is. What other streams still have to
+run on `x` is waited for, and whatever reads it after the call, on any
+stream or task, waits for the launches. A target whose arrays' package
+orders an array's uses by the stream each was submitted on takes the
+array's address here, which that package counts as the calling task's use
+of it from then on, until another stream's. The CPU's run in order, and it
+does nothing.
 """
-written(::Target, x) = nothing
+taken(::Target, x) = nothing
 
 """
     crossing(target, to, from, values, offset) -> run
@@ -482,6 +487,26 @@ to run (see `crossing`). A target whose lanes are streams of their own
 enters them here.
 """
 on_stream(f, target::Target, stream) = on_device(f, target, last(stream))
+
+"""
+    task_stream(target) -> stream
+
+The stream the calling task's launches run on, on the device the task is on
+(see `on_device`): what an executable keeps of its last use on each device,
+and compares with the next (see `taken!`). On a target whose steps have run
+as they return, the CPU's, `nothing`.
+"""
+task_stream(::Target) = nothing
+
+"""
+    quiesce(target, stream)
+
+Wait until `stream`, a task's as `task_stream` gave it, has run everything
+that task launched on it, with the calling task on the stream's device: a
+task that uses an executable another stream used last waits so (see
+`taken!`). The CPU's steps have run as they return, and it does nothing.
+"""
+quiesce(::Target, stream) = nothing
 
 """
     event(target, stream) -> event

@@ -50,13 +50,20 @@ end
 ## Devices.
 
 # CUDA.jl learns which stream last used an array, and whether work on it is
-# pending, from the operations it submits, and a reader on another stream
-# waits for that stream only while it is: the floor's, cuTile's and cuBLAS's
-# launches are not its operations, so after a reader had waited once, a
-# result written again by the next call was read before it was written (on
-# a second device, whose stream no reader shared). The result is taken as
-# used on the task's stream, after the launches that wrote it.
-Tempest.Compiler.written(::CUDATarget, x) = CUDACore.with_managed_arrays(Returns(nothing), x)
+# pending, from the operations it submits, which the floor's, cuTile's and
+# cuBLAS's launches are not. An address a task takes outside those
+# operations it counts as the task's use of the array, on its stream, from
+# then on and until an operation on another stream takes the array: what
+# another stream still has to run on the array is waited for as the address
+# is taken, and whatever uses the array next on another stream waits for
+# the task's stream as it is by then, the launches made since among its
+# work. So each call takes its results' addresses before its launches.
+# Taken as used on the task's stream by an operation, a result was the
+# stream's only for the work launched till then: once a reader on another
+# stream had waited for it, the next call's launches wrote it unseen, and
+# it was read before it was written (on a second device, whose stream no
+# reader shared).
+Tempest.Compiler.taken(::CUDATarget, x) = (pointer(x); nothing)
 
 # The bytes a crossing stages through the host at a time, and how many
 # buffers it stages them through: one chunk's upload runs beside the next
@@ -310,6 +317,31 @@ end
 
 Tempest.Compiler.on_stream(f, target::CUDATarget, s::Own) = Tempest.Compiler.on_device(f, target, s.device)
 
+"""
+A task's stream as a use of an executable finds it (see
+`Tempest.Compiler.task_stream`): the stream, and its generation, which
+CUDA.jl counts up as it hands the stream of a task that has ended, idle by
+then, to a new task.
+"""
+struct TaskStream
+    stream::CUDACore.CuStream
+    generation::Int
+end
+
+function Tempest.Compiler.task_stream(::CUDATarget)
+    stream = CUDACore.stream()
+    TaskStream(stream, CUDACore.generation(stream))
+end
+
+# A stream destroyed with its context has no work left, and one handed to
+# another task since had none as it was handed over (see `TaskStream`):
+# neither is waited for.
+function Tempest.Compiler.quiesce(::CUDATarget, s::TaskStream)
+    CUDACore.isvalid(s.stream) && CUDACore.generation(s.stream) == s.generation || return nothing
+    after_captures(() -> CUDACore.synchronize(s.stream))
+    nothing
+end
+
 # The task on the reader's device, and on each device the lane's stream the
 # task's, as a crossing's run takes them (see `Crossing`).
 function Tempest.Compiler.on_stream(f, target::CUDATarget, l::Lane)
@@ -343,12 +375,17 @@ Tempest.Compiler.toolchain(::CUDATarget) =
 Tempest.Compiler.measurable(::CUDATarget) = true
 
 # Every stream's work done, so that a claim is timed after what was launched
-# before it. CUDA.jl refuses to wait for the device while any task captures
-# a graph, before it waits: a timing waits for the capture to end.
-function Tempest.Compiler.quiesce(target::CUDATarget)
+# before it.
+Tempest.Compiler.quiesce(target::CUDATarget) = after_captures(() -> Tempest.Compiler.on_device(CUDACore.device_synchronize, target))
+
+# `wait()`, which waits for a device or a stream, once no capture keeps it
+# from waiting: CUDA.jl refuses to wait for the device while any task
+# captures a graph, and for a stream while its task does, before it waits,
+# and the wait is made again once the capture has ended.
+function after_captures(wait)
     while true
         try
-            return Tempest.Compiler.on_device(CUDACore.device_synchronize, target)
+            return wait()
         catch err
             err isa CUDACore.CaptureError || rethrow()
             sleep(0.001)

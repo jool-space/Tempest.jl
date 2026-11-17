@@ -99,6 +99,9 @@ mutable struct Executable{T <: Target}
     devices::Vector{Union{Nothing, Int}}
     argument_devices::Vector{Union{Nothing, Int}}
     result_devices::Vector{Union{Nothing, Int}}
+    # Per device of `devices`, the stream that used the executable last
+    # there, nothing before its first use (see `taken!`).
+    streams::Vector{Any}
     # Per argument whose storage can be the caller's array (see `point!`):
     # where the storage is used; nothing for one copied. And per such
     # argument, its storage: its buffer, or the caller's array it was
@@ -446,7 +449,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
         return Executable(program, p, target, s, Any[], none(length(values)),
             none(n), none(n), none(length(p.graph.results)), nothing,
             Any[], none(length(p.groups)), Any[ds...], Any[considered...], Any[], Copy[], Step[], Touches[], Schedule(target, Step[], Touches[]), nothing,
-            devices, argument_devices, result_devices, Vector{Union{Nothing, Uses}}(nothing, n), none(n),
+            devices, argument_devices, result_devices, none(length(devices)), Vector{Union{Nothing, Uses}}(nothing, n), none(n),
             zeros(UInt, n), zeros(UInt, n), fill(false, n), none(n), 1, false, reached)
     end
     slots = Any[on_device(() -> allocate(target, UInt8, bytes), target, devices[s.devices[k]]) for (k, bytes) in enumerate(s.sizes)]
@@ -572,7 +575,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     lap!(:executable, clock)
     Executable(program, p, target, s, slots, kept, arguments, referenced, results, outputs_over(program, results),
         launches, Any[b[2] for b in built], Any[b[3] for b in built], Any[considered...], saves, copies, steps, touches, schedule, nothing,
-        devices, argument_devices, result_devices, used, pointed, at, zeros(UInt, n), fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
+        devices, argument_devices, result_devices, Vector{Any}(nothing, length(devices)), used, pointed, at, zeros(UInt, n), fill(false, n), Vector{Any}(nothing, n), 1, true, reached)
 end
 
 # The address of array `x`'s first element, as a number, as `pointer` gives
@@ -585,9 +588,58 @@ address_of(x) = x isa StridedArray ? reinterpret(UInt, pointer(x)) : UInt(0)
 `ex` taken for a use by the calling task: what every use of an executable
 begins with, a binding (`bind!`, `point!`, and the one `prepare` makes), an
 execution, a capture and a replay, and so each call of a compiled function.
-A program prepared with `build = false` has nothing to use, and throws.
+
+An executable is used by one stream at a time on each of its devices. Its
+kernels read and write its storage by address, in launches the arrays'
+package does not see, so nothing orders what a task launches after what
+another task's stream still has to run there, a binding's copy into an
+argument's buffer or an execution's kernels: a program prepared, and so
+bound, on one task and executed on another read its input before the copy
+had run. So on each device, a task whose stream (see `task_stream`) is not
+the one that used the executable last waits for that one (`quiesce`), and
+is the one that used it last from then on; a task on the same stream
+compares the two and goes on. What a call leaves on the lanes of its
+crossings its own streams wait for as it ends (see `walk`), and so the
+stream that waits for them waits for the lanes. The arrays the executable
+shares with its caller are taken one by one, before each run's launches
+(see `take_shared!`).
+
+Uses in turn, from any tasks, each find what the uses before left. Two
+tasks that use one executable at the same moment are not ordered by this:
+they take turns themselves, as a compiled function's calls do under its
+lock. A program prepared with `build = false` has nothing to use, and
+throws.
 """
-taken!(ex::Executable) = ex.built ? ex : throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
+function taken!(ex::Executable)
+    ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
+    for k in eachindex(ex.devices)
+        on_device(() -> take_stream!(ex, k), ex.target, ex.devices[k])
+    end
+    ex
+end
+
+# With the task on device `k` of those of `ex`: the task's stream there is
+# the one that used `ex` last, once the one that did has run its work.
+function take_stream!(ex::Executable, k)
+    now = task_stream(ex.target)
+    last = ex.streams[k]
+    now === last && return nothing
+    last === nothing || quiesce(ex.target, last)
+    ex.streams[k] = now
+    nothing
+end
+
+# Take, each on its device, the arrays `ex` shares with its caller, before
+# a run's launches read and write them (see `taken`): its results, which
+# `outputs` hands the caller, and the arguments bound by reference, the
+# caller's own arrays. The arrays a call's arguments are pointed at are
+# taken as the call finds them (see `located!`).
+function take_shared!(ex::Executable)
+    on_each_device(k -> taken(ex.target, ex.results[k]), k -> ex.result_devices[k], ex.target, eachindex(ex.results))
+    all(isnothing, ex.referenced) ||
+        on_each_device(a -> ex.referenced[a] === nothing || taken(ex.target, ex.referenced[a]), a -> ex.argument_devices[a], ex.target, eachindex(ex.referenced))
+    ex
+end
 
 "A value of `n` elements of type `T` in the first bytes of a slot."
 slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
@@ -864,7 +916,9 @@ end
 # The addresses of the arrays of `b`, each asked on its argument's device;
 # arrays that share memory with one the program writes throw, named by
 # their paths among `inputs` and the program by `writer`. Every binding of
-# a call's arrays, `point!`'s and `compile`'s call, finds them here.
+# a call's arrays, `point!`'s and `compile`'s call, finds them here, and
+# an array asked its address is taken by it for the launches that follow,
+# as a result is (see `taken`).
 function located!(b::Passed, ex::Executable, @nospecialize(inputs), paths, writer)
     on_each_device(k -> locate!(b, k, b.arrays[k]), k -> b.devices[k], ex.target, eachindex(b.arrays))
     isempty(ex.program.writes) || refuse_shared(ex, b, inputs, paths, writer)
@@ -1034,7 +1088,6 @@ end
 function write_back!(ex::Executable)
     back(a) = (x = ex.back[a]; x === nothing || download!(ex.target, vec(x), ex.arguments[a]))
     on_each_device(back ∘ last, w -> ex.argument_devices[last(w)], ex.target, ex.program.writes)
-    on_each_device(k -> written(ex.target, ex.results[k]), k -> ex.result_devices[k], ex.target, eachindex(ex.results))
     ex
 end
 
@@ -1128,6 +1181,7 @@ capture.
 """
 function execute!(ex::Executable)
     taken!(ex)
+    take_shared!(ex)
     walk(ex.target, ex.schedule)
     write_back!(ex)
 end
@@ -1178,6 +1232,7 @@ bound it to, where that is not its storage. The results are in `outputs(ex)`.
 function replay!(ex::Executable)
     taken!(ex)
     ex.captured === nothing && throw(ArgumentError("nothing to replay: capture! records the program first"))
+    take_shared!(ex)
     replay_recording(ex.target, ex.captured)
     write_back!(ex)
 end
@@ -1233,8 +1288,10 @@ end
 
 Where the executable leaves its results, in the program's output structure:
 arrays over its buffers, the same arrays every time, which each `execute!` or
-`replay!` fills again. Copy what you keep. A number is an array of no
-dimensions here, since it lives in a buffer too; `compile` returns numbers.
+`replay!` fills again. Copy what you keep: a read or a copy of one, on any
+task, waits for the run that filled it, and the next run for the copy (see
+`taken!`). A number is an array of no dimensions here, since it lives in a
+buffer too; `compile` returns numbers.
 """
 outputs(ex::Executable) = ex.outputs
 
