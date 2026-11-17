@@ -579,7 +579,15 @@ end
 # it; 0 for an array without one.
 address_of(x) = x isa StridedArray ? reinterpret(UInt, pointer(x)) : UInt(0)
 
-runnable(ex::Executable) = ex.built || throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
+"""
+    taken!(ex) -> ex
+
+`ex` taken for a use by the calling task: what every use of an executable
+begins with, a binding (`bind!`, `point!`, and the one `prepare` makes), an
+execution, a capture and a replay, and so each call of a compiled function.
+A program prepared with `build = false` has nothing to use, and throws.
+"""
+taken!(ex::Executable) = ex.built ? ex : throw(ArgumentError("the program was prepared with build = false: it can be explained, not run"))
 
 "A value of `n` elements of type `T` in the first bytes of a slot."
 slot_view(slot, T, n) = reinterpret(T, view(slot, 1:(n * sizeof(T))))
@@ -697,13 +705,13 @@ julia> outputs(execute!(ex))
 ```
 """
 function bind!(ex::Executable, @nospecialize(inputs...))
-    runnable(ex)
+    taken!(ex)
     refuse_devices(ex.target, inputs, input_paths)
     bind_leaves!(ex, leaves(ex.program.input_structure), leaves(inputs), () -> input_paths(inputs))
 end
 
 function bind!(ex::Executable, bindings::Pair{<:Integer}...)
-    runnable(ex)
+    taken!(ex)
     refuse_devices(ex.target, map(last, bindings), _ -> binding_paths(bindings))
     positions, xs = Any[], Any[]
     for (j, x) in bindings
@@ -978,7 +986,7 @@ end
 
 # Bind the arrays of `b`, as `point!` binds a call's inputs.
 function point_each!(ex::Executable, b::Passed)
-    runnable(ex)
+    taken!(ex)
     xs = b.arrays
     length(xs) == length(ex.arguments) || throw(ArgumentError("expected $(length(ex.arguments)) arrays, got $(length(xs))"))
     moves = Ref{Any}(nothing)
@@ -1119,7 +1127,7 @@ program is captured, this launches kernel by kernel; `replay!` runs the
 capture.
 """
 function execute!(ex::Executable)
-    runnable(ex)
+    taken!(ex)
     walk(ex.target, ex.schedule)
     write_back!(ex)
 end
@@ -1145,7 +1153,7 @@ replay!(ex)                     # the same graph, on the new values
 ```
 """
 function capture!(ex::Executable; repetitions::Integer = 1)
-    runnable(ex)
+    taken!(ex)
     release!(ex)
     ex.repetitions = repetitions
     ex.captured = record(ex.target, Schedule(ex.target, recorded(ex), repeat(ex.touches, repetitions)), ex.steps)
@@ -1168,6 +1176,7 @@ then copy what it wrote into an argument into the caller's array `point!`
 bound it to, where that is not its storage. The results are in `outputs(ex)`.
 """
 function replay!(ex::Executable)
+    taken!(ex)
     ex.captured === nothing && throw(ArgumentError("nothing to replay: capture! records the program first"))
     replay_recording(ex.target, ex.captured)
     write_back!(ex)
