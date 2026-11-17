@@ -4,7 +4,8 @@
 # the kernel computing their elements, no kernel joins a fold its reads wait
 # on, no backward product recomputes a factor inside it but a widening of a
 # half-precision value, and a fold over fewer positions joins the kernel of
-# folds that recompute what it does.
+# folds that recompute what it does. A map of positions joins every kernel
+# that reads it.
 include("../fixtures/programs.jl")
 
 # A scan is the sweep of a kernel along the axes it scans: a map before it is
@@ -37,6 +38,33 @@ end
         @test length(planned.groups) == 1
         @test agree(C.execute(planned, x), [interpret(p, x)])
     end
+end
+
+# A map of positions is recomputed where it is read, and so is a map of maps
+# of positions: a mask the forward and the backward both read is stored in
+# no spelling, `j != k`, `!(j == k)` or two conditions joined, and neither
+# are angles computed from positions. Written `!(j == k)` the mask, a map of
+# a map, had been stored, where written `j != k` it was recomputed.
+@testset "a map of maps of positions is recomputed where it is read" begin
+    x = data(8, 6)
+    rows(x) = reshape(1:size(x, 1), :, 1)
+    columns(x) = reshape(1:size(x, 2), 1, :)
+    unequal(x) = ifelse.(mod.(rows(x) .+ columns(x), 3) .!= 0, x, 0.0)
+    negated(x) = ifelse.(.!(mod.(rows(x) .+ columns(x), 3) .== 0), x, 0.0)
+    both(x) = ifelse.((rows(x) .<= columns(x)) .& (mod.(rows(x) .+ columns(x), 3) .!= 0), x, 0.0)
+    angles(x) = x .* cos.(rows(x) .* exp.(.-columns(x) ./ 3))
+    of_positions(graph, v) = graph.values[v].definition isa C.Pointwise &&
+        all(o -> !(o isa C.Read) || of_positions(graph, o.value), graph.values[v].definition.operands)
+    planned(masked) = C.plan(C.lower(differentiate(trace(x -> sum(abs2, masked(x) .* exp.(masked(x))), x))))
+    for masked in (unequal, negated, both, angles)
+        p = planned(masked)
+        maps = filter(v -> of_positions(p.graph, v), eachindex(p.graph.values))
+        @test !isempty(maps)
+        @test !any(v -> p.stored[v], maps)
+        reference = interpret(differentiate(trace(x -> sum(abs2, masked(x) .* exp.(masked(x))), x)), x)
+        @test agree(C.execute(p, x), filter(!isnothing, C.leaves(reference)))
+    end
+    @test count(planned(unequal).stored) == count(planned(negated).stored)
 end
 
 # A chain of maps each reading the last twice is one kernel, its term

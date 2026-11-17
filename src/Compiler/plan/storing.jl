@@ -153,12 +153,18 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
                 any(u -> u in cycle && !stored[u] && values[u].definition isa Pointwise && outside(u), users[w])
         end
     end
-    # A pointwise value that reads no value, only constants and indices, is
-    # cheaper to recompute.
+    # A map of positions is cheaper to recompute where it is read than to
+    # load: one that reads only constants, indices and maps of positions, as
+    # a mask `j != k` does, and the same mask written `!(j == k)`, a map of a
+    # map. It is said of what a map reads, not of what is stored: a map a
+    # recurrence computes at each step is not stored either, and a map of
+    # that one reads what the recurrence stores.
+    of_positions = falses(n)
     for id in eachindex(values)
         d = values[id].definition
-        d isa Pointwise && stored[id] && !(id in results) && !materialized[id] || continue
-        all(o -> o isa Literal || o isa IndexOperand, d.operands) && (stored[id] = false)
+        d isa Pointwise || continue
+        of_positions[id] = all(o -> o isa Literal || o isa IndexOperand || o isa Read && of_positions[o.value], d.operands)
+        of_positions[id] && !(id in results) && !materialized[id] && (stored[id] = false)
     end
     # A stored half-precision value widened to Float32 is widened where it is
     # read, from the half value: a reader loads half the bytes, and a product
