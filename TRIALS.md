@@ -743,10 +743,26 @@ and 5.76 with direct ones, the gradients left on their devices 5.7 to
 5.8: there the link decides whether a second device pays. The device
 tests pass on the H100s (110, 3 broken, the third a test of three
 devices) and on trizzle's A6000s, staged (869, 1 broken); the whole suite
-here 34,498, 23 broken. Open: the estimate prices every link at the
-A6000s' 7.7 GB/s, 2180 μs for the 16 MiB that take 70; with the rate set
-by hand to 390 GB/s the schedule stops putting device graphs between the
-crossings, 29 segments where 33, and the step is within noise (30.75);
+here 34,498, 23 broken. The estimate priced every link at the A6000s'
+7.7 GB/s, 2180 μs for the 16 MiB that take 70. Landed after (117dc3b): a
+crossing is priced by the link between its two devices, a latency and a
+rate that a decider which measures fits on first need for each ordered
+pair a plan crosses, from crossings of 1 and 64 MiB timed alone
+(`time_crossing`, the target's), and keeps in the rates file, as it does
+each package's memory; a decider that does not measure prices on the
+nominal rate as before. Fitted: between the H100s 396 and 397 GB/s with
+20.6 μs from the first to the second and 9.6 back, the first twice the
+second run after run, not known why; between trizzle's A6000s 7.5 to 7.7
+GB/s with 0.11 to 0.14 ms, each of the six pairs. The 16 MiB is then
+priced at 63 and 54 μs, and the schedule stops putting device graphs
+between the crossings, 29 segments where 33; the steps are within noise
+(30.7 ms at full precision, 5.8 at TF32; on trizzle 78.4 on two devices
+and 55.5 on three), every digest as before, the device tests 112 and 3
+broken on the H100s and 875 and 1 on trizzle. A decider now knows the
+device each of its graph's labels stands for, and kept decisions are
+keyed by them. Open: the rates file names a link by CUDA's device
+numbers, which `CUDA_VISIBLE_DEVICES` renumbers, so that a kept link can
+come to describe another pair;
 a kernel reading the other device's memory in place, a crossing with no
 copy at all, measured at the copy's rate and not built; whether two
 direct copies leaving one device share the link as two staged ones
