@@ -691,6 +691,72 @@ readers, a concatenation for the pieces, whether a call spins at its end,
 the link in seconds for a short vector, `prepare` by reference over one
 memory, and the fingerprint harness on seeds 41 to 200.
 
+Two H100s joined by NVLink, 17 November (a rented container, eighteen
+links between the two at 26.6 GB/s each, driver 610.57; scripts and
+outputs in `challengers/h100-2026-11-17`: `peer.jl`, `peerkernel.jl`,
+`access.jl`, `gemm.jl`, `allreduce.jl`, and the trial's `towers`,
+`shards`, `placed_compiled` and `reduce`). The first devices here that
+reach each other's memory. The whole suite at 25e9f26: 34,587 passed, 17
+broken, 3 failed, none a miscompiled kernel, which the A6000s and the Ada
+have. Two failures were the test of the staging's NUMA node: a container
+refuses a process without the capability its memory policy, and `near`
+already left the staging where the thread ran; the test is skipped where
+the system tells no policy (a28cbc7). The third was the cover's test of
+attention's recomputing, which held every comparison under
+`measure = :all` to be measured: on an H100 the gradient's fold
+recomputed was timed at 73.1 μs against 70.3 stored, a tie within the
+noise, which `compare` gives to the estimates as it says it does; the
+test now asserts a comparison measured exactly where its times part
+(1dc5c59). That an estimate already refuted, 31.9 μs for the 73.1, breaks
+the tie is the open rule for a measured tie above.
+What moves bytes from one device to the other, 256 MiB and more: to the
+host or from it alone 55 GB/s; the staged crossing 52, of chunks of 8 MiB
+through two buffers, larger chunks no faster; the driver's copy between
+the devices 37, slower than through the host, and CUDA.jl's `copyto!`
+the same; that copy once the source's pool is granted to the reader's
+device 390 to 397; a kernel on one device reading or writing the other's
+memory 375, a sum reading its other term there the same; two copies in
+opposite directions at once 338 each. The cause of the 37: CUDA.jl
+allocates from a pool of each device's, which the driver shows to no
+other device until granted (`cuMemPoolSetAccess`), and between pools not
+granted it copies by a path of its own. A grant of either pool to the
+other device serves copies both ways and covers what was allocated
+before it; enabling access between the contexts changes nothing.
+Landed (69b9c04): a crossing between two devices that reach each other
+is one such copy on the source's link out, the lane's stream on the
+reader waiting for it, its pool granted where the crossing is built;
+between others it is staged as before (`Crossing` by its way, `Direct`
+or `Staging`). On the trial's model, full Float32: a crossing of 16 MiB
+0.07 ms where 0.49; the 25 crossings of a step of data-parallel SGD
+together 0.59 ms where 7.13, NCCL's all-reduce of 192 MB there 0.72; the
+step on two devices 30.8 ms where 31.3, the gradients left on their
+devices 30.6 to 30.9, the whole batch on one 49.9; the placed model's
+training step 48.7 ms where 49.2 (57.3 whole) and its forward 24.9 where
+25.1 (24.6 whole); two towers 1.00 of one. Replicas alike to the bit
+after 1 and 100 steps, every digest as on main. The link was 1 ms of 31
+here because the products are slow, not because the link was fast:
+cuBLAS reaches 44 to 51 TFLOP/s on these shapes in Float32, a step's 35
+products 49.9 ms alone, the whole-batch step's time, and 200 to 360 at
+TF32, the products 8.5 ms. With `precision = :tf32` the whole batch
+takes 10.3 ms, and two devices 9.65 with staged crossings, 0.93 of one,
+and 5.76 with direct ones, the gradients left on their devices 5.7 to
+5.8: there the link decides whether a second device pays. The device
+tests pass on the H100s (110, 3 broken, the third a test of three
+devices) and on trizzle's A6000s, staged (869, 1 broken); the whole suite
+here 34,498, 23 broken. Open: the estimate prices every link at the
+A6000s' 7.7 GB/s, 2180 μs for the 16 MiB that take 70; with the rate set
+by hand to 390 GB/s the schedule stops putting device graphs between the
+crossings, 29 segments where 33, and the step is within noise (30.75);
+a kernel reading the other device's memory in place, a crossing with no
+copy at all, measured at the copy's rate and not built; whether two
+direct copies leaving one device share the link as two staged ones
+share the copy engine, not measured (they share one stream now); a
+third device and a machine where only some pairs share a link, neither
+at hand; the fit of `cuTile full recompute` fails on the H100 as on the
+Ada (a negative rate, the bound standing in); and half the batch takes
+0.60 of the whole batch's time on one device at full precision, 30 ms
+where the products alone are 25.1, the 5 ms not looked into.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
