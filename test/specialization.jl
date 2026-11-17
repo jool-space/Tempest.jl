@@ -2,8 +2,8 @@
 # which runs the user's function, and the runtime, which runs kernels on the
 # user's arrays, meet the program's types. The keys and orders that make it
 # so agree with Base's, and a program of other numbers of inputs, nodes and
-# operands than one prepared before it, with the same functions and ranks,
-# compiles none of the compiler's methods again.
+# operands than one prepared before it, with the same functions, ranks and
+# extents, compiles none of the compiler's methods again.
 
 @testset "structural keys compare as Base" begin
     # A key is equal to another, and hashes alike, as its parts are.
@@ -35,17 +35,21 @@ if isdefined(Core, :methodtable)
         # The tracer meets the user's function and the runtime the user's arrays.
         own(m::Method) = (f = string(m.file); occursin("/src/Compiler/", f) && !occursin("/program/tracing.jl", f) && !occursin("/runtime/", f))
         a(x, y) = sum(abs2, sum(tanh.(x .* y) .+ x; dims = 2))
-        b(x, y, z) = sum(abs2, sum(tanh.(x .* y .* z) .+ x .+ y; dims = 2))
+        # Of more inputs than any program the precompile workload prepares, so
+        # that no instance for its numbers is in Tempest's image; and of the
+        # first's extents, by which the planner chooses: a fold stored where
+        # the first's is recomputed is planned by code the first never ran.
+        b(x, y, z, w) = sum(abs2, sum(tanh.(x .* y .* z .* w) .+ x .+ y .+ z; dims = 2))
         function run(f, args...)
             p = trace(f, args...)
             for q in (p, differentiate(p))
                 execute!(prepare(q, args...))
             end
         end
-        run(a, data(3, 4), data(3, 4; scale = 2.0))
+        run(a, data(5, 6), data(5, 6; scale = 2.0))
         before = instances()
         compiled = Set(mi.def for mi in before if mi.def isa Method && own(mi.def))
-        run(b, data(5, 6), data(5, 6; scale = 2.0), data(5, 6; scale = 3.0))
+        run(b, data(5, 6), data(5, 6; scale = 2.0), data(5, 6; scale = 3.0), data(5, 6; scale = 4.0))
         again = [mi for mi in setdiff(instances(), before) if mi.def in compiled]
         @test isempty(again) || (foreach(mi -> println(stderr, "compiled again: ", mi), again); false)
     end

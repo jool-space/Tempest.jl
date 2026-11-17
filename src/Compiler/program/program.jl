@@ -165,14 +165,12 @@ struct Program
     backward::BitSet
     writes::Vector{Pair{Int, Int}}
     gradients::Vector{Pair{Int, Int}}
+    # Compiled once, whatever the structures.
+    function Program(nodes, arguments, results, @nospecialize(input_structure), @nospecialize(output_structure), backward = BitSet(),
+            writes = Pair{Int, Int}[], gradients = Pair{Int, Int}[])
+        new(nodes, arguments, results, input_structure, output_structure, backward, writes, gradients)
+    end
 end
-
-Program(nodes, arguments, results, input_structure, output_structure) =
-    Program(nodes, arguments, results, input_structure, output_structure, BitSet())
-Program(nodes, arguments, results, input_structure, output_structure, backward) =
-    Program(nodes, arguments, results, input_structure, output_structure, backward, Pair{Int, Int}[])
-Program(nodes, arguments, results, input_structure, output_structure, backward, writes) =
-    Program(nodes, arguments, results, input_structure, output_structure, backward, writes, Pair{Int, Int}[])
 
 """
 A recurrence's step: a program whose arguments are the state's arrays, a slice

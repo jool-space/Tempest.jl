@@ -46,7 +46,8 @@ struct Apply <: Term
     variables::UInt64
     # Compiled once, whatever the function and the arguments' number and kinds.
     Base.@nospecializeinfer function Apply(@nospecialize(f), @nospecialize(args::Tuple{Vararg{Term}}), eltype)
-        commutative(f) && length(args) > 1 && (args = Tuple(sort!(collect(Term, args)::Vector{Term}; lt = (a, b) -> term_order(a, b) < 0, alg = InsertionSort)))
+        commutative(f) && length(args) > 1 && (args = Tuple(sort!(collect(Term, args)::Vector{Term};
+            lt = (@nospecialize(a), @nospecialize(b)) -> term_order(a, b) < 0, alg = InsertionSort)))
         intern(new(f, args, eltype, hash(f, hash(args, hash(eltype, 0x5d3e7a6b1c4f9e21))),
             mapreduce(variables, |, args; init = UInt64(0))))
     end
@@ -91,8 +92,9 @@ Base.hash(t::Recomputed, h::UInt) = hash(t.hash, h)
 # takes first, have one term and one kernel. The graph orders a value's
 # operands by number, in the value's own indices, which a group's domain
 # renames; ties keep that order. Values come first, then positions, then
-# constants, as the graph orders operands.
-term_order(a::Term, b::Term) = a === b ? 0 : (r = cmp(term_rank(a), term_rank(b))) != 0 ? r : same_rank_order(a, b)
+# constants, as the graph orders operands. Compiled once, whatever the kinds
+# of the two terms, which meet as a program's operands happen to.
+term_order(@nospecialize(a::Term), @nospecialize(b::Term)) = a === b ? 0 : (r = cmp(term_rank(a), term_rank(b))) != 0 ? r : same_rank_order(a, b)
 
 term_rank(::Load) = 0
 term_rank(::Stat) = 1
