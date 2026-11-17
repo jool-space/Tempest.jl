@@ -130,8 +130,9 @@ device_of(target::CUDATarget) = target.device
 """
 Whether a target plans and runs a program whose arrays are on several
 devices: the CPU, whose devices are labels on the host's memory, a crossing
-between two a copy there, and CUDA's, a crossing a copy staged through the
-host's memory. A target that does not refuses such arrays.
+between two a copy there, and CUDA's, a crossing a copy over the link two
+devices share, or staged through the host's memory where they share none. A
+target that does not refuses such arrays.
 """
 plans_across_devices(::Target) = false
 plans_across_devices(::Union{CPUTarget, CUDATarget}) = true

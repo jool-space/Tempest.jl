@@ -61,7 +61,8 @@ Tempest.Compiler.written(::CUDATarget, x) = CUDACore.with_managed_arrays(Returns
 # The bytes a crossing stages through the host at a time, and how many
 # buffers it stages them through: one chunk's upload runs beside the next
 # one's download, 7.7 GB/s between two RTX A6000s without peer access, where
-# the whole value through one buffer ran at half that.
+# the whole value through one buffer ran at half that; 52 GB/s between two
+# H100s, of the 55 each moves to or from the host alone.
 const CHUNK = 8 << 20
 const STAGES = 2
 
@@ -146,31 +147,59 @@ function Staging(bytes, from::Int)
 end
 
 """
-A crossing on CUDA's target: buffer `from` on one device, from `offset`
-bytes in, copied into `to` on another, as many bytes as `to` holds, through
-page-locked host memory, chunk by chunk, each chunk's
-download on the source's link out and its upload on the lane's stream on
-the reader (see `Lane`), so that the copy runs beside both
-devices' kernels, and neither device waits for the host nor the host for
-either: the copy between two devices that every pair of them can make,
-where a kernel or a copy between devices can touch only a peer's memory. It
-reads and writes its buffers by addresses taken where they were given it,
-each on its own device with the task's own stream, never on a lane's:
-CUDA.jl learns from the operations it submits which stream an array is
-used on, and would order the next use of one after a lane's stream, or wait
-for it on the host. Its schedule orders it after what wrote its source and
-before what reads its copy (see `Tempest.Compiler.Schedule`). It runs as it
-is replayed between the graphs of the devices around it rather than
-recorded (see `capture`), and repoints as a `Copy` does.
+The link two devices share, where each reaches the other's memory, as
+NVLink joins them: a crossing over it is one copy by the driver from the
+source to the reader, with no host between, 390 GB/s between two H100s over
+eighteen links, where the staged copy ran at 52. The driver takes the link
+only for memory the other device may map. CUDA.jl allocates from a pool of
+each device's, which the driver shows to no other device until it is
+granted, and copies between pools not granted by a path of its own, 37 GB/s
+there, slower than through the host: so the source's pool is granted to the
+reader's device, which covers what was allocated before the grant, and
+serves copies either way. `copied` is recorded on the source's link out
+after the copy, for the lane's stream on the reader to wait for (see
+`Lane`).
 """
-mutable struct Staged
+struct Direct
+    copied::CUDACore.CuEvent
+end
+
+# The link from device `from` to the task's, its pool granted, or nothing
+# where the two do not reach each other's memory or either allocates
+# otherwise than from a pool.
+function Direct(from::Int)
+    source, reader = CUDACore.CuDevice(from), CUDACore.device()
+    CUDACore.can_access_peer(reader, source) && CUDACore.stream_ordered(source) && CUDACore.stream_ordered(reader) || return nothing
+    CUDACore.access!(CUDACore.pool_create(source), reader, CUDACore.ACCESS_FLAGS_PROT_READWRITE)
+    Direct(CUDACore.device!(() -> CUDACore.CuEvent(CUDACore.EVENT_DISABLE_TIMING), from))
+end
+
+"""
+A crossing on CUDA's target: buffer `from` on one device, from `offset`
+bytes in, copied into `to` on another, as many bytes as `to` holds, by
+`way`: over the link the two devices share where there is one (see
+`Direct`), else through page-locked host memory (see `Staging`), the copy
+that every pair of devices can make. Either way it leaves the source by its
+link out and ends on the lane's stream on the reader (see `Lane`), so that
+the copy runs beside both devices' kernels, and neither device waits for
+the host nor the host for either. It reads and writes its buffers by
+addresses taken where they were given it, each on its own device with the
+task's own stream, never on a lane's: CUDA.jl learns from the operations it
+submits which stream an array is used on, and would order the next use of
+one after a lane's stream, or wait for it on the host. Its schedule orders
+it after what wrote its source and before what reads its copy (see
+`Tempest.Compiler.Schedule`). It runs as it is replayed between the graphs
+of the devices around it rather than recorded (see `capture`), and repoints
+as a `Copy` does.
+"""
+mutable struct Crossing{W}
     to::Any
     from::Any
     to_address::CUDACore.CuPtr{Cvoid}
     from_address::CUDACore.CuPtr{Cvoid}
     const values::Pair{Int, Int}
     const offset::Int
-    const staging::Staging
+    const way::W
 end
 
 # The address of buffer `x`, taken with the task on its device.
@@ -179,12 +208,15 @@ address(x) = CUDACore.device!(() -> reinterpret(CUDACore.CuPtr{Cvoid}, pointer(x
 function Tempest.Compiler.crossing(::CUDATarget, to, from, values::Pair{Int, Int}, offset::Int)
     bytes = offset * sizeof(eltype(from))
     bytes + sizeof(to) <= sizeof(from) || throw(DimensionMismatch("a crossing copies $(sizeof(to)) bytes from $bytes bytes into a source of $(sizeof(from))"))
-    Staged(to, from, address(to), address(from), values, bytes, Staging(sizeof(to), Tempest.Compiler.device_of(from)))
+    source = Tempest.Compiler.device_of(from)
+    direct = Direct(source)
+    way = direct === nothing ? Staging(sizeof(to), source) : direct
+    Crossing(to, from, address(to), address(from), values, bytes, way)
 end
 
-Tempest.Compiler.Implement.repoints(::Staged) = true
+Tempest.Compiler.Implement.repoints(::Crossing) = true
 
-function Tempest.Compiler.Implement.repoint!(c::Staged, value, buffer)
+function Tempest.Compiler.Implement.repoint!(c::Crossing, value, buffer)
     if first(c.values) == value
         c.to = buffer
         c.to_address = address(buffer)
@@ -197,10 +229,24 @@ function Tempest.Compiler.Implement.repoint!(c::Staged, value, buffer)
 end
 
 # Run on its lane (see `on_stream`): the task on the reader's device, and
-# each device's stream the lane's there, the source's link out for the
-# downloads and the reader's stream for the uploads.
-function (c::Staged)()
-    s = c.staging
+# each device's stream the lane's there, the source's link out and the
+# reader's stream.
+(c::Crossing)() = cross!(c.way, c)
+
+# One copy on the source's link out, which the reader's stream waits for.
+function cross!(d::Direct, c::Crossing)
+    reader = CUDACore.context()
+    CUDACore.device!(Tempest.Compiler.device_of(c.from)) do
+        CUDACore.cuMemcpyPeerAsync(c.to_address, reader, c.from_address + c.offset, CUDACore.context(), sizeof(c.to), CUDACore.stream())
+        CUDACore.record(d.copied)
+    end
+    CUDACore.wait(d.copied)
+    nothing
+end
+
+# Chunk by chunk, each chunk's download on the source's link out and its
+# upload on the reader's stream.
+function cross!(s::Staging, c::Crossing)
     bytes = sizeof(c.to)
     for (i, at) in enumerate(0:CHUNK:(bytes - 1))
         k = mod1(i, length(s.host))
@@ -231,17 +277,19 @@ end
 """
 The lane of an ordered pair of devices, where the crossings from one to the
 other run beside both devices' kernels, in order: the source's link out,
-which the downloads of every lane from the source take (see `link`), and a
-stream on the reader, which this lane's uploads take, each a stream of its
-own that CUDA.jl's operations never use. A device copies one chunk at a time
-in each direction, and of two streams with copies ready keeps to one until
-it has none: a stream per lane on the source would have the link drain one
-lane's backlog while another's reader waits, where one stream, launched in
-the order the sources are written, takes each download once its source is.
-The uploads into a reader are a stream per lane, each taken once it is
-downloaded. A crossing's upload waits for its download, so that what is
-launched on the lane after a wait on the link out waits for it too, and the
-lane's work ends on the reader's stream.
+which every lane from the source leaves by (see `link`), and a stream on
+the reader, where this lane's work ends, each a stream of its own that
+CUDA.jl's operations never use. A staged crossing's downloads take the link
+out and its uploads the reader's stream; a direct one's copy takes the link
+out, and the reader's stream waits for it (see `Crossing`). A device copies
+one chunk at a time in each direction, and of two streams with copies ready
+keeps to one until it has none: a stream per lane on the source would have
+the link drain one lane's backlog while another's reader waits, where one
+stream, launched in the order the sources are written, takes each copy once
+its source is. What arrives at a reader is a stream per lane. A crossing's
+last work on the reader's stream waits for its last on the link out, so
+that what is launched on the lane after a wait on the link out waits for it
+too, and the lane's work ends on the reader's stream.
 """
 struct Lane
     from::Int
@@ -263,7 +311,7 @@ end
 Tempest.Compiler.on_stream(f, target::CUDATarget, s::Own) = Tempest.Compiler.on_device(f, target, s.device)
 
 # The task on the reader's device, and on each device the lane's stream the
-# task's, as a crossing's run takes them (see `Staged`).
+# task's, as a crossing's run takes them (see `Crossing`).
 function Tempest.Compiler.on_stream(f, target::CUDATarget, l::Lane)
     Tempest.Compiler.on_device(target, l.from) do
         CUDACore.stream!(l.out) do
@@ -475,7 +523,7 @@ function captured!(f, graph; after)
 end
 
 # A run of crossings is not recorded: it runs as it is replayed (see
-# `Staged`), as the steps of a target without graphs do, and is changed by
+# `Crossing`), as the steps of a target without graphs do, and is changed by
 # repointing its copies alone.
 function Tempest.Compiler.capture(target::CUDATarget, steps, keep)
     Tempest.Compiler.crosses(first(steps).step) && return steps

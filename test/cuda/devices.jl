@@ -429,6 +429,40 @@ end
     end
 end
 
+# A crossing between two devices that reach each other's memory goes over
+# the link they share, one copy by the driver, and between two that do not,
+# through the host; either way copies the bytes, a span of the source's from
+# an offset, on the lane of the two, and the way through the host is one a
+# pair that shares a link can take too.
+@testset "a crossing is direct between devices that reach each other, staged between others" begin
+    if CUDACore.ndevices() < 2
+        @test_skip "needs two devices"
+    else
+        CX = Base.get_extension(Tempest, :CUDAExt)
+        target = T.CUDATarget()
+        n, offset = 5 << 20, 1 << 20
+        for from in 0:(CUDACore.ndevices() - 1), to in 0:(CUDACore.ndevices() - 1)
+            from == to && continue
+            # What the task's streams launch is done before a lane copies, as a call's beginning has it.
+            ready(f, d) = CUDACore.device!(() -> (x = f(); CUDACore.synchronize(); x), d)
+            source = ready(() -> CuArray(rand(Xoshiro(from), Float32, n)), from)
+            reaches = CUDACore.can_access_peer(CUDACore.CuDevice(to), CUDACore.CuDevice(from))
+            out = CUDACore.device!(() -> C.link(target, from), from)
+            lane = CUDACore.device!(() -> C.lane(target, from, to, out), to)
+            copy = ready(() -> CUDACore.zeros(Float32, n - offset), to)
+            built = CUDACore.device!(() -> C.crossing(target, copy, source, 2 => 1, offset), to)
+            @test built.way isa (reaches ? CX.Direct : CX.Staging)
+            staged = CUDACore.device!(() -> CX.Crossing(copy, source, built.to_address, built.from_address, 2 => 1, built.offset, CX.Staging(sizeof(copy), from)), to)
+            for crossing in (built, staged)
+                ready(() -> fill!(copy, 0), to)
+                C.on_stream(() -> crossing(), target, lane)
+                CUDACore.device!(() -> CUDACore.synchronize(lane.upload), to)
+                @test Array(copy) == Array(source)[(offset + 1):end]
+            end
+        end
+    end
+end
+
 # A crossing's page-locked staging is on the NUMA node of its source device,
 # whatever node the thread runs on, as /proc/self/numa_maps counts its pages:
 # over devices of two nodes, some staging is on a node the thread is not on.
