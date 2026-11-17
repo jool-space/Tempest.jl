@@ -463,6 +463,24 @@ end
     end
 end
 
+# The link a decider fits for an ordered pair of devices prices a crossing of
+# a size it was not fitted on within a factor of 1.5 of the crossing timed
+# alone, whichever way the pair copies.
+@testset "a link fitted for a pair of devices prices a crossing as it is timed" begin
+    if CUDACore.ndevices() < 2
+        @test_skip "needs two devices"
+    else
+        bytes = 16 << 20
+        for from in 0:(CUDACore.ndevices() - 1), to in 0:(CUDACore.ndevices() - 1)
+            from == to && continue
+            target = T.CUDATarget(; device = from)
+            d = C.Decider(target, C.lower(trace(identity, zeros(Float32, 1))); measure = :none, devices = Union{Nothing, Int}[from, to])
+            ratio = C.crossing_seconds(C.link!(d, 1, 2), bytes) / C.timed_crossing(target, from, to, bytes)
+            @test 1 / 1.5 < ratio < 1.5
+        end
+    end
+end
+
 # A crossing's page-locked staging is on the NUMA node of its source device,
 # whatever node the thread runs on, as /proc/self/numa_maps counts its pages:
 # over devices of two nodes, some staging is on a node the thread is not on.

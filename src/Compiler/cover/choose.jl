@@ -126,6 +126,10 @@ mutable struct Decider
     calibration_path::Union{Nothing, String}
     lines::Dict{Tuple{Symbol, Symbol}, Line}
     memories::Dict{Symbol, Memory}
+    # The device each label of the graph stands for (see `Placement`), and
+    # the link between each ordered pair of them a crossing takes.
+    devices::Vector{Union{Nothing, Int}}
+    links::Dict{Tuple{Int, Int}, Link}
     # Seconds per position of each scalar function on the device, measured
     # once, in each regime: streamed, swept in a product of a class, swept in
     # a product of a class that recomputes a fold.
@@ -169,13 +173,15 @@ end
 
 # A decider reads the rates file and the record as they are when it is made,
 # and prices on the rates `calibration` holds: by default those fitted on this
-# machine over those shipped for its device (see `known_rates`).
-function Decider(target, graph; measure = measuring(), recompute = (), keep = (), ride = (), steps = 1, calibration = known_rates(target, measure))
+# machine over those shipped for its device (see `known_rates`). Its graph's
+# labels stand for `devices`, by default label 1 alone, at home.
+function Decider(target, graph; measure = measuring(), recompute = (), keep = (), ride = (), steps = 1, calibration = known_rates(target, measure),
+        devices = Union{Nothing, Int}[home_device(target)])
     dry = level(measure) === :dry
     path, calibration_path = dry ? (nothing, nothing) : (record_path(target), rates_path(target))
     r = dry ? rates(target) : target_rates(target)
     how = dry ? :dry : measurable(target) ? level(measure) : :none
-    decider(target, measurable(target), graph, how, r, calibration, calibration_path, Noted(load_record(path)), path;
+    decider(target, measurable(target), graph, how, r, calibration, calibration_path, Noted(load_record(path)), path, devices;
         recompute, keep, ride, steps)
 end
 
@@ -187,12 +193,13 @@ the preparation's do, noting the options it wanted with the preparation's,
 and building the claims it times with the preparation's resources.
 """
 Decider(parent::Decider, graph::IndexGraph; steps) =
-    decider(parent.target, parent.measurable, graph, parent.measure, parent.rates, parent.calibration, parent.calibration_path, parent.record, parent.record_path;
-        steps, wanted = parent.wanted, timer = parent.timer, resources = parent.resources)
+    decider(parent.target, parent.measurable, graph, parent.measure, parent.rates, parent.calibration, parent.calibration_path, parent.record, parent.record_path,
+        parent.devices; steps, wanted = parent.wanted, timer = parent.timer, resources = parent.resources)
 
-decider(target, measurable, graph, measure, rates, calibration, calibration_path, record, record_path; recompute = (), keep = (), ride = (), steps = 1,
+decider(target, measurable, graph, measure, rates, calibration, calibration_path, record, record_path, devices; recompute = (), keep = (), ride = (), steps = 1,
         wanted = Set{String}(), timer = timed, resources = Resources(target)) =
-    Decider(target, measurable, graph, measure, rates, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), record, record_path,
+    Decider(target, measurable, graph, measure, rates, calibration, calibration_path, Dict{Tuple{Symbol, Symbol}, Line}(), Dict{Symbol, Memory}(),
+        devices, Dict{Tuple{Int, Int}, Link}(), Dict{Tuple{Symbol, Symbol, Any}, Float64}(), record, record_path,
         Set{Int}(recompute), Set{Int}(keep), Set{Int}(ride), Any[], Dict{String, Any}(), resources, Dict{String, Tuple{Int, Symbol, Union{Nothing, Float64}}}(), Dict{Any, Decision}(),
         Dict{Any, Vector{Choice}}(), Dict{Any, Offered}(), Dict{String, Failure}(), Dict{Any, Any}(), steps, wanted, timer)
 
@@ -358,11 +365,12 @@ between its devices; nothing for the rest.
 """
 floor_seconds(::GroupKind, d::Decider, p::Plan, g::Group) = nothing
 floor_seconds(::RecurrenceKind, d::Decider, p::Plan, g::Group) = stepped_seconds(d, p, g)
-floor_seconds(::CrossingKind, d::Decider, p::Plan, g::Group) = crossing_seconds(d.rates, value_bytes(p.graph.values[only(g.outputs)]))
+floor_seconds(::CrossingKind, d::Decider, p::Plan, g::Group) =
+    crossing_seconds(link!(d, source_device(p, g), group_device(p, g)), value_bytes(p.graph.values[only(g.outputs)]))
 
 """
 Whether a decider that measures times a group of a kind: every kind but a
-crossing, which is priced over the link alone. The decider's buffers are at
+crossing, which is priced by the link between its devices alone (see `link!`). The decider's buffers are at
 home, where a crossing's copy would be a copy within one device, and every
 plan the cover weighs crosses alike, as placement decides the crossings
 before the cover, so that its time would rank nothing.

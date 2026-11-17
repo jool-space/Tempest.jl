@@ -8,7 +8,7 @@
 # target defines them for its type (see CUDAExt).
 
 public Target, CPUTarget, CUDATarget, target_for, device_of, default_device, home_device, at_home, on_device, Step, crosses, written, crossing, stream, lane, link, on_stream, event, record!, wait!, Scheduled, allocate, upload, upload!, download!, bindable, pointable, retarget!, task_state, device_name,
-    toolchain, measurable, time_launch, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
+    toolchain, measurable, time_launch, time_crossing, quiesce, device_rates, capture, recapture, replay, release, floor_launch, floor_split, ScalarKernel, Split,
     accumulate!, merge_lanes, implementations, numerics, permits_rewrites, rounded_backward, deterministic, product_class
 
 "Where a program runs: `CPUTarget`, `CUDATarget`, or a type a package adds, defining the protocol of this file for it."
@@ -146,8 +146,10 @@ the first device an argument is on, else the target's default (see
 `default_device`). Arguments on
 the host and values no placed input reaches are there, and the decider
 builds and times there. The devices the other arguments are on follow in
-the order the arguments first meet them, so that a plan and its decisions
-do not depend on which of a machine's devices hold the arrays.
+the order the arguments first meet them, so that a plan does not depend
+on which of a machine's devices hold the arrays; its decisions do through
+the price of each crossing, which is the link's between the two devices
+its labels stand for (see `link!`).
 """
 struct Placement
     labels::Vector{Int}
@@ -615,6 +617,22 @@ const TIMINGS = ReentrantLock()
 # `time_launch`, one timing at a time, once the device's work is done: a
 # decider's timer unless it is given another (see `decide!`).
 timed(target, launch) = @lock TIMINGS (quiesce(target); time_launch(target, launch))
+
+"""
+    time_crossing(target, from, to, bytes) -> seconds::Float64
+
+The seconds a crossing of `bytes` from device `from` to device `to` of
+`target` takes (see `crossing`), run alone on the lane of the two (see
+`lane`), from when the lane may start to when what reads the copy may:
+what a decider fits the link between them on (see `link!`). Only a
+`measurable` target that plans across devices defines it. Tempest calls it
+one timing at a time, once both devices' work is done.
+"""
+function time_crossing end
+
+# `time_crossing`, one timing at a time, once the work of both devices is done.
+timed_crossing(target, from, to, bytes) =
+    @lock TIMINGS (quiesce(at_home(target, from)); quiesce(at_home(target, to)); time_crossing(target, from, to, bytes))
 
 """
     device_rates(target) -> rates

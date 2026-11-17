@@ -147,9 +147,11 @@ function key_parts(d::Decider; measure = d.measure)
     device = measure === :dry ? nothing : device_name(d.target)
     # The device's reported rates, `d.rates`, are its identity, as a shipped
     # rates file states it (see `device_identity`); the record's times, and
-    # the shipped rates fitted on them, are on the timing basis.
+    # the shipped rates fitted on them, are on the timing basis. The devices
+    # the graph's labels stand for name the links its crossings are priced
+    # by (see `link!`), which the rates file keeps by device.
     ("decisions", REACHED_SCHEMA, TIMING_BASIS, g.values, g.arguments, g.results, g.result_dims, g.result_scalar, g.result_eltype,
-        collect(g.backward), g.devices, sort!(collect(d.pinned)), sort!(collect(d.kept)), sort!(collect(d.rides)), d.steps, measure,
+        collect(g.backward), g.devices, d.devices, sort!(collect(d.pinned)), sort!(collect(d.kept)), sort!(collect(d.rides)), d.steps, measure,
         d.measurable, d.target, device, d.rates, loaded_implementations(), packages, extensions, read_settings())
 end
 

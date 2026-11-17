@@ -1,7 +1,8 @@
 # Measuring on the device: its rates, each package's line for products of a
-# class and its memory, and the seconds per position of each scalar function
-# in each regime, fitted on first need to reference programs timed as claims
-# are, and kept in the rates file.
+# class and its memory, the seconds per position of each scalar function in
+# each regime, fitted on first need to reference programs timed as claims
+# are, and the link from one device to another, to crossings timed alone;
+# kept in the rates file.
 
 # What a fitted rate can be, ends included: seconds, a latency, a step, or
 # what a function adds, no fewer than none; a rate of flops, more than none;
@@ -250,6 +251,48 @@ function memory!(d::Decider, package)
         fitted_memory(d, package) ||
             fit_memory!(d, Implementation[own..., (i for i in loaded_implementations() if package_name(i) === package && !(i in own))...])
         Memory((d.calibration[memory_key(package, what)] for what in MEMORY_RATES)...)
+    end
+end
+
+"""
+The link from the device label `from` stands for to the one `to` stands
+for, which a crossing between them takes (see `Link`), fitted on first
+need and kept in the rates file by the two devices; a link of the nominal
+rate (`LINK`) for a decider that does not measure. Each ordered pair has
+its own, as two devices may reach each other's memory over a link they
+share, or copy through the host, and the two directions apart.
+"""
+function link!(d::Decider, from, to)
+    get!(d.links, (from, to)) do
+        measures(d) || return Link(d.rates.launch, LINK)
+        pair = (d.devices[from], d.devices[to])
+        all(what -> haskey(d.calibration, link_key(pair..., what)), LINK_RATES) || fit_link!(d, pair...)
+        Link((d.calibration[link_key(pair..., what)] for what in LINK_RATES)...)
+    end
+end
+
+# What a link is in the rates file, each a line of its own (see `Link`).
+const LINK_RATES = ("latency", "rate")
+link_key(from, to, what) = string("link ", from, " to ", to, " ", what)
+
+# Crossings of these many bytes fit a link: the smaller's time nearly all
+# latency, and the larger's its bytes. Between two H100s over NVLink 1 MiB
+# moves in 3 μs at the link's rate, a few ticks of the coarsest event clock
+# (the RTX 6000 Ada's, 1.024 μs), and 64 MiB in 170 μs; staged between two
+# RTX A6000s the two take 0.14 and 8.7 ms.
+const LINK_BYTES = (1 << 20, 64 << 20)
+
+"""
+Fit the link from device `from` to device `to`: its latency and rate, the
+line through the times of a crossing of each of `LINK_BYTES` timed alone
+(see `time_crossing`). A fit that fails (see `keep_fit!`) keeps a launch's
+latency and the nominal rate.
+"""
+function fit_link!(d::Decider, from, to)
+    phase(:calibration) do
+        (b1, b2), (t1, t2) = LINK_BYTES, map(bytes -> timed_crossing(d.target, from, to, bytes), LINK_BYTES)
+        rate = (b2 - b1) / (t2 - t1)
+        keep_fit!(d, link_key.(from, to, LINK_RATES), (t1 - b1 / rate, rate), (SECONDS, RATE), (d.rates.launch, LINK))
     end
 end
 
@@ -525,5 +568,5 @@ end
 function target_rates(target)
     measurable(target) || return rates(target)
     r = device_rates(target)
-    Rates(r.launch, r.cached, r.bandwidth, r.cache, Int(r.blocks), NOISE, LINK)
+    Rates(r.launch, r.cached, r.bandwidth, r.cache, Int(r.blocks), NOISE)
 end

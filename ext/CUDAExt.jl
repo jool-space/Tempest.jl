@@ -722,6 +722,45 @@ __init__() = atexit(() -> foreach(finalize, keys(GRAPHS)))
 # made and read by one timing at a time.
 Tempest.Compiler.time_launch(target::CUDATarget, launch) = Tempest.Compiler.on_device(() -> timed_launch(target, launch), target)
 
+# A crossing timed on a lane and between buffers of its own: the minimum over
+# samples, each from an event the lane records before the crossing to one
+# after it, as a call's beginning and end bracket a lane's work (see
+# `walk`), so that the time holds the wait across devices that starts it.
+# Before each sample the reader's stream is held by launches that clear its
+# cache, about 120 μs of them on an H100, so that the host has launched the
+# crossing before its start is recorded and the time is the devices' alone:
+# timed as the host launched it, a crossing of 1 MiB from the first of two
+# H100s to the second took 19 to 29 μs, and held, 23.0 to 23.7. The first
+# sample, which finds the reader's grant to the source's pool and the
+# staging new, is left out.
+const CROSSING_HOLDS = 4
+
+function Tempest.Compiler.time_crossing(target::CUDATarget, from::Int, to::Int, bytes::Int; samples = 10)
+    on(f, device) = Tempest.Compiler.on_device(f, target, device)
+    source = on(() -> Tempest.Compiler.allocate(target, UInt8, bytes), from)
+    copy = on(() -> Tempest.Compiler.allocate(target, UInt8, bytes), to)
+    # What the task's streams launched is done before a lane copies, as a call's beginning has it.
+    foreach(device -> on(CUDACore.synchronize, device), (from, to))
+    out = on(() -> Tempest.Compiler.link(target, from), from)
+    lane = on(() -> Tempest.Compiler.lane(target, from, to, out), to)
+    crossing = on(() -> Tempest.Compiler.crossing(target, copy, source, 2 => 1, 0), to)
+    events = on(() -> [(CUDACore.CuEvent(), CUDACore.CuEvent()) for _ in 0:samples], to)
+    seconds = Tempest.Compiler.on_stream(target, lane) do
+        for (start, stop) in events
+            foreach(_ -> clear_cache!(), 1:CROSSING_HOLDS)
+            Tempest.Compiler.record!(target, lane, start)
+            Tempest.Compiler.wait!(target, lane, start)
+            crossing()
+            Tempest.Compiler.record!(target, lane, stop)
+        end
+        CUDACore.synchronize(last(last(events)))
+        Float64(minimum(((start, stop),) -> CUDACore.elapsed(start, stop), events[2:end]))
+    end
+    on(() -> CUDACore.unsafe_free!(source), from)
+    on(() -> CUDACore.unsafe_free!(copy), to)
+    seconds
+end
+
 # A launch timed, `n` times over as the steps of a graph, on the target's
 # device, where its timing runs.
 function timed_steps(target, launch, n)

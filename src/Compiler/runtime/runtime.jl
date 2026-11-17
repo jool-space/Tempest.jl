@@ -255,9 +255,10 @@ in_tables(f, t::Tables) = Base.ScopedValues.with(f, IR.INTERNED => t.interned, M
 """
 A preparation set up, before it decides: the program, its decider as
 `prepare` makes it, on the program's index graph lowered and rewritten with
-the folds pinned, kept and riding, the results paired with the arguments
-they replace, the value of each argument, whether it builds, its tables,
-and the device each label of its plan stands for (see `Placement`).
+the folds pinned, kept and riding, and placed, the device each label of its
+plan stands for its decider's (see `Placement`); the results paired with the
+arguments they replace, the value of each argument, whether it builds, and
+its tables.
 `decide!` reaches its decisions and `prepared` builds them.
 """
 struct Setup{D}
@@ -267,7 +268,6 @@ struct Setup{D}
     input::Dict{Int, Int}
     build::Bool
     tables::Tables
-    devices::Vector{Union{Nothing, Int}}
 end
 
 # `f()` as preparation `s` runs it: within its tables, building as it does
@@ -331,8 +331,8 @@ function setup(program::Program; target, placement = Placement(target, program),
             foreach(v -> push!(graph.rewrites, v => "recomputed in the backward where it is read: saving it would cost more than its operands"), recomputed)
             union!(pinned, recomputed)
         end
-        d = phase(() -> Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride), :decider)
-        Setup(program, d, collect(Pair{Int, Int}, pairs), input, build, tables, placement.devices)
+        d = phase(() -> Decider(target, graph; measure = build ? measure : :dry, recompute = pinned, keep = kept, ride, devices = placement.devices), :decider)
+        Setup(program, d, collect(Pair{Int, Int}, pairs), input, build, tables)
     end
 end
 
@@ -436,7 +436,7 @@ function planned(prep::Setup, decided, @nospecialize(inputs), by_reference, poin
     # value's, an argument the program does not read at home, and each
     # result on its value's. What is made for a value, a slot, a buffer or
     # a group's launches, is made with the task on its device.
-    devices = prep.devices
+    devices = d.devices
     device(v) = devices[p.graph.devices[v]]
     on(f, v) = on_device(f, target, device(v))
     argument_devices = Union{Nothing, Int}[haskey(input, k) ? device(input[k]) : devices[1] for k in 1:n]

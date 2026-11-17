@@ -1,16 +1,16 @@
 # What a launch costs: the device's rates, each package's line for products of
-# a class and its memory, and the seconds of a launch's work on them, after
-# XLA's GPU performance model. The rates are the device's as it reports them
-# (`device_rates`); lines, memories and the price of each scalar function are
-# measured on first need (see calibrate.jl) and kept in the rates file beside
-# the tuning record.
+# a class and its memory, the link from one device to another, and the
+# seconds of a launch's work on them, after XLA's GPU performance model. The
+# rates are the device's as it reports them (`device_rates`); lines,
+# memories, links and the price of each scalar function are measured on
+# first need (see calibrate.jl) and kept in the rates file beside the tuning
+# record.
 
 """
 A device's rates for estimates: seconds per launch in a captured graph, bytes
 per second from memory for a launch that moves at most `cache` bytes and for
-one that moves more, the blocks that fill the device, the relative margin
-within which two measurements tie, and bytes per second between two of the
-target's devices, which a crossing moves (see `crossing_seconds`).
+one that moves more, the blocks that fill the device, and the relative margin
+within which two measurements tie.
 """
 struct Rates
     launch::Float64
@@ -19,7 +19,6 @@ struct Rates
     cache::Float64
     blocks::Int
     noise::Float64
-    link::Float64
 end
 
 """
@@ -56,6 +55,18 @@ struct Memory
     error::Float64
     refold::Float64
 end
+
+"""
+The link from one device to another, the way a crossing between them takes
+(see `crossing`): a crossing of `bytes` takes `latency + bytes / rate`
+seconds (see `link!`).
+"""
+struct Link
+    latency::Float64
+    rate::Float64
+end
+
+crossing_seconds(link::Link, bytes) = link.latency + bytes / link.rate
 
 # A launch of fewer blocks than the device runs at once computes on that
 # share of the device, a block on a multiprocessor. A launch whose blocks
@@ -127,18 +138,14 @@ package_name(implementation) = Base.invokelatest(package_of, implementation)
 
 const NOISE = 0.05
 
-# The bytes per second between two devices, nominal until a target reports
-# its own: a copy staged through page-locked host memory moved 7.7 GB/s
-# between two RTX A6000s in the trial of the devices.
+# The bytes per second between two devices where a decider does not fit the
+# link between them (see `link!`): a copy staged through page-locked host
+# memory moved 7.7 GB/s between two RTX A6000s in the trial of the devices.
 const LINK = 7.7e9
 
 # A target that cannot measure, or a decider that must not, has nominal
 # rates: no latency, one line for every product (see `line!`).
-rates(::Target) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE, LINK)
-
-# The seconds a crossing of `bytes` takes: a launch, and its bytes over the
-# link between the two devices.
-crossing_seconds(r::Rates, bytes) = r.launch + bytes / r.link
+rates(::Target) = Rates(0.0, 2.0e10, 2.0e10, Inf, 1, NOISE)
 
 value_bytes(v::Value) = sizeof(v.eltype) * storage_length(v)
 
