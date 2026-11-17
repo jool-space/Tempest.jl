@@ -42,7 +42,7 @@ changes often, at the cost of compiling that code in each session.
 ## What holds
 
 Tempest owns coverage and kernel packages own speed. A program written with
-Base's arrays and the primitives on the [API](api.md) page runs with no
+Base's arrays and the primitives on the [Tempest](api.md) page runs with no
 kernel package loaded, on the kernels Tempest generates for itself, so
 loading a package or removing one changes how fast a program runs and never
 whether it runs. Each kind of change has one place: a new function is array
@@ -55,7 +55,11 @@ in the repository is the docket of what the code is being measured against.
 
 ## Where to go next
 
-The [API](api.md) page documents the functions Tempest exports for compiling,
-differentiating and explaining a program, the primitives programs can call,
-the interface an implementation package writes to, and what a package that
-adds a target defines.
+The [Tempest](api.md) page documents the functions Tempest exports for
+compiling, differentiating and explaining a program, and the primitives
+programs can call. The pages under `Tempest.Compiler` are for packages beside
+a program: [the steps beneath `compile`](compiler.md),
+[what a package that adds a target defines](targets.md),
+[what kernel packages build kernels with](kernels.md),
+[the vocabulary they read](ir.md) and
+[the interface they implement](implement.md).
