@@ -14,6 +14,7 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
+        "Compiling and calling" => "compiling.md",
         "Tempest" => "api.md",
         "Tempest.Compiler" => [
             "Beneath compile" => "compiler.md",

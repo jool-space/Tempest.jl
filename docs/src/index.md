@@ -55,10 +55,12 @@ in the repository is the docket of what the code is being measured against.
 
 ## Where to go next
 
-The [Tempest](api.md) page documents the functions Tempest exports for
-compiling, differentiating and explaining a program, and the primitives
-programs can call. The pages under `Tempest.Compiler` are for packages beside
-a program: [the steps beneath `compile`](compiler.md),
+[Compiling and calling](compiling.md) says what a compiled function reads,
+keeps and returns, and how its plan is measured. The [Tempest](api.md) page
+documents the functions Tempest exports for compiling, differentiating and
+explaining a program, and the primitives programs can call. The pages under
+`Tempest.Compiler` are for packages beside a program:
+[the steps beneath `compile`](compiler.md),
 [what a package that adds a target defines](targets.md),
 [what kernel packages build kernels with](kernels.md),
 [the vocabulary they read](ir.md) and
