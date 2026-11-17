@@ -55,13 +55,20 @@ in the repository is the docket of what the code is being measured against.
 
 ## Where to go next
 
-[Compiling and calling](compiling.md) says what a compiled function reads,
-keeps and returns, and how its plan is measured. The [Tempest](api.md) page
-documents the functions Tempest exports for compiling, differentiating and
-explaining a program, and the primitives programs can call. The pages under
-`Tempest.Compiler` are for packages beside a program:
+[Programs](programs.md) says what a program is to the compiler,
+[Compiling and calling](compiling.md) what a compiled function reads, keeps
+and returns and how its plan is measured, and
+[The CUDA target](cuda.md) where a program runs and how its products round.
+The [Tempest](api.md) page documents the functions Tempest exports for
+compiling, differentiating and explaining a program, and the primitives
+programs can call.
+
+The pages under `Tempest.Compiler` are for packages beside a program:
+[preparing a program](preparing.md) and
 [the steps beneath `compile`](compiler.md),
+[the invariants a plan keeps](invariants.md),
 [what a package that adds a target defines](targets.md),
 [what kernel packages build kernels with](kernels.md),
-[the vocabulary they read](ir.md) and
-[the interface they implement](implement.md).
+[the vocabulary they read](ir.md),
+[the interface they implement](implement.md) and
+[how a launch's work is stated and priced](work.md).
