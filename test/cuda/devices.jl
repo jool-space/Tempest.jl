@@ -2,6 +2,7 @@
 # whatever device the calling task is on, and leaves the task's device and
 # stream as they were. A program whose arrays are on several devices runs
 # over them, each value on one and a crossing where it is read on another.
+# An executable that tasks use in turn is used by one stream at a time.
 # What needs two devices is skipped on a machine with one.
 include("../fixtures/devices.jl")
 
@@ -38,6 +39,66 @@ cu32(x) = CuArray(Float32.(x))
             @test task_device() == (0, s)
         end
     end
+end
+
+@testset "an executable used by tasks in turn" begin
+    # An executable is used by one stream at a time (see `C.taken!`): what a
+    # task launches on it waits for what another task's stream has still to
+    # run there. In each case the other task's stream is busy as it uses
+    # the executable, copies of 128 MiB queued on it and not waited for,
+    # some 20 ms of them on GB10, so that what that task did to the
+    # executable is still to run when the next uses it.
+    big = CUDACore.zeros(Float32, 1 << 25), CUDACore.zeros(Float32, 1 << 25)
+    busy!() = foreach(_ -> copyto!(big[2], big[1]), 1:16)
+    elsewhere(f) = fetch(Threads.@spawn f())
+    f = x -> sum(abs2, 1.5f0 .* x; dims = 1)
+    zs = [cu32(data(48, 80; scale)) for scale in (0.1, 0.07)]
+    sums = [sum(abs2, 1.5f0 .* Array(z); dims = 1) for z in zs]
+    ex = prepare(trace(f, zs[1]), zs[1])
+
+    # Bound on the busy task, executed and read here: the execution reads
+    # what the binding copied, where it read the buffer as it was before.
+    @test count(1:6) do i
+        elsewhere(() -> (busy!(); bind!(ex, zs[mod1(i, 2)])))
+        !isapprox(Array(outputs(execute!(ex))), sums[mod1(i, 2)]; rtol = 1.0e-4)
+    end == 0
+
+    # A result copied on the busy task, and the executable bound and
+    # executed again here before the copy has run: the copy is the first
+    # execution's result, where the second's kernels wrote over it first.
+    @test count(1:6) do _
+        r = outputs(execute!(bind!(ex, zs[1])))
+        kept = elsewhere(() -> (busy!(); copy(r)))
+        execute!(bind!(ex, zs[2]))
+        !isapprox(Array(kept), sums[1]; rtol = 1.0e-4)
+    end == 0
+
+    # Executed on the busy task, then bound and executed on another: a state
+    # the program keeps in the executable's own buffer takes a step on each
+    # batch, in that order, where the second task's batch was copied in
+    # before the first task's kernels had read theirs.
+    step!(s, x) = (s .= 0.5f0 .* s .+ x; sum(abs2, s))
+    s0, x1, x2 = cu32(data(4096)), cu32(data(4096; scale = 0.5)), cu32(data(4096; scale = 0.3))
+    e = prepare(trace(step!, s0, x1), s0, x1)
+    in_turn = sum(abs2, 0.5f0 .* (0.5f0 .* Array(s0) .+ Array(x1)) .+ Array(x2))
+    @test count(1:6) do _
+        bind!(e, s0, x1)
+        elsewhere(() -> (busy!(); execute!(e); nothing))
+        !isapprox(elsewhere(() -> Array(outputs(execute!(bind!(e, 2 => x2))))[]), in_turn; rtol = 1.0e-4)
+    end == 0
+
+    # A result read on another task after each run, executed and replayed,
+    # the runs on two arrays in turn so that a stale read differs: the read
+    # waits for the run's kernels, long ones here, as over two devices below.
+    g = x -> sum(abs2, tanh.(1.5f0 .* x); dims = 1)
+    xs = [cu32(data(1 << 20, 16; scale)) for scale in (0.1, 0.07)]
+    filled = [Array(outputs(execute!(prepare(trace(g, x), x)))) for x in xs]
+    late = prepare(trace(g, xs[1]), xs[1])
+    read_elsewhere(r) = elsewhere(() -> Array(r))
+    stale(run) = count(_ -> any(i -> read_elsewhere(outputs(run(bind!(late, xs[i])))) != filled[i], 1:2), 1:10)
+    @test stale(execute!) == 0
+    capture!(late)
+    @test stale(replay!) == 0
 end
 
 @testset "two devices" begin
