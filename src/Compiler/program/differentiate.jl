@@ -935,8 +935,9 @@ function withgradient(@nospecialize(f), @nospecialize(args...))
         g = cotangent!(tape, cotangents, entered[k][3])
         g === nothing && return nothing
         # The stand-in reads the array as it was when the gradient was taken.
-        push!(tape.adjoints, g.id => only(tape.nodes[entered[k][3]].inputs))
-        TracedArray(tape, g.id)
+        handle = TracedArray(tape, g.id)
+        tape.adjoints[handle] = only(tape.nodes[entered[k][3]].inputs)
+        handle
     end
     # What `f` wrote into a stand-in it writes into the argument, as `f`
     # would untraced; a constant of the program cannot change.

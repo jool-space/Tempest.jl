@@ -126,15 +126,17 @@ mutable struct Tape
     # Whether the function is being traced: when its trace ends, a handle to
     # the tape names nothing (see `named`).
     open::Bool
-    # Each gradient a `withgradient` returned, as `gradient => primal` of
-    # nodes: the node of the array it is the gradient of, as it was when the
-    # gradient was taken.
-    adjoints::Vector{Pair{Int, Int}}
+    # Each gradient a `withgradient` returned, the handle it returned to the
+    # node of the array it is the gradient of, as it was when the gradient was
+    # taken: by the handle, as two arguments' gradients may be one node, the
+    # gradient of `x .+ y` of `x` and of `y` alike, and each is still its own
+    # argument's.
+    adjoints::IdDict{Any, Int}
 end
 
-Tape() = Tape(Node[], BitSet(), Int[], 0, Any[], true, Pair{Int, Int}[])
-Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[], true, Pair{Int, Int}[])
-Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[], true, Pair{Int, Int}[])
+Tape() = Tape(Node[], BitSet(), Int[], 0, Any[], true, IdDict{Any, Int}())
+Tape(nodes::Vector{Node}) = Tape(nodes, BitSet(), Int[], 0, Any[], true, IdDict{Any, Int}())
+Tape(nodes::Vector{Node}, backward::BitSet) = Tape(nodes, backward, Int[], 0, Any[], true, IdDict{Any, Int}())
 
 function record!(tape::Tape, @nospecialize(op), @nospecialize(inputs), @nospecialize(dims), @nospecialize(T); scalar = false)
     # A loop's step was recorded node by node.

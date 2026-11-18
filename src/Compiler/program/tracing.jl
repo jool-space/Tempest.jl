@@ -1545,6 +1545,7 @@ function traced_on(tape, @nospecialize(f), @nospecialize(args...))
     end
     copy(Random.default_rng()) == drawn || @warn GLOBAL_DRAW
     results = Int[]
+    gradients = Pair{Int, Int}[]
     output_structure = structure_of(output) do leaf
         # Any other leaf, `nothing` as a gradient has for an integer argument,
         # a layer's function, or a number, constant as among the arguments,
@@ -1558,6 +1559,9 @@ function traced_on(tape, @nospecialize(f), @nospecialize(args...))
             constant!(tape, leaf)
         end
         push!(results, id)
+        # A gradient of an argument as the program gets it, the handle a
+        # `withgradient` returned for it.
+        haskey(tape.adjoints, leaf) && haskey(position, tape.adjoints[leaf]) && push!(gradients, length(results) => position[tape.adjoints[leaf]])
         length(results)
     end
     # An input `f` wrote holds what it wrote when the program ends, as the
@@ -1568,9 +1572,6 @@ function traced_on(tape, @nospecialize(f), @nospecialize(args...))
         push!(results, x.id)
         push!(writes, length(results) => k)
     end
-    # A gradient of an argument as the program gets it that is a result.
-    gradients = [r => position[primal] for (r, id) in enumerate(results) for (gradient, primal) in tape.adjoints
-        if gradient == id && haskey(position, primal)]
     # A loop `f` ran outside any gradient is rolled (see `rolled`).
     nodes, backward, at = rolled(tape.nodes, tape.backward, 1, [results; arguments])
     program = Program(nodes, map(a -> at[a], arguments), map(r -> at[r], results), input_structure, output_structure, backward, writes,

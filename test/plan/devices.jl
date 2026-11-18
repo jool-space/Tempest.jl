@@ -356,6 +356,24 @@ end
     end
 end
 
+# The gradients of `x .+ y` of `x` and of `y` are one value, each returned
+# for its own argument and so on its device, as they are of `x .- y .+ z` of
+# `x` and of `z`: a gradient is its argument's by the handle `withgradient`
+# returned for it, not by the value it is.
+@testset "two arguments' gradients that are one value, $name" for (name, f, n) in (
+        ("a sum", (x, y) -> sum(x .+ y), 2),
+        ("abs of a sum", (x, y) -> sum(abs.(x .+ y)), 2),
+        ("tanh of three terms", (x, y, z) -> sum(tanh.(x .- y .+ z)), 3))
+    args = Tuple(rand(Float32, 3, 4) for _ in 1:n)
+    program = trace((xs...) -> T.withgradient(f, xs...), args...)
+    @test program.gradients == gradient_pairs(program) == [k + 1 => k for k in 1:n]
+    for labels in (collect(1:n), circshift(1:n, 1))
+        p = pinned_plan(program, labels)
+        @test gradients_off(p, program) == 0
+        @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
+    end
+end
+
 @testset "a result that replaces an argument is written on its device" begin
     # The result reads only the second argument, and is copied to the
     # first's device, whose array it replaces.
