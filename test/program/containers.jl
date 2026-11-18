@@ -40,7 +40,9 @@
     @test compiled(single(x)) ≈ cols(single(x))
 
     # A container typed by the first number it held takes a number of
-    # another type in its own, as Base's containers convert one.
+    # another type in its own, as Base's containers convert one, where Base
+    # converts any number of that type: between floats, rounded, an integer
+    # to a float, and an integer to one that holds every value of its type.
     typed = [
         x -> (v = [sum(x)]; push!(v, sum(Float32.(x))); v),
         x -> (v = [sum(Float32.(x))]; push!(v, sum(x)); v),
@@ -48,11 +50,30 @@
         x -> (r = Ref(sum(x)); r[] = sum(Float32.(x)); r[]),
         x -> (a = sum(x); a + convert(typeof(a), sum(Float32.(x)))),
         x -> (local s::typeof(sum(x)) = sum(Float32.(x)); 2s),
+        x -> (v = [count(>(0), x)]; push!(v, Int32(count(>(1), x))); v),
+        x -> (v = [count(>(0), x)]; push!(v, UInt8(count(>(1), x))); push!(v, any(x .> 1)); v),
+        x -> (v = [sum(Float32.(x))]; push!(v, count(>(0), x)); v),
     ]
     for f in typed
         got, eager = interpret(trace(f, x), x), f(x)
         @test typeof(got) == typeof(eager)
         @test agree(C.leaves(got), C.leaves(eager); rtol = 1.0e-6)
+    end
+    # Where Base would check the value, an integer to a narrower or
+    # differently signed one, a float to an integer, anything to a truth
+    # value, a compiled program has no error to raise: the conversion is
+    # refused as the program is traced, in words that say what to write.
+    checked = [
+        x -> (v = [Int32(count(>(0), x))]; push!(v, count(>(1), x)); v),
+        x -> (v = [UInt(count(>(0), x))]; push!(v, count(>(1), x)); v),
+        x -> (v = [Int8(count(>(0), x))]; push!(v, UInt8(count(>(1), x))); v),
+        x -> (v = [count(>(0), x)]; push!(v, sum(x)); v),
+        x -> (v = [any(x .> 1)]; push!(v, count(>(1), x)); v),
+        x -> (r = Ref(count(>(0), x)); r[] = sum(x); r[]),
+        x -> (local n::typeof(Int32(count(>(0), x))) = count(>(1), x); n),
+    ]
+    for f in checked
+        @test occursin("Base converts it by checking its value", message(() -> trace(f, x)))
     end
 
     # A plain number has no tape to be a traced number on.

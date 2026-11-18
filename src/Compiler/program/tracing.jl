@@ -321,10 +321,25 @@ for T in (Float16, Float32, Float64, BFloat16, Int8, Int16, Int32, Int64, UInt8,
 end
 
 Base.convert(::Type{T}, x::Traced) where {T <: Number} = cast(T, x)
+# Whether Base converts every number of type `S` to `T` without looking at
+# its value: to its own type; to a float, rounded; to an integer that holds
+# every `S`. Any other conversion Base checks, an error where the value does
+# not fit, which a compiled program has no way to raise.
+unchecked(::Type{T}, ::Type{S}) where {T, S} = T === S || T <: AbstractFloat && S <: Union{AbstractFloat, Integer} ||
+    T <: Integer && S <: Integer && typemin(T) <= typemin(S) && typemax(S) <= typemax(T)
+
 # To a traced number's type, which a container typed by the first number it
 # held asks of the next, `push!` into `[a]` or `r[] = b` of a `Ref`: the
-# number in that type, as Base converts a number to a container's.
-Base.convert(::Type{Traced{T}}, x::Traced) where {T} = cast(T, x)
+# number in that type where Base converts any number of its type, and
+# refused where Base would check the value, so that nothing is silently
+# another number.
+function Base.convert(::Type{Traced{T}}, x::Traced{S}) where {T, S}
+    unchecked(T, S) || throw(ArgumentError("a traced $S is stored where a traced $T is held, as `push!` into `[a]`, an element \
+        assigned, a `Ref` set or a typed local store it: Base converts it by checking its value, an error where a $T cannot hold \
+        it, which a compiled program cannot raise. Hold the wider type from the first number on, or say the conversion where the \
+        number is made, `$T(x)`, which converts as a kernel does, a value a $T cannot hold undefined"))
+    cast(T, x)
+end
 Base.float(x::Traced{T}) where {T} = cast(float(T), x)
 Base.oftype(x::Traced{T}, y::Real) where {T} = convert(T, y)
 Base.oftype(x::Traced{T}, y::Traced) where {T} = cast(T, y)
