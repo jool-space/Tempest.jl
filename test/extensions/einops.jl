@@ -25,3 +25,19 @@ end
     @test count(n -> n.op isa C.Contract, p.nodes) == 2
     @test only(C.leaves(interpret(p, a, b, c))) ≈ h(a, b, c)
 end
+
+# Einops drops the axis a fold reduces and puts back the one its pattern
+# keeps: two reshapes that are the fold's own result. So a log-sum-exp
+# spelled with `@reduce` is the one spelled with `dims`, whose maximum the
+# loss does not depend on and no rule differentiates, where a reshape
+# between the sum and its logarithm hid that from the laws that find it.
+@testset "a fold whose pattern keeps its axis is the fold along `dims`" begin
+    x = randn(Float32, 7, 3, 2)
+    mask = axes(x, 1) .== reshape(rand(1:7, 3, 2), 1, 3, 2)
+    pick(logp) = -sum(ifelse.(mask, logp, 0.0f0))
+    kept(x) = (z = x .- @reduce(maximum, x, "v t b -> 1 t b"); pick(z .- log.(@reduce(sum, exp.(z), "v t b -> 1 t b"))))
+    plain(x) = (z = x .- maximum(x; dims = 1); pick(z .- log.(sum(exp.(z); dims = 1))))
+    folds(f) = count(n -> n.op isa C.Reduce, differentiate(trace(f, x)).nodes)
+    @test folds(kept) == folds(plain)
+    @test T.gradient(kept, x)[1] ≈ T.gradient(plain, x)[1]
+end

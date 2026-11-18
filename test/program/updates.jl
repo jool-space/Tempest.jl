@@ -26,6 +26,15 @@
     @test same(x -> (y = zero(x); view(y, :, 2:3) .= x[:, 1:2]; reshape(y, 6, 8)[1, :] .= 5; transpose(y)[2, 1] = 9; y), x)
     @test same(x -> (y = copy(x); w = view(y, 2:7, :); view(w, 1:2, 3)[2] = -1; (y, w)), x)
     @test same(x -> (y = copy(x); w = PermutedDimsArray(y, (2, 1)); y .= 0; w[2, 1] = 3; (y, w .+ 1)), x)
+    # A reshape of a reshape and a permutation of a permutation are layouts
+    # of the array the first was made from, and the array itself where they
+    # undo each other: they read its writes and write into it.
+    @test same(x -> (y = copy(x); r = reshape(reshape(y, 6, 8), 4, 12); y[1, 1] = -1; r[4, 12] = 7; (y, r .+ 1)), x)
+    @test same(x -> (y = copy(x); t = transpose(transpose(y)); t[2, 3] = 5; (y, t .+ 1)), x)
+    @test same(x -> (y = copy(x); w = PermutedDimsArray(PermutedDimsArray(reshape(y, 2, 4, 6), (3, 1, 2)), (2, 1, 3)); w[1, 6, 4] = -2; (y, w .* 2)), x)
+    itself = Ref((false, false))
+    trace(x -> (itself[] = (reshape(reshape(x, 6, 8), 8, 6) === x, transpose(transpose(x)) === x); sum(x)), x)
+    @test itself[] == (true, true)
     # `similar` holds zeros until written; Julia leaves them undefined.
     @test interpret(trace(x -> similar(x, 3, 2), x), x) == zeros(3, 2)
     # A copy is the array's contents now, in memory of its own.

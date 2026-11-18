@@ -890,11 +890,21 @@ end
 "A copy of `x`: its contents now, in an array of its own."
 Base.copy(x::TracedArray) = TracedArray(x.tape, x.id)
 
+# A reshape of a reshape is a reshape of the array the first was made from,
+# the same elements in the same order sharing the same memory, and a
+# permutation of a permutation one permutation of it: an axis dropped and put
+# back, as Einops' patterns do after a fold, and a transpose taken twice are
+# the array itself, so that what reads them reads what made it, as a
+# derivative's laws do (see `moved`).
 function Base.reshape(x::TracedArray, dims::Tuple{Vararg{Int}})
     prod(dims) == length(x) || throw(DimensionMismatch("cannot reshape $(size(x)) to $dims"))
     dims == size(x) && return x
+    laid(x, Reshape) && return reshape(x.layout.parent, dims)
     layout(x, Reshape(), (), dims)
 end
+
+# Whether `x` is a layout of kind `L` of another array.
+laid(x::TracedArray, ::Type{L}) where {L} = x.layout !== nothing && x.layout.op isa L
 
 function check_permutation(x, perm)
     perm = Tuple(perm)
@@ -911,7 +921,9 @@ end
 # A traced array, as a view of one is, rather than Base's wrapper.
 function Base.PermutedDimsArray(x::TracedArray, perm)
     perm = check_permutation(x, perm)
-    perm == ntuple(identity, ndims(x)) ? x : layout(x, Permute(perm), (), map(p -> size(x, p), perm))
+    perm == ntuple(identity, ndims(x)) && return x
+    laid(x, Permute) && return PermutedDimsArray(x.layout.parent, map(p -> x.layout.op.perm[p], perm))
+    layout(x, Permute(perm), (), map(p -> size(x, p), perm))
 end
 
 Base.permutedims(x::TracedArray{<:Any, 2}) = permutedims(x, (2, 1))
