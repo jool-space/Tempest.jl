@@ -16,6 +16,7 @@ Tempest.Compiler.capture!
 Tempest.Compiler.replay!
 Tempest.Compiler.outputs
 Tempest.Compiler.forget_session!
+Tempest.Compiler.precompile_calls
 ```
 
 ## Plans

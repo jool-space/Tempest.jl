@@ -1017,7 +1017,7 @@ Base.@nospecializeinfer function applied(c, @nospecialize(roots))
     for r in c.g.reductions
         # A fold the sweep adds into its value is a product over its own
         # tile axis (see `add_step!`).
-        sums = r in added ? [(c.g.terms[r], bilinear_over(c, SumFold(), c.g.terms[r], only(fold_tiles(c, r))))] : fold_sums(c, r)
+        sums = r in added ? SweptSum[(c.g.terms[r], bilinear_over(c, SumFold(), c.g.terms[r], only(fold_tiles(c, r))))] : fold_sums(c, r)
         if sums === nothing
             push!(factors, c.g.terms[r])
         else

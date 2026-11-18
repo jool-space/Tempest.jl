@@ -46,6 +46,9 @@ using .Implement: loaded_implementations
 # Beneath `compile`: a program traced and prepared, for a step run in place.
 public trace, prepare, bind!, point!, execute!, capture!, replay!, outputs
 
+# What a target's extension compiles of a call while it precompiles.
+public precompile_calls
+
 # What proposals read, until a view of the graph replaces it: the plan, and the
 # views of its groups; how kernels are built side by side; and whether two
 # buffers are one storage, which a fold written where it starts is built by.

@@ -32,7 +32,8 @@ end
 # them: the unit-stride axis first. Tiles are permuted and reshaped to the
 # kernel's tile axes in registers (a transposed operand is loaded in storage
 # order, then permuted).
-compact(spans, xs) = Tuple(x for (s, x) in zip(spans, xs) if s)
+# Compiled once, whatever the view's rank and the kinds of what it compacts.
+Base.@nospecializeinfer compact(@nospecialize(spans), @nospecialize(xs)) = Tuple(x for (s, x) in zip(spans, xs) if s)
 storage_order(v) = sortperm(Int[x for (s, x) in zip(v.spans, v.strides) if s])
 
 # Kernels read and write memory through these. A Bool buffer reaches a kernel

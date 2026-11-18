@@ -542,3 +542,23 @@ end
 explain(io::IO, c::Compiled) = explain(io, c.executable)
 explain(io::IO, s::Searching) = explain(io, s.compiled)
 explain(c::Union{Compiled, Searching}) = explain(stdout, c)
+
+"""
+    precompile_calls(T)
+
+Compile the entry points a call of a program prepared for target type `T`
+takes: binding its arguments (`point!`), the call itself, capturing its
+launches (`capture!`), building a group's choice, and resolving a kernel from
+the cache. A target's extension calls it while it precompiles, since no
+workload calls a program where there is no device: compiled there, with the
+target's methods defined, rather than in every session that calls a program.
+"""
+function precompile_calls(::Type{T}) where {T <: Target}
+    E = Executable{T}
+    precompile(Tuple{typeof(point!), E, Any, Vararg{Any}})
+    precompile(Tuple{typeof(called), E, Passed, Any})
+    precompile(Tuple{typeof(capture!), E})
+    precompile(Tuple{typeof(build_choice), T, Plan, Group, Choice, Vector{Any}, Resources})
+    precompile(Tuple{typeof(resolved_kernel), Any, String})
+    nothing
+end

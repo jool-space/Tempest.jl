@@ -179,7 +179,7 @@ function unsplit_kernel(c::Context, workspaces, slots)
     ruled === nothing || (k.name *= ", masked tiles skipped")
     for (q, phase) in enumerate(reduction_phases(c))
         adding = q == 1 ? added : Int[]
-        sums = Dict(r => fold_sums(c, r) for r in phase)
+        sums = phase_sums(c, phase)
         # Folds of a resident tile that do not sum fold it directly; folds
         # whose sums another holds are that one's (see `shared_sums`).
         shared = shared_sums(c, phase, sums)
@@ -340,16 +340,28 @@ function sweep_sums(c::Context, f, body, p)
         y, gs = shifted_parts(c, body)
         W = shifted_type(c, f, body)
         w = Apply(Weight(), (y,), W)
-        return map(gs) do g
+        function summed(g)
             g isa Lit && isone(g.value) && return (w, oriented(bilinear_over(c, SumFold(), w, p)))
             term_eltype(g, c.g) === W || (g = Apply(Cast{W}(), (g,), W))
             term = Apply(*, (g, w), W)
             (term, oriented(bilinear_over(c, SumFold(), term, p)))
         end
+        return SweptSum[summed(g) for g in gs]
     end
     product = oriented(bilinear_over(c, f, body, p))
-    product === nothing ? nothing : [(body, product)]
+    product === nothing ? nothing : SweptSum[(body, product)]
 end
+
+"""
+A sum a sweep accumulates: its term, and, where it is a product over the
+sweep, its factors and their axes (see `bilinear_over`). One type whatever
+kinds of term the sums are of, so that what emits a sweep compiles once
+rather than for each kind a program's sums are of.
+"""
+const SweptSum = Tuple{Term, Union{Nothing, Tuple{Term, Term, Int, Int}}}
+
+# Each fold of a phase's sums (see `sweep_sums`).
+phase_sums(c::Context, phase) = Dict{Int, Union{Nothing, Vector{SweptSum}}}(r => fold_sums(c, r) for r in phase)
 
 # A product's matrix over its two axes in the tiling's order, its factors
 # swapped where the term names them the other way: a product commutes, and
@@ -608,7 +620,7 @@ function split_phase_kernel(c::Context, phase, earlier, workspaces, slots)
     at(t) = step_indices(c.s, indices, t)
     names = Dict{Term, Any}()
     load_folds!(k, st, c, earlier, names, at(:(Int32(1))), workspaces)
-    sums = Dict(r => fold_sums(c, r) for r in phase)
+    sums = phase_sums(c, phase)
     accumulators = Dict(r => fold_accumulators!(st, c, r, sums[r]) for r in phase)
     chunk = cld(sweeps(c.s), c.s.splits)
     t = gensym(:t)

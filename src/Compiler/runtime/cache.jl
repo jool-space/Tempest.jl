@@ -140,12 +140,18 @@ the last of them had asked for its kernel, as the GPT step's first stage of
 function cached_kernel(@nospecialize(compile), key)
     observe(:kernel, key)
     task = @lock RESOLVED_KERNELS.lock get!(RESOLVED_KERNELS.table, key) do
-        Threads.@spawn begin
-            found = load_kernel(key)
-            found === nothing ? phase(compile, :compile) : found
-        end
+        Threads.@spawn resolved_kernel(compile, key)
     end
     fetch_result(task)
+end
+
+# The kernel under `key`, loaded, or compiled by `compile()` where the cache has
+# none. Compiled once, whatever compiles kernels, and ahead of a session (see
+# CUDAExt): the many tasks that first ask for kernels at once would each
+# compile it.
+Base.@nospecializeinfer function resolved_kernel(@nospecialize(compile), key::String)
+    found = load_kernel(key)
+    found === nothing ? phase(compile, :compile) : found
 end
 
 # Generated kernels live here.
@@ -455,7 +461,17 @@ function own_types!(records, @nospecialize(T))
     end
 end
 
-const CHECKED = SessionTable{Tuple, Bool}()
+"""
+What a kernel depends on of Tempest's code, as `dependencies` writes it: its
+kind (`:method`, `:global` or `:type`), what it names, and its text then.
+"""
+struct Dependency
+    kind::Symbol
+    named::Any
+    text::String
+end
+
+const CHECKED = SessionTable{Dependency, Bool}()
 
 """
     current(bytes) -> Bool
@@ -464,23 +480,29 @@ Whether what a kernel depends on of Tempest's code, as `dependencies` wrote it,
 is unchanged in this session: each method is still the one its signature
 dispatches to, with the same lowered code; each global has the same value; each
 type the same fields. What cannot be read back, as a type gone, is changed.
+Each is checked once a session, by code compiled once whatever it names: a
+record's tuple is a type of its own for each kind of thing it names.
 """
 function current(bytes)
     isempty(bytes) && return true
-    records = try
-        deserialize(IOBuffer(bytes))
+    found = try
+        [Dependency(getfield(r, 1), getfield(r, 2), getfield(r, 3)) for r in deserialize(IOBuffer(bytes))]
     catch
         return false
     end
-    all(r -> get!(() -> unchanged(r), CHECKED, r), records)
+    all(checked, found)
 end
 
-function unchanged(r)
-    kind, x, text = r
+function checked(d::Dependency)
+    known = get(CHECKED, d, nothing)
+    known === nothing ? get!(CHECKED, d, unchanged(d)) : known
+end
+
+function unchanged(d::Dependency)
     try
-        kind === :method && return method_text(which(x)) == text
-        kind === :global && return global_text(x) == text
-        kind === :type && return type_text(x) == text
+        d.kind === :method && return method_text(which(d.named)) == d.text
+        d.kind === :global && return global_text(d.named) == d.text
+        d.kind === :type && return type_text(d.named) == d.text
     catch
     end
     false

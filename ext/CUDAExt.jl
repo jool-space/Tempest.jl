@@ -1096,4 +1096,15 @@ function (l::FloorLaunch)()
     nothing
 end
 
+## Compiled while the extension precompiles.
+
+# The call path of a program prepared for the device, which no workload can
+# run without one, compiled here once rather than in every session that calls
+# a program (2.5 s of each run of the corpus's GPT step). An extension's
+# workload follows Tempest's (see cuTileExt's).
+using PrecompileTools: PrecompileTools
+if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_enabled(Tempest)
+    Tempest.Compiler.precompile_calls(CUDATarget)
+end
+
 end
