@@ -476,7 +476,7 @@ end
 # five values of the state's size over the steps, the state entering each
 # step and the state leaving it, the same numbers a step apart, and three of
 # the reverse's cotangents, each read by one fold after the steps that a
-# step could compute itself. Qwen3.5-4B's training step stores 254 MiB a
+# step could compute itself. Qwen3.5-4B's training step stores 260 MiB a
 # token and sequence so, 240 of them these.
 @testset "gap: a recurrence's gradient writes one state over its steps; closed by a step's folds riding the reverse's steps where they cross its lanes, and by a state read outside its recurrence through the value it is carried from" begin
     function delta_step(S, q, k, v, decay, β)
