@@ -595,24 +595,21 @@ end
 
 fold(f::Fold, x::AbstractArray; dims = :) = (y = fold_array(f, x, reduced_axes(x, dims)); dims isa Colon ? only(y) : y)
 
-Base.sum(x::TracedArray; dims = :) = fold(SumFold(), x; dims)
+# A sum, a product and a count are Base's: reductions by `add_sum` and
+# `mul_prod`, in the type those return (see `widened`).
+Base.sum(x::TracedArray; kw...) = mapreduce(identity, Base.add_sum, x; kw...)
 Base.maximum(x::TracedArray; dims = :) = fold(MaxFold(), x; dims)
 Base.minimum(x::TracedArray; dims = :) = fold(MinFold(), x; dims)
-Base.prod(x::TracedArray; dims = :) = fold(ProdFold(), x; dims)
-Base.sum(f, x::TracedArray; dims = :) = sum(map(f, x); dims)
+Base.prod(x::TracedArray; kw...) = mapreduce(identity, Base.mul_prod, x; kw...)
+Base.sum(f, x::TracedArray; kw...) = mapreduce(f, Base.add_sum, x; kw...)
 Base.maximum(f, x::TracedArray; dims = :) = maximum(map(f, x); dims)
 Base.minimum(f, x::TracedArray; dims = :) = minimum(map(f, x); dims)
-Base.prod(f, x::TracedArray; dims = :) = prod(map(f, x); dims)
+Base.prod(f, x::TracedArray; kw...) = mapreduce(f, Base.mul_prod, x; kw...)
 
-# Truth values fold as numbers do: `count` sums them in the type Base adds
-# them to `init` in, a small integer widened to `Int`, and `any` and `all` are
-# their largest and smallest. Base's loops stop at the first that decides, a
-# branch on each element.
-function Base.count(f, x::TracedArray; dims = :, init = 0)
-    S = typeof(Base.add_sum(init, false))
-    total = sum(S.(f.(x)); dims)
-    dims isa Colon ? init + total : init .+ total
-end
+# Truth values fold as numbers do: `count` sums them, as Base does, from
+# `init`, and `any` and `all` are their largest and smallest. Base's loops
+# stop at the first that decides, a branch on each element.
+Base.count(f, x::TracedArray; dims = :, init = 0) = mapreduce(f, Base.add_sum, x; dims, init)
 Base.any(x::TracedArray{Bool}; dims = :) = maximum(x; dims)
 Base.all(x::TracedArray{Bool}; dims = :) = minimum(x; dims)
 Base.any(f::Function, x::TracedArray; dims = :) = any(f.(x); dims)
@@ -633,6 +630,18 @@ builtin_fold(::Union{typeof(max), typeof(Base.FastMath.max_fast)}) = MaxFold()
 builtin_fold(::Union{typeof(min), typeof(Base.FastMath.min_fast)}) = MinFold()
 builtin_fold(op) = nothing
 
+# A reduction by one of Base's operators is of the type the operator returns,
+# of `init` and an element or of two elements: `add_sum` and `mul_prod` widen
+# truth values and small integers to `Int` or `UInt`, and `+` widens truth
+# values alone. Base widens by converting each element (`add_sum` of two Int8
+# is `Int(x) + Int(y)`, its first element `Int(x)`), and so does a traced
+# reduction, before a fold that keeps its elements' type. The fold's own
+# accumulator is a matter of rounding, not of type (see `fold_accumulator`).
+widened(op, x, init) = in_type(reduced_eltype(op, eltype(x), init), x)
+reduced_eltype(op, T, init) = Base.promote_op(op, typeof(init), T)
+reduced_eltype(op, T, ::Nothing) = Base.promote_op(op, T, T)
+in_type(::Type{S}, x) where {S} = eltype(x) === S ? x : map(S, x)
+
 struct OperatorCombine{O}
     op::O
 end
@@ -644,13 +653,14 @@ end
 # the elements' order.
 function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
     init isa Tuple && return state_fold(f, op, x, init; dims)
-    y = f === identity ? x : f.(x)
+    y = f === identity ? x : map(f, x)
     builtin = builtin_fold(op)
     if builtin !== nothing
-        r = fold(builtin, y; dims)
+        z = widened(op, y, init)
+        r = fold(builtin, z; dims)
         # An `init` that is the fold's identity, of the elements' type, changes
         # nothing: NNlib's `-Inf` for a maximum, say.
-        return init === nothing || init === only(fold_init(builtin, eltype(y))) ? r : op.(init, r)
+        return init === nothing || init === only(fold_init(builtin, eltype(z))) ? r : op.(init, r)
     end
     init === nothing && throw(ArgumentError("reducing a traced array by $op needs `init`, its identity"))
     holds_handle(op) && throw(ArgumentError(HANDLE_AS_DATA))
@@ -1119,11 +1129,12 @@ function Base.accumulate(op, x::TracedArray; dims = nothing, init = nothing)
     init isa Tuple && return state_scan(op, x, init, axes)
     builtin = builtin_fold(op)
     if builtin !== nothing
-        r = scan(builtin, x, axes)
+        z = widened(op, x, init)
+        r = scan(builtin, z, axes)
         # As in `mapreduce`: an `init` that is the fold's identity changes
         # nothing, and another combines with each element after the scan,
         # which groups it apart from Base's sequence.
-        return init === nothing || init === only(fold_init(builtin, eltype(x))) ? r : op.(init, r)
+        return init === nothing || init === only(fold_init(builtin, eltype(z))) ? r : op.(init, r)
     end
     init === nothing && throw(ArgumentError("accumulating a traced array by $op needs `init`, the state the scan starts from"))
     T = promote_type(eltype(x), typeof(init))

@@ -328,7 +328,9 @@ function fold_elements(f::Fold, x, axes)
     map(s -> fold_observe(f, s), states)
 end
 
-fold_elements(::SumFold, x, axes) = sum(x; dims = axes)
+# A sum fold is `+`'s, which keeps a small integer's type where Base's `sum`,
+# by `add_sum`, widens it: its overflow wraps.
+fold_elements(::SumFold, x, axes) = reduce(+, x; dims = axes)
 
 # A scan, the same keeping `axes`: each element the fold of those up to it in
 # the axes' linear order, the first fastest; from the last down with
@@ -342,8 +344,11 @@ end
 
 scan_elements(f::Fold, x, axes, reverse, exclusive) = in_sequence(f, x, axes, reverse, exclusive)
 
-# A sum along one axis keeps Base's `cumsum`, which sums a vector pairwise.
-scan_elements(f::SumFold, x, axes, reverse, exclusive) = length(axes) == 1 && !reverse && !exclusive ?
+# A sum along one axis keeps Base's `cumsum`, which sums a vector pairwise
+# where its type rounds. Integers wrap rather than round, and are summed in
+# sequence, by `+`, which keeps their type where `cumsum` widens it.
+scan_elements(f::SumFold, x, axes, reverse, exclusive) =
+    length(axes) == 1 && !reverse && !exclusive && !(Base.ArithmeticStyle(eltype(x)) isa Base.ArithmeticWraps) ?
     cumsum(x; dims = only(axes)) : in_sequence(f, x, axes, reverse, exclusive)
 
 # Elements combined one after another, as Base's `accumulate` combines them.

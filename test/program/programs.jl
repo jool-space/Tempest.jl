@@ -289,16 +289,51 @@ end
     # differs between Julia's versions.
     counted = x -> count(>(0), x; init = Int32(2))
     @test interpret(trace(counted, x), x) === counted(x)
-    # Base sums truth values and Int8, Int16 and Int32 in `Int`
-    # (`Base.add_sum`): a sum of truth values is refused, its fold's state a
-    # truth value, and a sum of Int32 is an Int32, which overflows where
-    # Base's does not.
-    @testset "gap: a sum of truth values or of small integers is Base's, in `Int`; closed by a sum in the type `Base.add_sum` adds in, as a count's is" begin
-        @test_broken interpret(trace(x -> sum(x .> 0), x), x) === sum(x .> 0)
-        @test_broken interpret(trace(x -> sum(>(0), x), x), x) === sum(>(0), x)
-        @test_broken interpret(trace(x -> sum(x .> 0; dims = 2), x), x) == sum(x .> 0; dims = 2)
-        @test_broken interpret(trace(x -> sum(Int32.(round.(x))), x), x) === sum(Int32.(round.(x)))
+end
+
+# Base's sum and product are reductions by `add_sum` and `mul_prod`, of the
+# type those return: truth values and small integers widen to `Int` or `UInt`,
+# so that the sum of a mask is a count and a sum of Int8 does not overflow
+# where an Int8 would. `+` and `*` keep a small integer's type, and `+` of
+# truth values is an `Int`. The integers here overflow their own type.
+@testset "sums and products in the type of Base's operator" begin
+    x = data(8, 6)
+    i8 = fill(Int8(100), 8, 6)
+    i32 = fill(typemax(Int32) ÷ Int32(2), 8, 6)
+    u8 = fill(UInt8(200), 8, 6)
+    p8 = fill(Int8(3), 12)
+    @testset "$name" for (name, f, a) in [
+        ("sum(x .> 0)", x -> sum(x .> 0), x),
+        ("sum(>(0), x)", x -> sum(>(0), x), x),
+        ("sum(x .> 0; dims = 2)", x -> sum(x .> 0; dims = 2), x),
+        ("sum(x .> 0) / length(x)", x -> sum(x .> 0) / length(x), x),
+        ("cumsum(vec(x .> 0))", x -> cumsum(vec(x .> 0)), x),
+        ("reduce(+, x .> 0)", x -> reduce(+, x .> 0), x),
+        ("accumulate(+, vec(x .> 0))", x -> accumulate(+, vec(x .> 0)), x),
+        ("prod(x .> -10)", x -> prod(x .> -10), x),
+        ("sum(Int32.(round.(x)))", x -> sum(Int32.(round.(x))), x),
+        ("sum of Int8", a -> sum(a), i8),
+        ("sum of Int8 along dims = 1", a -> sum(a; dims = 1), i8),
+        ("cumsum of Int8", a -> cumsum(a; dims = 2), i8),
+        ("reduce(+, ·) of Int8, which wraps", a -> reduce(+, a), i8),
+        ("accumulate(+, ·) of Int8, which wraps", a -> accumulate(+, vec(a)), i8),
+        ("sum of Int32", a -> sum(a), i32),
+        ("sum of UInt8", a -> sum(a), u8),
+        ("sum of UInt8 from init = 0, an Int", a -> sum(a; init = 0), u8),
+        ("prod of Int8", a -> prod(a), p8),
+        ("cumprod of Int8", a -> cumprod(a), p8),
+    ]
+        p = trace(f, a)
+        @test interpret(p, a) == f(a)
+        @test typeof(interpret(p, a)) == typeof(f(a))
+        @test on_host(outputs(execute!(prepare(p, a)))) == f(a)
     end
+    # Of an empty array, the identity in the widened type.
+    @test interpret(trace(sum, Int8[]), Int8[]) === 0
+    # The accuracy beside a loss has no gradient: the loss's alone.
+    loss, (g,) = interpret(trace(x -> T.withgradient(x -> sum(x) * (sum(x .> 0) / length(x)), x), x), x)
+    @test loss ≈ sum(x) * (sum(x .> 0) / length(x))
+    @test g ≈ fill(sum(x .> 0) / length(x), size(x))
 end
 
 # A norm is its formula, the elements' powers summed, without Base's division
