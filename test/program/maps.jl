@@ -71,6 +71,25 @@
             unrolled(x, J) = sum(abs2, stack([x[J[:, b], b] .* sum(x[:, b]) for b in axes(x, 2)]))
             @test agree(T.gradient(gathered, x, J)[1:1], T.gradient(unrolled, x, J)[1:1])
         end
+        # The index arrays hold any integer type: the linear index is
+        # computed in `Int`, as the steps' positions beside them are, where
+        # the positions were converted to the arrays' type, which no map does.
+        x = data(4, 6)
+        for I in (Int32, UInt8)
+            i = I[3, 1, 4, 2, 2, 1]
+            programs = [
+                (x, i) -> sum(view(x, :, t)[i[t]] for t in axes(x, 2)),
+                (x, i) -> sum(abs2, stack([x[i[t], :] .* t for t in 1:4])),
+                (x, i) -> sum(abs2, stack(map((v, j) -> (y = copy(v); y[j] = 0; y), eachcol(x), i))),
+            ]
+            for f in programs
+                p = trace(f, x, i)
+                @test count(n -> n.op isa C.Loop, p.nodes) >= 1
+                @test agree((outputs(execute!(prepare(p, x, i; target = T.CPUTarget()))),), (f(x, i),); rtol = 1.0e-12)
+                g(x, i) = T.gradient(x -> f(x, i), x)[1]
+                @test agree((outputs(execute!(prepare(trace(g, x, i), x, i; target = T.CPUTarget()))),), (g(x, i),); rtol = 1.0e-12)
+            end
+        end
     end
 end
 

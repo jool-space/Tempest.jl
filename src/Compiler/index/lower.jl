@@ -797,9 +797,11 @@ function batched_indexing!(tape::Tape, n::Node, step_nodes, ins, computed, steps
         j = ins[op.indices[k].input]
         Traced(tape, record(Reshape(), (j,), shape, nodes[j].eltype))
     end
+    # The steps' positions are in `Int` whatever integer type the arrays
+    # hold, each component a traced number of its own type.
     positions = record!(tape, Constant(1:steps), (), (steps,), Int)
-    push!(components, Traced(tape, record(Reshape(), (positions,), (ntuple(_ -> 1, R - 1)..., steps), Int)))
-    linear = linear_index(components, (A[along]..., steps))
+    position = Traced(tape, record(Reshape(), (positions,), (ntuple(_ -> 1, R - 1)..., steps), Int))
+    linear = linear_index((components..., position), (A[along]..., steps))
     # The indices on the merged array: the others as they were, their index
     # arrays numbered anew after the inputs the operation takes first, then
     # the linear index.
