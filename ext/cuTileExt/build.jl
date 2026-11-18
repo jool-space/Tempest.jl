@@ -888,7 +888,7 @@ settings (`settings`): what emitting reads.
 Groups alike, as a model's layers are, emit and define their kernels once,
 each launching them on its own values.
 """
-const EMITTED = Tempest.Compiler.SessionTable{Tuple{Structure, Any, Vector{Int}, NTuple{3, String}}, Emitted}()
+const EMITTED = Tempest.Compiler.SessionTable{Tuple{Structure, Vector{Any}, Vector{Int}, NTuple{3, String}}, Emitted}()
 
 # A fold by key in the storage of the contents it starts from (see
 # `Tempest.Compiler.storage`) starts from them there.

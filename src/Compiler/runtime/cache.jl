@@ -359,8 +359,12 @@ function canonical_definition(c::Canonical, @nospecialize(T::DataType))
 end
 
 # Whether a module's code is identified by its package: Core, Base, the
-# standard library, and installed or developed packages.
-identified(m::Module) = (r = Base.moduleroot(m); r === Core || r === Base || pkgdir(r) !== nothing)
+# standard library, and installed or developed packages. Asked of every module
+# a kernel's source names, and the same all session.
+identified(m::Module) = get!(() -> find_identified(Base.moduleroot(m)), IDENTIFIED, Base.moduleroot(m))
+find_identified(r::Module) = r === Core || r === Base || pkgdir(r) !== nothing
+
+const IDENTIFIED = SessionTable{Module, Bool}()
 
 const IDENTITIES = SessionTable{Module, String}()
 

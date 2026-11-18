@@ -853,7 +853,7 @@ What the generator says of a group, kept by the group's `structure` (see
 and estimate. A claim names the domain's axes and no value, so groups alike,
 as a model's layers are, ask once.
 """
-const SAID = Tempest.Compiler.SessionTable{Tuple{Symbol, cuTileGenerator, Any, NTuple{3, String}, Structure, Any}, Any}()
+const SAID = Tempest.Compiler.SessionTable{Tuple{Symbol, cuTileGenerator, Any, NTuple{3, String}, Structure, Union{Nothing, Vector{Any}}}, Any}()
 
 # The settings of the environment the generator reads as it claims, estimates
 # and emits: a product's tile and options forced, and whether a sweep skips
@@ -861,10 +861,11 @@ const SAID = Tempest.Compiler.SessionTable{Tuple{Symbol, cuTileGenerator, Any, N
 settings() = (get(ENV, "TEMPEST_PRODUCT_TILE", ""), get(ENV, "TEMPEST_PRODUCT_OPTIONS", ""), get(ENV, "TEMPEST_SKIP_MASKED", "1"))
 
 # A claim's every field, as a key: its schedule's tiling is an array, which is
-# equal to another only by identity.
+# equal to another only by identity. A key is of one type whatever the
+# schedule's tiling, so that what looks it up compiles once.
 schedule_key(c::Claim) = schedule_key(c.schedule)
-schedule_key(s::TileSchedule) = (s.sketch, Tuple((Tuple(ax.axes), ax.extent, ax.tile, ax.reduced, ax.chunk) for ax in s.tiling), s.splits,
-    s.occupancy, s.swizzle, s.precision, s.options)
+schedule_key(s::TileSchedule) = Any[s.sketch, Any[(Tuple(ax.axes), ax.extent, ax.tile, ax.reduced, ax.chunk) for ax in s.tiling], s.splits,
+    s.occupancy, s.swizzle, s.precision, s.options]
 
 # What the generator says of `g` (and of `claim`, unless nothing), found by
 # `f` where `SAID` holds none.
