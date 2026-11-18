@@ -171,3 +171,11 @@ end
     owner[v] = k
     @test broken(() -> C.verify(with_groups(p, [j == k ? h : x for (j, x) in enumerate(p.groups)], owner))) == 4
 end
+
+@testset "invariant 6: a kernel's domain has positions" begin
+    # A kernel over an axis of extent zero, which no implementation is asked for.
+    p = planned(x -> exp.(x) .* 2, data(8, 6))
+    g = only(p.groups)
+    none = C.Group(g.kind, (0, Base.tail(g.domain)...), g.reductions, g.outputs, g.terms, g.phase)
+    @test broken(() -> C.verify(with_groups(p, [none]))) == 6
+end

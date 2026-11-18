@@ -220,6 +220,12 @@ IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites = Pair{Int
         devices = ones(Int, length(values))) =
     IndexGraph(values, arguments, results, dims, scalar, eltype, rewrites, backward, devices, Base.Lockable(Masks()))
 
+# The element type of what an operand reads, among a graph's values.
+eltype_of(values::Vector{Value}, o::Read) = values[o.value].eltype
+eltype_of(values::Vector{Value}, o::Literal) = typeof(o.value)
+eltype_of(values::Vector{Value}, ::IndexOperand{T}) where {T} = T
+eltype_of(graph::IndexGraph, o::Operand) = eltype_of(graph.values, o)
+
 operands(d::Definition) = ()
 operands(d::Pointwise) = d.operands
 operands(d::Union{Reduction, Scan, Crossed}) = (d.operand,)

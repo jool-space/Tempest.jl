@@ -63,7 +63,8 @@ Check the invariants the kernels of `plan` rely on, and throw an
     within the domain, a fold read as a `Stat` is complete in an earlier
     phase, and a fold a term recomputes is no member of the group;
  5. a kernel's members and what it reads are on its device, but for a
-    crossing, which reads one span of a value on another.
+    crossing, which reads one span of a value on another;
+ 6. a kernel's domain has positions, no axis of it of extent zero.
 
 The manual's page [Plan invariants](@ref) states each in full.
 
@@ -73,6 +74,7 @@ of its outputs needs before it writes any of them, as `storage` was told.
 the default when the environment sets `TEMPEST_VERIFY=true`, as the tests do.
 """
 function verify(p::Plan)
+    verify_extents(p)
     reads = [group_reads(p.graph, g) for g in p.groups]
     verify_owners(p, reads)
     verify_recurrences(p)
@@ -86,6 +88,13 @@ function verify(p::Plan, s::Storage; in_place = k -> true)
     verify_storage(p, s, in_place, [group_reads(p.graph, g) for g in p.groups])
     verify_placed_storage(p, s)
     p
+end
+
+# Invariant 6: a kernel's domain has positions.
+function verify_extents(p::Plan)
+    for (k, g) in enumerate(p.groups)
+        0 in g.domain && invalid(6, kernel_name(p, k), " ranges over an axis of extent zero")
+    end
 end
 
 # Invariant 5: a kernel on one device, a crossing between two.

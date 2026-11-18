@@ -56,6 +56,13 @@ end
 
 fold_eltype(f::Fold, T) = fold_types(f, T).result
 
+# What a fold of elements of type `T` gives of none: its initial state,
+# observed, in the type of its result.
+function fold_of_none(f::Fold, T)
+    (; accumulator, result) = fold_types(f, T)
+    convert(result, fold_observe(f, fold_init(f, accumulator)))
+end
+
 struct SumFold <: Fold end
 fold_name(::SumFold) = :sum
 fold_init(::SumFold, T) = (zero(T),)

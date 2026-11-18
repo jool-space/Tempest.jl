@@ -59,3 +59,10 @@ its device, but a crossing's kernel's, whose one member is a crossing,
 reading its source (both stored, by 1); with `storage`, a slot holds values
 of one device, and a result that replaces an argument is on that argument's
 device.
+
+## 6. Extents
+
+Every kernel's domain has positions: no axis of it is of extent zero. A
+value of no elements is a constant, the one array of its shape and type, and
+a fold over no elements is what it starts from, so that no implementation is
+asked for a kernel over an axis of none.

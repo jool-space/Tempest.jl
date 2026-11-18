@@ -136,10 +136,6 @@ compact(graph::IndexGraph) = first(rebuild((b, id) -> nothing, graph, live_value
 
 ## Products of operands, seen through the values they read.
 
-eltype_of(graph, o::Read) = graph.values[o.value].eltype
-eltype_of(graph, o::Literal) = typeof(o.value)
-eltype_of(graph, ::IndexOperand{T}) where {T} = T
-
 # An operand of a value read at `index`, as read from the reader's domain.
 through(x::Read, index, d::Domain) = Read(x.value, map(e -> substitute(e, index, d), x.index))
 through(x::Literal, index, d::Domain) = x

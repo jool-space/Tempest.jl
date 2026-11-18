@@ -595,23 +595,25 @@ end
 
 fold(f::Fold, x::AbstractArray; dims = :) = (y = fold_array(f, x, reduced_axes(x, dims)); dims isa Colon ? only(y) : y)
 
-# A sum, a product and a count are Base's: reductions by `add_sum` and
-# `mul_prod`, in the type those return (see `widened`).
+# A sum, a product, an extreme and a count are Base's: reductions by
+# `add_sum`, `mul_prod`, `max` and `min`, in the type those return (see
+# `widened`), from `init` where one is given.
 Base.sum(x::TracedArray; kw...) = mapreduce(identity, Base.add_sum, x; kw...)
-Base.maximum(x::TracedArray; dims = :) = fold(MaxFold(), x; dims)
-Base.minimum(x::TracedArray; dims = :) = fold(MinFold(), x; dims)
+Base.maximum(x::TracedArray; kw...) = mapreduce(identity, max, x; kw...)
+Base.minimum(x::TracedArray; kw...) = mapreduce(identity, min, x; kw...)
 Base.prod(x::TracedArray; kw...) = mapreduce(identity, Base.mul_prod, x; kw...)
 Base.sum(f, x::TracedArray; kw...) = mapreduce(f, Base.add_sum, x; kw...)
-Base.maximum(f, x::TracedArray; dims = :) = maximum(map(f, x); dims)
-Base.minimum(f, x::TracedArray; dims = :) = minimum(map(f, x); dims)
+Base.maximum(f, x::TracedArray; kw...) = mapreduce(f, max, x; kw...)
+Base.minimum(f, x::TracedArray; kw...) = mapreduce(f, min, x; kw...)
 Base.prod(f, x::TracedArray; kw...) = mapreduce(f, Base.mul_prod, x; kw...)
 
 # Truth values fold as numbers do: `count` sums them, as Base does, from
-# `init`, and `any` and `all` are their largest and smallest. Base's loops
-# stop at the first that decides, a branch on each element.
+# `init`, and `any` and `all` are their largest and smallest, of none false
+# and true, as Base's are. Base's loops stop at the first that decides, a
+# branch on each element.
 Base.count(f, x::TracedArray; dims = :, init = 0) = mapreduce(f, Base.add_sum, x; dims, init)
-Base.any(x::TracedArray{Bool}; dims = :) = maximum(x; dims)
-Base.all(x::TracedArray{Bool}; dims = :) = minimum(x; dims)
+Base.any(x::TracedArray{Bool}; dims = :) = fold(MaxFold(), x; dims)
+Base.all(x::TracedArray{Bool}; dims = :) = fold(MinFold(), x; dims)
 Base.any(f::Function, x::TracedArray; dims = :) = any(f.(x); dims)
 Base.all(f::Function, x::TracedArray; dims = :) = all(f.(x); dims)
 
@@ -656,6 +658,13 @@ function Base.mapreduce(f, op, x::TracedArray; dims = :, init = nothing)
     y = f === identity ? x : map(f, x)
     builtin = builtin_fold(op)
     if builtin !== nothing
+        # Of no elements a sum is zero and a product one, the folds' own. An
+        # extreme is `init`, and without one what Base gives of none, along an
+        # axis of none as over all: zero for the largest of magnitudes, and
+        # for any other its refusal.
+        if init === nothing && builtin isa Union{MaxFold, MinFold} && any(a -> size(x, a) == 0, reduced_axes(x, dims))
+            init = Base.mapreduce_empty(f, op, eltype(x))
+        end
         z = widened(op, y, init)
         r = fold(builtin, z; dims)
         # An `init` that is the fold's identity, of the elements' type, changes

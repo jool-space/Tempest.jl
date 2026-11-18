@@ -424,6 +424,8 @@ fill_out(a::IndexAccess, dims, d) = IndexAccess(substitute(a.expr, broadcast_ind
 # scatter that covers its result is a formula.
 function placement!(value!, indices, input, otherwise, n, d)
     i = identity_index(n.dims)
+    # Of no elements none is placed: every position is `otherwise`.
+    any(s -> !(s isa Integer) && isempty(s), indices) && return access(otherwise, i, d)
     conditions = ValueAccess[]
     condition!(f, e, c) = push!(conditions, value!(Pointwise(f, (IndexOperand(e, Int32), Literal(Int32(c)))), n.dims, Bool))
     source = Affine[]
@@ -527,6 +529,21 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
     # The result's axes come first, so its value is read at the same variables.
     value!(Reduction(SumFold(), Read(product.value, product.index), iteration, reduced), kept, n.eltype)
 end
+
+# What a fold over no elements is, where its value has some: what it starts
+# from. A reduction's is the fold's value of none, a constant; a fold by key's
+# is the contents it folds into, or its initial state. Nothing for a fold of
+# elements, and for what is no fold.
+started(values, d::Definition, dims, T) = nothing
+started(values, d::Reduction, dims, T) =
+    0 in d.iteration ? LiteralAccess(convert(T, fold_of_none(d.fold, eltype_of(values, d.operand)))) : nothing
+function started(values, d::Keyed, dims, T)
+    0 in d.iteration || return nothing
+    d.into === nothing ? LiteralAccess(only(fold_init(d.fold, T))) : access(d.into, ntuple(var, length(dims)), Domain(dims))
+end
+
+# The one array of a shape and an element type that has no elements.
+none(T, dims) = ConstantArray(Array{T}(undef, dims))
 
 # Integer arithmetic on ranges and literals stays a formula: `(1:n) .- 1` is
 # the index shifted, `2 .* (1:n)` scaled, `fld.(1:n, 4)` divided. Sums,
@@ -878,7 +895,14 @@ function lower(p::Program)
     # A value defined over a node's shape, over the node's wide axes instead.
     # Two nodes with one definition are one value: a subexpression written
     # twice is computed once, and spellings that repeat it read the same value.
+    # A value of no elements is the one array of its shape and type, a
+    # constant, whatever would compute it, and a fold over no elements is what
+    # it starts from: so nothing computed ranges over an axis of extent zero,
+    # and no kernel is asked for one.
     function value!(definition, dims, T; scalar = false)
+        0 in dims && !(definition isa Union{Input, ConstantArray}) && (definition = none(T, dims))
+        begun = started(values, definition, dims, T)
+        begun === nothing || return begun
         whole = !scalar && definition isa Pointwise ? covering(values, definition, Domain(dims), T, found) : nothing
         whole === nothing || return ValueAccess(whole.value, whole.index)
         v = Value(narrow(definition, dims), map(k -> dims[k], wide_axes(dims)), T, scalar)
@@ -904,7 +928,11 @@ function lower(p::Program)
         op = n.op
         inputs = map(i -> access[i], n.inputs)
         input_dims = map(i -> nodes[i].dims, n.inputs)
-        access[id] = if op isa Constant && op.value isa AbstractRange
+        access[id] = if 0 in n.dims
+            # A node of no elements is the array that has none, whatever its
+            # operation, and reads nothing.
+            value!(none(n.eltype, n.dims), n)
+        elseif op isa Constant && op.value isa AbstractRange
             # A range is the index itself: `first + step·i`.
             r = op.value
             IndexAccess(add(mul(only(identity_index(n.dims)), Int(step(r)), d), Int(first(r)), d), n.eltype)

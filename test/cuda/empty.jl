@@ -1,19 +1,24 @@
-# Programs over empty arrays, which the interpreter runs: a map of no
-# elements gives none, and a fold over an axis of no positions gives its
-# identity at every position it keeps. On the device every one fails while
-# it is prepared, at each measure level: cuTile's generator sizes its tiles
-# by `nextpow(2, extent)`, which takes no zero (`default_tiles`), and the
-# cover then looks for the ends of a domain of no positions
-# (`holding_bound`). Whether a group of no positions is left to the floor or
-# planned before any implementation is asked is not decided yet.
+# Programs over arrays of no elements on the device, as in index/empty.jl on
+# the CPU: nothing computed ranges over an axis of extent zero, so no
+# implementation is asked for a kernel over one, and arrays of none are bound
+# and returned as any others.
+include("../fixtures/empty.jl")
 
-@testset "gap: a domain of extent zero, closed once a group of no positions is planned without a generator's tiles" begin
-    @testset "$name" for (name, f, x) in (
-        ("a map", x -> x .+ 1.0f0, zeros(Float32, 0)),
-        ("a masked map", x -> ifelse.(Int32.(1:length(x)) .< Int32(3), x, 0.0f0), zeros(Float32, 0)),
-        ("a fold over no positions", x -> sum(x; dims = 1), zeros(Float32, 0, 3)),
-    )
-        p = trace(f, x)
-        @test_broken Array(only(C.leaves(outputs(execute!(prepare(p, CuArray(x))))))) == interpret(p, x)
+@testset "a program over no elements gives what Julia does, on the device" begin
+    @testset "$name" for (name, f, args) in OF_NONE
+        p = trace(f, args...)
+        results = C.leaves(outputs(execute!(prepare(p, map(CuArray, args)...))))
+        @test all(r -> r isa CuArray, results)
+        @test as_julia(map(on_host, results), listed(f(args...)))
     end
+end
+
+@testset "a derivative with respect to no elements, on the device" begin
+    f(x, y) = sum(abs2, x) + sum(abs2, y) + sum(x * y')
+    x, y = nothing32(0), counted32(3)
+    p = differentiate(trace(f, x, y))
+    results = C.leaves(outputs(execute!(prepare(p, CuArray(x), CuArray(y)))))
+    @test all(r -> r isa CuArray, results)
+    @test as_julia(map(on_host, results), map(on_host, C.leaves(outputs(execute!(prepare(p, x, y))))))
+    @test any(isempty, results)
 end
