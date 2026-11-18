@@ -3,7 +3,7 @@
 # as data. The plan stays the compiler's: a view holds what claims, their
 # estimates and their builds read, and nothing an implementation could change.
 
-public GroupView, ValueView, members, own_domain, product_axes
+public GroupView, ValueView, members, own_domain, product_axes, structure, Structure, numbering
 
 """
 What a view holds of a value: its element type and dims, whether it is a
@@ -47,6 +47,30 @@ struct ValueView
 end
 
 """
+    Structure
+
+A group in its own numbering (see `structure`): equal to another only where
+the two are one group but for the numbers of their values.
+"""
+struct Structure
+    parts::Vector{Any}
+    hash::UInt
+end
+
+# Its parts in arrays rather than tuples, a group's many members of many
+# kinds: a tuple of them would be a type of its own, whose hash and equality
+# Julia would compile for each group.
+Structure(parts::Vector{Any}) = Structure(parts, hash(parts))
+Base.:(==)(a::Structure, b::Structure) = a.hash == b.hash && isequal(a.parts, b.parts)
+Base.hash(s::Structure, h::UInt) = hash(s.hash, h)
+
+# What a value keeps once found, which tasks reading it side by side may each
+# find and store: the same answer.
+mutable struct Found{T}
+    @atomic value::Union{Nothing, T}
+end
+
+"""
     GroupView
 
 A group of the plan as implementations see it. A group computes its members
@@ -64,7 +88,8 @@ axes its first fold not by key reduces, can be read within the group, and `phase
 value the group computes or reads, `placement` where it keeps each member (its
 index over the domain, or nothing), and `bytes` what it reads from storage and
 writes. `reference(target, buffers)` builds the group's reference kernels, the
-floor's, which every claim agrees with.
+floor's, which every claim agrees with. Its `structure` is the rest in its own
+numbering.
 """
 struct GroupView
     kind::Symbol
@@ -78,11 +103,75 @@ struct GroupView
     placement::Dict{Int, Union{Nothing, Tuple{Vararg{Affine}}}}
     bytes::Float64
     reference::Any
+    # Its `structure` and `numbering`, found on first need.
+    structure::Found{Tuple{Structure, Vector{Int}}}
     # Compiled once, whatever the rank of the group's domain.
     Base.@nospecializeinfer function GroupView(kind, @nospecialize(domain), reductions, outputs, terms, phase, @nospecialize(primary_axes),
             values, placement, bytes, @nospecialize(reference))
-        new(kind, domain, reductions, outputs, terms, phase, primary_axes, values, placement, bytes, reference)
+        new(kind, domain, reductions, outputs, terms, phase, primary_axes, values, placement, bytes, reference, Found{Tuple{Structure, Vector{Int}}}(nothing))
     end
+end
+
+"""
+    structure(group) -> Structure
+
+All the view holds but `reference`, each value numbered by where it first
+appears: its members first, in order, then the values their placements and
+terms read, then those the values' own views name. Groups of one structure
+are one group but for their values' numbers, as a model's layers are: what
+an implementation answers of one (`claims`, `variants`, `estimate`) it
+answers of the others, where its claims name no value, and it may keep its
+answers by it (see `Tempest.Compiler.SessionTable`). Found once a view.
+"""
+structure(g::GroupView) = first(structure_numbering(g))
+
+"""
+    numbering(group) -> Vector{Int}
+
+The values of the group by their number in its `structure`: what an
+implementation that keeps what it made for one group by its structure, its
+kernels say, reads to give another group of the structure its own values.
+"""
+numbering(g::GroupView) = last(structure_numbering(g))
+
+function structure_numbering(g::GroupView)
+    found = g.structure
+    s = @atomic found.value
+    s === nothing || return s
+    s = structure_of(g)
+    @atomic found.value = s
+    s
+end
+
+function structure_of(g::GroupView)
+    numbers, order = Dict{Int, Int}(), Int[]
+    number(v) = get!(() -> (push!(order, v); length(order)), numbers, v)
+    renamed = Dict{Term, Term}()
+    term(t) = t === nothing ? nothing : revalued(t, number, renamed)
+    formulas(es) = es === nothing ? nothing : Affine[revalued(e, number) for e in es]
+    foreach(number, members(g))
+    ms = Any[Any[get(g.phase, m, nothing), formulas(get(g.placement, m, nothing)), term(get(g.terms, m, nothing))] for m in members(g)]
+    function value_parts(x::ValueView)
+        masked = x.masked === nothing ? nothing : Any[formulas(first(x.masked)), last(x.masked)]
+        carried = x.carried === nothing ? nothing : Any[x.carried.axis, term(x.carried.from), x.carried.reverse]
+        Any[x.eltype, x.dims, x.scalar, x.stored, x.fold, x.reduced, x.keyed, term(x.into), x.scan, masked, formulas(x.observed), carried]
+    end
+    # Each value's view, in its number's order, which a view may extend; then
+    # those nothing names, in the plan's order.
+    vs, rest, k, i = Any[], sort!(collect(keys(g.values))), 0, 1
+    while true
+        if k == length(order)
+            while i <= length(rest) && haskey(numbers, rest[i])
+                i += 1
+            end
+            i > length(rest) && break
+            number(rest[i])
+        end
+        k += 1
+        x = get(g.values, order[k], nothing)
+        push!(vs, x === nothing ? nothing : value_parts(x))
+    end
+    (Structure(Any[g.kind, g.domain, g.primary_axes, g.bytes, length(g.reductions), ms, vs]), order)
 end
 
 "A group of no members over `domain`, reading `values`: where a recomputed fold's body runs."

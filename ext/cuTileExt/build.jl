@@ -857,32 +857,67 @@ function Base.show(io::IO, b::BuiltTiles)
     print(io, "cuTile ", b.schedule, ": ", join((string(k.name, " grid ", k.grid) for k in b.kernels), "; "))
 end
 
+"""
+A claim's kernels as emitted for a group, with their functions, and the
+group's values by their number in its structure (see
+`Tempest.Compiler.Implement.numbering`): the ids its kernels' arguments name.
+"""
+struct Emitted
+    kernels::Vector{TileKernel}
+    workspaces::Dict{Any, Workspace}
+    functions::Vector{Any}
+    numbers::Dict{Int, Int}
+end
+
+"""
+The kernels of each claim emitted, by the group's structure, the claim, the
+folds by key that start where their contents are, and the environment's
+settings (`settings`): what emitting reads.
+Groups alike, as a model's layers are, emit and define their kernels once,
+each launching them on its own values.
+"""
+const EMITTED = Tempest.Compiler.SessionTable{Tuple{Structure, Any, Vector{Int}, NTuple{3, String}}, Emitted}()
+
 # A fold by key in the storage of the contents it starts from (see
 # `Tempest.Compiler.storage`) starts from them there.
 function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buffers, _)
     c = Context(g, claim.schedule)
-    workspaces = Dict{Any, Workspace}()
     held = filter(r -> g.values[r].into isa Load && Tempest.Compiler.same_storage(buffers[g.values[r].into.value], buffers[r]), keyed_folds(c))
-    launch_kernels(schedule_kernels(c, workspaces; held), workspaces, buffers, claim.schedule, target)
+    order = numbering(g)
+    numbers = Dict(v => k for (k, v) in enumerate(order))
+    key = (structure(g), schedule_key(claim), sort!([numbers[r] for r in held]), settings())
+    e = get(EMITTED, key, nothing)
+    if e === nothing
+        workspaces = Dict{Any, Workspace}()
+        kernels = schedule_kernels(c, workspaces; held)
+        e = get!(EMITTED, key, Emitted(kernels, workspaces, Any[Tempest.Compiler.generated(source(k)) for k in kernels], numbers))
+    end
+    launch_kernels(e, order, buffers, claim.schedule, target)
 end
 
-function launch_kernels(kernels, workspaces, buffers, schedule, target)
-    scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in workspaces)
-    built = Tempest.Compiler.concurrently(kernels, target) do k
-        f = Tempest.Compiler.generated(source(k))
-        arrays = map(spec -> tile_array(spec.buffer isa Int ? buffers[spec.buffer] : scratch[spec.buffer], spec), k.args)
+# The kernels of `e` launched on the values of a group whose `numbering` is
+# `order`.
+function launch_kernels(e::Emitted, order, buffers, schedule, target)
+    value(v) = order[e.numbers[v]]
+    scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in e.workspaces)
+    built = Tempest.Compiler.concurrently(eachindex(e.kernels), target) do i
+        k, f = e.kernels[i], e.functions[i]
+        arrays = map(spec -> tile_array(spec.buffer isa Int ? buffers[value(spec.buffer)] : scratch[spec.buffer], spec), k.args)
         launch = tile_launch(f, arrays, k.grid; k.occupancy)
         # Where each value's array starts among the parameters: after the
         # kernel function's captured values and the arrays before it.
         at = length(flatten!(Any[], f))
         places = Place[]
         for (spec, a) in zip(k.args, arrays)
-            spec.buffer isa Int && push!(places, Place(at + 1, spec.buffer, UInt(a.ptr) - reinterpret(UInt, pointer(buffers[spec.buffer])), UInt(1) << min(7, trailing_zeros(UInt(a.ptr)))))
+            if spec.buffer isa Int
+                v = value(spec.buffer)
+                push!(places, Place(at + 1, v, UInt(a.ptr) - reinterpret(UInt, pointer(buffers[v])), UInt(1) << min(7, trailing_zeros(UInt(a.ptr)))))
+            end
             at += length(flatten!(Any[], a))
         end
         (launch, places)
     end
-    (TileRun(first.(built), last.(built), (scratch, buffers)), BuiltTiles(schedule, kernels))
+    (TileRun(first.(built), last.(built), (scratch, buffers)), BuiltTiles(schedule, e.kernels))
 end
 
 """

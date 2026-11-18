@@ -165,6 +165,29 @@ function intern(t::T) where {T <: Union{Apply, Recomputed}}
     end
 end
 
+"""
+    revalued(t, number, renamed = Dict{Term, Term}()) -> Term
+
+`t` with each value it names, as a load, a fold's statistic, a fold it
+recomputes or a gather in an index does, numbered `number(value)` instead.
+Each subterm is renamed once (`renamed`), so that a term sharing its parts
+is walked as the graph it is, in the order a walk of `t` first reaches them.
+"""
+revalued(t::Term, number) = revalued(t, number, Dict{Term, Term}())
+function revalued(t::Term, number, renamed::Dict{Term, Term})
+    found = get(renamed, t, nothing)
+    found === nothing || return found
+    renamed[t] = revalued_parts(t, number, renamed)
+end
+
+revalued_parts(t::Load, number, renamed) = Load(number(t.value), map(e -> revalued(e, number), t.index))
+revalued_parts(t::Lit, number, renamed) = t
+revalued_parts(t::Ix{T}, number, renamed) where {T} = Ix{T}(revalued(t.expr, number))
+revalued_parts(t::Stat, number, renamed) = Stat(number(t.value))
+revalued_parts(t::Apply, number, renamed) = Apply(t.f, map(a -> revalued(a, number, renamed), t.args), t.eltype)
+revalued_parts(t::Recomputed, number, renamed) =
+    Recomputed(number(t.value), map(e -> revalued(e, number), t.index), t.extents, revalued(t.body, number, renamed))
+
 term_eltype(t::Load, graph) = graph.values[t.value].eltype
 term_eltype(t::Lit, graph) = typeof(t.value)
 term_eltype(::Ix{T}, graph) where {T} = T

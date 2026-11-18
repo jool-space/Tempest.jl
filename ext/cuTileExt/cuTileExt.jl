@@ -847,7 +847,34 @@ function recurrence_claims(target, g::GroupView)
     found
 end
 
-function claims(generator::cuTileGenerator, target::CUDATarget, g::GroupView)
+"""
+What the generator says of a group, kept by the group's `structure` (see
+`Tempest.Compiler.Implement.structure`): its claims, and each claim's variants
+and estimate. A claim names the domain's axes and no value, so groups alike,
+as a model's layers are, ask once.
+"""
+const SAID = Tempest.Compiler.SessionTable{Tuple{Symbol, cuTileGenerator, Any, NTuple{3, String}, Structure, Any}, Any}()
+
+# The settings of the environment the generator reads as it claims, estimates
+# and emits: a product's tile and options forced, and whether a sweep skips
+# the tiles its masks rule out. What it keeps is kept by them too.
+settings() = (get(ENV, "TEMPEST_PRODUCT_TILE", ""), get(ENV, "TEMPEST_PRODUCT_OPTIONS", ""), get(ENV, "TEMPEST_SKIP_MASKED", "1"))
+
+# A claim's every field, as a key: its schedule's tiling is an array, which is
+# equal to another only by identity.
+schedule_key(c::Claim) = schedule_key(c.schedule)
+schedule_key(s::TileSchedule) = (s.sketch, Tuple((Tuple(ax.axes), ax.extent, ax.tile, ax.reduced, ax.chunk) for ax in s.tiling), s.splits,
+    s.occupancy, s.swizzle, s.precision, s.options)
+
+# What the generator says of `g` (and of `claim`, unless nothing), found by
+# `f` where `SAID` holds none.
+answered(f, what, generator, target, g, claim) =
+    get!(f, SAID, (what, generator, target, settings(), structure(g), claim === nothing ? nothing : schedule_key(claim)))
+
+claims(generator::cuTileGenerator, target::CUDATarget, g::GroupView) =
+    Claim[c for c in answered(() -> claimed(generator, target, g), :claims, generator, target, g, nothing)]
+
+function claimed(generator::cuTileGenerator, target::CUDATarget, g::GroupView)
     g.kind === :scan && return scan_claims(g)
     g.kind === :recurrence && return recurrence_claims(target, g)
     g.kind in (:pointwise, :reduction) || return Claim[]
@@ -902,8 +929,8 @@ The variants of a product claim, its other depths and its split (see
 `stepped_variants`); of a streamed column, its longer steps (see
 `column_variants`).
 """
-variants(::cuTileGenerator, target::CUDATarget, g::GroupView, c::Claim) =
-    [product_variants(target, g, c); stepped_variants(g, c); column_variants(g, c)]
+variants(generator::cuTileGenerator, target::CUDATarget, g::GroupView, c::Claim) =
+    collect(answered(() -> [product_variants(target, g, c); stepped_variants(g, c); column_variants(g, c)], :variants, generator, target, g, c))
 
 # A streamed column, a block per column, whose kernel sweeps the column again
 # after its folds to write what reads them, as a softmax's gradient reads its
@@ -1090,7 +1117,10 @@ end
 # the plan's bytes are: no launch copies the contents, and a kernel moves the
 # elements it combines, a sum reading them too. A value another group folded
 # by key is read as any value is.
-function estimate(::cuTileGenerator, claim::Claim, target, g::GroupView)
+estimate(generator::cuTileGenerator, claim::Claim, target, g::GroupView) =
+    answered(() -> estimated(generator, claim, target, g), :estimate, generator, target, g, claim)
+
+function estimated(::cuTileGenerator, claim::Claim, target, g::GroupView)
     s = claim.schedule
     # A transposed fold is priced as the kernel computes it, in the sweep's
     # orientation, sharing what the sweep recomputes.

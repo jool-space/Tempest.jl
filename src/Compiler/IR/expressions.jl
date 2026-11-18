@@ -4,7 +4,7 @@
 # built from tuples, so `==` and `hash` are structural.
 
 public Affine, Var, Div, Mod, Indirect, Domain, affine_range, coefficient, is_affine, var,
-    indirect_values, substitute, fdiv, fmod
+    indirect_values, substitute, fdiv, fmod, revalued
 
 abstract type Atom end
 
@@ -38,6 +38,21 @@ struct Indirect <: Atom
     lo::Int
     hi::Int
 end
+
+"""
+    revalued(e, number)
+
+`e` with the value each gather in it reads, `value`, numbered `number(value)`
+instead, its atoms sorted again.
+"""
+function revalued(e::Affine, number)
+    all(t -> first(t) isa Var, e.terms) && return e
+    Affine(e.constant, Tuple(sort!(Pair{Atom, Int}[revalued(a, number) => c for (a, c) in e.terms]; by = t -> atom_key(first(t)))))
+end
+revalued(a::Var, number) = a
+revalued(a::Div, number) = Div(revalued(a.e, number), a.d)
+revalued(a::Mod, number) = Mod(revalued(a.e, number), a.d)
+revalued(a::Indirect, number) = Indirect(number(a.value), map(e -> revalued(e, number), a.index), a.lo, a.hi)
 
 # A total order on atoms, so sorted terms are canonical.
 atom_key(a::Var) = (0, a.n)
