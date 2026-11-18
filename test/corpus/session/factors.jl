@@ -10,7 +10,7 @@ const SESSION = ("first", "kept", "doubled")
 const SETS = ("development" => ["gpt", "lstm", "qwen-gradient"], "held out" => ["heat", "node", "qwen-decode"])
 
 function rows(directory)
-    header, out = String[], Dict{String, Dict{String, String}}[]
+    header, out = String[], Dict{String, String}[]
     for line in readlines(joinpath(directory, "corpus.tsv"))
         fields = split(line, '\t')
         first(fields) == "when" && (header = String.(fields); continue)
