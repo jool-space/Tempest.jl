@@ -321,7 +321,10 @@ for T in (Float16, Float32, Float64, BFloat16, Int8, Int16, Int32, Int64, UInt8,
 end
 
 Base.convert(::Type{T}, x::Traced) where {T <: Number} = cast(T, x)
-Base.convert(::Type{Traced{T}}, x::Traced{T}) where {T} = x
+# To a traced number's type, which a container typed by the first number it
+# held asks of the next, `push!` into `[a]` or `r[] = b` of a `Ref`: the
+# number in that type, as Base converts a number to a container's.
+Base.convert(::Type{Traced{T}}, x::Traced) where {T} = cast(T, x)
 Base.float(x::Traced{T}) where {T} = cast(float(T), x)
 Base.oftype(x::Traced{T}, y::Real) where {T} = convert(T, y)
 Base.oftype(x::Traced{T}, y::Traced) where {T} = cast(T, y)

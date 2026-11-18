@@ -39,6 +39,22 @@
     @test compiled(single(x)) isa Vector{Float32}
     @test compiled(single(x)) ≈ cols(single(x))
 
+    # A container typed by the first number it held takes a number of
+    # another type in its own, as Base's containers convert one.
+    typed = [
+        x -> (v = [sum(x)]; push!(v, sum(Float32.(x))); v),
+        x -> (v = [sum(Float32.(x))]; push!(v, sum(x)); v),
+        x -> (v = [sum(x), maximum(x)]; v[2] = sum(Float32.(x)); v),
+        x -> (r = Ref(sum(x)); r[] = sum(Float32.(x)); r[]),
+        x -> (a = sum(x); a + convert(typeof(a), sum(Float32.(x)))),
+        x -> (local s::typeof(sum(x)) = sum(Float32.(x)); 2s),
+    ]
+    for f in typed
+        got, eager = interpret(trace(f, x), x), f(x)
+        @test typeof(got) == typeof(eager)
+        @test agree(C.leaves(got), C.leaves(eager); rtol = 1.0e-6)
+    end
+
     refused = [
         x -> x .* cols(x)',
         x -> x[1:2, :] .* (sum(x), maximum(x)),
