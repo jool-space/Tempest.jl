@@ -59,6 +59,14 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
             s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
             Tempest.Compiler.contract(v, exp.(s .- Tempest.logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 6, 5, 2, 4), (1, 6, 5, 2, 4))
         end
+        # A recurrence: a cell stepped over a sequence's slices in a plain loop.
+        function recurrent(u, w, xs)
+            h = tanh.(w * xs[:, :, 1])
+            for t in 2:size(xs, 3)
+                h = tanh.(u * h .+ w * xs[:, :, t])
+            end
+            h
+        end
         x, w, b, v, y = sample(64, 48), sample(32, 64), sample(32), sample(64), sample(48, 4096)
         tall, long, h = sample(8192, 16), sample(16, 8192), Float16.(sample(256, 64))
         q, k = sample(16, 32, 2, 2), sample(16, 32, 2, 2)
@@ -71,6 +79,7 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
             (h -> sum(abs2, sum(abs2, h; dims = 1)) + sum(abs2, h), (h,)),
             ((q, k) -> sum(abs2, attention(q, k, k) .+ q), (q, k)),
             ((q, k) -> sum(abs2, grouped(q, k, k)), (sample(16, 4, 32, 2), sample(16, 2, 32, 2))),
+            ((u, w, xs) -> sum(abs2, recurrent(u, w, xs)), (sample(32, 32), sample(32, 16), sample(16, 8, 6))),
         ]
         @compile_workload begin
             for (f, args) in losses, target in (CUDATarget(cuTileGenerator(); device = 0), CUDATarget(cuTileGenerator(); precision = :tf32, device = 0))

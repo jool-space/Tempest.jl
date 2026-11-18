@@ -5,7 +5,7 @@
 
 using PrecompileTools: @compile_workload
 
-"Trace, differentiate, interpret, prepare, run and explain small programs of each kind on the CPU."
+"Trace, differentiate, interpret, prepare, run and explain small programs of each kind on the CPU, a recurrence among them."
 function workload()
     sample(dims...) = Float32.(reshape(sin.(1:prod(dims)), dims))
     gelu(x) = x / (1 + exp(-1.702f0 * x))
@@ -38,6 +38,14 @@ function workload()
         s = ifelse.((1:size(s, 1)) .<= (1:size(s, 2))', s, -Inf32)
         Compiler.contract(v, exp.(s .- logsumexp(s; dims = 1)), (1, 2, 3, 4), (3, 6, 5, 2, 4), (1, 6, 5, 2, 4))
     end
+    # A recurrence: a cell stepped over a sequence's slices in a plain loop.
+    function recurrent(u, w, xs)
+        h = tanh.(w * xs[:, :, 1])
+        for t in 2:size(xs, 3)
+            h = tanh.(u * h .+ w * xs[:, :, t])
+        end
+        h
+    end
     x, w, b, v = sample(8, 6), sample(4, 8), sample(4), sample(8)
     q, k = sample(4, 8, 2), sample(4, 8, 2)
     q4, k4 = sample(4, 8, 2, 2), sample(4, 8, 2, 2)
@@ -54,6 +62,7 @@ function workload()
         (x -> sum(abs2, Float16.(reshape(x, 6, 8))), (x,)),
         (x -> sum(abs2, exp.(cumsum(x; dims = 1)) .- accumulate(max, x; dims = 2)), (x,)),
         (x -> (y = copy(x); y[2:3, :] .= 0; sum(abs2, vcat(y, x))), (x,)),
+        ((u, w, xs) -> sum(abs2, recurrent(u, w, xs)), (sample(4, 4), sample(4, 6), sample(6, 2, 5))),
     ]
     for (f, args) in losses
         p = Compiler.trace(f, args...)
