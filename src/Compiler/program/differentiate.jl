@@ -160,8 +160,23 @@ function rule_argument(tape, id)
     op isa Constant && op.value isa Number ? op.value : h(tape, id)
 end
 
+# A float argument narrower than the map's result `T` is read by its rule in
+# `T`, as Julia's arithmetic promotes it before computing: `x / c` of a
+# Float64 `x` and a Float32 `c` divides by `Float64(c)`, so its derivative
+# `1 / c` is the reciprocal of that, where the rule given `c` itself would
+# compute a Float32 reciprocal and widen it after, wrong in the eighth digit;
+# `atan(a, b)`'s `a² + b²` and `c ^ x`'s `log(c)` are so too. Integers stay
+# as they are: an integer power is not a float one.
+function rule_argument(tape, id, T)
+    x = rule_argument(tape, id)
+    narrower(tape.nodes[id].eltype, T) ? convert(T, x) : x
+end
+
+"Whether `S` is a float narrower than the float `T`, which it promotes to."
+narrower(S, T) = S <: AbstractFloat && T <: AbstractFloat && S !== T && promote_type(S, T) === T
+
 function pullback(op::Map, n, id, g, tape)
-    xs = map(i -> rule_argument(tape, i), n.inputs)
+    xs = map(i -> rule_argument(tape, i, n.eltype), n.inputs)
     map(d -> contribution(g, d), scalar_partials(op.f, h(tape, id), xs...))
 end
 
