@@ -364,6 +364,27 @@ end
     @test g ≈ (x .> 0) * ones(5, 5)
 end
 
+# `dot` adds its products by `+`, as Base's does: of truth values an `Int`,
+# of small integers their own type, which wraps. A row times a vector is that
+# `dot` where the row is an adjoint or of the vector's type, and otherwise a
+# sum of products, which `sum` widens, as LinearAlgebra's.
+@testset "dot in the type of Base's" begin
+    x = data(6)
+    i8 = fill(Int8(100), 6)
+    @testset "$name" for (name, f, a) in [
+        ("dot of masks", x -> dot(x .> 0, x .> -1), x),
+        ("dot of Int8, which wraps", a -> dot(a, a), i8),
+        ("dot of a mask and Int8", a -> dot(a .> 50, a), i8),
+        ("an Int8 row times Int8", a -> fill(Int8(3), 6)' * a, i8),
+        ("a transposed row of truth values times Int8", a -> transpose(fill(true, 6)) * a, i8),
+    ]
+        p = trace(f, a)
+        @test interpret(p, a) == f(a)
+        @test typeof(interpret(p, a)) == typeof(f(a))
+        @test on_host(outputs(execute!(prepare(p, a)))) == f(a)
+    end
+end
+
 # A norm is its formula, the elements' powers summed, without Base's division
 # by the largest element first, which branches on the elements.
 @testset "norms" begin

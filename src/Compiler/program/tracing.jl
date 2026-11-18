@@ -882,10 +882,13 @@ for (A, B) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (Abstra
 end
 
 # A row vector or a diagonal matrix times a traced array, as LinearAlgebra
-# multiplies them: a row times a vector is a number.
+# multiplies them: a row times a vector is a number, `dot` of an adjoint or of
+# a transpose of the vector's element type, and otherwise a sum of products,
+# which widens as `sum` does.
 Base.:*(a::LinearAlgebra.AdjOrTransAbsVec{<:Real}, b::TracedArray{<:Real, 2}) = contract(a, b, (1, 2), (2, 3), (1, 3))
+Base.:*(a::LinearAlgebra.AdjointAbsVec{<:Real}, b::TracedArray{<:Real, 1}) = dot(parent(a), b)
+Base.:*(a::Transpose{T, <:AbstractVector}, b::TracedArray{T, 1}) where {T <: Real} = dot(parent(a), b)
 Base.:*(a::LinearAlgebra.AdjOrTransAbsVec{<:Real}, b::TracedArray{<:Real, 1}) = sum(vec(a) .* b)
-Base.:*(a::Transpose{T, <:AbstractVector}, b::TracedArray{T, 1}) where {T <: Real} = sum(vec(a) .* b)
 Base.:*(a::LinearAlgebra.Diagonal{<:Real}, b::TracedArray{<:Real, 1}) = a.diag .* b
 
 # Layout. As in Julia, `reshape`, `vec`, `view`, `transpose` and
@@ -1379,9 +1382,14 @@ function Base.map(f, x::TracedArray, xs::AbstractArray...)
     Broadcast.broadcast_preserving_zero_d(f, x, xs...)
 end
 
-function LinearAlgebra.dot(x::TracedArray{<:Real}, y::TracedArray{<:Real})
-    length(x) == length(y) || throw(DimensionMismatch("dot of arrays of lengths $(length(x)) and $(length(y))"))
-    sum(vec(x) .* vec(y))
+# The products are added by `+`, as Base's `dot` adds each to a zero of their
+# type: truth values widen to `Int` and small integers keep their type and
+# wrap, where `sum`, by `add_sum`, would widen them.
+for (X, Y) in ((TracedArray, TracedArray), (TracedArray, AbstractArray), (AbstractArray, TracedArray))
+    @eval function LinearAlgebra.dot(x::$X{<:Real}, y::$Y{<:Real})
+        length(x) == length(y) || throw(DimensionMismatch("dot of arrays of lengths $(length(x)) and $(length(y))"))
+        reduce(+, vec(x) .* vec(y))
+    end
 end
 
 # A norm is its formula. Base's divides the elements by the largest first, so
