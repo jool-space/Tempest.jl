@@ -853,14 +853,20 @@ julia> Tempest.Compiler.contract([1.0 2; 3 4], [5.0 6; 7 8], (1, 2), (2, 3), (1,
 """
 function contract end
 
+# A product is of the type Base's is, `matprod`'s of an element of each
+# factor: `x * y + x * y`, products added by `+`, which widens truth values to
+# `Int` where their product is a truth value. Where the sum widens past the
+# products, the factors convert to its type, as a sum's elements do (see
+# `widened`), before a contraction in the type its products are of.
 function contract(a::TracedArray, b::TracedArray, la, lb, lo)
-    T = promote_type(eltype(a), eltype(b))
+    S = Base.promote_op(LinearAlgebra.matprod, eltype(a), eltype(b))
+    Base.promote_op(*, eltype(a), eltype(b)) === S || return contract(in_type(S, a), in_type(S, b), la, lb, lo)
     labels = Dict{Int, Int}()
     for (l, n) in zip((la..., lb...), (size(a)..., size(b)...))
         get!(labels, l, n) == n || throw(DimensionMismatch("contracted axes differ: $(size(a)) and $(size(b))"))
     end
     dims = map(l -> labels[l], lo)
-    TracedArray(a.tape, record!(a.tape, Contract(la, lb, lo), (a.id, b.id), dims, T))
+    TracedArray(a.tape, record!(a.tape, Contract(la, lb, lo), (a.id, b.id), dims, S))
 end
 
 contract(a::TracedArray, b::AbstractArray{<:Number}, la, lb, lo) = contract(a, TracedArray(a.tape, constant!(a.tape, b)), la, lb, lo)

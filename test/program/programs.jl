@@ -336,6 +336,34 @@ end
     @test g ≈ fill(sum(x .> 0) / length(x), size(x))
 end
 
+# A product of arrays is of the type `LinearAlgebra.matprod` returns,
+# `x * y + x * y`: of truth values an `Int`, the factors converted before the
+# contraction, and of small integers their own type, which wraps as Base's
+# does. A mask times numbers is in the numbers' type.
+@testset "products in the type of Base's" begin
+    x = data(6, 5)
+    i8 = fill(Int8(100), 6, 5)
+    @testset "$name" for (name, f, a) in [
+        ("mask * mask'", x -> (x .> 0) * transpose(x .> 0), x),
+        ("mask' * mask", x -> transpose(x .> 0) * (x .> 0), x),
+        ("mask * mask'', copied", x -> (x .> 0) * permutedims(x .> 0), x),
+        ("mask * mask vector", x -> (x .> 0) * (x[1, :] .> 0), x),
+        ("mask * Int8', which wraps", a -> (a .> 50) * transpose(a), i8),
+        ("Int8 * Int8', which wraps", a -> a * transpose(a), i8),
+        ("mask * numbers'", x -> (x .> 0) * transpose(x), x),
+        ("numbers' * mask", x -> transpose(x) * (x .> 0), x),
+    ]
+        p = trace(f, a)
+        @test interpret(p, a) == f(a)
+        @test typeof(interpret(p, a)) == typeof(f(a))
+        @test on_host(outputs(execute!(prepare(p, a)))) == f(a)
+    end
+    # A mask's product inside a gradient: the numbers' cotangent is the mask's
+    # product with the seed.
+    _, (g,) = interpret(trace(x -> T.withgradient(x -> sum(transpose(x .> 0) * x), x), x), x)
+    @test g ≈ (x .> 0) * ones(5, 5)
+end
+
 # A norm is its formula, the elements' powers summed, without Base's division
 # by the largest element first, which branches on the elements.
 @testset "norms" begin

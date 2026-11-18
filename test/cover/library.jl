@@ -23,6 +23,12 @@ layout(s) = (s.size, s.strides, s.offset)
     @test only(bound(PRODUCT, (a, b) -> permutedims(a) * b, data(4, 6), b)).arrays.A.strides == (4, 1, 0)
     h = only(bound(PRODUCT, (a, b) -> a * b, BFloat16.(single(a)), BFloat16.(single(b))))
     @test h.arrays.A.eltype === h.arrays.C.eltype === BFloat16
+    # Truth values multiply into `Int`, as Base's do: the template traced at
+    # the group's truth values converts them as the group does, and a mask
+    # times numbers is in the numbers' type.
+    eltypes(m) = map(s -> s.eltype, Tuple(m.arrays))
+    @test eltypes(only(bound(PRODUCT, (a, b) -> a * b, a .> 0, b .> 0))) == (Bool, Bool, Int)
+    @test eltypes(only(bound(PRODUCT, (a, b) -> a * b, a, b .> 0))) == (Float64, Bool, Float64)
     # Attention's scores, keys by queries summing features: heads and batch
     # are one axis of the batch, whose strides chain. Keys and queries alike
     # in shape, either is the template's first factor.
