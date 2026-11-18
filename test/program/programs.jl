@@ -289,6 +289,16 @@ end
     # differs between Julia's versions.
     counted = x -> count(>(0), x; init = Int32(2))
     @test interpret(trace(counted, x), x) === counted(x)
+    # Base sums truth values and Int8, Int16 and Int32 in `Int`
+    # (`Base.add_sum`): a sum of truth values is refused, its fold's state a
+    # truth value, and a sum of Int32 is an Int32, which overflows where
+    # Base's does not.
+    @testset "gap: a sum of truth values or of small integers is Base's, in `Int`; closed by a sum in the type `Base.add_sum` adds in, as a count's is" begin
+        @test_broken interpret(trace(x -> sum(x .> 0), x), x) === sum(x .> 0)
+        @test_broken interpret(trace(x -> sum(>(0), x), x), x) === sum(>(0), x)
+        @test_broken interpret(trace(x -> sum(x .> 0; dims = 2), x), x) == sum(x .> 0; dims = 2)
+        @test_broken interpret(trace(x -> sum(Int32.(round.(x))), x), x) === sum(Int32.(round.(x)))
+    end
 end
 
 # A norm is its formula, the elements' powers summed, without Base's division

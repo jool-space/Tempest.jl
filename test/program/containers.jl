@@ -55,6 +55,12 @@
         @test agree(C.leaves(got), C.leaves(eager); rtol = 1.0e-6)
     end
 
+    # A plain number has no tape to be a traced number on.
+    @testset "gap: a plain number stored among traced ones, `push!(v, 2.5)` into `[a]`, is refused in words about an operation on arrays; closed by a plain number made traced on the tape being traced, or by words that name the container" begin
+        @test_broken interpret(trace(x -> (v = [sum(x)]; push!(v, 2.5); v), x), x) == [sum(x), 2.5]
+        @test_broken occursin("stored", message(() -> trace(x -> (v = [sum(x)]; push!(v, 2.5); v), x)))
+    end
+
     refused = [
         x -> x .* cols(x)',
         x -> x[1:2, :] .* (sum(x), maximum(x)),
