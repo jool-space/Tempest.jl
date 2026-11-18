@@ -60,6 +60,26 @@ end
     @test_throws BoundsError C.interpret(C.lower(p), x, [1, 7])
 end
 
+# A constant index is a position in `Int` whatever integer type the program
+# wrote it in: a range of Int32, Int16 or UInt8, or a host vector of them that
+# steps evenly and so is a range, places what is written at it, and what the
+# gradient of a read by it scatters, as a range of `Int` does. Unsigned
+# indices that step down are the range their values make.
+@testset "constant indices of any integer type" begin
+    x, v = data(4, 6), data(4, 3; scale = 0.3)
+    indices = (Int32(2):Int32(4), Int32[2, 3, 4], Int32[1, 3, 5], Int32(4):Int32(-1):Int32(2), 1:Int32(2):5, Base.OneTo(Int32(3)),
+        Int16[2, 3, 4], 0x02:0x04, UInt8[4, 3, 2])
+    for i in indices
+        programs = ((x, v) -> x[:, i] .* v, (x, v) -> (y = copy(x); y[:, i] = v; y), (x, v) -> (y = copy(x); view(y, :, i) .= 2 .* v; y))
+        for f in programs
+            @test interpret(trace(f, x, v), x, v) == f(x, v)
+            for p in (trace(f, x, v), differentiate(trace((x, v) -> sum(abs2, f(x, v)), x, v)))
+                @test agree(C.interpret(C.lower(p), x, v), flat(interpret(p, x, v)))
+            end
+        end
+    end
+end
+
 # An index a program computes from others by sums, differences and products
 # by constants is a formula of theirs, read in the kernel that indexes by it,
 # where a kernel of its own stored it: an offset, a stride, the linear index

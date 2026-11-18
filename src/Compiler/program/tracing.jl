@@ -904,10 +904,13 @@ Base.adjoint(x::TracedArray{<:Real}) = transpose(x)
 
 # Indexing: integers drop an axis; ranges keep one; an array of integers,
 # traced or not, replaces it by its own axes (a gather). A traced integer is
-# an array without axes.
+# an array without axes. An integer and a range are positions in `Int`,
+# whatever integer type the program wrote them in: what places an element
+# computes with them, and computes in `Int`.
 selection_index(i::Integer) = Int(i)
 selection_index(i::Base.Slice) = 1:length(i)
-selection_index(i::AbstractRange{<:Integer}) = i
+selection_index(i::AbstractUnitRange{<:Integer}) = Int(first(i)):Int(last(i))
+selection_index(i::AbstractRange{<:Integer}) = Int(first(i)):Int(step(i)):Int(last(i))
 # A vector of integers that steps evenly is a range: a formula, not a gather.
 selection_index(i::Vector{<:Integer}) = linear_range(i)
 selection_index(i::AbstractArray{<:Integer}) = i
@@ -924,11 +927,14 @@ index_array(::Traced{Bool}) = mask_error()
 index_array(::TracedArray{Bool}) = mask_error()
 mask_error() = throw(ArgumentError("a traced mask selects a number of elements known only when the program runs"))
 
-# Linear indices, as a range where they step evenly.
+# Linear indices, as a range where they step evenly: a range of `Int`, as a
+# selection's are, its step the difference of two `Int`s, which unsigned
+# indices that step down would wrap.
 function linear_range(l)
     l isa AbstractVector && !isempty(l) || return l
-    s = length(l) > 1 ? l[2] - l[1] : 1
-    s != 0 && all(k -> l[k] - l[k - 1] == s, 2:length(l)) ? (first(l):s:last(l)) : l
+    at(k) = Int(l[k])
+    s = length(l) > 1 ? at(2) - at(1) : 1
+    s != 0 && all(k -> at(k) - at(k - 1) == s, 2:length(l)) ? (at(1):s:at(length(l))) : l
 end
 
 # The axes of an array an index stands for, as Base counts them: an array of
