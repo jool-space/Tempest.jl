@@ -469,3 +469,39 @@ end
         @test agree(map(x -> x isa AbstractArray ? Array(x) : x, C.leaves(outputs(execute!(ex)))), C.leaves(grad(args...)); rtol = 1.0e-4)
     end
 end
+
+# A delta rule, the state of a linear attention layer: each step decays the
+# state, corrects it toward a value along a key, and reads it along a query.
+# Its gradient needs the state as each step found it, once: the plan writes
+# five values of the state's size over the steps, the state entering each
+# step and the state leaving it, the same numbers a step apart, and three of
+# the reverse's cotangents, each read by one fold after the steps that a
+# step could compute itself. Qwen3.5-4B's training step stores 254 MiB a
+# token and sequence so, 240 of them these.
+@testset "gap: a recurrence's gradient writes one state over its steps; closed by a step's folds riding the reverse's steps where they cross its lanes, and by a state read outside its recurrence through the value it is carried from" begin
+    function delta_step(S, q, k, v, decay, β)
+        S = S .* @rearrange(decay, "h b -> 1 1 h b")
+        δ = @rearrange(β, "h b -> 1 h b") .* (v .- @einsum(S, k, "i j h b, i h b -> j h b"))
+        S = S .+ @einsum(k, δ, "i h b, j h b -> i j h b")
+        S, @einsum(S, q, "i j h b, i h b -> j h b")
+    end
+    function delta_rule(S, q, k, v, decay, β)
+        outputs = []
+        for t in axes(q, 3)
+            S, o = delta_step(S, q[:, :, t, :], k[:, :, t, :], v[:, :, t, :], decay[:, t, :], β[:, t, :])
+            push!(outputs, o)
+        end
+        @rearrange(stack(outputs), "j h b t -> j h t b"), S
+    end
+    D, H, steps, B = 8, 2, 12, 2
+    S0 = zeros(D, D, H, B)
+    q, k, v = data(D, H, steps, B; scale = 0.1), data(D, H, steps, B; scale = 0.2), data(D, H, steps, B; scale = 0.3)
+    decay, β = 0.5 .+ 0.1 .* data(H, steps, B), 0.5 .+ 0.1 .* data(H, steps, B; scale = 0.7)
+    loss(q, k, v, decay, β) = ((o, S) = delta_rule(S0, q, k, v, decay, β); sum(abs2, o) + sum(abs2, S))
+    g(q, k, v, decay, β) = T.gradient(loss, q, k, v, decay, β)
+    ex = prepare(trace(g, q, k, v, decay, β), q, k, v, decay, β; target = T.CPUTarget())
+    @test agree(C.leaves(outputs(execute!(ex))), C.leaves(interpret(trace(g, q, k, v, decay, β), q, k, v, decay, β)); rtol = 1.0e-10)
+    graph = ex.plan.graph
+    over_steps = count(v -> ex.plan.stored[v] && prod(graph.values[v].dims; init = 1) >= D * D * H * B * (steps - 2), eachindex(graph.values))
+    @test_broken over_steps == 1
+end
