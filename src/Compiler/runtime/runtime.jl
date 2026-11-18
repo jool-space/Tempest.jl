@@ -26,6 +26,14 @@ const Uses = @NamedTuple{steps::Vector{Tuple{Int, Int}}, results::Vector{Int}}
 # A value moved, as `retarget!` takes it: its old and new addresses and its bytes.
 const Move = @NamedTuple{value::Int, from::UInt, to::UInt, bytes::UInt}
 
+# What a binding moved, as `retarget!` takes it: per step that uses an
+# argument whose storage moved, the step, the argument, the move of the
+# value the step names the storage by, and the storage the step uses from
+# now on. Of one type whatever moved, so that the first binding, which
+# moves nothing in a call or nothing yet recorded, compiles what a later
+# one that moves a recorded step runs.
+const Moves = Vector{Tuple{Int, Int, Move, Any}}
+
 """
 A step of an execution that copies one buffer into another: an input saved
 apart before the kernels, a staged result into the argument it replaces
@@ -783,17 +791,17 @@ function bind_leaves!(ex, positions, xs, paths)
     given = [j for j in eachindex(positions) if positions[j] !== nothing]
     misplaced = [positions[j] for j in given if !read_on(ex.argument_devices[positions[j]], xs[j])]
     isempty(misplaced) || refuse_placed(ex, positions, xs, misplaced, paths())
-    moves = Ref{Any}(nothing)
+    moves = Moves()
     function bind_one(j)
         k, x = positions[j], xs[j]
         ex.back[k] = nothing
         x === ex.referenced[k] && return
         own = own!(ex, k)
-        moves[] = point_at!(ex, k, own, moves[])
+        point_at!(ex, k, own, moves)
         upload!(ex.target, own, vec(x))
     end
     on_each_device(bind_one, j -> ex.argument_devices[positions[j]], ex.target, given)
-    retarget!(ex, moves[])
+    retarget!(ex, moves)
 end
 
 """
@@ -1043,30 +1051,30 @@ function point_each!(ex::Executable, b::Passed)
     taken!(ex)
     xs = b.arrays
     length(xs) == length(ex.arguments) || throw(ArgumentError("expected $(length(ex.arguments)) arrays, got $(length(xs))"))
-    moves = Ref{Any}(nothing)
-    on_each_device(k -> moves[] = point_leaf!(ex, k, xs[k], b.at[k], moves[]), k -> ex.argument_devices[k], ex.target, eachindex(xs))
+    moves = Moves()
+    on_each_device(k -> point_leaf!(ex, k, xs[k], b.at[k], moves), k -> ex.argument_devices[k], ex.target, eachindex(xs))
     for (_, a) in ex.program.writes
         x = xs[a]
         ex.back[a] = x === ex.pointed[a] || x === ex.referenced[a] ? nothing : x
     end
-    retarget!(ex, moves[])
+    retarget!(ex, moves)
 end
 
 # Bind input `x`, whose first element is at `at`, to argument `k`, as
 # `point!` binds each: one call a leaf, specialized on the leaf's type, a
 # model's hundreds of arrays each checked in a few hundred nanoseconds.
-function point_leaf!(ex::Executable, k::Int, x, at::UInt, moves)
+function point_leaf!(ex::Executable, k::Int, x, at::UInt, moves::Moves)
     if ex.pointable[k] !== nothing && pointable(ex.target, x, at)
         again = at == ex.seen[k]
         ex.seen[k] = at
-        at == ex.at[k] && return moves
+        at == ex.at[k] && return
         (again || !ex.settles[k]) && return point_at!(ex, k, x, moves)
     end
-    x === ex.referenced[k] && return moves
+    x === ex.referenced[k] && return
     own = own!(ex, k)
-    moves = point_at!(ex, k, own, moves)
+    point_at!(ex, k, own, moves)
     upload!(ex.target, own, vec(x))
-    moves
+    nothing
 end
 
 # The buffer of the executable's own that a binding copies argument `k` into,
@@ -1092,17 +1100,15 @@ function write_back!(ex::Executable)
 end
 
 # Make array `x`, its buffer or the caller's array, argument `k`'s storage,
-# adding to `moves` (made on the first) what moved for each step that uses
-# it: the step, the argument, the move of the value it names the storage
-# by, as `retarget!` takes it, and the storage the step uses from now on,
-# which `retarget!` points it at. The results over the storage are over `x`.
-function point_at!(ex::Executable, k, x, moves)
+# adding to `moves` what moved for each step that uses it (see `Moves`),
+# the storage the step uses from now on being what `retarget!` points it
+# at. The results over the storage are over `x`.
+function point_at!(ex::Executable, k, x, moves::Moves)
     uses = ex.pointable[k]
-    uses === nothing && return moves
+    uses === nothing && return
     to = address_of(x)
-    to == ex.at[k] && return moves
+    to == ex.at[k] && return
     buffer = vec(x)
-    moves = something(moves, Tuple{Int, Int, Move, Any}[])
     for (i, v) in uses.steps
         push!(moves, (i, k, (value = v, from = ex.at[k], to, bytes = UInt(sizeof(x))), buffer))
     end
@@ -1112,7 +1118,7 @@ function point_at!(ex::Executable, k, x, moves)
     end
     ex.pointed[k] = x
     ex.at[k] = to
-    moves
+    nothing
 end
 
 # The results in the program's output structure, as `outputs` gives them.
@@ -1124,8 +1130,8 @@ outputs_over(program, results) = rebuild(k -> k isa Int ? results[k] : constant_
 # in several segments, an execution over several devices repeated, is
 # recorded again in each. An argument whose segment was recorded again
 # waits from then on to be brought twice in a row.
-function retarget!(ex::Executable, moves)
-    moves === nothing && return ex
+function retarget!(ex::Executable, moves::Moves)
+    isempty(moves) && return ex
     sort!(moves; by = first)
     r = ex.captured
     stale = Set{Int}()
