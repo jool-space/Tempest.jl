@@ -26,6 +26,10 @@ end
     r = T.withgradient(f, x, y)
     @test r.val == f(x, y)
     @test r.grad[1] isa Vector{Float32} && isempty(r.grad[1]) && r.grad[2] == 2 .* y
+    # Through a loop of no steps, whose results the interpreter collects.
+    v = nothing32(2, 0, 7)
+    r = T.withgradient(of_no_slices, v)
+    @test r.val == of_no_slices(v) && only(r.grad) isa Array{Float32, 3} && size(only(r.grad)) == size(v)
 end
 
 @testset "an extreme of none is Base's" begin

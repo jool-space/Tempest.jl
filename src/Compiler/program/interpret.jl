@@ -137,6 +137,9 @@ function run_loop(body::LoopBody, xs)
     body.reverse && reverse!(steps)
     map(eachindex(body.program.results)) do r
         n = body.program.nodes[body.program.results[r]]
+        # Of no steps, the array of none of a step's shape and type, which
+        # Base's `stack` refuses to make.
+        isempty(steps) && return Array{n.eltype}(undef, n.dims..., 0)
         n.scalar ? [y[r] for y in steps] : stack(y -> y[r], steps)
     end
 end

@@ -20,6 +20,9 @@ function loop_beside_none(x, y)
     (a, b)
 end
 
+# A function of each slice of none, as a loop of no steps.
+of_no_slices(v) = sum(abs2, (s -> sum(abs2, s)).(eachslice(v; dims = 2))) + sum(v)
+
 const OF_NONE = [
     ("a map", x -> x .+ 1.0f0, (nothing32(0),)),
     ("a masked map", x -> ifelse.(Int32.(1:length(x)) .< Int32(3), x, 0.0f0), (nothing32(0),)),
@@ -48,6 +51,7 @@ const OF_NONE = [
     ("a reshape of none", x -> reshape(x, 3, 0), (nothing32(0, 3),)),
     ("a write of none", write_none, (nothing32(0), counted32(4))),
     ("a loop with a state of none beside one of some", loop_beside_none, (nothing32(0), counted32(3))),
+    ("a map over no slices", of_no_slices, (nothing32(2, 0, 7),)),
 ]
 
 # The results of a program as Julia's are: of its shapes and element types,
