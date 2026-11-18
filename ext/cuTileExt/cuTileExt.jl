@@ -535,14 +535,24 @@ function pieces(axes, addresses, domain, folds = ())
 end
 
 # Whether the generator can load every load of the group under a schedule,
-# and the indices the keys of its folds by key read; and each fold over other
-# axes than the swept ones reduces whole tile axes. The loads of a fold the
-# group recomputes are over the tiling it extends (`recomputing_fits`). And
-# a sweep's step holds what it loads (see `step_loads`).
+# and the indices the keys of its folds by key read; each fold over other
+# axes than the swept ones reduces whole tile axes; and what the kernel
+# stores it can store (`storable`). The loads of a fold the group recomputes
+# are over the tiling it extends (`recomputing_fits`). And a sweep's step
+# holds what it loads (see `step_loads`).
 fits(c) = held_bytes(c) <= HELD_BYTES && (recomputing(c.g) ? recomputing_fits(c) :
     all(l -> loadable(c, l), (l for m in members(c.g) for l in loads(c.g.terms[m]))) &&
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
-    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c)))
+    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c)) && storable(c))
+
+# Whether each value the kernel stores through a view has one under the
+# schedule (see `store_values!`): its outputs and the folds it keeps, but
+# those by key, stored at their keys. A fold kept for a backward that spans
+# fewer axes than the kept axes collapsed into one group, as the maximum and
+# the sum an online softmax leaves beside its weighted sum, has none there,
+# and has one where the group is cut (`refined`).
+storable(c) = all(m -> output_view(c, m) !== nothing,
+    (m for m in members(c.g) if (c.g.values[m].stored || m in c.g.outputs) && !c.g.values[m].keyed))
 
 """
 What a block of a sweep holds of what a step loads: each load of the
@@ -746,11 +756,11 @@ end
 
 # Whether the generator can lower every term under a schedule, the folds it
 # recomputes over the tiling they extend, and the indices the keys of its folds
-# by key read; and each fold over other axes than the swept ones reduces whole
-# tile axes.
+# by key read; each fold over other axes than the swept ones reduces whole
+# tile axes; and what the kernel stores it can store (`storable`).
 recomputing_fits(c) = all(m -> terms_expressible(c, (c.g.terms[m],); stats = true), members(c.g)) &&
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
-    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c))
+    all(r -> fold_tiles(c, r) !== nothing, partial_folds(c)) && storable(c)
 
 # Candidates: of a kernel that is not a product's, its product folds, the
 # most that split the axes alike, apart from its other folds, and apart from

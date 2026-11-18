@@ -177,6 +177,32 @@ end
     end
 end
 
+# Attention written by its formulas over a cache, as Vallmo's is, the
+# softmax's maximum and sum taken apart: its backward reads both, so the
+# kernel of the weighted sum keeps them beside it, values over fewer axes
+# than the kernel keeps. Where the kept axes are one group they have no view
+# to be stored through, and where the group is cut they have one: a schedule
+# that cannot store what its kernel writes is no claim, and the cut one is.
+# At 16 and 64 positions the claim offered was the first, refused in the
+# cover as a view that is nothing.
+@testset "an online softmax's maximum and sum, kept for its backward" begin
+    for S in (6, 16, 64)
+        K, V, q = single(data(64, 2, S, 3; scale = 0.1)), single(data(64, 2, S, 3; scale = 0.2)), single(data(64, 4, S, 3; scale = 0.3))
+        positions = repeat(Int32.(1:S), 1, 3)
+        function weighted(K, V, q)
+            scores = @einsum(K, q, "d h c b, d (g h) t b -> c g h t b") ./ 8.0f0
+            scores = ifelse.(axes(K, 3) .<= @rearrange(positions, "t b -> 1 1 1 t b"), scores, typemin(eltype(scores)))
+            p = exp.(scores .- maximum(scores; dims = 1))
+            p = p ./ sum(p; dims = 1)
+            sum(abs2, @einsum(V, p, "d h c b, c g h t b -> d (g h) t b"))
+        end
+        g(K, V, q) = T.gradient(weighted, K, V, q)
+        want = T.compile(g, K, V, q; target = T.CPUTarget(), capture = false)(K, V, q)
+        device = map(CuArray, (K, V, q))
+        @test agree(T.compile(g, device...)(device...), want; rtol = 1.0e-4)
+    end
+end
+
 # A layer's gradient whose sums recompute the hidden product they read:
 # generated as folds that recompute it, stepping at a product's depths.
 @testset "sums that recompute a product, generated" begin
