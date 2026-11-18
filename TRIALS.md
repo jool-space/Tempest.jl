@@ -779,6 +779,44 @@ Ada (a negative rate, the bound standing in); and half the batch takes
 0.60 of the whole batch's time on one device at full precision, 30 ms
 where the products alone are 25.1, the 5 ms not looked into.
 
+Four devices, and the challenger at matched precision (18 Nov, a machine of
+four RTX A6000 with no peer access between any pair,
+`challengers/night-2026-11-18/devices`): the data-parallel step of the
+trials above, 6 blocks 1024 wide on 8184 and on 32736 tokens, each side
+including one program file, the devices cooled to 60 °C before each run, the
+sides in turn in one sitting, medians of 30 calls. At full precision 124.1 ms
+on one device and 66.1, 46.9 and 36.9 on two, three and four, 499.8 and
+248.6, 168.4 and 126.5 at the larger size; Reactant 0.2.308, whose sharding
+over a mesh of the local devices runs the file unedited for one added line,
+with its products at its highest precision 125.8 and 77.4, 62.5 and 51.4,
+497.5 and 253.5, 175.9 and 140.5. With TF32 products, Reactant's default on
+these devices and `CUDATarget(precision = :tf32)` here: 56.8 and 30.1, 23.1
+and 22.4 against 57.2 and 43.6, 37.0 and 35.0; 217.3 and 110.9, 76.2 and
+59.1 against 217.3 and 121.5, 90.1 and 74.8. Replicas equal to the bit on
+both sides throughout, the two sides' losses within 1e-7 of each other at
+full precision and 2e-6 at TF32. Reactant's step as compiled is its devices'
+work and then an all-reduce of the weights' size, 15 to 20 ms, one after the
+other; with XLA's latency-hiding scheduler asked for through its compile
+options the all-reduces run inside the backward pass and its steps are 68.4,
+52.0 and 40.2 and 247.4, 164.6 and 128.1 at full precision, 38.5, 28.6 and
+26.8 and 113.0, 78.8 and 61.7 at TF32: level at the larger size, 2 to 8 ms
+behind at the smaller. Tempest's reduce runs behind the backward pass, the
+step within 2 ms of the devices' own work at full precision, and at TF32 is
+what bounds it: the link through host memory carries 22 GB/s a device and
+direction and 18 with all four both ways (plain staged copies,
+`tempest/link.jl`), the four-device reduce needs 17 ms, and four devices are
+then no faster than three. Reactant's first call from nothing takes 16 to 26
+s where Tempest's takes 51 to 93, of which 25 s at full precision and 56 at
+TF32 are the fitting of the machine's rates, once and kept, and 14 s remain
+with the stores kept (`tempest/prep.tsv`). The 4B decoding there, 16
+sequences a device, as one compiled call over a tuple of replicas: 26.1 ms a
+step on one device and 26.8, 26.4 and 26.9 on two, three and four, 613,
+1194, 1816 and 2381 tokens a second, each device's tokens its batch's alone;
+its first call 115 to 150 s on each new count of devices with every kernel
+built, each replica planned anew. Reactant with a program compiled for each
+device and a task for each, 28.0 and 28.3 ms on two and four, and through its
+sharding 781 ms on two, its tokens right.
+
 **The schedules are a small set.** A product is claimed under four output
 tiles per class, then the depths and the split of the best, and the cover
 measures them in stages; every other sketch's parameters are constants
@@ -1819,6 +1857,64 @@ its factors, the factors stored (`factors_stored`), 185 folds of the model.
 The 4B decodes in 44.0, 51.9 and 66.9 ms at B of 1, 4 and 16 and a chunk of
 64 tokens in 64 to 65 where 74 to 76; what follows is the estimate on a
 second device (Open).
+
+**A model written once: one sitting against Reactant, the same file at the
+27B, and its weights' load.** Vallmo's `bench/decode.jl`, each backend twice
+in turn on the first GB10, Tempest at 4323397 with nothing measured, Reactant
+0.2.308 (`challengers/night-2026-11-18/table`): Tempest decodes in 39.4, 48.8
+and 63.9 ms at B of 1, 4 and 16 from empty stores and in 39.4, 49.8 and 65.0
+with its stores kept, Reactant in 45.4, 48.6 and 71.7 and in 44.2, 50.2 and
+71.3; a 64-token chunk in 59 to 60 ms against 71 to 74; the five programs'
+first calls in 200 s from empty stores and 83 with them kept, against 276 and
+288; 12.1 GB held against 16.6; Tempest's tokens the old engine's on all
+three prompts, Reactant's parting on the long one at its fourth. On an RTX
+A6000 the same bench gives 15.1, 23.0 and 25.8 ms against Reactant's 16.3,
+17.9 and 27.2, Reactant ahead at 4, and both part from the old engine's
+tokens there at ties within a BFloat16 unit of the logit. The 27B of the same
+architecture (64 layers, 5120 wide, a head apart from its embedding, which
+Vallmo's `load` refuses and three lines of a probe read) went through
+unchanged: 232, 249 and 309 ms a step, 51 tokens a second at 16, 61 GB held,
+its continuations of three prompts sensible (`probe27`). Its load showed what
+the 4B's had hidden: a weight copied to the device from the checkpoint's
+memory map goes at 0.29 GiB/s, the driver bringing each page in by its own
+fault, and at 2.6 with the tensor's pages asked for whole first (`madvise`,
+`MADV_POPULATE_READ`), the 4B's load 27 s to 3 and the 27B's about 200 to 36:
+Vallmo's to take, on its branch `load-populate`.
+
+**A model written once: its gradient.** The model file given a next-token
+loss beside `forward!` (Vallmo's branch `train`), `withgradient` of it with
+respect to its 426 weight arrays compiles: at toy size within 6e-11 of
+Richardson-extrapolated differences of the eager Float64 loss, and at the
+real 4B with its BFloat16 weights a loss of 15.115 at 64 tokens where the
+eager run gives 15.112, in 414 ms a call and 443 at 16 tokens with nothing
+measured, 395 and 263 with the close calls measured; the step with Float32
+weights 0.62 s, three steps taking the loss from 15.11 to 10.98. The
+challenger, the same loss under Enzyme and Reactant 0.2.308 on the second
+GB10 (`reactant-train`): 292 ms at 16 tokens, 561 at 64, and 559 at 64
+tokens of four sequences in about 41 GiB, where Tempest takes 1031 ms and
+holds 66 GiB, the recurrences and the kernels that read their steps' values
+back over half of it; its step 0.75 s; two lines of the model respelled, a product of operands of two element types having no reverse
+there. What the program asked of Tempest, each answered as its family after
+a survey of the family's spellings (`train/gaps`, `sum`, `partials`): an
+index range of any integer type; an index array each step of a rolled loop
+computes; a traced number stored where another type is held, taken where
+Base converts any value and refused where Base would check one; a cuTile
+schedule a claim only where its kernel can store what it writes, without
+which attention's gradient was refused from 16 positions on; a reshape of a
+reshape one reshape, Einops' kept axes having hidden a shift from the
+derivative's laws; Base's reductions in the type their operator returns, 55
+of 248 spellings having been silently of another type and 44 refused; and a
+derivative's rule reading a narrower float in the type its operation
+promotes to, found by holding Tempest's Float64 gradient to Enzyme's, right
+to 3.5e-8 where Enzyme's was to 9e-10. Open: what a recurrence writes over
+its steps, five arrays of the state's size a layer and token where one would
+do, 260 MiB a token and sequence at real size (a recurrence's facts held
+once with its group, the first part of what closes it, is the branch
+`recurrence-riders`, its plans unchanged; folds added by key inside the
+recurrence's kernel, the second, is not built); a term recomputed inside a
+product's sweep priced 36 times under, which is the 443 ms; and the element
+type of a BFloat16 weight's gradient and what an update does to it, which is
+the user's.
 
 **A trial planned near the plan it changes, adopted.** The cover's trials
 each plan the graph with a few of what the planner is given changed, and
