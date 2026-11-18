@@ -296,8 +296,8 @@ function products_of(c::Context, r)
 end
 has_product(c::Context, r) = (sums = fold_sums(c, r); sums !== nothing && any(s -> s[2] !== nothing, sums))
 
-# Every load a view over the tiling, every stored value too, and nothing the
-# generator cannot lower.
+# Every load a view over the tiling, nothing the generator cannot lower, and
+# what the kernel stores storable (see `storable`).
 function expressible_over(c::Context)
     g = c.g
     for m in members(g)
@@ -306,7 +306,6 @@ function expressible_over(c::Context)
         m in g.reductions && !tile_fold(val.fold, term_eltype(g.terms[m], g)) && return false
         m in g.outputs && val.dims == g.domain && return false
         terms_expressible(c, (g.terms[m],); stats = true) || return false
-        (g.values[m].stored || m in g.outputs) && output_view(c, m) === nothing && return false
     end
-    true
+    storable(c)
 end

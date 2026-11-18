@@ -545,14 +545,23 @@ fits(c) = held_bytes(c) <= HELD_BYTES && (recomputing(c.g) ? recomputing_fits(c)
     all(a -> loadable(c, Load(a.value, a.index); index = true), key_atoms(c.g)) &&
     all(r -> fold_tiles(c, r) !== nothing, partial_folds(c)) && storable(c))
 
-# Whether each value the kernel stores through a view has one under the
-# schedule (see `store_values!`): its outputs and the folds it keeps, but
-# those by key, stored at their keys. A fold kept for a backward that spans
+# The values a kernel of the group stores through a view (see
+# `store_values!`): its outputs and the folds it keeps, but no fold by key,
+# which is stored at its keys; of a recurrence, the outputs something else
+# reads, its folds, the sums riding its steps, being a stepped run's to
+# store (see `Tempest.Compiler.build_stepped`).
+function written(g::GroupView)
+    g.kind === :recurrence && return [m for m in g.outputs if g.values[m].stored]
+    [m for m in members(g) if m in g.outputs || g.values[m].stored && !g.values[m].keyed]
+end
+
+# Whether a kernel under the schedule can store what it writes, each such
+# value a view of whole groups (see `view_of`): what every claim is asked,
+# whichever kind of kernel it is of. A fold kept for a backward that spans
 # fewer axes than the kept axes collapsed into one group, as the maximum and
-# the sum an online softmax leaves beside its weighted sum, has none there,
-# and has one where the group is cut (`refined`).
-storable(c) = all(m -> output_view(c, m) !== nothing,
-    (m for m in members(c.g) if (c.g.values[m].stored || m in c.g.outputs) && !c.g.values[m].keyed))
+# the sum an online softmax leaves beside its weighted sum, has no view
+# there, and has one where the group is cut (`refined`).
+storable(c) = all(m -> output_view(c, m) !== nothing, written(c.g))
 
 """
 What a block of a sweep holds of what a step loads: each load of the
@@ -831,7 +840,7 @@ function recurrence_claims(target, g::GroupView)
                 TileAxis([k], D[k], k == tiled ? t : 1, false)
         end
         c = Context(g, TileSchedule(:recurrence, tiling, 1, nothing, 0, target.precision))
-        all(m -> g.values[m].eltype <: TILE_TYPES && (!g.values[m].stored || output_view(c, m) !== nothing), g.outputs) &&
+        all(m -> g.values[m].eltype <: TILE_TYPES, g.outputs) && storable(c) &&
             terms_expressible(c, [g.terms[m] for m in g.outputs]) || continue
         any(cl -> cl.schedule.tiling == c.s.tiling, found) || push!(found, Claim(c.s))
     end

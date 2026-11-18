@@ -81,6 +81,20 @@ const SCATTERS = [
         ex = prepare(p, map(CuArray, args)...; target)
         scatters = [k for (k, g) in enumerate(ex.plan.groups) if any(r -> ex.plan.graph.values[r].definition isa C.Keyed, g.reductions)]
         @test !isempty(scatters) && all(k -> (ex.kernels[k] isa C.FloorKernels) == (where == "the floor"), scatters)
+        # A fold by key is stored at its keys: what a schedule must be able
+        # to store through views (`written`) leaves it out, and where its
+        # keys are read from an index array, as an embedding's are, it has no
+        # view of whole groups and the scatter's claim is cuTile's all the
+        # same.
+        if where == "cuTile"
+            ext = Base.get_extension(Tempest, :cuTileExt)
+            for gv in C.group_views(ex.plan)[scatters]
+                keyed = [r for r in gv.reductions if gv.values[r].keyed]
+                @test all(r -> gv.values[r].stored && !(r in ext.written(gv)), keyed)
+                name == "embedding" && @test all(claim -> all(r -> ext.output_view(ext.Context(gv, claim.schedule), r) === nothing, keyed),
+                    ext.claims(C.cuTileGenerator(), target, gv))
+            end
+        end
         # An embedding's rows add on cuTile as boxes, a TMA reduction each.
         if where == "cuTile" && name == "embedding"
             ext = Base.get_extension(Tempest, :cuTileExt)
