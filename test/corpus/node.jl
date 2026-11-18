@@ -4,13 +4,13 @@
 # RAdam's state replaced in place. 32 inputs through 256 hidden, 100 RK4
 # steps, TF32, as the challengers' scripts (PathMNISTReactant.jl's
 # benchmarks/*/bench_node.*) run it: batch 128 is the small shape, 1024 the
-# full one.
+# full one, 256 the doubled one.
 include(joinpath(@__DIR__, "..", "bench", "node.jl"))
 using Random
 import Tempest as T
 
 function instance(shape)
-    cfg = (; dims = 32, hidden = 256, steps = 100, batch = shape === :small ? 128 : 1024)
+    cfg = (; dims = 32, hidden = 256, steps = 100, batch = shape === :small ? 128 : shape === :doubled ? 256 : 1024)
     rng = Xoshiro(0)
     params = NODE.parameters(rng, cfg)
     batch = NODE.batch(rng, cfg)

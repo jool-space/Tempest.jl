@@ -96,12 +96,35 @@
 # process writes them last. A job killed by a signal stops the run: on this
 # machine that is the memory the GPU shares running out. runtests.jl skips
 # this directory.
+#
+# The preparation session (session/README.md) adds three scenarios, run apart
+# from the others, each a process that runs the program as its user would:
+# `compile` with every default but the case's target, two calls, and the
+# second's outputs checked against the same function untraced, computed
+# before in a process of its own and kept in TEMPEST_CORPUS_REFERENCES. Its
+# processes run in session/'s environment, and their stores are one
+# directory the three share, in TEMPEST_CORPUS_STORES; nothing is measured
+# and no setting of Tempest's is given but where the stores are.
+#
+#   first             A new process whose stores are empty.
+#   kept              A new process on the stores the first left.
+#   doubled           A new process on the stores the two left, the program
+#                     at its doubled shape (`instance(:doubled)`), twice its
+#                     tokens or its batch.
+#
+# Each is clocked from outside: `seconds` runs from the moment the process
+# is started (session/outside.sh) to the end of its check, and of them
+# `checkpoint_s` read a checkpoint from disk; `compile_s` is `compile`'s,
+# `calls_s` the two calls', `phases` the compiler's work by phase as
+# `Compiler.tallied` tallies it.
 
 const HERE = @__DIR__
 const PROJECT = dirname(HERE)
 const COLUMNS = ("when", "pass", "host", "program", "shape", "scenario", "side", "commit", "device", "sm_mhz", "precision",
-    "first_s", "julia_s", "step_ms", "kernels", "built", "loaded", "stored_bytes", "replayed", "covered", "plan", "agreement", "note")
-const SCENARIOS = ("cold", "cold-unmeasured", "cold-known", "warm", "again", "after", "after-unmeasured")
+    "first_s", "julia_s", "step_ms", "kernels", "built", "loaded", "stored_bytes", "replayed", "covered", "plan", "agreement", "note",
+    "seconds", "checkpoint_s", "compile_s", "calls_s", "phases")
+const SESSION = ("first", "kept", "doubled")
+const SCENARIOS = ("cold", "cold-unmeasured", "cold-known", "warm", "again", "after", "after-unmeasured", SESSION...)
 
 include(joinpath(HERE, "challengers", "challengers.jl"))
 
@@ -123,11 +146,13 @@ device_name() = first(readlines(`nvidia-smi --query-gpu=name --format=csv,nohead
 """
 Runs `cmd` as a GPU job in `env`: under the lock, the clock sampled, stopped
 after the timeout, its output in `log`. Returns the exit code and the median
-busy clock.
+busy clock. A session's job (`clocked = false`) is not sampled, which takes
+a processor, but told when it was started (session/outside.sh).
 """
-function gpu_job(cmd, log; env = ())
+function gpu_job(cmd, log; env = (), clocked = true)
     seconds = get(ENV, "TEMPEST_CORPUS_TIMEOUT", "1800")
-    job = `bash $(joinpath(HERE, "challengers", "clocked.sh")) $seconds $cmd`
+    wrapper = clocked ? joinpath(HERE, "challengers", "clocked.sh") : joinpath(HERE, "session", "outside.sh")
+    job = `bash $wrapper $seconds $cmd`
     lock = get(ENV, "TEMPEST_GPU_LOCK", nothing)
     lock === nothing || (job = `flock $lock $job`)
     process = open(io -> run(pipeline(ignorestatus(addenv(job, env...)); stdout = io, stderr = io)), log, "w")
@@ -205,13 +230,24 @@ scenarios(s::Session) = filter(!isempty, map(p -> p.scenario, s.preparations))
 
 # The settings that point a process at its stores (test/fixtures/stores.jl),
 # and what it measures.
-session_env(s::Session) =
-    ["TEMPEST_CACHE" => s.stores, "JULIA_OBJCACHE_PATH" => joinpath(s.stores, "objcache"), "TEMPEST_MEASURE" => s.measure]
+# A process of the preparation session is given where its stores are and
+# nothing else of Tempest's, the device's cache of compiled code among them.
+function session_env(s::Session)
+    stores = ["TEMPEST_CACHE" => s.stores, "JULIA_OBJCACHE_PATH" => joinpath(s.stores, "objcache")]
+    in_session(s) ? [stores; "CUDA_CACHE_PATH" => joinpath(s.stores, "nv")] : [stores; "TEMPEST_MEASURE" => s.measure]
+end
+
+in_session(s::Session) = any(in(SESSION), scenarios(s))
 
 # The processes of a round for the scenarios wanted, in the order they run:
 # cold-known starts on the tuning directory the cold process left, before the
 # warm one adds to it, and the warm one on all of it.
 function sessions(program, shape, wanted, other, round)
+    if any(in(SESSION), wanted)
+        issubset(wanted, SESSION) || error("the session's scenarios run apart from the others")
+        stores = joinpath(round, "stores")
+        return [Session([Preparation(program, s == "doubled" ? "doubled" : shape, s, "")], stores, "", "") for s in SESSION if s in wanted]
+    end
     any(in(wanted), ("cold-known", "warm", "again")) && !("cold" in wanted) &&
         error("cold-known, warm and again start on what cold leaves: run them with it")
     at(scenario; tuning = "") = Preparation(program, shape, scenario, tuning)
@@ -240,11 +276,12 @@ function session(s::Session, run, reference, directory)
         isdir(given) || return map(scenario -> (; scenario, side = "tempest", note = "no tuning directory left to start on"), scenarios(s))
         cp(given, joinpath(s.stores, "tuning"))
     end
-    check = get(ENV, "TEMPEST_CORPUS_CHECK", "1") != "0" ? ["--check", reference] : String[]
+    check = get(ENV, "TEMPEST_CORPUS_CHECK", "1") != "0" || in_session(s) ? ["--check", reference] : String[]
     preparations = reduce(vcat, [[p.program, p.shape, dash(p.scenario), dash(p.tuning)] for p in s.preparations])
-    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$PROJECT $(joinpath(HERE, "run.jl")) --worker $check $preparations`
+    project = in_session(s) ? joinpath(HERE, "session") : PROJECT
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$project $(joinpath(HERE, "run.jl")) --worker $check $preparations`
     println("tempest $program $shape, $names, run $run: ", log)
-    status, clock = gpu_job(cmd, log; env = session_env(s))
+    status, clock = gpu_job(cmd, log; env = session_env(s), clocked = !in_session(s))
     results = Dict{String, Any}()
     for line in filter(l -> startswith(l, "corpus result "), readlines(log))
         r = eval(Meta.parse(line[(length("corpus result ") + 1):end]))
@@ -265,15 +302,31 @@ undash(x) = x == "-" ? "" : x
 # processes in turn, in stores of the round's own, and the Float64 reference
 # kept for all of them in one directory.
 function tempest(record, program, shape, wanted, other, runs, directory)
-    reference = mktempdir()
+    in_session = any(in(SESSION), wanted)
+    reference = in_session ? references!(program, unique([shape, "doubled"]), directory) : mktempdir()
     for run in 1:runs
-        round = mktempdir()
+        round = in_session ? mktempdir(mkpath(get(ENV, "TEMPEST_CORPUS_STORES", tempdir()))) : mktempdir()
         for s in sessions(program, shape, wanted, other, round), r in session(s, run, reference, directory)
             r.scenario in wanted && record(r)
         end
         rm(round; recursive = true)
     end
-    rm(reference; recursive = true)
+    in_session || rm(reference; recursive = true)
+end
+
+# The session's references: each shape's outputs of the program untraced,
+# computed where they are not kept already, in a process of their own before
+# the session's, and kept in TEMPEST_CORPUS_REFERENCES.
+function references!(program, shapes, directory)
+    kept = mkpath(get(ENV, "TEMPEST_CORPUS_REFERENCES", joinpath(directory, "references")))
+    missing = filter(shape -> !isfile(joinpath(kept, "$(program_name(program))-$shape.jls")), shapes)
+    isempty(missing) && return kept
+    log = joinpath(directory, "logs", "$(program_name(program))-references-$(stamp()).log")
+    println("references of $(program_name(program)) at $(join(missing, ", ")): ", log)
+    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$(joinpath(HERE, "session")) $(joinpath(HERE, "run.jl")) --reference $kept $program $missing`
+    status = open(io -> run(pipeline(ignorestatus(cmd); stdout = io, stderr = io)), log, "w").exitcode
+    status == 0 || error("the references of $program failed (exit $status); see $log")
+    kept
 end
 
 function challengers(program, shape, directory)
@@ -304,6 +357,8 @@ function worker(args)
     i = findfirst(==("--check"), args)
     reference = i === nothing ? nothing : args[i + 1]
     rest = i === nothing ? args : args[[1:(i - 1); (i + 2):end]]
+    in_session = any(in(SESSION), rest[3:4:end])
+    in_session && return session_worker(rest, reference)
     @eval Main begin
         import cuBLAS, cuTile
         using Tempest, CUDACore
@@ -322,6 +377,43 @@ function worker(args)
         kept = reference === nothing || isempty(scenario) ? nothing : joinpath(reference, "$(program_name(program))-$shape.jls")
         result = Base.invokelatest(() -> m.measure(case; reference = kept, report = scenario == "warm"))
         println("corpus result ", repr(merge((; scenario), result)))
+    end
+end
+
+# A run of the session: its one preparation, the kernel packages loaded as a
+# user loads them, then `called` (session/call.jl).
+function session_worker(args, reference)
+    started = parse(Float64, ENV["TEMPEST_CORPUS_STARTED"])
+    using_s = @elapsed @eval Main using Tempest, CUDACore, cuTile, cuBLAS, cuDNN
+    program, shape, scenario, _ = args
+    m = session_module(program)
+    instance_s = @elapsed case = Base.invokelatest(() -> m.instance(Symbol(shape)))
+    kept = joinpath(reference, "$(program_name(program))-$shape.jls")
+    result = Base.invokelatest(() -> m.called(case; reference = kept, started, using_s, instance_s))
+    println("corpus result ", repr(merge((; scenario), result)))
+end
+
+function session_module(program)
+    m = Core.eval(Main, :(module $(Symbol(program_name(program))) end))
+    Base.include(m, program_file(program))
+    Base.include(m, joinpath(HERE, "session", "call.jl"))
+    m
+end
+
+# The references of a program at shapes: its outputs untraced, by the
+# program's own `untraced` where it has one, else its step on its arguments
+# widened to Float64 on the host, kept as `held` (session/call.jl).
+function reference_worker(args)
+    kept, program, shapes = args[1], args[2], args[3:end]
+    m = session_module(program)
+    for shape in shapes
+        seconds = @elapsed outputs = Base.invokelatest() do
+            isdefined(m, :untraced) && return m.untraced(Symbol(shape))
+            case = m.instance(Symbol(shape))
+            m.compared_of(case, case.step(map(m.wide, case.args)...), case.args)
+        end
+        Base.invokelatest(() -> m.reference!(joinpath(kept, "$(program_name(program))-$shape.jls"), outputs))
+        println("reference of $(program_name(program)) at $shape in ", round(seconds; digits = 1), " s")
     end
 end
 
@@ -351,6 +443,9 @@ end
 function main(args)
     if "--worker" in args
         return worker(args[(findfirst(==("--worker"), args) + 1):end])
+    end
+    if "--reference" in args
+        return reference_worker(args[(findfirst(==("--reference"), args) + 1):end])
     end
     program = program_given(first(args))
     shape = option(args, "--shape", "small")

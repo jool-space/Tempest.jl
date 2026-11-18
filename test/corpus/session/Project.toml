@@ -1,0 +1,20 @@
+[deps]
+BFloat16s = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
+CUDACore = "bd0ed864-bdfe-4181-a5ed-ce625a5fdea2"
+LMDB = "11f193de-5e89-5f17-923a-7d207d56daf9"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"
+Vallmo = "d7e4f3a4-021c-470a-a969-608a99edde6c"
+cuBLAS = "182d3088-87b7-4494-8cad-fc6afaa545bc"
+cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
+cuTile = "0dea8319-8c4a-4662-a73d-20234d115b9a"
+
+[sources]
+LMDB = {rev = "concurrent-transactions", url = "https://github.com/AntonOresten/LMDB.jl"}
+Tempest = {path = "../../.."}
+Vallmo = {path = "../../../../Vallmo-train"}
+cuTile = {rev = "main", url = "https://github.com/JuliaGPU/cuTile.jl"}

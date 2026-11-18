@@ -1,8 +1,8 @@
 # A 2-D heat equation's gradient: u on a 256×256 grid, its interior diffusing
 # by the five-point stencil, its border held, a source added at each step;
 # the loss the sum of the final state squared, and its gradient with respect
-# to the initial state. 100 steps is the small shape, 1000 the full one;
-# TEMPEST_CORPUS_HEAT_STEPS sets them.
+# to the initial state. 100 steps is the small shape, 200 the doubled one,
+# 1000 the full one; TEMPEST_CORPUS_HEAT_STEPS sets them.
 #
 # The steps are `accumulate` over the source's slices, the form Tempest rolls
 # into one loop (TRIALS: recurrences): at 20 steps 2 kernels forward and 4 for
@@ -37,7 +37,7 @@ loss(u, q) = sum(abs2, evolve(u, q))
 step(u, q) = T.withgradient(v -> loss(v, q), u)
 
 function instance(shape)
-    steps = parse(Int, get(ENV, "TEMPEST_CORPUS_HEAT_STEPS", shape === :small ? "100" : "1000"))
+    steps = parse(Int, get(ENV, "TEMPEST_CORPUS_HEAT_STEPS", shape === :small ? "100" : shape === :doubled ? "200" : "1000"))
     rng = Xoshiro(0)
     u = randn(rng, Float32, 256, 256)
     q = 0.01f0 .* randn(rng, Float32, 256, 256, steps)

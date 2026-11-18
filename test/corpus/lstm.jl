@@ -3,7 +3,8 @@
 # the gradient of every weight and of the first state, and a step of gradient
 # descent, the parameters replaced in place. 32 inputs through 256 hidden, 100
 # steps, TF32, as the torch challenger (torch_lstm.py) runs it: batch 64 is the
-# small shape, 1024 the full one. The challenger takes no optimizer step.
+# small shape, 1024 the full one, 128 the doubled one. The challenger takes no
+# optimizer step.
 using Random
 import Tempest as T
 
@@ -35,7 +36,7 @@ end
 
 function instance(shape)
     D, H, S = 32, 256, 100
-    B = shape === :small ? 64 : 1024
+    B = shape === :small ? 64 : shape === :doubled ? 128 : 1024
     rng = Xoshiro(0)
     w(o, i) = 0.1f0 .* randn(rng, Float32, o, i)
     p = (; Wi = w(H, D), Wf = w(H, D), Wg = w(H, D), Wo = w(H, D), Ui = w(H, H), Uf = w(H, H), Ug = w(H, H), Uo = w(H, H),

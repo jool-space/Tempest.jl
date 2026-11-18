@@ -6,16 +6,17 @@
 # 384, T 64, batch 16. The full shape is GPT-2 124M's geometry: 12 layers, 768
 # hidden, 12 heads each its own key/value head, FFN 3072, T 1024, vocabulary
 # 50257, batch TEMPEST_CORPUS_GPT_BATCH (4), on tokens drawn at random. The
-# layer shape is one of its layers at batch 1.
+# layer shape is one of its layers at batch 1; the doubled shape the small one
+# at batch 32.
 include(joinpath(@__DIR__, "..", "bench", "gpt.jl"))
 using Random
 import Tempest as T
 
 function configuration(shape, rng)
-    if shape === :small
+    if shape in (:small, :doubled)
         corpus = GPT.load_corpus(joinpath(@__DIR__, "..", "..", "docs", "src"))
         cfg = (; vocabulary = length(corpus.chars), hidden = 128, heads = 4, kv_heads = 2, head_dim = 32, ffn = 384, layers = 4,
-            T = 64, B = 16)
+            T = 64, B = shape === :doubled ? 32 : 16)
         return cfg, corpus.data
     end
     batch = shape === :full ? parse(Int, get(ENV, "TEMPEST_CORPUS_GPT_BATCH", "4")) : 1
