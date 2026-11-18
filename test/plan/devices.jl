@@ -337,6 +337,25 @@ end
     @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
 end
 
+# A gradient whose terms lie on both devices, the negation of the other
+# argument's, is a chain the cut may leave on the device that does not read
+# it, made again on its argument's device, where it is returned: it has no
+# copy of its own where the cut left it.
+@testset "a gradient made again on its argument's device, $name" for (name, f, n) in (
+        ("tanh of a difference", (x, y) -> sum(tanh.(x .- y)), 2),
+        ("abs2 of a difference", (x, y) -> sum(abs2.(x .- y)), 2),
+        ("a difference shared", (x, y) -> (s = x .- y; sum(s .* tanh.(s))), 2),
+        ("an argument read twice", (x, y) -> sum(tanh.(x .* x .- y)), 2),
+        ("two differences, three devices", (x, y, z) -> sum(sin.(x .- y) .+ cos.(y .- z)), 3))
+    args = Tuple(rand(Float32, 3, 4) for _ in 1:n)
+    program = trace((xs...) -> T.withgradient(f, xs...), args...)
+    for labels in (collect(1:n), circshift(1:n, 1))
+        p = pinned_plan(program, labels)
+        @test gradients_off(p, program) == 0
+        @test C.execute(p, args...) == C.execute(C.plan(C.rewrite(C.lower(program))), args...)
+    end
+end
+
 @testset "a result that replaces an argument is written on its device" begin
     # The result reads only the second argument, and is copied to the
     # first's device, whose array it replaces.

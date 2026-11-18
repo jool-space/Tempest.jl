@@ -36,7 +36,7 @@ function with_devices(graph::IndexGraph, arguments; pins = Pair{Int, Int}[])
         graph.rewrites, graph.backward, devices)
     p = realizations(graph, devices, landing)
     rebuilt, ids = rebuild((b, id) -> home!(p, b, id), placed, made_at_home(p))
-    narrowed_crossings(landed(rebuilt, ids, graph.results, landing, devices, (b, r, here) -> value_on!(p, b, r, here)))
+    narrowed_crossings(landed(rebuilt, ids, placed, landing, (b, r, here) -> value_on!(p, b, r, here)))
 end
 
 # The device each result is pinned to, by `pins`, zero for one that is not.
@@ -51,21 +51,25 @@ function result_devices(graph, pins)
     landing
 end
 
-# The rebuilt graph with each pinned result on its device: reading through a
-# crossing what it reads on another, and a result that is not a value's read
-# whole made a value there, as storing would make it (see `result_copy`) on no
-# device in particular. The crossings follow the values, in the results'
-# order, made by `across!` on a builder of the rebuilt graph's values.
-function landed(rebuilt, ids, results, landing, devices, across!)
+# The rebuilt graph with each pinned result of the placed graph on its
+# device: reading through a crossing what it reads on another, and a result
+# that is not a value's read whole made a value there, as storing would make
+# it (see `result_copy`) on no device in particular. The crossings follow the
+# values, in the results' order, made by `across!` on a builder of the
+# rebuilt graph's values.
+function landed(rebuilt, ids, placed, landing, across!)
     b = Builder(copy(rebuilt.values), ids, Pair{Int, String}[], copy(rebuilt.backward), Ref(false), copy(rebuilt.devices), Ref(1))
-    placed = map(enumerate(results)) do (k, o)
+    results = map(enumerate(placed.results)) do (k, o)
         landing[k] == 0 && return remap(o, ids)
         b.on_device[] = landing[k]
         through = Dict{Int, Int}()
         for r in read_values(o)
-            devices[r] == landing[k] && continue
-            # A crossing belongs to the backward where what it copies does.
-            b.in_backward[] = rebuilt.backward[ids[r]]
+            placed.devices[r] == landing[k] && continue
+            # What a value read on another device is there belongs to the
+            # backward where the value does: asked of the placed graph, as
+            # a value of a chain made again elsewhere has no copy of its
+            # own in the rebuilt one.
+            b.in_backward[] = placed.backward[r]
             through[r] = across!(b, r, landing[k])
         end
         r = remap(o, Rerouted(ids, through))
@@ -74,7 +78,7 @@ function landed(rebuilt, ids, results, landing, devices, across!)
         held, index = result_copy(rebuilt, k, r)
         Read(add!(b, held.definition, held.dims, held.eltype, held.scalar), index)
     end
-    IndexGraph(b.values, rebuilt.arguments, Operand[placed...], rebuilt.result_dims, rebuilt.result_scalar, rebuilt.result_eltype,
+    IndexGraph(b.values, rebuilt.arguments, Operand[results...], rebuilt.result_dims, rebuilt.result_scalar, rebuilt.result_eltype,
         rebuilt.rewrites, b.backward, b.devices)
 end
 
