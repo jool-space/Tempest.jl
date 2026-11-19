@@ -85,8 +85,31 @@ end
 act(x::Float32) = 2.0f0 * x
 scaled(x) = sum(act.(x) .* x; dims = 1)
 
-function scaled_run(x, target)
-    p = trace(scaled, x)
+# A developed package of the test's own, loaded from its source, whose scalar
+# function a program applies: as a user's model package is, under Revise.
+const PACKAGE = joinpath(mktempdir(), "Redefined")
+write_package(factor) = write(joinpath(PACKAGE, "src", "Redefined.jl"), """
+    module Redefined
+    __precompile__(false)
+    act(x::Float32) = $(factor)f0 * x
+    end
+    """)
+mkpath(joinpath(PACKAGE, "src"))
+write(joinpath(PACKAGE, "Project.toml"), "name = \"Redefined\"\nuuid = \"$(Base.UUID(0x6f1a77e2_5c2b_4e0e_9d1e_3b8f6a4c2d10))\"\n")
+write_package(2)
+push!(LOAD_PATH, dirname(PACKAGE))
+const Redefined = Base.require(@__MODULE__, :Redefined)
+scaled_by_package(x) = sum(Redefined.act.(x) .* x; dims = 1)
+
+# The package's function redefined as Revise redefines it, its file written
+# and evaluated in its module, or by an `@eval` into it, its file unchanged.
+function redefine(factor; file)
+    file && write_package(factor)
+    Core.eval(Redefined, :(act(x::Float32) = $(Float32(factor)) * x))
+end
+
+function scaled_run(f, x, target)
+    p = trace(f, x)
     ex = prepare(p, target isa T.CUDATarget ? CuArray(x) : x; target)
     got = only(map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex))))))
     (; got, expected = only(filter(!isnothing, C.leaves(interpret(p, x)))), views = C.group_views(ex))
@@ -95,28 +118,83 @@ end
 # The definitions the keys of answers about a plan's groups hold.
 named_code(views) = unique!(reduce(vcat, [C.definitions(C.Implement.code(C.Implement.structure(g))) for g in views]))
 
+# A global code reads, assigned in the session.
+divisor = 6
+
+@testset "a session ends where code is defined that is not Tempest's own" begin
+    before = C.session()
+    t = C.SessionTable{Int, Int}()
+    get!(t, 1, 2)
+    # A kernel's function, which every build defines, leaves it standing.
+    C.generated(:(function (x) x + 1 end))
+    @test C.session() == before && get(t, 1, nothing) == 2
+    # A definition in a package's module, as Revise or an `@eval` makes,
+    # ends it, and the table's answers with it.
+    Core.eval(Redefined, :(unrelated(x) = x))
+    @test C.session() != before && get(t, 1, nothing) === nothing
+    # A global assigned is no definition: what code reads of it is named in
+    # the keys (`definitions`).
+    during = C.session()
+    global divisor = 5
+    @test C.session() == during
+    global divisor = 6
+end
+
 @testset "a function redefined in the session is other code" begin
     x = single(data(256, 64)) ./ 4
     if CUDA_FUNCTIONAL
-        first = Base.invokelatest(scaled_run, x, T.CUDATarget())
+        first = Base.invokelatest(scaled_run, scaled, x, T.CUDATarget())
         @test first.got ≈ first.expected
         @eval act(x::Float32) = 3.0f0 * x
         # Prepared again in the session, its kernels are not those of the
         # definition before.
-        second = Base.invokelatest(scaled_run, x, T.CUDATarget())
+        second = Base.invokelatest(scaled_run, scaled, x, T.CUDATarget())
         @test second.got ≈ second.expected
         @test !(second.got ≈ first.got)
         @eval act(x::Float32) = 2.0f0 * x
+        # A package's function, its file edited and evaluated as Revise does:
+        # the session's answers are asked again and its kernel compiled anew.
+        first = Base.invokelatest(scaled_run, scaled_by_package, x, T.CUDATarget())
+        @test first.got ≈ first.expected
+        redefine(3; file = true)
+        second = Base.invokelatest(scaled_run, scaled_by_package, x, T.CUDATarget())
+        @test second.got ≈ second.expected
+        @test !(second.got ≈ first.got)
+        redefine(2; file = true)
     end
-    before = Base.invokelatest(scaled_run, x, T.CPUTarget())
+    before = Base.invokelatest(scaled_run, scaled, x, T.CPUTarget())
     named = named_code(before.views)
     @test length(named) == 1
     # Code of packages is named by its object alone.
     @test C.definitions(Any[sin, +, Float32, IR.SumFold()]) == String[]
     @eval act(x::Float32) = 3.0f0 * x
-    after = Base.invokelatest(scaled_run, x, T.CPUTarget())
+    after = Base.invokelatest(scaled_run, scaled, x, T.CPUTarget())
     @test after.got ≈ after.expected
     @test length(named_code(after.views)) == 1 && named_code(after.views) != named
+    @eval act(x::Float32) = 2.0f0 * x
+    for file in (true, false)
+        before = Base.invokelatest(scaled_run, scaled_by_package, x, T.CPUTarget())
+        redefine(3; file)
+        after = Base.invokelatest(scaled_run, scaled_by_package, x, T.CPUTarget())
+        @test after.got ≈ after.expected && !(after.got ≈ before.got)
+        redefine(2; file)
+    end
+end
+
+# The session asks again once a package's code is defined anew, but the
+# kernel store answers by the package's identity, the hash of its files,
+# which an `@eval` leaves as it was: the kernel compiled before is loaded
+# again. Closed by the store's key naming the code the process has loaded.
+if CUDA_FUNCTIONAL
+    @testset "a package's function redefined, its files unchanged, runs as redefined once the store's key names the code loaded" begin
+        x = single(data(256, 64)) ./ 4
+        first = Base.invokelatest(scaled_run, scaled_by_package, x, T.CUDATarget())
+        @test first.got ≈ first.expected
+        redefine(3; file = false)
+        second = Base.invokelatest(scaled_run, scaled_by_package, x, T.CUDATarget())
+        @test_broken second.got ≈ second.expected
+        redefine(2; file = false)
+    end
 end
 
 if CUDA_FUNCTIONAL

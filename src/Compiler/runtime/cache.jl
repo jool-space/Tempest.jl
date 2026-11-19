@@ -172,7 +172,7 @@ workload defines its kernels in a module of its own, since `Generated` is
 closed to it then.
 """
 function generated(source::Expr, into::Module = Generated)
-    f = Core.eval(into, source)
+    f = own_definition(() -> Core.eval(into, source))
     @lock GENERATED_LOCK GENERATED_SOURCES[typeof(f)] = source
     f
 end
@@ -374,7 +374,8 @@ answer was derived from, beside the objects themselves (see `SessionTable`):
 the content key of each no package identifies (see `content_key`), which
 writes it by its definition, as a store's key does, so that a function
 redefined in the session, the same object, is another key. A package's code
-is named by the object alone, since its package is the same all session.
+is named by the object alone, since no code changes within a session
+(`session`).
 Sorted, so that code named in any order is named alike.
 """
 definitions(code) = sort!(unique!(String[content_key(x) for x in code if !of_packages(x)]))

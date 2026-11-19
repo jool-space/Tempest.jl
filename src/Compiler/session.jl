@@ -19,11 +19,11 @@ session, so that emptying it (`forget_session!`) costs time and never a wrong
 plan; any other table of theirs is named, with why, in `NOT_SESSION_TABLES`.
 A key holds, of what can differ:
 
-  - code, named as the stores' content keys name it (`definitions`): a package's
-    by the package, which is the same all session (its identity is found
-    once, `package_identity`), so by the function itself; any other, a
-    function of `Main` or a closure over one, by its definition, which a
-    redefinition changes and the function object keeps;
+  - code, named as the stores' content keys name it (`definitions`): a
+    package's by the function itself, since no code changes within a session
+    (below); any other, a function of `Main` or a closure over one, by its
+    definition, which holds the values of the globals it reads, which change
+    without a definition;
   - the device, by what the answer read of it: its architecture, its context;
   - the environment's settings the answer read, and what the preparation that
     asked was asked, as whether it compiles (`Implement.compiling`);
@@ -32,15 +32,14 @@ A key holds, of what can differ:
 Answers are their session's: a table filled in another process, as a
 package's precompile workload fills its tables in the package's image,
 compiled on another machine perhaps and compiling nothing, holds none in the
-session that loads it (`SESSION`).
+session that loads it, and a session ends when code is defined that is not
+Tempest's own (`session`). Revise evaluating an edited file, an `@eval` into
+a package and a function redefined at the prompt are one event to Julia, a
+world after the last, and end a session alike, so that the code a table's
+answer was derived from is the code the process runs. Tempest's own
+definitions, its kernels' functions, which every build makes, leave it
+standing (`own_definition`).
 
-Code is named by content rather than by the world it was found in, Julia's
-rule for its own compiled code: every build defines its kernels' functions
-(`generated`), so a world in the key would never be met again by a later
-preparation, and Julia's validity for a range of worlds rests on the edges
-only its own compiler keeps. Content is how the stores already name code; a
-session table keys as a store does, with the session's one difference that a
-package's code is fixed.
 
 An answer missing is found outside the lock and kept with
 `get!(table, key, answer)`, the first kept winning where two tasks found one
@@ -62,21 +61,79 @@ end
 SessionTable{K, V}() where {K, V} = SessionTable{K, V}(Dict{K, V}(), ReentrantLock(), Threads.Atomic{UInt}(SESSION[]))
 
 """
-The session this process is: set as Tempest loads, other in every process. A
-table whose answers are of another session, as those a package image holds
+The session this process is in: begun as Tempest loads, and again whenever
+code is defined that is not Tempest's own (`session`), other in every process.
+A table whose answers are of another session, as those a package image holds
 are, holds none in this one.
 """
 const SESSION = Threads.Atomic{UInt}(0)
 
-# A process's session differs from that of any process before it, the one
-# that wrote the package images it loads among them.
-start_session!() = (SESSION[] = hash((getpid(), time_ns(), Base.get_world_counter())); nothing)
+# The world the session knows of: the world counter as the session began or
+# as Tempest's last own definition left it. A world past it is code defined
+# by someone else since.
+const KNOWN_WORLD = Threads.Atomic{UInt}(0)
+
+# Held while the session begins again or Tempest defines code of its own, so
+# that a world one of its definitions makes is known before it is looked at.
+const DEFINING = ReentrantLock()
+
+# A session differs from that of any process before it, the one that wrote
+# the package images it loads among them, and from any before it in the
+# process.
+function start_session!()
+    world = Base.get_world_counter()
+    SESSION[] = hash((getpid(), time_ns(), world))
+    KNOWN_WORLD[] = world
+    nothing
+end
+
+"""
+    session() -> UInt
+
+The session whose answers hold now: the one before, unless code was defined
+since that is not Tempest's own, which begins another. Julia counts a world
+for every definition, of a method, a type or a constant, by whatever made it;
+the world counter is read once per question, the lock taken only when it has
+moved.
+"""
+function session()
+    Base.get_world_counter() == KNOWN_WORLD[] || @lock DEFINING moved!()
+    SESSION[]
+end
+
+# Under `DEFINING`: a world past the known one begins a session.
+function moved!()
+    Base.get_world_counter() == KNOWN_WORLD[] || start_session!()
+    nothing
+end
+
+"""
+    own_definition(define) -> what `define()` returns
+
+Define code of Tempest's own by `define()`, as a generated kernel's function
+is (`generated`), leaving the session standing: the worlds it makes are
+known. Every build defines its kernels' functions, so a session that ended
+at them would never keep an answer to a later preparation; and a function
+defined once and never again, as a kernel's is, changes no code an answer was
+derived from. A definition by someone else before it still ends the session.
+A definition made on another thread while `define` runs is taken for
+Tempest's.
+"""
+function own_definition(define)
+    @lock DEFINING begin
+        moved!()
+        defined = define()
+        KNOWN_WORLD[] = Base.get_world_counter()
+        defined
+    end
+end
 
 # The table's answers, under its lock: none if they are of another session.
 function answers(t::SessionTable)
-    if t.session[] != SESSION[]
+    now = session()
+    if t.session[] != now
         empty!(t.table)
-        t.session[] = SESSION[]
+        t.session[] = now
     end
     t.table
 end
