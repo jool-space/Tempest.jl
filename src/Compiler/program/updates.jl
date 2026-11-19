@@ -18,12 +18,12 @@
 element_type(::Type{Traced{T}}) where {T} = T
 element_type(T) = T
 
-Base.similar(x::TracedArray, ::Type{T}, dims::Dims) where {T <: Number} =
+Base.similar(@nospecialize(x::TracedArray), ::Type{T}, dims::Dims) where {T <: Number} =
     TracedArray(x.tape, record!(x.tape, Constant(zero(element_type(T))), (), dims, element_type(T)))
 
-Base.fill(v::Traced, dims::Dims) = TracedArray(v.tape, filled(v.tape, v.id, dims))
-Base.fill(v::Traced, dims::Tuple{}) = TracedArray(v.tape, filled(v.tape, v.id, dims))
-Base.fill(v::Traced, dims::Integer...) = fill(v, Dims(dims))
+Base.fill(@nospecialize(v::Traced), dims::Dims) = TracedArray(v.tape, filled(v.tape, v.id, dims))
+Base.fill(@nospecialize(v::Traced), dims::Tuple{}) = TracedArray(v.tape, filled(v.tape, v.id, dims))
+Base.fill(@nospecialize(v::Traced), dims::Integer...) = fill(v, Dims(dims))
 
 """
     write!(x, contents)
@@ -33,7 +33,7 @@ Make node `contents`, of the shape and element type of `x`, the contents of
 make `x`) takes the contents written through those layouts, and every layout
 made from it reads them.
 """
-function write!(x::TracedArray, contents::Int)
+function write!(@nospecialize(x::TracedArray), contents::Int)
     owner = x
     while owner.layout !== nothing
         owner = owner.layout.parent
@@ -172,7 +172,7 @@ The contents of `x` with the elements that `indices` select replaced by those
 of node `v`, an array of the selection's shape and the element type of `x`.
 `indices` are a selection's, its index arrays the nodes `inputs`.
 """
-function update(x::TracedArray, indices, inputs, v::Int)
+function update(@nospecialize(x::TracedArray), indices, inputs, v::Int)
     full = isempty(inputs) && length(indices) == ndims(x) &&
         all(k -> indices[k] isa AbstractRange && indices[k] == 1:size(x, k), 1:ndims(x))
     full && return v
@@ -189,7 +189,7 @@ function converted(tape, v, ::Type{T}) where {T}
     n.eltype === T ? v.id : record!(tape, Map(Cast{T}()), (v.id,), n.dims, T; scalar = n.scalar)
 end
 
-function Base.setindex!(x::TracedArray, v, I...)
+function Base.setindex!(@nospecialize(x::TracedArray), v, I...)
     holds_traced(v) && return written_each!(x, v, I)
     y, indices = selection(x, I)
     indices = map(i -> i isa AbstractVector{<:Integer} && !(i isa TracedArray) ? linear_range(i) : i, indices)
@@ -214,7 +214,7 @@ end
 
 # `x .= ...`, `broadcast!` and `x ./= n`: the broadcast's result, filled out to
 # the shape of `x` and converted to its element type, is its new contents.
-function assign!(x::TracedArray, bc::Broadcast.Broadcasted)
+function assign!(@nospecialize(x::TracedArray), bc::Broadcast.Broadcasted)
     h = cast(eltype(x), broadcast_handle(bc, x.tape))
     write!(x, filled(x.tape, h.id, x.dims))
     x
@@ -223,7 +223,7 @@ end
 # Base writes a broadcast by the style of the destination and the broadcast
 # combined, which is `TracedStyle` wherever either is traced, whatever array
 # the other side holds: the one place every such write comes through.
-Broadcast.materialize!(::TracedStyle, x::TracedArray, bc::Broadcast.Broadcasted) = assign!(x, bc)
+Broadcast.materialize!(::TracedStyle, @nospecialize(x::TracedArray), bc::Broadcast.Broadcasted) = assign!(x, bc)
 
 # An array the function allocates itself, as `zeros(Float32, n)` does, is a
 # constant of the program and holds numbers: what a traced broadcast computes
@@ -242,7 +242,7 @@ Broadcast.materialize!(::TracedStyle, ::AbstractArray, ::Broadcast.Broadcasted) 
 # position: a write of one number a position, each a choice of that number
 # at its position and the contents elsewhere, the choices one kernel's.
 # Faster still is the array made by array code, which no loop of numbers is.
-function written_each!(x::TracedArray, v, I)
+function written_each!(@nospecialize(x::TracedArray), v, I)
     J = to_indices(x, I)
     Base.setindex_shape_check(v, (length(i) for i in J if !(i isa Integer))...)
     for (at, e) in zip(Iterators.product(map(i -> i isa Integer ? (i,) : i, J)...), v)
@@ -251,7 +251,7 @@ function written_each!(x::TracedArray, v, I)
     x
 end
 
-function Base.copyto!(dest::TracedArray, src::AbstractArray)
+function Base.copyto!(@nospecialize(dest::TracedArray), src::AbstractArray)
     length(src) <= length(dest) || throw(ArgumentError("destination has fewer elements than required"))
     holds_traced(src) && return written_each!(dest, src, (1:length(src),))
     length(src) == length(dest) || return copyto!(dest, 1, src, 1, length(src))
@@ -267,7 +267,7 @@ end
 # the collector drops it (see `moved!`), and Base's `stack` copies each slice
 # so, which moved the views of all the slices before at each one, T²/2 nodes
 # for a stack of T slices.
-function Base.copyto!(dest::TracedArray, d::Integer, src::AbstractArray, s::Integer, n::Integer)
+function Base.copyto!(@nospecialize(dest::TracedArray), d::Integer, src::AbstractArray, s::Integer, n::Integer)
     n >= 0 || throw(ArgumentError("tried to copy n=$n elements, but n should be nonnegative"))
     n == 0 && return dest
     checkbounds(dest, d:(d + n - 1))
@@ -279,19 +279,19 @@ function Base.copyto!(dest::TracedArray, d::Integer, src::AbstractArray, s::Inte
     dest
 end
 
-function Base.fill!(x::TracedArray, v)
+function Base.fill!(@nospecialize(x::TracedArray), v)
     write!(x, filled(x.tape, converted(x.tape, v, eltype(x)), x.dims))
     x
 end
 
-function Base.permutedims!(dest::TracedArray, src::AbstractArray, perm)
+function Base.permutedims!(@nospecialize(dest::TracedArray), src::AbstractArray, perm)
     p = permutedims(src, perm)
     size(p) == size(dest) || throw(DimensionMismatch("destination of size $(size(dest)) for a permutation of size $(size(p))"))
     write!(dest, converted(dest.tape, p, eltype(dest)))
     dest
 end
 
-function Base.map!(f, dest::TracedArray, xs::AbstractArray...)
+function Base.map!(f, @nospecialize(dest::TracedArray), xs::AbstractArray...)
     all(x -> size(x) == size(dest), xs) || throw(DimensionMismatch("map! over arrays of sizes $(map(size, (dest, xs...)))"))
     dest .= f.(xs...)
 end

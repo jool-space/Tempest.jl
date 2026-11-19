@@ -10,7 +10,7 @@ public gradient, withgradient, scalar_partials, stated_derivatives, stopgrad, di
 const Handle = Union{Traced, TracedArray}
 
 h(tape, id) = Traced(tape, id)
-lit(x::Traced, v) = convert(node(x).eltype, v)
+lit(@nospecialize(x::Traced), v) = convert(node(x).eltype, v)
 
 """
     scalar_partials(f, y, xs...) -> tuple
@@ -48,7 +48,7 @@ They are taken as the function's own where it has none of its own, for a
 function whose code traces, whose derivative at a branch may not be the
 function's, and for one recorded whole, whose code cannot be differentiated.
 """
-function stated_derivatives(f, y::Traced, xs::Union{Traced, Number}...)
+function stated_derivatives(f, @nospecialize(y::Traced), @nospecialize(xs::Union{Traced, Number}...))
     applicable(derivatives_given_output, y, f, xs...) || return nothing
     # One row of partials for each of the function's results; a scalar
     # function has one.
@@ -535,7 +535,7 @@ pullback(::Union{Constant, Argument}, n, id, g, tape) = map(_ -> nothing, n.inpu
 
 # Undo broadcasting: sum a contribution over the axes its input was broadcast
 # along, and give it the input's shape and element type.
-function unbroadcast(tape, c::Traced, input)
+function unbroadcast(tape, @nospecialize(c::Traced), input)
     target = tape.nodes[input]
     fitted(tape, c, (; target.dims, target.scalar, target.eltype))
 end

@@ -75,13 +75,13 @@ Traced(tape::Tape, id::Int) = Traced{tape.nodes[id].eltype}(tape, id)
     getfield(x, :id)
 end
 
-stale(x::Union{TracedArray, Traced}) = !getfield(x, :tape).open
+stale(@nospecialize(x::Union{TracedArray, Traced})) = !getfield(x, :tape).open
 
 const ENDED = "a traced value was read after the trace that made it ended: the traced function stored it where it \
     outlived the function's run, in a `Ref`, a variable it captures, a global or a container. A traced value stands for \
     one only while its function is traced: return it from the function"
 
-node(x::Union{TracedArray, Traced}) = x.tape.nodes[x.id]
+node(@nospecialize(x::Union{TracedArray, Traced})) = x.tape.nodes[x.id]
 
 # A handle stands for a value only on its tape, while the program is traced:
 # held by an operation, as a constant's value or captured by a function the
@@ -193,7 +193,7 @@ constant!(tape::Tape, x::Base.ReshapedArray{<:Integer, N, <:AbstractRange}) wher
 constant!(tape::Tape, x::LinearAlgebra.AdjOrTrans{<:Integer, <:AbstractRange}) =
     record!(tape, Reshape(), (constant!(tape, parent(x)),), size(x), eltype(x))
 
-operand_id(tape, x::Union{Traced, TracedArray}) = x.id
+operand_id(tape, @nospecialize(x::Union{Traced, TracedArray})) = x.id
 operand_id(tape, x::Number) = constant!(tape, x)
 
 # The tape of the traced operands among `args`, or among a broadcast's: a
@@ -294,19 +294,19 @@ end
 Base.:+(x::Traced) = x
 Base.:^(x::Traced, p::Integer) = record_map(^, x, p)
 # A traced choice is between operands of a map: numbers and traced arrays.
-Base.ifelse(c::Traced, a::Union{Number, TracedArray}, b::Union{Number, TracedArray}) = record_map(ifelse, c, a, b)
-Base.muladd(a::Traced, b::Real, c::Real) = record_map(muladd, a, b, c)
-Base.muladd(a::Real, b::Traced, c::Real) = record_map(muladd, a, b, c)
+Base.ifelse(@nospecialize(c::Traced), a::Union{Number, TracedArray}, b::Union{Number, TracedArray}) = record_map(ifelse, c, a, b)
+Base.muladd(@nospecialize(a::Traced), b::Real, c::Real) = record_map(muladd, a, b, c)
+Base.muladd(a::Real, @nospecialize(b::Traced), c::Real) = record_map(muladd, a, b, c)
 Base.muladd(a::Real, b::Real, c::Traced) = record_map(muladd, a, b, c)
-Base.muladd(a::Traced, b::Traced, c::Real) = record_map(muladd, a, b, c)
-Base.muladd(a::Traced, b::Traced, c::Traced) = record_map(muladd, a, b, c)
-Base.muladd(a::Traced, b::Real, c::Traced) = record_map(muladd, a, b, c)
-Base.muladd(a::Real, b::Traced, c::Traced) = record_map(muladd, a, b, c)
-Base.fma(a::Traced, b::Real, c::Real) = muladd(a, b, c)
-Base.clamp(x::Traced, lo::Real, hi::Real) = min(max(x, lo), hi)
+Base.muladd(@nospecialize(a::Traced), @nospecialize(b::Traced), c::Real) = record_map(muladd, a, b, c)
+Base.muladd(@nospecialize(a::Traced), @nospecialize(b::Traced), c::Traced) = record_map(muladd, a, b, c)
+Base.muladd(@nospecialize(a::Traced), b::Real, c::Traced) = record_map(muladd, a, b, c)
+Base.muladd(a::Real, @nospecialize(b::Traced), c::Traced) = record_map(muladd, a, b, c)
+Base.fma(@nospecialize(a::Traced), b::Real, c::Real) = muladd(a, b, c)
+Base.clamp(@nospecialize(x::Traced), lo::Real, hi::Real) = min(max(x, lo), hi)
 
 # `x^2` and other literal powers reach here from broadcasts and from code.
-function Base.literal_pow(::typeof(^), x::Traced, ::Val{p}) where {p}
+function Base.literal_pow(::typeof(^), @nospecialize(x::Traced), ::Val{p}) where {p}
     p == 0 && return one(node(x).eltype)
     p == 1 && return x
     p == 2 && return x * x
@@ -341,8 +341,8 @@ function Base.convert(::Type{Traced{T}}, x::Traced{S}) where {T, S}
     cast(T, x)
 end
 Base.float(x::Traced{T}) where {T} = cast(float(T), x)
-Base.oftype(x::Traced{T}, y::Real) where {T} = convert(T, y)
-Base.oftype(x::Traced{T}, y::Traced) where {T} = cast(T, y)
+Base.oftype(@nospecialize(x::Traced{T}), y::Real) where {T} = convert(T, y)
+Base.oftype(@nospecialize(x::Traced{T}), y::Traced) where {T} = cast(T, y)
 
 # An array converts as Base converts one to an `Array`'s type: to its own
 # type, itself; to another element type, a copy of its elements cast, which
@@ -356,10 +356,10 @@ Base.convert(::Type{T}, x::TracedArray) where {T <: TracedArray} = x isa T ? x :
 # Rounding to a type, `round(Int, x)` or `floor(Int32, x)`, is Base's: the
 # number rounded in the mode, then converted. Base asks a new number for its
 # rounding by mode, which is the primitive of that name.
-Base.round(x::Traced, ::RoundingMode{:Nearest}) = round(x)
-Base.round(x::Traced, ::RoundingMode{:Down}) = floor(x)
-Base.round(x::Traced, ::RoundingMode{:Up}) = ceil(x)
-Base.round(x::Traced, ::RoundingMode{:ToZero}) = trunc(x)
+Base.round(@nospecialize(x::Traced), ::RoundingMode{:Nearest}) = round(x)
+Base.round(@nospecialize(x::Traced), ::RoundingMode{:Down}) = floor(x)
+Base.round(@nospecialize(x::Traced), ::RoundingMode{:Up}) = ceil(x)
+Base.round(@nospecialize(x::Traced), ::RoundingMode{:ToZero}) = trunc(x)
 # A value outside the type is undefined, as a kernel's conversion leaves it.
 Base.unsafe_trunc(::Type{T}, x::Traced) where {T <: Integer} = cast(T, trunc(x))
 
@@ -748,7 +748,7 @@ Base.argmin(f, x::TracedArray) = x[last(findmin(f, x))]
 Base.extrema(x::TracedArray; dims = :) = dims isa Colon ? (minimum(x), maximum(x)) : tuple.(minimum(x; dims), maximum(x; dims))
 Base.extrema(f, x::TracedArray; dims = :) = extrema(f.(x); dims)
 
-function extreme(x::TracedArray, largest, dims)
+function extreme(@nospecialize(x::TracedArray), largest, dims)
     isempty(x) && throw(ArgumentError(dims isa Colon ? "reducing over an empty collection is not allowed; consider supplying `init` to the reducer" :
         "collection slices must be non-empty"))
     T = eltype(x)
@@ -801,14 +801,14 @@ struct CartesianAt{dims} end
 (::CartesianAt{dims})(i::Integer) where {dims} = CartesianIndices(dims)[i]
 Base.show(io::IO, ::CartesianAt{dims}) where {dims} = print(io, "CartesianIndices(", dims, ")[·]")
 
-cartesian(i::Traced, dims) = record_map(CartesianAt{dims}(), i)
-cartesian(i::TracedArray, dims) = TracedArray(i.tape, cartesian(handle(i), dims).id)
+cartesian(@nospecialize(i::Traced), dims) = record_map(CartesianAt{dims}(), i)
+cartesian(@nospecialize(i::TracedArray), dims) = TracedArray(i.tape, cartesian(handle(i), dims).id)
 
 # A Cartesian index is its components. One made from a linear index has them
 # as formulas of it, and one made from integers, as `CartesianIndex.(i, j)`
 # makes them, has them as those integers filled out to its shape, so that
 # taking them leaves no index of another type.
-function Base.getindex(c::Traced{CartesianIndex{N}}, d::Integer) where {N}
+function Base.getindex(@nospecialize(c::Traced{CartesianIndex{N}}), d::Integer) where {N}
     op = node(c).op
     n = node(c)
     if op isa Map && op.f isa Type{<:CartesianIndex} && length(n.inputs) == N && all(i -> c.tape.nodes[i].eltype <: Integer, n.inputs)
@@ -827,7 +827,7 @@ Base.length(::Traced{CartesianIndex{N}}) where {N} = N
 (::Component{I})(c::CartesianIndex) where {I} = c[I]
 
 # The linear index into an array of size `dims` a Cartesian index names.
-function linear_at(c::Traced{CartesianIndex{N}}, dims) where {N}
+function linear_at(@nospecialize(c::Traced{CartesianIndex{N}}), dims) where {N}
     op = node(c).op
     op isa Map{CartesianAt{dims}} && return Traced(c.tape, only(node(c).inputs))
     linear_index(Tuple(c), dims)
@@ -853,7 +853,7 @@ function linear_index(components, extents)
     end
     i
 end
-linear_at(c::TracedArray{CartesianIndex{N}}, dims) where {N} = TracedArray(c.tape, linear_at(handle(c), dims).id)
+linear_at(@nospecialize(c::TracedArray{CartesianIndex{N}}), dims) where {N} = TracedArray(c.tape, linear_at(handle(c), dims).id)
 
 # Products. Julia arrays among the factors are constants of the program.
 
@@ -880,7 +880,7 @@ function contract end
 # `Int` where their product is a truth value. Where the sum widens past the
 # products, the factors convert to its type, as a sum's elements do (see
 # `widened`), before a contraction in the type its products are of.
-function contract(a::TracedArray, b::TracedArray, la, lb, lo)
+function contract(@nospecialize(a::TracedArray), @nospecialize(b::TracedArray), la, lb, lo)
     S = Base.promote_op(LinearAlgebra.matprod, eltype(a), eltype(b))
     Base.promote_op(*, eltype(a), eltype(b)) === S || return contract(in_type(S, a), in_type(S, b), la, lb, lo)
     labels = Dict{Int, Int}()
@@ -891,8 +891,8 @@ function contract(a::TracedArray, b::TracedArray, la, lb, lo)
     TracedArray(a.tape, record!(a.tape, Contract(la, lb, lo), (a.id, b.id), dims, S))
 end
 
-contract(a::TracedArray, b::AbstractArray{<:Number}, la, lb, lo) = contract(a, TracedArray(a.tape, constant!(a.tape, b)), la, lb, lo)
-contract(a::AbstractArray{<:Number}, b::TracedArray, la, lb, lo) = contract(TracedArray(b.tape, constant!(b.tape, a)), b, la, lb, lo)
+contract(@nospecialize(a::TracedArray), b::AbstractArray{<:Number}, la, lb, lo) = contract(a, TracedArray(a.tape, constant!(a.tape, b)), la, lb, lo)
+contract(a::AbstractArray{<:Number}, @nospecialize(b::TracedArray), la, lb, lo) = contract(TracedArray(b.tape, constant!(b.tape, a)), b, la, lb, lo)
 contract(a::AbstractArray, b::AbstractArray, la, lb, lo) = einsum(a, la, b, lb, lo)
 
 # Each product with a traced factor, the other traced or not.
@@ -921,7 +921,7 @@ Base.:*(a::LinearAlgebra.Diagonal{<:Real}, b::TracedArray{<:Real, 1}) = a.diag .
 A layout of `x` that shares its memory: it reads later writes into `x`, and a
 write into it writes into `x`. `op` is applied to `x` and the nodes `inputs`.
 """
-function layout(x::TracedArray, op, inputs, dims)
+function layout(@nospecialize(x::TracedArray), op, inputs, dims)
     id = record!(x.tape, op, (x.id, inputs...), dims, eltype(x))
     y = TracedArray{eltype(x), length(dims)}(x.tape, id, Tuple(dims), Layout(x, op, Tuple(inputs)), WeakRef[])
     push!(x.views, WeakRef(y))
@@ -937,7 +937,7 @@ Base.copy(x::TracedArray) = TracedArray(x.tape, x.id)
 # back, as Einops' patterns do after a fold, and a transpose taken twice are
 # the array itself, so that what reads them reads what made it, as a
 # derivative's laws do (see `moved`).
-function Base.reshape(x::TracedArray, dims::Tuple{Vararg{Int}})
+function Base.reshape(@nospecialize(x::TracedArray), dims::Tuple{Vararg{Int}})
     prod(dims) == length(x) || throw(DimensionMismatch("cannot reshape $(size(x)) to $dims"))
     dims == size(x) && return x
     laid(x, Reshape) && return reshape(x.layout.parent, dims)
@@ -945,7 +945,7 @@ function Base.reshape(x::TracedArray, dims::Tuple{Vararg{Int}})
 end
 
 # Whether `x` is a layout of kind `L` of another array.
-laid(x::TracedArray, ::Type{L}) where {L} = x.layout !== nothing && x.layout.op isa L
+laid(@nospecialize(x::TracedArray), ::Type{L}) where {L} = x.layout !== nothing && x.layout.op isa L
 
 function check_permutation(x, perm)
     perm = Tuple(perm)
@@ -953,14 +953,14 @@ function check_permutation(x, perm)
     perm
 end
 
-function Base.permutedims(x::TracedArray, perm)
+function Base.permutedims(@nospecialize(x::TracedArray), perm)
     perm = check_permutation(x, perm)
     perm == ntuple(identity, ndims(x)) && return copy(x)
     TracedArray(x.tape, record!(x.tape, Permute(perm), (x.id,), map(p -> size(x, p), perm), eltype(x)))
 end
 
 # A traced array, as a view of one is, rather than Base's wrapper.
-function Base.PermutedDimsArray(x::TracedArray, perm)
+function Base.PermutedDimsArray(@nospecialize(x::TracedArray), perm)
     perm = check_permutation(x, perm)
     perm == ntuple(identity, ndims(x)) && return x
     laid(x, Permute) && return PermutedDimsArray(x.layout.parent, map(p -> x.layout.op.perm[p], perm))
@@ -1015,7 +1015,7 @@ index_axes(i) = 1
 
 # An index along the axes of extents `dims` as one axis, the linear index
 # into them: an array of Cartesian indices the linear indices it holds.
-merged_index(i::TracedArray{<:CartesianIndex}, dims) = linear_at(i, dims)
+merged_index(@nospecialize(i::TracedArray{<:CartesianIndex}), dims) = linear_at(i, dims)
 merged_index(i::AbstractArray{<:CartesianIndex}, dims) = linear_range(LinearIndices(dims)[i])
 merged_index(i, dims) = i
 
@@ -1031,7 +1031,7 @@ of several axes selects from `vec(x)`, and an array of Cartesian indices
 beside other indices from `x` with the axes it names merged. A sole integer
 is its Cartesian index instead.
 """
-function selection(x::TracedArray, I)
+function selection(@nospecialize(x::TracedArray), I)
     I = Base.to_indices(x, map(index_array, Tuple(Iterators.flatten(map(index_components, I)))))
     length(I) == 1 && only(I) isa Integer && ndims(x) != 1 && return (checkbounds(x, only(I)); (x, Tuple(CartesianIndices(x)[only(I)])))
     spans = length(I) == 1 ? [ndims(x)] : Int[index_axes(i) for i in I]
@@ -1057,7 +1057,7 @@ end
 
 # With `scalar`, as `getindex`, a selection copies the elements, and one
 # element is a number; otherwise it is a view that shares their memory.
-function select(x::TracedArray, I; scalar)
+function select(@nospecialize(x::TracedArray), I; scalar)
     x, indices = selection(x, I)
     for (k, i) in enumerate(indices)
         i isa TracedArray || all(j -> 1 <= j <= size(x, k), i) || throw(BoundsError(x, I))
@@ -1073,15 +1073,15 @@ function select(x::TracedArray, I; scalar)
     scalar ? Traced(x.tape, id) : TracedArray(x.tape, id)
 end
 
-Base.getindex(x::TracedArray, I...) = any(reads_element, I) ? select_elements(x, I) : select(x, I; scalar = true)
-Base.view(x::TracedArray, I...) = select(x, I; scalar = false)
+Base.getindex(@nospecialize(x::TracedArray), I...) = any(reads_element, I) ? select_elements(x, I) : select(x, I; scalar = true)
+Base.view(@nospecialize(x::TracedArray), I...) = select(x, I; scalar = false)
 
 # In a broadcast's function, indices that stand for elements of arrays, as in
 # `getindex.(Ref(x), i, j)`, select an element at each position of their
 # broadcast, as Base's broadcast does: a gather from `vec(x)` by the linear
 # index they name together, itself an element. A selection by them as arrays
 # would take every combination of their positions.
-function select_elements(x::TracedArray, I)
+function select_elements(@nospecialize(x::TracedArray), I)
     I = Tuple(Iterators.flatten(map(index_components, I)))
     linear = first(I)
     stride = 1
@@ -1103,9 +1103,9 @@ Base.rotl90(x::TracedArray{<:Any, 2}) = reverse(permutedims(x); dims = 1)
 Base.rotr90(x::TracedArray{<:Any, 2}) = reverse(permutedims(x); dims = 2)
 Base.rot180(x::TracedArray{<:Any, 2}) = reverse(x)
 
-Base.circshift(x::TracedArray, shift::Real) = circshift(x, (shift,))
-Base.circshift(x::TracedArray, shifts) = circshift(x, Tuple(shifts))
-function Base.circshift(x::TracedArray, shifts::Tuple{Vararg{Integer}})
+Base.circshift(@nospecialize(x::TracedArray), shift::Real) = circshift(x, (shift,))
+Base.circshift(@nospecialize(x::TracedArray), shifts) = circshift(x, Tuple(shifts))
+function Base.circshift(@nospecialize(x::TracedArray), shifts::Tuple{Vararg{Integer}})
     y = copy(x)
     for k in 1:min(ndims(x), length(shifts))
         n = size(x, k)
@@ -1133,16 +1133,16 @@ function Base.repeat(x::TracedArray; inner = nothing, outer = nothing)
 end
 
 # Triangles are masks of positions, not loops over elements.
-LinearAlgebra.tril(x::TracedArray{<:Any, 2}, k::Integer = 0) =
+LinearAlgebra.tril(@nospecialize(x::TracedArray{<:Any, 2}), k::Integer = 0) =
     ifelse.(reshape(1:size(x, 1), :, 1) .- reshape(1:size(x, 2), 1, :) .>= -k, x, zero(eltype(x)))
-LinearAlgebra.triu(x::TracedArray{<:Any, 2}, k::Integer = 0) =
+LinearAlgebra.triu(@nospecialize(x::TracedArray{<:Any, 2}), k::Integer = 0) =
     ifelse.(reshape(1:size(x, 1), :, 1) .- reshape(1:size(x, 2), 1, :) .<= -k, x, zero(eltype(x)))
 
 # Scans: folds that keep the axes they fold along, as Base's `accumulate`
 # defines them, each element the fold of the elements up to it.
 
 "`x` scanned by the fold `f` along `axes` (see `Accumulate`)."
-function scan(f::Fold, x::TracedArray, axes; reverse = false, exclusive = false)
+function scan(f::Fold, @nospecialize(x::TracedArray), axes; reverse = false, exclusive = false)
     op = Accumulate(f, Tuple(axes), reverse, exclusive)
     TracedArray(x.tape, record!(x.tape, op, (x.id,), size(x), fold_eltype(f, eltype(x))))
 end
@@ -1399,7 +1399,7 @@ constant_handle(tape, x::AbstractArray) = TracedArray(tape, constant!(tape, x))
 # `map` over arrays of one shape is a broadcast, and `dot` a sum of products,
 # rather than loops over their elements. A map of arrays of no dimensions is
 # one, where their broadcast is a number.
-function Base.map(f, x::TracedArray, xs::AbstractArray...)
+function Base.map(f, @nospecialize(x::TracedArray), xs::AbstractArray...)
     all(y -> size(y) == size(x), xs) || throw(DimensionMismatch("map over arrays of sizes $(map(size, (x, xs...)))"))
     Broadcast.broadcast_preserving_zero_d(f, x, xs...)
 end
@@ -1418,7 +1418,7 @@ end
 # that their squares do not overflow, which branches on the elements; a sum
 # accumulates in Float32 at least, wide enough for the squares of the numbers
 # a network holds.
-function LinearAlgebra.norm(x::TracedArray{<:Real}, p::Real = 2)
+function LinearAlgebra.norm(@nospecialize(x::TracedArray{<:Real}), p::Real = 2)
     p == 2 && return sqrt(float(sum(abs2, x)))
     p == 1 && return float(sum(abs, x))
     p == Inf && return float(maximum(abs, x))
@@ -1430,7 +1430,7 @@ function LinearAlgebra.norm(x::TracedArray{<:Real}, p::Real = 2)
     sum(abs.(T.(x)) .^ q)^inv(q)
 end
 
-LinearAlgebra.normalize(x::TracedArray{<:Real}, p::Real = 2) = x ./ norm(x, p)
+LinearAlgebra.normalize(@nospecialize(x::TracedArray{<:Real}), p::Real = 2) = x ./ norm(x, p)
 
 # Tracing a function.
 
