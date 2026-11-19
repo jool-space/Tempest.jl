@@ -400,7 +400,9 @@ end
 # it is built on, as cuTile's arrays state it in their type, and may be
 # pointed only at storage aligned as much. A step's slice of a value of `n`
 # elements along the steps starts at `(t - 1)n` of them, aligned as `n` is.
-least_aligned(buffers) = argmin(b -> trailing_zeros(reinterpret(UInt, pointer(b))), collect(buffers))
+# Taken unspecialized and gathered into a vector of `Any`, compiled once
+# whatever views of whatever arrays the steps' buffers are.
+least_aligned(@nospecialize(buffers)) = argmin(b -> trailing_zeros(reinterpret(UInt, pointer(b))), collect(Any, buffers))
 
 """
     build_stepped(d, p, g, buffers, r) -> (launch, description) or nothing
@@ -420,8 +422,14 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers, r::Resources)
     fs = [carried_from(p.graph, c) for c in cs]
     cd = values[first(cs)].definition::Carried
     # A state, or a value one is carried from, where the plan does not store
-    # it, is stored by the steps, each step's where the next reads it.
-    own = Dict(f => allocate(target, values[f].eltype, storage_length(values[f])) for f in [cs; fs] if buffers[f] === nothing)
+    # it, is stored by the steps, each step's where the next reads it. The
+    # tables and vectors below hold arrays, views and closures of whatever
+    # element types and operands the program has, as `Any`, so that what
+    # builds the steps compiles once.
+    own = Dict{Int, Any}()
+    for f in [cs; fs]
+        buffers[f] === nothing && (own[f] = allocate(target, values[f].eltype, storage_length(values[f])))
+    end
     stacked(u) = haskey(own, u) ? own[u] : buffers[u]
     # The step's slice of value `u` along its last axis, at step `t`.
     function slice(u, t)
@@ -431,8 +439,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers, r::Resources)
     # The start: each state's first step where the recurrence starts, and
     # each sum riding the steps at zero.
     first_step = cd.reverse ? steps : 1
-    starts = map(cs) do c
-        init = values[c].definition.init
+    function start_of(c, @nospecialize(init))
         if init isa Literal
             () -> fill!(slice(c, first_step), init.value)
         elseif init isa Read && !any(e -> mentions(e, cd.axis), init.index) && buffers[init.value] !== nothing &&
@@ -450,6 +457,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers, r::Resources)
             nothing
         end
     end
+    starts = Any[start_of(c, values[c].definition.init) for c in cs]
     any(isnothing, starts) && return nothing
     sums = s.sums
     start = () -> (foreach(x -> x(), starts); foreach(r -> fill!(buffers[r], zero(values[r].eltype)), sums))
@@ -502,7 +510,7 @@ function build_stepped(d::Decider, p::Plan, g::Group, buffers, r::Resources)
     # A sum its step's kernels could not write over the steps before's is
     # copied there after them.
     copies = Any[(let to = bbuffers[a], from = bbuffers[r]; () -> copyto!(to, from) end) for (r, a) in st.staged]
-    built = [build_group(bd, bp, bg, x, bbuffers, r) for (bg, x) in zip(bp.groups, ds)]
+    built = Any[build_group(bd, bp, bg, x, bbuffers, r) for (bg, x) in zip(bp.groups, ds)]
     launches = Any[b[1] for b in built]
     all(repoints, launches) || return nothing
     # Per step, where each launch reads the states and the values along the
