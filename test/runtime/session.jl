@@ -140,6 +140,24 @@ divisor = 6
     global divisor = 6
 end
 
+# The library's tables name the code a template is, with the globals it
+# reads, which change in a session without ending it.
+# Functions are defined before a session is looked at: a function defined,
+# as a closure written at the top level is where it is reached, ends it.
+divided_mean = C.Template(x -> sum(x; dims = 1) ./ divisor; inputs = (X = (:r, :c),), outputs = (:Y,))
+mean_of_six(x) = sum(x; dims = 1) ./ 6
+bound(t, f, a) = [get(C.match_template(t, 1, T.CPUTarget(), g), 1, nothing) for g in C.group_views(C.plan(C.rewrite(C.lower(trace(f, a)))))]
+
+@testset "the library's tables name the code a template reads" begin
+    a = data(6, 4)
+    during = C.session()
+    @test only(bound(divided_mean, mean_of_six, a)) !== nothing
+    global divisor = 5
+    @test all(isnothing, bound(divided_mean, mean_of_six, a))
+    @test C.session() == during
+    global divisor = 6
+end
+
 @testset "a function redefined in the session is other code" begin
     x = single(data(256, 64)) ./ 4
     if CUDA_FUNCTIONAL
@@ -210,6 +228,32 @@ if CUDA_FUNCTIONAL
         prepare(p, x; target, build = false)
         ex = @test_logs min_level = Base.CoreLogging.Warn prepare(p, x; target)
         @test sprint(T.explain, ex) == fresh
+    end
+
+    @testset "cuTile's tables name the architecture and the code their answers were derived from" begin
+        X = Base.get_extension(Tempest, :cuTileExt)
+        arch = X.ct.device_sm_arch()
+        table_keys(t) = @lock t.lock collect(keys(C.answers(t)))
+        x = single(data(256, 64)) ./ 4
+        # The keys are read as the preparation leaves them: the closures
+        # below, defined where they are reached, end the session.
+        C.forget_session!()
+        Base.invokelatest(scaled_run, scaled, x, T.CUDATarget())
+        lowered, said, emitted = table_keys(X.LOWERED), table_keys(X.SAID), table_keys(X.EMITTED)
+        named = C.definitions((act,))
+        @test !isempty(named)
+        # Whether cuTile lowers `act`: by its definition and the architecture
+        # its trial compiled for.
+        @test any(k -> k[1] === act && k[2] == named && k[5] == arch, lowered)
+        # What the generator says of a group, and the kernels it emits: by
+        # the code the group's functions are and, compiling, the architecture.
+        @test all(k -> k[4][3] && k[4][4] == arch, said) && any(k -> issubset(named, k[4][2]), said)
+        @test !isempty(emitted) && all(k -> k[1][3] && k[1][4] == arch, emitted)
+        # A preparation that compiles nothing reads no architecture.
+        C.forget_session!()
+        prepare(trace(scaled, x), CuArray(x); target = T.CUDATarget(), build = false)
+        said = table_keys(X.SAID)
+        @test !isempty(said) && all(k -> !k[4][3] && k[4][4] === nothing, said)
     end
 
     @testset "groups alike but numbered in different orders share their kernels, each computing its own" begin
