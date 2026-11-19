@@ -199,6 +199,21 @@ end
     end
 end
 
+# A developed package's identity is a hash of its files as they are when a
+# session first names it, which need not be the code the process loaded: a
+# file edited and not evaluated, without Revise or before it revises, is
+# read as the package's code once any definition ends the session, and the
+# kernels of the code loaded are stored under the edited files' identity,
+# which a later process loading those files is handed. Closed by the
+# store's key naming the code the process has loaded.
+@testset "a package's identity is of the code loaded, its file edited and not evaluated, once the store's key names the code loaded" begin
+    loaded = C.package_identity(Redefined)
+    write_package(5)
+    Core.eval(@__MODULE__, :(defined_elsewhere(x) = x))
+    @test_broken C.package_identity(Redefined) == loaded
+    write_package(2)
+end
+
 # The session asks again once a package's code is defined anew, but the
 # kernel store answers by the package's identity, the hash of its files,
 # which an `@eval` leaves as it was: the kernel compiled before is loaded
