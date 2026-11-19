@@ -6,9 +6,10 @@
 # what it resolved: the second pass forgets the kernels the generator emitted
 # and the functions it loaded (`EMITTED`, `FUNCTIONS`), so that each kernel is
 # emitted again and resolved by its content. The first and last passes forget
-# what the session keeps (`forget_session!`), as a new process starts without
-# it: the last reads what the first wrote (the store before Julia 1.14 commits
-# at once), and checks each kernel by what its compilation used.
+# what the session keeps (`forget_session!`), in this one process: the last
+# reads what the first wrote (the store before Julia 1.14 commits at once),
+# and checks each kernel by what its compilation used. Two processes, the
+# second with code changed, are code_changed.jl's.
 using Tempest, Test, NNlib, CUDACore
 import cuBLAS, cuTile
 include(joinpath(@__DIR__, "..", "setup.jl"))

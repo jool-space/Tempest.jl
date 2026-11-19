@@ -231,22 +231,20 @@ end
     end
 end
 
-# A developed package's identity is a hash of its files as they are when a
-# session first names it, which need not be the code the process loaded: a
-# file edited and not evaluated, without Revise or before it revises, is
-# read as the package's code once any definition ends the session. A kernel
-# stored then is checked in a later process by the code its compilation
-# reached as it was loaded, a developed package's methods being no installed
-# image's, which the edit changes; what the key's identity still stands for
-# alone is code of a developed package that a compilation runs and inference
-# does not reach, as a developed compiler's own. Closed by identifying a
-# developed package by the image it was loaded from.
-@testset "a package's identity is of the code loaded, its file edited and not evaluated, once a developed package is identified by the image it was loaded from" begin
-    loaded = C.package_identity(Redefined)
+# A package is identified by the image it was loaded from, which its files
+# edited and not evaluated leave as it was; one loaded from its files, as this
+# one is, has no image and its code is written out by its code as loaded.
+@testset "a package's identity is of the code loaded, its file edited and not evaluated" begin
+    loaded = C.content_key(Redefined.act)
+    @test C.package_identity(Redefined) == "unidentified"
     write_package(5)
     Core.eval(@__MODULE__, :(defined_elsewhere(x) = x))
-    @test_broken C.package_identity(Redefined) == loaded
-    write_package(2)
+    @test C.content_key(Redefined.act) == loaded
+    redefine(5; file = true)
+    @test C.content_key(Redefined.act) != loaded
+    redefine(2; file = true)
+    @test C.content_key(Redefined.act) == loaded
+    @test startswith(C.package_identity(LinearAlgebra), "image ")
 end
 
 # The session asks again once a package's code is defined anew, and the

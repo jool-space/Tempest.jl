@@ -27,6 +27,22 @@
         @test success(process)
     end
 
+    # A kernel stored by one process is not loaded by another whose code it
+    # was compiled from differs, where neither key nor identity names it, and
+    # is loaded where nothing differs: two processes on one store, the second
+    # with the script's code changed.
+    mktempdir() do store
+        fixture = joinpath(@__DIR__, "..", "fixtures", "code_changed.jl")
+        for variant in (1, 2)
+            child = `$(Base.julia_cmd()) --project=$(Base.active_project()) $fixture`
+            output = IOBuffer()
+            process = run(pipeline(ignorestatus(addenv(child, "JULIA_OBJCACHE_PATH" => store, "VARIANT" => string(variant)));
+                stdout = output, stderr = output))
+            success(process) || println(stderr, String(take!(output)))
+            @test success(process)
+        end
+    end
+
     # Captured graphs are destroyed before the modules they launch are
     # unloaded: graphs that outlive their programs and are collected
     # after them, and a graph alive when the process exits.

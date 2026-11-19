@@ -5,10 +5,11 @@
 # A key is a hash of the kernel's code and everything that decides its binary:
 # the generated source, written out with every function and type it names; the
 # argument types; the compiler options; the toolchain; and the identity of each
-# package those names come from (its installed version, or a hash of its sources
-# when it is developed). Code outside any package is identified by its lowered
-# code. The binary's parameters follow from the argument types, so a cached
-# kernel is its entry name and its binary.
+# package those names come from, the build of the image it was loaded from.
+# Code no image holds, a script's, or a package's loaded from its files, is
+# written by its code: its lowered code, with the values of the constants it
+# reads, and a value by its content. The binary's parameters follow from the
+# argument types, so a cached kernel is its entry name and its binary.
 #
 # A key names the code a kernel is compiled from only as far as its source
 # names it: what the compilation reached beyond, by inference, the key cannot
@@ -18,24 +19,22 @@
 # one deleted, change the kernel and not its key. So a kernel is stored with
 # what its compilation used, read from the edges inference keeps
 # (`dependencies`): each call's signature with the methods it matched in the
-# method table it was dispatched in, each `invoke`, each global and each type,
-# with what identifies each then; and it loads only while each of them still
-# holds in this process (`holds`), as Julia checks a package image's code
-# against the session that loads it. Each is stored once, under its digest,
-# and checked once a session, as kernels share most of what they reach.
+# method table it was dispatched in, each `invoke`, each global inference
+# kept an edge to and each type, with what identifies each then; and it loads
+# only while each of them still holds in this process (`holds`), as Julia
+# checks a package image's code against the session that loads it. Each is
+# stored once, under its digest, and checked once a session, as kernels share
+# most of what they reach. A kernel whose dependencies cannot all be written
+# so that another process reads back the same, or whose inference cannot be
+# read, is not stored.
 #
-# A method is identified by its package where an installed package's image
-# holds it, and otherwise by its lowered code as loaded: code outside packages,
-# a method a script evaluated into a package's module, a developed package's,
-# whose files may have changed since they were loaded, Tempest's own. A
-# developed package is named in a key by its files all the same, for the code
-# of it a compilation runs that inference does not reach, as a compiler's
-# own. Tempest's own code is left
-# out of a key (`content_key`'s `checked`), so that an edit to Tempest
-# compiles again only the kernels whose code it changed. A kernel that failed
-# to compile is kept the same way, with what its inference used, and fails
-# again only while that holds; one whose inference cannot be read is not
-# kept. Before Julia 1.12 inference keeps no edges, there is nothing to check
+# A method is identified by the build of the image that holds it, and
+# otherwise by its code as loaded (`method_identity`). Tempest's own code is
+# identified by its code wherever it was loaded from, and left out of a key
+# (`content_key`'s `checked`), so that an edit to Tempest compiles again only
+# the kernels whose code it changed. A kernel that failed to compile is kept
+# the same way, with what its inference used, and fails again only while that
+# holds. Before Julia 1.12 inference keeps no edges, there is nothing to check
 # a kernel by, and nothing is loaded from the store: kernels compile in every
 # process, once a session.
 #
@@ -114,13 +113,16 @@ function store_failure(key, message::String; dependencies)
     put_entry(key, dependencies, [reinterpret(UInt8, [UInt32(0)]); codeunits(message)])
 end
 
-# An entry whose dependencies could not be read is not kept, nor any before
-# Julia 1.12, which nothing would load.
+# An entry whose dependencies could not be read, or not all written so that
+# another process reads them back the same (`written`), is not kept, nor any
+# before Julia 1.12, which nothing would load.
 put_entry(key, ::Nothing, rest) = nothing
 
 function put_entry(key, dependencies, rest)
     EDGES || return nothing
-    digests = UInt128[kept(d) for d in dependencies]
+    each = map(written, dependencies)
+    any(isnothing, each) && return nothing
+    digests = UInt128[kept(bytes) for bytes in each]
     ObjCache.put!(KERNELS, store_key(key), [reinterpret(UInt8, [UInt32(length(digests))]); reinterpret(UInt8, digests); rest])
     nothing
 end
@@ -259,22 +261,45 @@ canonical(c::Canonical, m::Module) = (push!(c.roots, Base.moduleroot(m)); print(
 function canonical(c::Canonical, g::GlobalRef)
     canonical(c, g.mod)
     print(c.io, ".", g.name)
-    # Code outside any package is identified by what its names refer to.
-    if !identified(g.mod) && isdefined(g.mod, g.name) && !(g in c.seen)
+    # Code no image holds is identified by what its names refer to; and so is
+    # a constant whose value no image's identity names, which inference may
+    # fold into code compiled from it.
+    if isdefined(g.mod, g.name) && !(g in c.seen) && (!identified(g.mod) || unnamed_constant(g))
         push!(c.seen, g)
         print(c.io, " = ")
         canonical(c, getglobal(g.mod, g.name))
     end
 end
 
-function canonical(c::Canonical, @nospecialize(x::Array))
+# A constant inference folds into code compiled from it, plain data, whose
+# value its package's identity does not name: Tempest's own, whose identity a
+# checked key leaves out, or one defined since the image was loaded. A
+# function, type or module is named by its name, its code checked where it is
+# called; a constant holding mutable state, a table, by its name, as code
+# compiled from it reads that state where it runs.
+function unnamed_constant(g::GlobalRef)
+    isconst(g.mod, g.name) || return false
+    value = getglobal(g.mod, g.name)
+    value isa Function && return false
+    isbits(value) || value isa Union{String, Symbol} || return false
+    own_code(g.mod) || !defined_in_image(convert(Core.Binding, g))
+end
+
+defined_in_image(b::Core.Binding) = isdefined(b, :partitions) && in_image(b.partitions)
+
+# An array or a memory by its elements: a dictionary, whose fields hold its
+# keys and values in memories, by its contents.
+function canonical(c::Canonical, @nospecialize(x::Union{Array, Memory}))
     print(c.io, "array ")
     canonical(c, typeof(x))
     print(c.io, size(x))
     if isbitstype(eltype(x))
-        print(c.io, " ", bytes2hex(sha256(reinterpret(UInt8, vec(x)))))
+        print(c.io, " ", bytes2hex(sha256(reinterpret(UInt8, collect(vec(x))))))
     else
-        foreach(y -> (print(c.io, " "); canonical(c, y)), x)
+        for i in eachindex(x)
+            print(c.io, " ")
+            isassigned(x, i) ? canonical(c, x[i]) : print(c.io, "#undef")
+        end
     end
 end
 
@@ -283,10 +308,18 @@ function canonical(c::Canonical, @nospecialize(T::Type))
     canonical_type(c, T)
 end
 
-# Any other value: its type, then its fields.
+# Any other value: its type, then its fields; a primitive value, as an enum's,
+# by its bytes; a pointer, which means nothing in another process, by its
+# address in this session, so that no other session is handed what was
+# derived from it.
 function canonical(c::Canonical, @nospecialize(x))
     T = typeof(x)
     canonical_type(c, T)
+    if isprimitivetype(T)
+        print(c.io, "(", bytes2hex(reinterpret(UInt8, [x])))
+        x isa Union{Ptr, Core.LLVMPtr} && print(c.io, " in session ", session())
+        return print(c.io, ")")
+    end
     Base.issingletontype(T) && return
     if ismutable(x)
         x in c.seen && return print(c.io, "(seen)")
@@ -365,21 +398,19 @@ function canonical_definition(c::Canonical, @nospecialize(T::DataType))
         method = match.method
         print(c.io, " method ")
         canonical_type(c, method.sig)
-        code = try
-            Base.uncompressed_ast(method).code
-        catch
-            Any[string(method.file, ":", method.line)]
-        end
-        foreach(s -> (print(c.io, "; "); canonical(c, s)), code)
+        foreach(s -> (print(c.io, "; "); canonical(c, s)), lowered_code(method))
     end
     print(c.io, "]")
 end
 
-# Whether a module's code is identified by its package: Core, Base, the
-# standard library, and installed or developed packages. Asked of every module
-# a kernel's source names, and the same all session.
+# Whether a module's code is identified by its package: Core, Base, and a
+# package loaded from an image, whose build names the code it holds, installed
+# or developed; and Tempest, whose own code a checked key leaves out, and
+# whose image its precompile workload is building. A package loaded from its
+# files is written by its code, as a script is. Asked of every module a
+# kernel's source names.
 identified(m::Module) = get!(() -> find_identified(Base.moduleroot(m)), IDENTIFIED, Base.moduleroot(m))
-find_identified(r::Module) = r === Core || r === Base || pkgdir(r) !== nothing
+find_identified(r::Module) = r === Core || r === Base || r === ROOT || (pkgdir(r) !== nothing && (in_image(r) || own_root(r)))
 
 const IDENTIFIED = SessionTable{Module, Bool}()
 
@@ -422,30 +453,15 @@ const IDENTITIES = SessionTable{Module, String}()
 """
     package_identity(m) -> String
 
-What identifies the code of the package `m`: the Julia build for Core, Base and
-the standard library, the installation path (which names the version's content)
-for an installed package, and a hash of its sources for a developed one: the
-.jl files under src/ and ext/, where it has them, not the .cov files a run
-with coverage writes beside them as its processes exit.
+What identifies the code of the package `m` as this process loaded it: the
+build of the image it was loaded from, which Julia rebuilds when the
+package's files, its dependencies or its compile-time preferences change.
+A package loaded from its files has none, and its code is written out where
+a key names it (`identified`).
 """
 package_identity(m::Module) = get!(() -> find_identity(m), IDENTITIES, m)
 
-function find_identity(m::Module)
-    dir = pkgdir(m)
-    if installed(m)
-        return dir === nothing || startswith(dir, Sys.STDLIB) ? string("julia ", VERSION, " ", Base.GIT_VERSION_INFO.commit) : dir
-    end
-    dir === nothing && return "unidentified"
-    ctx = SHA2_256_CTX()
-    for sub in filter(sub -> isdir(joinpath(dir, sub)), ["src", "ext"]), (root, _, files) in walkdir(joinpath(dir, sub))
-        for file in sort(filter(endswith(".jl"), files))
-            path = joinpath(root, file)
-            update!(ctx, codeunits(relpath(path, dir)))
-            update!(ctx, read(path))
-        end
-    end
-    string("sources ", bytes2hex(digest!(ctx)))
-end
+find_identity(m::Module) = identified(m) ? string("image ", Base.module_build_id(m)) : "unidentified"
 
 ## What a kernel's compilation used
 
@@ -470,8 +486,11 @@ What a kernel's compilation used, and what it found then, as `dependencies`
 reads it: a call (`:call`) of a signature, and the methods it matched in the
 method table the compilation dispatched in (`table`: the global holding an
 overlay table, or `nothing` for Julia's own); an `invoke` (`:invoke`) of a
-signature, and the method it named; a global (`:global`) and what it held;
-or a type (`:type`) a method was specialized on, and its fields. What it
+signature, and the method it named; a global inference kept an edge to
+(`:global`) and what it held, where the constants a method reads of its own
+module, which inference keeps no edge to, are written with the method's code
+(`method_identity`); or a type (`:type`) a method was specialized on, its
+fields, mutability and supertype. What it
 found is written by what identifies it (`method_identity`, `global_identity`,
 `type_text`).
 """
@@ -488,18 +507,16 @@ end
 What a kernel compiled from the code instance `code` used, as inference's
 edges record it: each call its inference made, from the kernel down, with the
 methods it matched in `table`, the method table the compilation dispatched
-in; each `invoke` and global; and each type its methods were specialized on
-that no package's image holds. `lookup(mi)` gives the code instance of a
+in; each `invoke`, and each global its edges name; and each type its methods
+were specialized on that no package's image holds. `lookup(mi)` gives the code instance of a
 method instance an edge names, as the compiler that inferred them caches it.
-What names a function Tempest generated is left out, since the key holds its
-source and no other session can name it.
 """
 function dependencies(code, lookup, table::Union{Nothing, Core.MethodTable})
     EDGES || return Dependency[]
     at = table_name(table)
     found = Set{Dependency}()
     seen = Base.IdSet{Any}()
-    keep!(kind, named, text) = nameable(named) && push!(found, Dependency(kind, at, named, text))
+    keep!(kind, named, text) = push!(found, Dependency(kind, at, named, text))
     function visit(x)
         x in seen && return
         push!(seen, x)
@@ -575,51 +592,129 @@ table_name(t::Core.MethodTable) = t.module === Core && t.name === :methodtable ?
 
 # The view of a method table that inference dispatches through in `world`.
 method_view(::Nothing, world) = Core.Compiler.InternalMethodTable(world)
-method_view(g::GlobalRef, world) = Core.Compiler.OverlayMethodTable(world, getglobal(g.mod, g.name))
+method_view(g::GlobalRef, world) = isdefined(g.mod, g.name) ? Core.Compiler.OverlayMethodTable(world, getglobal(g.mod, g.name)) : nothing
 
-# Whether another session can read `x` back: not where it names a function
-# Tempest generated, whose name is its session's, nor an anonymous function
-# of `Main`, which serialization writes out whole and reads back as a type of
-# its own. The key holds the code of either, from the source that defined it.
-nameable(g::GlobalRef) = g.mod !== Generated
-function nameable(@nospecialize(T))
-    T isa TypeVar && return nameable(T.ub)
-    T isa Type || return nameable(typeof(T))
-    T = Base.unwrap_unionall(T)
-    T isa Union && return all(nameable, Base.uniontypes(T))
-    T isa DataType || return true
-    T.name.module !== Generated && !Serialization.should_send_whole_type(nothing, T) && all(nameable, T.parameters)
+# A dependency as another process reads it back. A type serialization cannot
+# name, an anonymous function of `Main`, which it writes out whole and reads
+# back as a type of its own, or a function Tempest generated, whose name is
+# its session's, is written by where it is defined and what it is: its global
+# and its definition, or its source. Read back, it is that global or that
+# source's function in the reading session, where its definition is the same,
+# and the dependency does not hold where there is none. A type neither names
+# makes the kernel unstorable (`nothing`).
+# The module and the name, not a `GlobalRef`, which serialization writes as
+# the anonymous function it names, whole.
+struct Anonymous
+    mod::Module
+    name::Symbol
+    parameters::Vector{Any}
+    definition::String
 end
+
+# A generated function by its source's content, which values spliced into it
+# take part in.
+struct GeneratedType
+    source::String
+end
+
+struct Applied
+    wrapper::Any
+    parameters::Vector{Any}
+end
+
+struct Unportable <: Exception end
+
+function written(d::Dependency)
+    named = try
+        portable(d.named)
+    catch err
+        err isa Unportable || rethrow()
+        return nothing
+    end
+    io = IOBuffer()
+    serialize(io, (d.kind, d.table, named, d.found))
+    take!(io)
+end
+
+function portable(@nospecialize(x))
+    x isa Type || return x
+    T = Base.unwrap_unionall(x)
+    if T isa Union
+        parts = Any[portable(S) for S in Base.uniontypes(T)]
+        return all(((S, P),) -> S === P, zip(Base.uniontypes(T), parts)) ? x : Applied(Union, parts)
+    end
+    T isa DataType || return x
+    source = generated_source(T)
+    source === nothing || return x isa UnionAll ? throw(Unportable()) : GeneratedType(content_key(source))
+    T.name.module === Generated && throw(Unportable())
+    parameters = Any[p isa Type ? portable(p) : p isa TypeVar ? p : portable_value(p) for p in T.parameters]
+    if Serialization.should_send_whole_type(nothing, T)
+        x === T.name.wrapper && return Anonymous(T.name.module, T.name.name, Any[], definition_text(x))
+        x isa UnionAll && throw(Unportable())
+        return Anonymous(T.name.module, T.name.name, parameters, definition_text(T))
+    end
+    all(((p, q),) -> p === q, zip(T.parameters, parameters)) && return x
+    x isa UnionAll && throw(Unportable())
+    Applied(T.name.wrapper, parameters)
+end
+
+# A value among a type's parameters, as a function in `Val{f}`: its type
+# portable where it is one serialization cannot name.
+portable_value(@nospecialize(v)) = Base.issingletontype(typeof(v)) && portable(typeof(v)) !== typeof(v) ? throw(Unportable()) : v
+
+function restored(@nospecialize(x))
+    x isa Applied && return x.wrapper === Union ? Union{map(restored, x.parameters)...} : x.wrapper{map(restored, x.parameters)...}
+    if x isa GeneratedType
+        found = generated_type(x.source)
+        found === nothing && throw(Unportable())
+        return found
+    end
+    if x isa Anonymous
+        isdefined(x.mod, x.name) || throw(Unportable())
+        wrapper = getglobal(x.mod, x.name)
+        T = isempty(x.parameters) ? wrapper : wrapper{map(restored, x.parameters)...}
+        definition_text(T) == x.definition || throw(Unportable())
+        return T
+    end
+    x
+end
+
+# The function Tempest generated in this session from a source of the content
+# `key`, if any: each generated function's source written once a session.
+function generated_type(key::String)
+    found = get(GENERATED_BY_CONTENT, key, nothing)
+    found === nothing || return found
+    asked = session()
+    for (T, source) in @lock GENERATED_LOCK collect(GENERATED_SOURCES)
+        get(INDEXED, T, false) && continue
+        get!(GENERATED_BY_CONTENT, content_key(source), T, asked)
+        get!(INDEXED, T, true, asked)
+    end
+    get(GENERATED_BY_CONTENT, key, nothing)
+end
+
+const GENERATED_BY_CONTENT = SessionTable{String, Any}()
+const INDEXED = SessionTable{Any, Bool}()
+
+definition_text(@nospecialize(T)) = (c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}()); canonical_type(c, T); bytes2hex(sha256(take!(c.io))))
 
 # Whether `x`, a method, a binding's partition or a type's name of module `m`,
-# is what its package's identity names: held by the image of an installed
-# package, whose version names its code. Not a script's code, nor a method a
-# script evaluated into the package's module since, which no image holds; nor
-# the code of a developed package, Tempest among them, whose files can differ
-# from the code loaded from them.
-by_package(@nospecialize(x), m::Module) = installed(Base.moduleroot(m)) && in_image(x)
+# is what its package's identity names: held by the image of a package other
+# than Tempest, whose build names its code. Not a script's code, nor a method
+# a script evaluated into the package's module since, nor a constant defined
+# there since, which no image holds.
+by_package(@nospecialize(x), m::Module) = !own_code(m) && identified(m) && in_image(x)
 
 in_image(@nospecialize(x)) = ccall(:jl_object_in_image, Cint, (Any,), x) != 0
-
-# Core, Base, the standard library and packages installed in a depot. Asked of
-# every method a kernel's inference reached, so the answer is kept per module:
-# `pkgdir` takes the loading lock.
-installed(r::Module) = get!(() -> find_installed(r), INSTALLED, r)
-
-const INSTALLED = SessionTable{Module, Bool}()
-
-function find_installed(r::Module)
-    (r === Core || r === Base) && return true
-    dir = pkgdir(r)
-    dir !== nothing && (startswith(dir, Sys.STDLIB) || any(depot -> startswith(dir, joinpath(depot, "packages")), DEPOT_PATH))
-end
 
 """
     method_identity(m) -> String
 
 What identifies the code of method `m` in any session: its package's identity
-and its signature, where its package's image holds it; its lowered code
-otherwise. Kept per method, a method's code being fixed.
+and its signature, where its package's image holds it; otherwise its code as
+loaded (`method_text`): its lowered code, the values of the constants it reads
+that no image's identity names, and a generated function's generator's code.
+Kept per method, a method's code being fixed within a session.
 """
 method_identity(m::Method) = get!(() -> find_method_identity(m), METHOD_IDENTITIES, m)
 
@@ -652,15 +747,12 @@ and a type are identified alike. What cannot be read back, as a type gone,
 has changed.
 """
 function holds(d::Dependency)
-    try
-        world = Base.get_world_counter()
-        d.kind === :call && return matched(d.named, method_view(d.table, world)) == d.found
-        d.kind === :invoke && return invoked(d.named, method_view(d.table, world)) == d.found
-        d.kind === :global && return global_identity(convert(Core.Binding, d.named)) == d.found
-        d.kind === :type && return type_text(d.named) == d.found
-    catch
-    end
-    false
+    world = Base.get_world_counter()
+    d.kind === :global && return global_identity(convert(Core.Binding, d.named)) == d.found
+    d.kind === :type && return type_text(d.named) == d.found
+    view = method_view(d.table, world)
+    view === nothing && return false
+    d.kind === :call ? matched(d.named, view) == d.found : invoked(d.named, view) == d.found
 end
 
 function matched(@nospecialize(sig), view)
@@ -679,10 +771,7 @@ end
 const CHECKED = SessionTable{UInt128, Bool}()
 const STORED = SessionTable{UInt128, Bool}()
 
-function kept(d::Dependency)
-    io = IOBuffer()
-    serialize(io, (d.kind, d.table, d.named, d.found))
-    bytes = take!(io)
+function kept(bytes::Vector{UInt8})
     digest = first(reinterpret(UInt128, sha256(bytes)[1:16]))
     asked = session()
     if get(STORED, digest, false) !== true
@@ -716,9 +805,13 @@ function held(digest::UInt128)
     get!(CHECKED, digest, bytes !== nothing && read_holds(bytes), asked)
 end
 
+# A dependency that cannot be read back in this session, as one naming a type
+# gone or an anonymous function defined otherwise, or bytes the store holds
+# damaged, does not hold. Checking one read back raises what it raises.
 function read_holds(bytes)
     d = try
-        Dependency(deserialize(IOBuffer(bytes))...)
+        kind, table, named, found = deserialize(IOBuffer(bytes))
+        Dependency(kind, table, restored(named), found)
     catch
         return false
     end
@@ -728,13 +821,20 @@ end
 function method_text(m::Method)
     c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
     canonical_type(c, m.sig)
-    code = try
-        Base.uncompressed_ast(m).code
-    catch
-        Any[string(m.file, ":", m.line)]
-    end
-    foreach(s -> (print(c.io, "; "); canonical(c, s)), code)
+    foreach(s -> (print(c.io, "; "); canonical(c, s)), lowered_code(m))
     bytes2hex(sha256(take!(c.io)))
+end
+
+# A method's lowered code; a generated function's, its generator's. A method
+# whose code is not kept is its session's alone, so that no other session is
+# handed what was derived from it.
+function lowered_code(m::Method)
+    if isdefined(m, :generator)
+        m.generator isa Core.GeneratedFunctionStub || return Any["generated in session $(session())"]
+        return Any[:generated; [s for g in methods(m.generator.gen) for s in lowered_code(g)]]
+    end
+    isdefined(m, :source) || return Any["without code in session $(session())"]
+    Base.uncompressed_ast(m).code
 end
 
 function global_text(g::GlobalRef)
@@ -746,5 +846,5 @@ end
 
 function type_text(@nospecialize(T))
     S = Base.unwrap_unionall(T)
-    string(fieldnames(S), " ", S.types)
+    string(ismutabletype(S) ? "mutable " : "", supertype(S), " ", fieldnames(S), " ", S.types)
 end

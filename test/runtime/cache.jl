@@ -23,8 +23,8 @@ closure(s) = x -> s * x
     @test_throws ErrorException C.content_key(Core.eval(C.Generated, :(function (x) x end)))
     # Package code is identified by its package; other code by its code, and
     # a closure by what it captures too.
-    @test occursin("Tempest = sources", C.canonical_text(T.logsumexp))
-    @test occursin("Base = julia", C.canonical_text(sin))
+    @test occursin("Tempest = image", C.canonical_text(T.logsumexp))
+    @test occursin("Base = image", C.canonical_text(sin))
     before = C.content_key(Elsewhere.scale)
     Core.eval(Elsewhere, :(scale(x) = 3x))
     @test C.content_key(Elsewhere.scale) != before
@@ -32,7 +32,7 @@ closure(s) = x -> s * x
     # A checked key names Tempest's own code without its identity, which an
     # edit anywhere in Tempest changes; the kernel is checked by what it uses.
     @test occursin("Tempest = checked by dependencies", C.canonical_text(T.logsumexp; checked = true))
-    @test occursin("Base = julia", C.canonical_text(T.logsumexp, sin; checked = true))
+    @test occursin("Base = image", C.canonical_text(T.logsumexp, sin; checked = true))
     @test C.content_key(T.logsumexp; checked = true) != C.content_key(T.logsumexp)
 end
 
@@ -60,7 +60,8 @@ function used(f, args...)
     C.dependencies(mi.cache, m -> isdefined(m, :cache) ? m.cache : nothing, nothing)
 end
 
-holding(dependencies) = all(C.holds, dependencies)
+# Checked in the latest world, as a preparation after a definition checks.
+holding(dependencies) = Base.invokelatest(all, C.holds, dependencies)
 
 @testset "a stored kernel loads only while what its compilation used holds" begin
     if !C.EDGES
@@ -100,6 +101,64 @@ holding(dependencies) = all(C.holds, dependencies)
         C.serialize(io, (dependency.kind, dependency.table, dependency.named, dependency.found))
         @test C.read_holds(take!(io)) && !C.read_holds(UInt8[1, 2, 3])
     end
+end
+
+struct Shape
+    side::Float32
+end
+area(s::Shape) = s.side * s.side
+invoked_third(x::Float32) = invoke(*, Tuple{Third, Real}, Third(), x)
+module Constants
+const K = 2.0f0
+end
+read_constant(x::Float32) = Constants.K * x
+through_constant(x::Float32) = read_constant(x)
+
+@testset "each kind of dependency holds until what it names changes" begin
+    if C.EDGES
+        # An `invoke`, the method it names redefined.
+        before = used(invoked_third, 1.0f0)
+        @test any(d -> d.kind === :invoke, before) && holding(before)
+        @eval Base.:*(::Third, x::Real) = x / 4
+        @test !holding(before)
+        # A global of another module, a constant redefined: read by a method
+        # the kernel calls, written with that method's code.
+        before = used(through_constant, 1.0f0)
+        @test any(d -> d.kind === :global, before) && holding(before)
+        Core.eval(Constants, :(const K = 3.0f0))
+        @test !holding(before)
+        # A type a method was specialized on, redefined mutable: read back by
+        # its name, as another process reads it.
+        dependency = only(filter(d -> d.kind === :type && d.named === Shape, used(area, Shape(2.0f0))))
+        bytes = C.written(dependency)
+        @test C.read_holds(bytes)
+        @eval mutable struct Shape
+            side::Float32
+        end
+        @test !Base.invokelatest(C.read_holds, bytes)
+    end
+end
+
+@testset "code no image identifies is written with what it reads" begin
+    # A constant a method reads of its own module, to which inference keeps
+    # no edge, is written with the method's code where no image names it.
+    Core.eval(LinearAlgebra, :(const TEXT_SLOPE = 2.0f0))
+    Core.eval(LinearAlgebra, :(text_slope(x::Float32) = TEXT_SLOPE * x))
+    method = which(LinearAlgebra.text_slope, (Float32,))
+    before = C.method_text(method)
+    Core.eval(LinearAlgebra, :(const TEXT_SLOPE = 3.0f0))
+    @test Base.invokelatest(C.method_text, method) != before
+    # A generated function by its generator's code.
+    @eval @generated generated_twice(x) = :(2x)
+    before = C.method_text(only(methods(generated_twice)))
+    @eval @generated generated_twice(x) = :(3x)
+    @test C.method_text(only(methods(generated_twice))) != before
+    # Values by their content: an enumeration's by its bytes, a dictionary's by
+    # its contents, and a pointer by its address in this session alone.
+    @test C.content_key(RoundingMode{:Up}()) != C.content_key(RoundingMode{:Down}())
+    @test C.content_key(Base.MPFR.MPFRRoundUp) != C.content_key(Base.MPFR.MPFRRoundDown)
+    @test C.content_key(Dict(1 => 2.0f0)) != C.content_key(Dict(1 => 3.0f0))
+    @test occursin("in session", C.canonical_text(Ptr{Cvoid}(1)))
 end
 
 @testset "a package's function redefined in the session is checked again" begin
