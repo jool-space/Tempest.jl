@@ -8,6 +8,7 @@ abstract type Access end
 struct ValueAccess <: Access
     value::Int
     index::Tuple{Vararg{Affine}}
+    ValueAccess(value, @nospecialize(index)) = new(value, index::Tuple{Vararg{Affine}})
 end
 
 struct LiteralAccess{T} <: Access

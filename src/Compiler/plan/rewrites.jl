@@ -688,16 +688,31 @@ function element!(b::Builder, graph, elements, E, iteration)
 end
 law_note(::Square) = "Welford"
 
-# A relative fold, or a maximum, that `o` reads: its law, what it observes,
-# its value, iteration and reduced axes, its operand, and whether it has sums
-# (a maximum has none).
-function relative_read(graph, o)
+"""
+A relative fold, or a maximum, that an operand reads: its law, what it
+observes, its value, iteration and reduced axes, its operand, where the
+operand reads it, and whether it has sums (a maximum has none). One type
+whatever its law and the ranks of its tuples, where a named tuple was a type
+of each, its vectors compiled again for each.
+"""
+struct RelativeRead
+    law::Law
+    observe::Any
+    value::Int
+    iteration::Tuple{Vararg{Int}}
+    reduced::Tuple{Vararg{Int}}
+    operand::Operand
+    index::Tuple{Vararg{Affine}}
+    sums::Bool
+end
+
+function relative_read(graph, @nospecialize(o))
     o isa Read || return nothing
     d = graph.values[o.value].definition
     if d isa Reduction && d.fold isa Relative
-        return (law = d.fold.law, observe = d.fold.observe, value = o.value, iteration = d.iteration, reduced = d.reduced, operand = d.operand, index = o.index, sums = true)
+        return RelativeRead(d.fold.law, d.fold.observe, o.value, d.iteration, d.reduced, d.operand, o.index, true)
     elseif d isa Reduction && d.fold isa MaxFold
-        return (law = Exponential(), observe = Statistic(), value = o.value, iteration = d.iteration, reduced = d.reduced, operand = d.operand, index = o.index, sums = false)
+        return RelativeRead(Exponential(), Statistic(), o.value, d.iteration, d.reduced, d.operand, o.index, false)
     end
     nothing
 end
@@ -736,10 +751,13 @@ function compose_observes(graph::IndexGraph)
         d = v.definition
         d isa Pointwise && d.f !== tuple && all(o -> o isa Literal || o isa Read, d.operands) || return nothing
         live[id] && (observed = observed_fold!(b, graph, id, users, live, results, known)) !== nothing && return observed
-        reads = [relative_read(graph, o) for o in d.operands]
-        folds = filter(!isnothing, reads)
+        reads = Union{Nothing, RelativeRead}[]
+        for o in d.operands
+            push!(reads, relative_read(graph, o))
+        end
+        folds = RelativeRead[r for r in reads if r !== nothing]
         isempty(folds) && return nothing
-        all(((o, r),) -> o isa Literal || r !== nothing, zip(d.operands, reads)) || return nothing
+        all(k -> d.operands[k] isa Literal || reads[k] !== nothing, eachindex(reads)) || return nothing
         # Composing replaces each fold: nothing else that runs reads it.
         all(r -> !(r.value in results) && all(u -> u == id || !live[u], users[r.value]), folds) || return nothing
         a = folds[argmax(map(r -> length(r.iteration), folds))]
@@ -753,7 +771,8 @@ function compose_observes(graph::IndexGraph)
         # is that one.
         gs = Operand[]
         args = Any[]
-        for (o, r) in zip(d.operands, reads)
+        for k in eachindex(reads)
+            o, r = d.operands[k], reads[k]
             o isa Literal && (push!(args, o.value); continue)
             index = aligned(graph, r.value, substituted(r.index, kept, domain), a.reduced, domain)
             index === nothing && return nothing
@@ -764,8 +783,8 @@ function compose_observes(graph::IndexGraph)
             arg === nothing && return nothing
             push!(args, arg)
         end
-        elements = map(o -> remap(o, b.ids), (ya, gs...))
-        t = element!(b, graph, elements, Tuple{map(o -> eltype_of(graph, o), (ya, gs...))...}, a.iteration)
+        elements = map_elements(@nospecialize(o) -> remap(o, b.ids), (ya, gs...))
+        t = element!(b, graph, elements, Tuple{map_elements(@nospecialize(o) -> eltype_of(graph, o), (ya, gs...))...}, a.iteration)
         new = add!(b, Reduction(Relative(a.law, Composed(d.f, Tuple(args))), t, a.iteration, a.reduced), v.dims, v.eltype, v.scalar)
         push!(b.rewrites, new => string(law_note(a.law), ": $(d.f) of folds sharing their $(statistic_name(a.law))"))
         new

@@ -12,6 +12,8 @@ abstract type Term end
 struct Load <: Term
     value::Int
     index::Tuple{Vararg{Affine}}
+    # Compiled once, whatever the rank of the index.
+    Load(value, @nospecialize(index)) = new(value, index::Tuple{Vararg{Affine}})
 end
 
 struct Lit{T} <: Term

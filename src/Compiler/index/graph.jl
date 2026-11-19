@@ -8,6 +8,9 @@ abstract type Operand end
 struct Read <: Operand
     value::Int
     index::Tuple{Vararg{Affine}}
+    # Compiled once, whatever the rank of the index, as the definitions'
+    # constructors are, whatever the ranks of their tuples.
+    Read(value, @nospecialize(index)) = new(value, index::Tuple{Vararg{Affine}})
 end
 
 "A constant, broadcast over the reader's domain."
@@ -66,6 +69,8 @@ struct Reduction <: Definition
     operand::Operand
     iteration::Tuple{Vararg{Int}}
     reduced::Tuple{Vararg{Int}}
+    Reduction(fold, @nospecialize(operand), @nospecialize(iteration), @nospecialize(reduced)) =
+        new(fold, operand, iteration::Tuple{Vararg{Int}}, reduced::Tuple{Vararg{Int}})
 end
 
 """
@@ -82,6 +87,7 @@ struct Scan <: Definition
     axes::Tuple{Vararg{Int}}
     reverse::Bool
     exclusive::Bool
+    Scan(fold, @nospecialize(operand), @nospecialize(axes), reverse, exclusive) = new(fold, operand, axes::Tuple{Vararg{Int}}, reverse, exclusive)
 end
 
 """
@@ -100,6 +106,8 @@ struct Keyed <: Definition
     iteration::Tuple{Vararg{Int}}
     key::Tuple{Vararg{Affine}}
     into::Union{Nothing, Operand}
+    Keyed(fold, @nospecialize(operand), @nospecialize(iteration), @nospecialize(key), @nospecialize(into)) =
+        new(fold, operand, iteration::Tuple{Vararg{Int}}, key::Tuple{Vararg{Affine}}, into)
 end
 
 Keyed(fold, operand, iteration, key) = Keyed(fold, operand, iteration, key, nothing)
@@ -143,6 +151,7 @@ struct Value
     dims::Tuple{Vararg{Int}}
     eltype::DataType
     scalar::Bool
+    Value(@nospecialize(definition), @nospecialize(dims), eltype, scalar) = new(definition, dims::Tuple{Vararg{Int}}, eltype, scalar)
 end
 
 domain(v::Value) = Domain(v.dims)

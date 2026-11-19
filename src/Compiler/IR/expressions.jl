@@ -17,6 +17,8 @@ end
 struct Affine
     constant::Int
     terms::Tuple{Vararg{Pair{Atom, Int}}}
+    # Compiled once, whatever the number and kinds of the terms.
+    Affine(constant, @nospecialize(terms)) = new(constant, terms)
 end
 
 "Floor division of an expression by a positive constant."
@@ -37,6 +39,7 @@ struct Indirect <: Atom
     index::Tuple{Vararg{Affine}}
     lo::Int
     hi::Int
+    Indirect(value, @nospecialize(index), lo, hi) = new(value, index::Tuple{Vararg{Affine}}, lo, hi)
 end
 
 """
@@ -74,6 +77,7 @@ The variables an expression ranges over: variable `n` takes the values
 """
 struct Domain
     extents::Tuple{Vararg{Int}}
+    Domain(@nospecialize(extents::Tuple)) = new(extents::Tuple{Vararg{Int}})
 end
 
 Domain(extents::AbstractVector) = Domain(Tuple(extents))
