@@ -140,13 +140,29 @@ end
 # A global code reads, assigned in the session.
 divisor = 6
 
+# A kernel's function defined while someone else defines code, as another
+# thread may while a preparation defines its kernels' functions: the source
+# defines a function of the test's module as it is evaluated.
+const MEANWHILE = :(begin
+    Core.eval($(@__MODULE__), :(defined_by_someone_else(x) = x))
+    function (x) x + 3 end
+end)
+
 @testset "a session ends where code is defined that is not Tempest's own" begin
+    # The first of Tempest's definitions in a process counts the worlds one
+    # makes; it ends the session, which cannot tell them apart yet.
+    C.generated(:(function (x) x end))
     t = C.SessionTable{Int, Int}()
     get!(() -> 2, t, 1)
     before = C.session()
     # A kernel's function, which every build defines, leaves it standing.
     C.generated(:(function (x) x + 1 end))
     @test C.session() == before && get(t, 1, nothing) == 2
+    # Someone else's definition among its worlds ends it.
+    C.own_definition(C.Generated, MEANWHILE)
+    @test C.session() != before && get(t, 1, nothing) === nothing
+    get!(() -> 2, t, 1)
+    before = C.session()
     # A definition in a package's module, as Revise or an `@eval` makes,
     # ends it, and the table's answers with it.
     Core.eval(Redefined, :(unrelated(x) = x))

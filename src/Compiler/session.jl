@@ -77,14 +77,32 @@ const SESSION = Threads.Atomic{UInt}(0)
 # by someone else since.
 const KNOWN_WORLD = Threads.Atomic{UInt}(0)
 
-# Held while the session begins again or Tempest defines code of its own, so
-# that a world one of its definitions makes is known before it is looked at.
+# The world as Tempest's definition in flight began, zero while none is.
+const DEFINING_SINCE = Threads.Atomic{UInt}(0)
+
+# The fewest worlds one of Tempest's definitions has made in this process:
+# what one makes, learned rather than written down, since what a definition
+# counts (a method, a binding for its function's type) is Julia's to change.
+# Unknown until the first, which ends the session as though someone else's
+# had been among its worlds.
+const OWN_WORLDS = Threads.Atomic{UInt}(typemax(UInt))
+
+# Tempest's definitions, one at a time, so that the worlds of each are
+# counted alone.
 const DEFINING = ReentrantLock()
+
+# Held while a session begins, so that a world past the known one begins one.
+const BEGINNING = ReentrantLock()
+
+# As Tempest loads: the process's first session, its own definitions' worlds
+# not yet counted, whatever the process that wrote its image counted.
+start_session!() = (OWN_WORLDS[] = typemax(UInt); begin_session!())
 
 # A session differs from that of any process before it, the one that wrote
 # the package images it loads among them, and from any before it in the
-# process.
-function start_session!()
+# process. The world is known after the session is set, so that whoever
+# reads the known world reads the session of it.
+function begin_session!()
     world = Base.get_world_counter()
     SESSION[] = hash((getpid(), time_ns(), world))
     KNOWN_WORLD[] = world
@@ -97,38 +115,69 @@ end
 The session whose answers hold now: the one before, unless code was defined
 since that is not Tempest's own, which begins another. Julia counts a world
 for every definition, of a method, a type or a constant, by whatever made it;
-the world counter is read once per question, the lock taken only when it has
-moved.
+the world counter is read once per question. A question asked while one of
+Tempest's definitions makes its worlds, some microseconds, waits for that one
+to end, which counts them (`own_definition`), and for no other.
 """
 function session()
-    Base.get_world_counter() == KNOWN_WORLD[] || @lock DEFINING moved!()
+    world = Base.get_world_counter()
+    world == KNOWN_WORLD[] && return SESSION[]
+    since = DEFINING_SINCE[]
+    if since != 0
+        while DEFINING_SINCE[] == since
+            yield()
+        end
+        return session()
+    end
+    @lock BEGINNING moved!()
     SESSION[]
 end
 
-# Under `DEFINING`: a world past the known one begins a session.
+# Under `BEGINNING`: a world past the known one begins a session.
 function moved!()
-    Base.get_world_counter() == KNOWN_WORLD[] || start_session!()
+    Base.get_world_counter() == KNOWN_WORLD[] || begin_session!()
     nothing
 end
 
 """
-    own_definition(define) -> what `define()` returns
+    own_definition(into, source) -> what evaluating `source` in `into` returns
 
-Define code of Tempest's own by `define()`, as a generated kernel's function
-is (`generated`), leaving the session standing: the worlds it makes are
-known. Every build defines its kernels' functions, so a session that ended
-at them would never keep an answer to a later preparation; and a function
-defined once and never again, as a kernel's is, changes no code an answer was
-derived from. A definition by someone else before it still ends the session.
-A definition made on another thread while `define` runs is taken for
-Tempest's.
+Define code of Tempest's own, as a generated kernel's function is
+(`generated`), leaving the session standing. Every build defines its
+kernels' functions, so a session that ended at them would never keep an
+answer to a later preparation; and a function defined once and never again,
+as a kernel's is, changes no code an answer was derived from.
+
+The source is lowered first, side by side with any other, and evaluated
+lowered, one definition at a time: the worlds a definition makes are made in
+that evaluation, some microseconds, rather than over the lowering, a
+thousand times longer, so that a question asked meanwhile waits that long.
+A definition by someone else before it ends the session, and so does one
+made on another thread while it evaluates: the worlds between its start and
+its end are more than one of Tempest's definitions makes (`OWN_WORLDS`).
+Where they cannot be told apart, as for the first of Tempest's definitions,
+the session ends.
 """
-function own_definition(define)
+function own_definition(into::Module, source::Expr)
+    lowered = Meta.lower(into, source)
     @lock DEFINING begin
-        moved!()
-        defined = define()
-        KNOWN_WORLD[] = Base.get_world_counter()
-        defined
+        @lock BEGINNING moved!()
+        before = KNOWN_WORLD[]
+        DEFINING_SINCE[] = before
+        try
+            defined = Core.eval(into, lowered)
+            made = Base.get_world_counter() - before
+            fewest = OWN_WORLDS[]
+            OWN_WORLDS[] = min(fewest, made)
+            if made > fewest || fewest == typemax(UInt)
+                @lock BEGINNING begin_session!()
+            else
+                KNOWN_WORLD[] = before + made
+            end
+            defined
+        finally
+            DEFINING_SINCE[] = 0
+        end
     end
 end
 

@@ -191,7 +191,7 @@ workload defines its kernels in a module of its own, since `Generated` is
 closed to it then.
 """
 function generated(source::Expr, into::Module = Generated)
-    f = own_definition(() -> Core.eval(into, source))
+    f = own_definition(into, source)
     @lock GENERATED_LOCK GENERATED_SOURCES[typeof(f)] = source
     f
 end
