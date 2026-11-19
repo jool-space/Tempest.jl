@@ -338,13 +338,21 @@ if CUDA_FUNCTIONAL
         args = map(((rows, scale),) -> single(data(n, rows == :n ? n : m; scale)) ./ 4,
             ((:m, 2), (:n, 3), (:m, 5), (:m, 7), (:n, 11), (:m, 13), (:m, 17), (:n, 19), (:m, 23), (:m, 29)))
         for p in (trace(layers, args...), differentiate(trace(layers, args...)))
+            # As the generator groups them, before any device's prices choose
+            # an implementation, the layers' groups are alike: fewer
+            # structures than groups.
+            structures = [C.Implement.structure(g) for g in C.group_views(C.plan(C.rewrite(C.lower(p))))]
+            @test length(unique(structures)) < length(structures)
+            # Whichever groups a device's prices give cuTile, those alike emit
+            # their kernels once, and each computes its own values.
             C.forget_session!()
             ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget())
+            emitted = length(X.EMITTED)
             got = map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex)))))
             expected = filter(!isnothing, C.leaves(interpret(p, args...)))
             @test all(isapprox.(got, expected; rtol = 1.0e-4))
-            tiled = count(d -> d !== nothing && d.choice.implementation isa X.cuTileGenerator, ex.decisions)
-            @test 0 < length(X.EMITTED) < tiled
+            tiled = [(g, d.choice.claim) for (g, d) in zip(C.group_views(ex), ex.decisions) if d !== nothing && d.choice.implementation isa X.cuTileGenerator]
+            @test emitted == length(unique([(X.derived(g), X.schedule_key(claim)) for (g, claim) in tiled]))
         end
     end
 end
