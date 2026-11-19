@@ -113,7 +113,7 @@ function read_observes(graph::IndexGraph, found, u, k)
         back[atom.n], placed[atom.n] = var(a), true
     end
     d = Domain(graph.values[o.value].dims)
-    mapped = [substitute(e, Tuple(back), d) for e in formulas if all(j -> placed[j] || !mentions(e, j), eachindex(dims))]
+    mapped = Affine[substitute(e, Tuple(back), d) for e in formulas if all(j -> placed[j] || !mentions(e, j), eachindex(dims))]
     isempty(mapped) ? nothing : unique(mapped)
 end
 

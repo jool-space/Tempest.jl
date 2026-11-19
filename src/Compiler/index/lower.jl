@@ -22,7 +22,7 @@ end
 
 # Each variable of a domain, read as itself; an axis of extent one reads zero,
 # the canonical form of its only index.
-identity_index(@nospecialize(dims)) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
+identity_index(@nospecialize(dims)) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims)::Int)
 
 # A value ranges over the axes of its node wider than one, so programs that
 # differ by axes of extent one have the same values; the node reads its value
@@ -36,7 +36,7 @@ wide_index(@nospecialize(dims)) = map_elements(var, wide_axes(dims))
 # a program makes them, of its ranks and kinds, and are compiled once for
 # all of them: those arguments unspecialized, mapped by `map_elements`.
 function narrowing(@nospecialize(dims), @nospecialize(keep))
-    index = ntuple(k -> (j = findfirst(==(k), keep)) === nothing ? constant(0) : var(j), length(dims))
+    index = ntuple(k -> (j = findfirst(==(k), keep)) === nothing ? constant(0) : var(j), length(dims)::Int)
     (index, Domain(map_elements(k -> dims[k], keep)))
 end
 
@@ -80,7 +80,7 @@ end
 
 # Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
 # broadcasts: axes of extent one, and missing trailing axes, read index zero.
-broadcast_index(@nospecialize(dims)) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
+broadcast_index(@nospecialize(dims)) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims)::Int)
 
 operand(a::ValueAccess, @nospecialize(dims), reader::Domain) =
     Read(a.value, substituted(a.index, broadcast_index(dims), reader))
@@ -530,7 +530,7 @@ function contraction!(value!, op::Contract, inputs, input_dims, n)
         A === n.eltype && return product
         return value!(Pointwise(Cast{n.eltype}(), (Read(product.value, product.index),)), iteration, n.eltype)
     end
-    kept = ntuple(k -> k in reduced ? 1 : iteration[k], length(iteration))
+    kept = ntuple(k -> k in reduced ? 1 : iteration[k], length(iteration)::Int)
     # The result's axes come first, so its value is read at the same variables.
     value!(Reduction(SumFold(), Read(product.value, product.index), iteration, reduced), kept, n.eltype)
 end
@@ -544,7 +544,7 @@ started(values, d::Reduction, dims, T) =
     0 in d.iteration ? LiteralAccess(convert(T, fold_of_none(d.fold, eltype_of(values, d.operand)))) : nothing
 function started(values, d::Keyed, dims, T)
     0 in d.iteration || return nothing
-    d.into === nothing ? LiteralAccess(only(fold_init(d.fold, T))) : access(d.into, ntuple(var, length(dims)), Domain(dims))
+    d.into === nothing ? LiteralAccess(only(fold_init(d.fold, T))) : access(d.into, ntuple(var, length(dims)::Int), Domain(dims))
 end
 
 # The one array of a shape and an element type that has no elements.

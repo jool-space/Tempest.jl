@@ -392,7 +392,7 @@ function spread_start(v::Value, index, dims)
         (k === nothing || !isempty(along) && k <= last(along) || v.dims[j] != dims[k]) && return nothing
         push!(along, k)
     end
-    ntuple(q -> q in along ? dims[q] : 1, length(dims))
+    ntuple(q -> q in along ? dims[q] : 1, length(dims)::Int)
 end
 
 # Of the storage a value of the step is at across the steps, the one at the

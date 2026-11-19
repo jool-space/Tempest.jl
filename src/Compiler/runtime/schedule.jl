@@ -168,7 +168,9 @@ function Schedule(target::Target, steps::Vector{Step}, touches::Vector{Touches})
     (; waits, runs) = stream_schedule(steps, touches)
     pairs = filter(σ -> first(σ) != last(σ), unique(map(stream_of, steps)))
     devices = unique([map(last ∘ stream_of, steps); map(first, pairs)])
-    streams = Dict{Any, Any}()
+    # By stream, the pair of devices `stream_of` gives: a key of a stated
+    # type, whose hashing no package's method for other tuples reopens.
+    streams = Dict{Tuple{Union{Nothing, Int}, Union{Nothing, Int}}, Any}()
     foreach(d -> streams[(d, d)] = on_device(() -> stream(target, d), target, d), devices)
     links = Dict(d => on_device(() -> link(target, d), target, d) for d in unique(map(first, pairs)))
     foreach(σ -> streams[σ] = on_device(() -> lane(target, σ..., links[first(σ)]), target, last(σ)), pairs)
