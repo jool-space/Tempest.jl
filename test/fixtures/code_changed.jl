@@ -1,5 +1,9 @@
 # Kernels stored by one process and looked up by another whose code differs
-# from it where neither a key's source nor a package's identity names it:
+# from it where neither a key's source nor a package's identity names it.
+# Outside this pair, since each needs another precompile of a package: an
+# edit to Tempest itself, whose kernels must still load, and a developed
+# package's file edited while loaded (reproducers in the challengers'
+# night-2026-11-19/review3, `run3.sh` and `devpkg.sh`).
 # cuda/cache.jl runs this twice on one store, `VARIANT` 1 then 2, each in a
 # process of its own, as a script edited between two runs is. A kernel of
 # code changed must not be loaded, and a kernel of code unchanged must be.
@@ -19,6 +23,12 @@ through_closure(x::Float32) = map(g -> g * x, Gain())
 Core.eval(LinearAlgebra, :(const CHANGED_SLOPE = $factor))
 Core.eval(LinearAlgebra, :(changed_slope(x::Float32) = CHANGED_SLOPE * x))
 
+# A constant of a package loaded from its image, read by a method the image
+# holds, redefined.
+push!(LOAD_PATH, joinpath(@__DIR__, "packages"))
+const ImageConstant = Base.require(@__MODULE__, :ImageConstant)
+VARIANT == 2 && Core.eval(ImageConstant, :(const SLOPE = 3.0f0))
+
 # A constant of an enumeration, which selects the arithmetic.
 @enum Mode fast slow
 @eval const MODE = $(VARIANT == 1 ? fast : slow)
@@ -35,6 +45,7 @@ changed = [
     ("a script's method called with a closure", x -> sum(through_closure.(x) .* x; dims = 1), x),
     ("a package's constant defined since its image", x -> sum(LinearAlgebra.changed_slope.(x) .* x; dims = 1), x),
     ("an enumeration's constant", x -> sum(picked.(x) .* x; dims = 1), x),
+    ("a constant an image held, redefined", x -> sum(ImageConstant.act.(x) .* x; dims = 1), x),
     ("a generated function", x -> sum(generated_scale.(x) .* x; dims = 1), x),
 ]
 unchanged = [("a fold of closures", x -> reduce(sums, x; dims = 1), data(80, 112))]
