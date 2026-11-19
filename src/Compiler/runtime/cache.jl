@@ -284,9 +284,7 @@ end
 # value is, through its structure to its leaves; a mutable one's too, a
 # table, which inference folds into code where a reader of it is declared
 # foldable (`Base.@assume_effects`).
-unvouched_constant(g::GlobalRef) = isconst(g.mod, g.name) && (own_code(g.mod) || !defined_in_image(convert(Core.Binding, g)))
-
-defined_in_image(b::Core.Binding) = isdefined(b, :partitions) && in_image(b.partitions)
+unvouched_constant(g::GlobalRef) = isconst(g.mod, g.name) && (own_code(g.mod) || !defined_in_image(g))
 
 # An array or a memory by its elements: a dictionary, whose fields hold its
 # keys and values in memories, by its contents.
@@ -760,7 +758,26 @@ definition_text(@nospecialize(T)) = (c = Canonical(); canonical_type(c, T); byte
 # there since, which no image holds.
 by_package(@nospecialize(x), m::Module) = !own_code(m) && identified(m) && in_image(x)
 
-in_image(@nospecialize(x)) = ccall(:jl_object_in_image, Cint, (Any,), x) != 0
+# What an image, the system's or a package's, holds: `in_image(x)`, and
+# `defined_in_image(g)`, whether it holds the binding of the global `g` as it
+# is now. Julia tells of any object from 1.12, and keeps a binding's
+# definitions as its partitions. Before, it tells only of a module, by its
+# build: one loaded from an image carries that image's checksum in its upper
+# half, one made in this process all ones. Whether a constant was defined as
+# the image was written or since, it cannot tell, and no image vouches for
+# one. Nothing else is asked there: a method, a binding's partition or a
+# type's name is asked of only for a kernel's dependencies, which a Julia
+# without inference's edges does not read.
+@static if VERSION >= v"1.12"
+    in_image(@nospecialize(x)) = ccall(:jl_object_in_image, Cint, (Any,), x) != 0
+    function defined_in_image(g::GlobalRef)
+        b = convert(Core.Binding, g)
+        isdefined(b, :partitions) && in_image(b.partitions)
+    end
+else
+    in_image(m::Module) = Base.module_build_id(m) >> 64 != typemax(UInt64)
+    defined_in_image(::GlobalRef) = false
+end
 
 """
     method_identity(m) -> String

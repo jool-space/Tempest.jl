@@ -180,30 +180,36 @@ end
 # methods: each changed changes the key or the dependencies, through immutable
 # structure to its leaves, a function or a type named by a constant too.
 @testset "a constant is known by its content" begin
-    cases = [(:((:a, 2.0f0)), :((:a, 3.0f0)), name -> :($name[2] * x)),
-        (:((kind = :a, k = 2.0f0)), :((kind = :a, k = 3.0f0)), name -> :($name.k * x)),
-        (:((Float32, 2.0f0)), :((Float32, 3.0f0)), name -> :($name[2] * x)),
-        (:sin, :cos, name -> :($name(x))),
-        (:Float32, :Float16, name -> :(Float32($name(x) / 3)))]
-    for (i, (before, after, body)) in enumerate(cases)
-        name, reader = Symbol(:OWN_CONSTANT_, i), Symbol(:reads_own_constant_, i)
-        Core.eval(IR, :(const $name = $before))
-        Core.eval(IR, :($reader(x::Float32) = $(body(name))))
-        through = Core.eval(@__MODULE__, :(x::Float32 -> IR.$reader(x)))
+    # From Julia 1.12, where a kernel is stored with its dependencies and a
+    # constant may be redefined to a value of another type. Before, no kernel
+    # is stored, and a checked key leaves Tempest's code to dependencies no
+    # kernel has.
+    if C.EDGES
+        cases = [(:((:a, 2.0f0)), :((:a, 3.0f0)), name -> :($name[2] * x)),
+            (:((kind = :a, k = 2.0f0)), :((kind = :a, k = 3.0f0)), name -> :($name.k * x)),
+            (:((Float32, 2.0f0)), :((Float32, 3.0f0)), name -> :($name[2] * x)),
+            (:sin, :cos, name -> :($name(x))),
+            (:Float32, :Float16, name -> :(Float32($name(x) / 3)))]
+        for (i, (before, after, body)) in enumerate(cases)
+            name, reader = Symbol(:OWN_CONSTANT_, i), Symbol(:reads_own_constant_, i)
+            Core.eval(IR, :(const $name = $before))
+            Core.eval(IR, :($reader(x::Float32) = $(body(name))))
+            through = Core.eval(@__MODULE__, :(x::Float32 -> IR.$reader(x)))
+            key = Base.invokelatest(C.content_key, through; checked = true)
+            found = Base.invokelatest(used, through, 1.0f0)
+            Core.eval(IR, :(const $name = $after))
+            @test Base.invokelatest(C.content_key, through; checked = true) != key || !holding(found)
+        end
+        # A table, read through an accessor declared foldable, which inference
+        # folds into code as it would a constant's value.
+        Core.eval(IR, :(const OWN_TABLE = Dict(:k => 2.0f0)))
+        Core.eval(IR, :(Base.@assume_effects :foldable reads_own_table(k::Symbol) = OWN_TABLE[k]))
+        through = Core.eval(@__MODULE__, :(x::Float32 -> IR.reads_own_table(:k) * x))
         key = Base.invokelatest(C.content_key, through; checked = true)
         found = Base.invokelatest(used, through, 1.0f0)
-        Core.eval(IR, :(const $name = $after))
-        @test Base.invokelatest(C.content_key, through; checked = true) != key || (C.EDGES && !holding(found))
+        Core.eval(IR, :(const OWN_TABLE = Dict(:k => 3.0f0)))
+        @test Base.invokelatest(C.content_key, through; checked = true) != key || !holding(found)
     end
-    # A table, read through an accessor declared foldable, which inference
-    # folds into code as it would a constant's value.
-    Core.eval(IR, :(const OWN_TABLE = Dict(:k => 2.0f0)))
-    Core.eval(IR, :(Base.@assume_effects :foldable reads_own_table(k::Symbol) = OWN_TABLE[k]))
-    through = Core.eval(@__MODULE__, :(x::Float32 -> IR.reads_own_table(:k) * x))
-    key = Base.invokelatest(C.content_key, through; checked = true)
-    found = Base.invokelatest(used, through, 1.0f0)
-    Core.eval(IR, :(const OWN_TABLE = Dict(:k => 3.0f0)))
-    @test Base.invokelatest(C.content_key, through; checked = true) != key || (C.EDGES && !holding(found))
 end
 
 @testset "waiting on a generator's callees" begin
