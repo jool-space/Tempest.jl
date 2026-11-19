@@ -256,6 +256,10 @@ end
 canonical(c::Canonical, ::LineNumberNode) = nothing
 canonical(c::Canonical, q::QuoteNode) = (print(c.io, "(quote "); canonical(c, q.value); print(c.io, ")"))
 canonical(c::Canonical, @nospecialize(x::Union{Number, Char, AbstractString, Nothing, Missing})) = print(c.io, typeof(x), "(", repr(x), ")")
+# A float by its bits, which its printing does not tell apart for NaNs.
+canonical(c::Canonical, x::Base.IEEEFloat) = print(c.io, typeof(x), "(", bytes2hex(reinterpret(UInt8, [x])), ")")
+# A simple vector, as a type's parameters are held, by its elements.
+canonical(c::Canonical, x::Core.SimpleVector) = (print(c.io, "svec("); foreach(y -> (canonical(c, y); print(c.io, ", ")), x); print(c.io, ")"))
 canonical(c::Canonical, m::Module) = (push!(c.roots, Base.moduleroot(m)); print(c.io, "module ", join(fullname(m), ".")))
 
 function canonical(c::Canonical, g::GlobalRef)
@@ -385,7 +389,8 @@ canonical_type(c::Canonical, ::Core.TypeofBottom) = print(c.io, "Union{}")
 
 function canonical_definition(c::Canonical, @nospecialize(T::DataType))
     push!(c.seen, T)
-    print(c.io, " defined as [")
+    print(c.io, " defined as [", ismutabletype(T) ? "mutable " : "", "<: ")
+    canonical_type(c, supertype(T))
     if isstructtype(T)
         for i in 1:fieldcount(T)
             print(c.io, fieldname(T, i), "::")

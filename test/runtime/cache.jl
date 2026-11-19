@@ -159,6 +159,8 @@ end
     @test C.content_key(Base.MPFR.MPFRRoundUp) != C.content_key(Base.MPFR.MPFRRoundDown)
     @test C.content_key(Dict(1 => 2.0f0)) != C.content_key(Dict(1 => 3.0f0))
     @test occursin("in session", C.canonical_text(Ptr{Cvoid}(1)))
+    @test C.content_key(Core.svec(1)) != C.content_key(Core.svec(2))
+    @test C.content_key(-NaN32) != C.content_key(NaN32)
 end
 
 @testset "a package's function redefined in the session is checked again" begin
