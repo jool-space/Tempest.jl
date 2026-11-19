@@ -84,11 +84,13 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
             ((q, k) -> sum(abs2, grouped(q, k, k)), (sample(16, 4, 32, 2), sample(16, 2, 32, 2))),
             ((u, w, xs) -> sum(abs2, recurrent(u, w, xs)), (sample(32, 32), sample(32, 16), sample(16, 8, 6))),
         ]
-        @compile_workload begin
+        @compile_workload Tempest.Compiler.in_own_store() do
             for (f, args) in losses, target in (CUDATarget(cuTileGenerator(); device = 0), CUDATarget(cuTileGenerator(); precision = :tf32, device = 0))
                 program = Tempest.Compiler.trace((xs...) -> Tempest.withgradient(f, xs...), args...)
                 ex = Tempest.Compiler.prepare(program, args...; target, build = false)
                 explain(devnull, ex)
+                # Again, replaying the decisions the first kept.
+                Tempest.Compiler.prepare(program, args...; target, build = false)
                 for g in Tempest.Compiler.group_views(ex), claim in claims(cuTileGenerator(), target, g)
                     workspaces = Dict{Any, Workspace}()
                     for k in schedule_kernels(Context(g, claim.schedule), workspaces)
@@ -105,12 +107,13 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
                     for k in schedule_kernels(Context(g, d.choice.claim.schedule), workspaces)
                         arrays = unbacked_arguments(g, k, workspaces)
                         f = Tempest.Compiler.generated(source(k), Workload)
-                        dependencies = Base.invokelatest(f, Tuple{map(Core.Typeof, arrays)...}) do f, tt
+                        # In the world the kernel was defined in, as its
+                        # dependencies name it.
+                        Base.invokelatest(f, Tuple{map(Core.Typeof, arrays)...}) do f, tt
                             job = tile_job(f, tt, k.occupancy, alias_groups(arrays), WORKLOAD_ARCH)
                             ct.invoke_frozen(ct.emit_tile, job)
-                            job_dependencies(job)
+                            Tempest.Compiler.holds_as_stored(job_dependencies(job))
                         end
-                        Tempest.Compiler.holds_as_stored(dependencies)
                     end
                 end
             end

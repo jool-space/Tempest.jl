@@ -346,11 +346,13 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
         # A batch of products over (features, keys, heads, batch), as attention makes.
         q, k = sample(Float32, 16, 32, 2, 2), sample(Float32, 16, 32, 2, 2)
         push!(losses, ((q, k) -> sum(abs2, Tempest.Compiler.contract(k, q, (1, 2, 3, 4), (1, 5, 3, 4), (2, 5, 3, 4))), (q, k)))
-        @compile_workload begin
+        @compile_workload Tempest.Compiler.in_own_store() do
             for (f, args) in losses, target in (CUDATarget(cuBLASProducts(); device = 0), CUDATarget(cuBLASProducts(); precision = :tf32, device = 0))
                 program = Tempest.Compiler.trace((xs...) -> Tempest.withgradient(f, xs...), args...)
                 ex = Tempest.Compiler.prepare(program, args...; target, build = false)
                 Tempest.explain(devnull, ex)
+                # Again, replaying the decisions the first kept.
+                Tempest.Compiler.prepare(program, args...; target, build = false)
             end
         end
     end

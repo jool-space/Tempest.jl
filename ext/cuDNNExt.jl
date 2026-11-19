@@ -236,11 +236,14 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
     @setup_workload begin
         sample(T, dims...) = T.(reshape(sin.(1:prod(dims)), dims))
         q, k, v = sample(BFloat16, 64, 2, 2, 32, 1), sample(BFloat16, 64, 2, 32, 1), sample(BFloat16, 64, 2, 32, 1)
-        @compile_workload begin
+        @compile_workload Tempest.Compiler.in_own_store() do
             for causal in (false, true), statistics in (false, true)
                 program = Tempest.Compiler.trace((q, k, v) -> attention(q, k, v; causal, statistics), q, k, v)
-                ex = Tempest.Compiler.prepare(program, q, k, v; target = CUDATarget(cuDNNAttention(); device = 0), build = false)
+                target = CUDATarget(cuDNNAttention(); device = 0)
+                ex = Tempest.Compiler.prepare(program, q, k, v; target, build = false)
                 Tempest.explain(devnull, ex)
+                # Again, replaying the decisions the first kept.
+                Tempest.Compiler.prepare(program, q, k, v; target, build = false)
             end
         end
     end

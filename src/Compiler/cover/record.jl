@@ -5,8 +5,8 @@ using Scratch: @get_scratch!
 
 # Tempest's `tuning` scratch space in the depot. Its path is found when Tempest
 # loads, so it is not part of the precompiled image; while Tempest precompiles
-# there is none, and its workload records nothing unless an environment
-# variable names a directory.
+# there is none, and its workloads keep what they record and decide in a
+# store of their own (`in_own_store`).
 const TUNING = Ref{Union{Nothing, String}}(nothing)
 
 find_tuning!() = (TUNING[] = @get_scratch!("tuning"); nothing)
@@ -21,6 +21,18 @@ function tuning_directory()
     dir = get(ENV, "TEMPEST_CACHE", nothing)
     dir === nothing ? TUNING[] : joinpath(dir, "tuning")
 end
+
+"""
+    in_own_store(f)
+
+`f()` with what it measures and decides kept in a store of its own, a new
+directory removed after: a package's precompile workload prepares in one, so
+that what its image compiles follows from its programs alone, never from
+what the store of the environment it ran in holds, and its preparations keep
+their decisions and a preparation of a program again replays them, as a
+session's do.
+"""
+in_own_store(f) = mktempdir(store -> withenv(f, "TEMPEST_CACHE" => store))
 
 # A file of the device `target` runs on and of the toolchain that builds its
 # kernels (see `toolchain`): the times it holds are of kernels built so on
