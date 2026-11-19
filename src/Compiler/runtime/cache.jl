@@ -617,7 +617,8 @@ struct Anonymous
 end
 
 # A generated function by its source's content, which values spliced into it
-# take part in.
+# take part in: Tempest's own code it names checked by the dependencies, as a
+# kernel's key leaves it out, so that a rebuild of Tempest leaves it readable.
 struct GeneratedType
     source::String
 end
@@ -650,7 +651,7 @@ function portable(@nospecialize(x))
     end
     T isa DataType || return x
     source = generated_source(T)
-    source === nothing || return x isa UnionAll ? throw(Unportable()) : GeneratedType(content_key(source))
+    source === nothing || return x isa UnionAll ? throw(Unportable()) : GeneratedType(content_key(source; checked = true))
     T.name.module === Generated && throw(Unportable())
     parameters = Any[p isa Type ? portable(p) : p isa TypeVar ? p : portable_value(p) for p in T.parameters]
     if Serialization.should_send_whole_type(nothing, T)
@@ -691,15 +692,16 @@ function generated_type(key::String)
     found === nothing || return found
     asked = session()
     for (T, source) in @lock GENERATED_LOCK collect(GENERATED_SOURCES)
-        get(INDEXED, T, false) && continue
-        get!(GENERATED_BY_CONTENT, content_key(source), T, asked)
-        get!(INDEXED, T, true, asked)
+        get(INDEXED, objectid(T), false) && continue
+        get!(GENERATED_BY_CONTENT, content_key(source; checked = true), T, asked)
+        get!(INDEXED, objectid(T), true, asked)
     end
     get(GENERATED_BY_CONTENT, key, nothing)
 end
 
 const GENERATED_BY_CONTENT = SessionTable{String, Any}()
-const INDEXED = SessionTable{Any, Bool}()
+# By identity: a dictionary of types compares them by subtyping.
+const INDEXED = SessionTable{UInt64, Bool}()
 
 definition_text(@nospecialize(T)) = (c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}()); canonical_type(c, T); bytes2hex(sha256(take!(c.io))))
 
