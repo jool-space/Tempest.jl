@@ -1069,8 +1069,10 @@ end
 # Make array `x`, its buffer or the caller's array, argument `k`'s storage,
 # adding to `moves` what moved for each step that uses it (see `Moves`),
 # the storage the step uses from now on being what `retarget!` points it
-# at. The results over the storage are over `x`.
-function point_at!(ex::Executable, k, x, moves::Moves)
+# at. The results over the storage are over `x`. One body whatever the
+# array's type, as `point_leaf!`, which calls it, so that the first binding
+# compiles what the first move runs.
+function point_at!(ex::Executable, k, @nospecialize(x), moves::Moves)
     uses = ex.pointable[k]
     uses === nothing && return
     to = address_of(x)
