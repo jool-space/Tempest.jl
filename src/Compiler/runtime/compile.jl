@@ -114,7 +114,7 @@ holds_arrays(name, passed) = string("the function reads the global ", name, ", w
     "the global") : string("Pass ", name, " as an argument, or bind it to a local the function captures"))
 
 # The arguments' arrays, and those they wrap.
-function argument_arrays(args)
+function argument_arrays(@nospecialize(args))
     arrays = Base.IdSet{Any}()
     for x in leaves(args)
         is_input(x) || continue
@@ -129,7 +129,7 @@ function argument_arrays(args)
 end
 
 # Whether `x`, or an array it wraps, is among `arrays`.
-function wraps(arrays, x)
+function wraps(arrays, @nospecialize(x))
     while true
         x in arrays && return true
         p = parent(x)
@@ -234,16 +234,38 @@ function hold!(held, seen, stack, at)
         if x isa AbstractArray && eltype(x) <: Number && ismutable(x)
             held.arrays[x] = at
         elseif x isa Union{Array, Core.Memory}
-            isbitstype(eltype(x)) && continue
-            for i in 1:min(length(x), 100_000)
-                isassigned(x, i) && push!(stack, x[i])
-            end
+            isbitstype(eltype(x)) || elements!(stack, x, 100_000)
         else
             for i in 1:nfields(x)
                 isdefined(x, i) && push!(stack, getfield(x, i))
             end
         end
     end
+end
+
+# The first `limit` elements of an array or a memory that are assigned, pushed
+# onto `stack`. They are read through the memory they live in, by Julia's
+# builtins, so that one compiled body walks memory of every element type,
+# where `isassigned`, `getindex` and `length` compile for each: a walk of
+# every global meets a few hundred.
+function elements!(stack, @nospecialize(x::Union{Array, Core.Memory}), limit)
+    if x isa Array
+        dims = getfield(x, :size)
+        n = 1
+        for k in 1:nfields(dims)
+            n *= getfield(dims, k)::Int
+        end
+        ref = getfield(x, :ref)
+    else
+        n = getfield(x, :length)::Int
+        n == 0 && return stack
+        ref = Core.memoryrefnew(x)
+    end
+    for i in 1:min(n, limit)
+        r = Core.memoryrefnew(ref, i, false)
+        Core.memoryref_isassigned(r, :not_atomic, false) && push!(stack, Core.memoryrefget(r, :not_atomic, false))
+    end
+    stack
 end
 
 const CODE = Union{Module, Type, Symbol, AbstractString, Number, Ptr, Expr, Task, GlobalRef, Method, Core.MethodInstance,
@@ -254,7 +276,7 @@ const CODE = Union{Module, Type, Symbol, AbstractString, Number, Ptr, Expr, Task
 global_name((m, n)) = Base.moduleroot(m) === Main ? string(n) : string(m, ".", n)
 
 # The global an array lives in, or one it wraps, a view or an adjoint, or `nothing`.
-function holder(arrays, x)
+function holder(arrays, @nospecialize(x))
     while true
         at = get(arrays, x, nothing)
         at === nothing || return at
@@ -411,7 +433,7 @@ end
 # program's input structure, number them; any other leaf as it is.
 function signature(call, positions)
     i = 0
-    structure_of(call) do x
+    structure_of(call) do @nospecialize(x)
         i += 1
         is_input(x) ? InputType(eltype(x), size(x), positions[i]) : x
     end
@@ -506,8 +528,8 @@ Base.@nospecializeinfer function match!(b::Passed, @nospecialize(e), @nospeciali
 end
 
 # Whether `x` is the input `e` describes, placed among `b`'s arrays at its
-# argument if it is: one call a leaf, specialized on the leaf's type.
-function placed!(b::Passed, e::InputType, x)
+# argument if it is: one call a leaf, one body whatever its type (see `locate!`).
+function placed!(b::Passed, e::InputType, @nospecialize(x))
     is_input(x) && eltype(x) === e.eltype && size(x) === e.dims || return false
     place!(b, e.argument, x)
     true
@@ -516,11 +538,28 @@ end
 shown(x) = sprint(show, x; context = :limit => true)
 
 # The path of each leaf of the call `(f, args...)`, as a difference names it,
-# in the order `leaves` gives them.
-leaf_paths(call) = foldl((out, (k, x)) -> leaf_paths!(out, x, k == 1 ? "f" : "argument $(k - 1)"), enumerate(call); init = String[])
-leaf_paths!(out, x::Tuple, path) = foldl((out, (k, y)) -> leaf_paths!(out, y, "$path[$k]"), enumerate(x); init = out)
-leaf_paths!(out, x::NamedTuple, path) = foldl((out, k) -> leaf_paths!(out, x[k], "$path.$k"), keys(x); init = out)
-leaf_paths!(out, x, path) = nested(x) ? leaf_paths!(out, parts(x), path) : push!(out, path)
+# in the order `leaves` gives them. Walked as `leaves!` walks, by fields and
+# unspecialized: the structure is the program's.
+Base.@nospecializeinfer function leaf_paths(@nospecialize(call::Tuple))
+    out = String[]
+    for k in 1:nfields(call)
+        leaf_paths!(out, getfield(call, k), k == 1 ? "f" : string("argument ", k - 1))
+    end
+    out
+end
+Base.@nospecializeinfer function leaf_paths!(out, @nospecialize(x::Tuple), path)
+    for k in 1:nfields(x)
+        leaf_paths!(out, getfield(x, k), string(path, "[", k, "]"))
+    end
+    out
+end
+Base.@nospecializeinfer function leaf_paths!(out, @nospecialize(x::NamedTuple), path)
+    for k in 1:nfields(x)
+        leaf_paths!(out, getfield(x, k), string(path, ".", fieldname(typeof(x), k)))
+    end
+    out
+end
+Base.@nospecializeinfer leaf_paths!(out, @nospecialize(x), path) = nested(x) ? leaf_paths!(out, parts(x), path) : push!(out, path)
 
 describe(x::InputType) = string("a ", x.eltype, " array of size ", x.dims)
 describe(x::Parts{T}) where {T} = string("a ", nameof(T))

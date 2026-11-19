@@ -7,9 +7,9 @@ using CUDACore
 import Tempest: CUDATarget
 
 Tempest.Compiler.target_for(x::CuArray) = CUDATarget(; device = Tempest.Compiler.device_of(x))
-Tempest.Compiler.device_of(x::CuArray) = CUDACore.deviceid(CUDACore.device(x))
+Tempest.Compiler.device_of(@nospecialize(x::CuArray)) = CUDACore.deviceid(CUDACore.device(x))
 # A view or reshape of a device's array is on its parent's device.
-Tempest.Compiler.device_of(x::CUDACore.AnyCuArray) = Tempest.Compiler.device_of(parent(x))
+Tempest.Compiler.device_of(@nospecialize(x::CUDACore.AnyCuArray)) = Tempest.Compiler.device_of(parent(x))
 # On another device, the task's state there is kept apart from its state on
 # the device it was on, which CUDA.jl gives back, its stream too, as `f`
 # ends. A task on the device already runs `f` as it is: switching costs a
@@ -63,7 +63,7 @@ end
 # stream had waited for it, the next call's launches wrote it unseen, and
 # it was read before it was written (on a second device, whose stream no
 # reader shared).
-Tempest.Compiler.taken(::CUDATarget, x) = (pointer(x); nothing)
+Tempest.Compiler.taken(::CUDATarget, @nospecialize(x)) = (pointer(x); nothing)
 
 # The bytes a crossing stages through the host at a time, and how many
 # buffers it stages them through: one chunk's upload runs beside the next

@@ -199,9 +199,9 @@ operand_id(tape, x::Number) = constant!(tape, x)
 # The tape of the traced operands among `args`, or among a broadcast's: a
 # map of traced operands has one, and so has a broadcast of `TracedStyle`,
 # which a traced operand gave its style.
-function tape_of(args...)
+function tape_of(@nospecialize(args...))
     for a in args
-        a isa Union{Traced, TracedArray} && return a.tape
+        a isa Union{Traced, TracedArray} && return getfield(a, :tape)
         a isa Broadcast.Broadcasted || continue
         tape = tape_in(a)
         tape === nothing || return tape
@@ -395,25 +395,28 @@ struct TracedNumberStyle <: Broadcast.AbstractArrayStyle{0} end
 TracedNumberStyle(::Val) = TracedStyle()
 Base.BroadcastStyle(::Type{<:Traced}) = TracedNumberStyle()
 
-handle(x::TracedArray) = Traced(x.tape, x.id)
-handle(x::TracedArray, tape) = handle(x)
-handle(x::AbstractArray{<:Number}, tape) = Traced(tape, constant!(tape, x))
+# The handles, dimensions and components of a broadcast's operands, each
+# compiled once whatever the operand's element type and axes, as the walks of
+# a broadcast below: the operands are the program's.
+handle(@nospecialize(x::TracedArray)) = Traced(x.tape, x.id)
+handle(@nospecialize(x::TracedArray), tape) = handle(x)
+handle(@nospecialize(x::AbstractArray{<:Number}), tape) = Traced(tape, constant!(tape, x))
 # A tuple of numbers broadcast is a vector of them, as in Base.
-handle(x::Tuple{Vararg{Number}}, tape) = handle(collect(x), tape)
-handle(x, tape) = handle(x)
-handle(x::Traced) = x
-handle(x::Number) = x
-handle(x::Base.RefValue) = x[]
-handle(x::Val) = x
-handle(x::Function) = x
-handle(x::Type) = x
-handle(x) = throw(ArgumentError("cannot broadcast a $(typeof(x)) with traced arrays; pass arrays as inputs"))
+handle(@nospecialize(x::Tuple{Vararg{Number}}), tape) = handle(collect(x), tape)
+handle(@nospecialize(x), tape) = handle(x)
+handle(@nospecialize(x::Traced)) = x
+handle(@nospecialize(x::Number)) = x
+handle(@nospecialize(x::Base.RefValue)) = x[]
+handle(@nospecialize(x::Val)) = x
+handle(@nospecialize(x::Function)) = x
+handle(@nospecialize(x::Type)) = x
+handle(@nospecialize(x)) = throw(ArgumentError("cannot broadcast a $(typeof(x)) with traced arrays; pass arrays as inputs"))
 
-operand_dims(x::TracedArray) = x.dims
-operand_dims(x::Traced) = node(x).dims
-operand_dims(x::AbstractArray{<:Number}) = size(x)
-operand_dims(x::Tuple{Vararg{Number}}) = (length(x),)
-operand_dims(x) = ()
+operand_dims(@nospecialize(x::TracedArray)) = x.dims
+operand_dims(@nospecialize(x::Traced)) = node(x).dims
+operand_dims(@nospecialize(x::AbstractArray{<:Number})) = size(x)
+operand_dims(@nospecialize(x::Tuple{Vararg{Number}})) = (length(x),)
+operand_dims(@nospecialize(x)) = ()
 
 "The `I`th component of a tuple."
 struct Component{I} end
@@ -423,8 +426,8 @@ Base.show(io::IO, ::Component{I}) where {I} = print(io, "component ", I)
 # A handle is a number, and `s[1]` of a number is the number. So a tuple
 # element, a fold's state say, is the tuple of its components, each a handle,
 # and a function of it runs on them as on a tuple.
-components(a::Traced) = node(a).eltype <: Tuple ? ntuple(i -> record_map(Component{i}(), a), fieldcount(node(a).eltype)) : a
-components(a) = a
+components(@nospecialize(a::Traced)) = node(a).eltype <: Tuple ? ntuple(i -> record_map(Component{i}(), a), fieldcount(node(a).eltype)) : a
+components(@nospecialize(a)) = a
 
 # A component of a tuple made by `tuple` is the operand it was made from.
 function simplify(::Component{I}, t::Traced) where {I}
@@ -440,7 +443,7 @@ end
 function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
     mark = length(tape.nodes)
     result = try
-        f(map(components, args)...)
+        f(map_elements(components, args)...)
     catch
         resize!(tape.nodes, mark)
         nothing
@@ -448,12 +451,17 @@ function trace_broadcast(@nospecialize(f), @nospecialize(args), tape)
     result isa Traced && return stated(f, result, args, tape)
     result isa Number && return Traced(tape, constant!(tape, result))
     # A tuple of handles is the tuple of its components, each traced.
-    result isa Tuple && all(r -> r isa Union{Traced, Number}, result) && any(r -> r isa Traced, result) && return record_map(tuple, result...)
+    result isa Tuple && all_elements(@nospecialize(r) -> r isa Union{Traced, Number}, result) &&
+        any_element(@nospecialize(r) -> r isa Traced, result) && return record_map(tuple, result...)
     # The function did not run on handles: record it whole, with its arguments
     # that are neither traced nor numbers bound into it.
     result === nothing || resize!(tape.nodes, mark)
-    inputs = filter(a -> a isa Union{Traced, Number}, collect(args))
-    g = length(inputs) == length(args) ? f : Bound(f, map(a -> a isa Union{Traced, Number} ? Slot() : fixed(a), args))
+    inputs = Any[]
+    for k in 1:nfields(args)
+        a = getfield(args, k)
+        a isa Union{Traced, Number} && push!(inputs, a)
+    end
+    g = length(inputs) == nfields(args) ? f : Bound(f, map_elements(@nospecialize(a) -> a isa Union{Traced, Number} ? Slot() : fixed(a), args))
     record_map(g, inputs...)
 end
 
@@ -476,20 +484,25 @@ Base.show(io::IO, s::Stated) = print(io, s.f, ", stated")
 function stated(@nospecialize(f), y::Traced, @nospecialize(args), tape)
     n = node(y)
     n.op isa Map && n.op.f === f && return y
-    all(a -> a isa Traced ? !(node(a).eltype <: Tuple) && a.id != y.id : a isa Number, args) || return y
+    all_elements(@nospecialize(a) -> a isa Traced ? !(node(a).eltype <: Tuple) && a.id != y.id : a isa Number, args) || return y
     derivatives_stated(f, y, args...) ? record_map(Stated(f), y, args...) : y
 end
 
+# A broadcast is walked by the fields of its tree, unspecialized: its type is
+# the program's expression, and Base's `map` and `any` over its arguments
+# would compile again for each expression a program broadcasts.
 broadcast_handle(@nospecialize(bc::Broadcast.Broadcasted), tape) =
-    trace_broadcast(bc.f, map(a -> broadcast_handle(a, tape), bc.args), tape)
-broadcast_handle(x, tape) = handle(x, tape)
+    trace_broadcast(getfield(bc, :f), map_elements(@nospecialize(a) -> broadcast_handle(a, tape), getfield(bc, :args)), tape)
+broadcast_handle(@nospecialize(x), tape) = handle(x, tape)
 
-broadcast_dims_of(@nospecialize(bc::Broadcast.Broadcasted)) = broadcast_dims(map(broadcast_dims_of, bc.args)...)
-broadcast_dims_of(x) = operand_dims(x)
+broadcast_dims_of(@nospecialize(bc::Broadcast.Broadcasted)) = broadcast_dims(map_elements(broadcast_dims_of, getfield(bc, :args))...)
+broadcast_dims_of(@nospecialize(x)) = operand_dims(x)
 
 function tape_in(@nospecialize(bc::Broadcast.Broadcasted))
-    for a in bc.args
-        t = a isa Broadcast.Broadcasted ? tape_in(a) : a isa Union{Traced, TracedArray} ? a.tape : nothing
+    args = getfield(bc, :args)
+    for k in 1:nfields(args)
+        a = getfield(args, k)
+        t = a isa Broadcast.Broadcasted ? tape_in(a) : a isa Union{Traced, TracedArray} ? getfield(a, :tape) : nothing
         t === nothing || return t
     end
     nothing
@@ -497,9 +510,9 @@ end
 
 # Whether a broadcast reads a traced number that stands for an element of an
 # array: one a broadcast's function runs on.
-reads_element(@nospecialize(bc::Broadcast.Broadcasted)) = any(reads_element, bc.args)
-reads_element(x::Traced) = !node(x).scalar
-reads_element(x) = false
+reads_element(@nospecialize(bc::Broadcast.Broadcasted)) = any_element(reads_element, getfield(bc, :args))
+reads_element(@nospecialize(x::Traced)) = !node(x).scalar
+reads_element(@nospecialize(x)) = false
 
 # A broadcast of numbers and arrays of no dimensions is a number, as in Julia:
 # the program's number, a scalar node. In a broadcast's function a traced
@@ -1424,7 +1437,7 @@ LinearAlgebra.normalize(x::TracedArray{<:Real}, p::Real = 2) = x ./ norm(x, p)
 # What becomes a program's input among the leaves of its arguments: arrays.
 # Numbers are constants, as configuration is: a layer's epsilon, a rule's
 # rate, a size.
-is_input(leaf) = leaf isa AbstractArray{<:Number}
+is_input(@nospecialize(leaf)) = leaf isa AbstractArray{<:Number}
 
 # A constant among the results, returned as it is, unless it holds traced
 # values where nothing rebuilds them: a dictionary, a set or a `Complex` of

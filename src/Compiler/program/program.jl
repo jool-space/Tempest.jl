@@ -382,7 +382,13 @@ Base.@nospecializeinfer leaves!(out, @nospecialize(x)) = nested(x) ? leaves!(out
 
 # `g` on each element of a tuple or named tuple, its names kept.
 Base.@nospecializeinfer each(g, @nospecialize(x::Tuple)) = map_elements(g, x)
-Base.@nospecializeinfer each(g, @nospecialize(x::NamedTuple)) = NamedTuple{keys(x)}(map_elements(g, values(x)))
+Base.@nospecializeinfer function each(g, @nospecialize(x::NamedTuple))
+    out = Vector{Any}(undef, nfields(x))
+    for k in eachindex(out)
+        out[k] = g(getfield(x, k))
+    end
+    NamedTuple{fieldnames(typeof(x))}(Tuple(out))
+end
 
 # `x` with `f` applied to each leaf, structs and vectors built anew from their parts.
 Base.@nospecializeinfer rebuild(f, @nospecialize(x::Union{Tuple, NamedTuple})) = each(@nospecialize(y) -> rebuild(f, y), x)
@@ -415,7 +421,9 @@ Base.@nospecializeinfer function argument_leaves(p, @nospecialize(inputs))
     xs = leaves(inputs)
     length(positions) == length(xs) || throw(ArgumentError("the program takes $(length(positions)) leaves, got $(length(xs))"))
     out = Vector{Any}(nothing, length(p.arguments))
-    foreach((k, x) -> k === nothing || (out[k] = x), positions, xs)
+    for (k, x) in zip(positions, xs)
+        k === nothing || (out[k] = x)
+    end
     out
 end
 

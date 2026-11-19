@@ -857,7 +857,7 @@ end
 
 # Array `x` as argument `k` of `b`, noted where it is on another device
 # than the plan put the argument on.
-function place!(b::Passed, k::Int, x)
+function place!(b::Passed, k::Int, @nospecialize(x))
     b.arrays[k] = x
     read_on(b.devices[k], x) || push!(b.elsewhere, k)
     b
@@ -934,9 +934,11 @@ function refuse_sharing(ex, paths, k, a, writer)
         " writes: the program reads its arrays apart, so pass arrays that share none")))
 end
 
-# Where array `x`, argument `k` of `b`, lives: one call a leaf, specialized
-# on the leaf's type, which asks once.
-function locate!(b::Passed, k::Int, x)
+# Where array `x`, argument `k` of `b`, lives: one call a leaf, which asks
+# once. Compiled once whatever the leaf's type, as the binding's other walks
+# of the leaves are: a dispatch of a few tens of nanoseconds a leaf, where a
+# body for each type of array compiled again for each program.
+function locate!(b::Passed, k::Int, @nospecialize(x))
     if x isa StridedArray
         at = reinterpret(UInt, pointer(x))
         b.at[k], b.extents[k] = at, extent(x, at)
@@ -950,7 +952,7 @@ end
 # an array on the host, which is copied where it cannot be the storage, or
 # on that device; a program on the host's memory alone reads a device's
 # arrays by copying them too.
-read_on(device, x) = (d = device_of(x)) === nothing || device === nothing || d == device
+read_on(device, @nospecialize(x)) = (d = device_of(x)) === nothing || device === nothing || d == device
 
 # Throw where the arrays among `inputs` and `target` are on more than one
 # device, beside the host (see `device_of`), naming each array by its path,
@@ -971,10 +973,23 @@ end
 
 # The path of each leaf of `inputs`, as a preparation takes them, in the
 # order `leaves` gives them.
-input_paths(inputs) = foldl((out, (k, x)) -> leaf_paths!(out, x, "input $k"), enumerate(inputs); init = String[])
+Base.@nospecializeinfer function input_paths(@nospecialize(inputs::Tuple))
+    out = String[]
+    for k in 1:nfields(inputs)
+        leaf_paths!(out, getfield(inputs, k), string("input ", k))
+    end
+    out
+end
 
 # The path of each leaf of the inputs `bindings` give by position, as `bind!` takes them.
-binding_paths(bindings) = foldl((out, (j, x)) -> leaf_paths!(out, x, "input $j"), bindings; init = String[])
+Base.@nospecializeinfer function binding_paths(@nospecialize(bindings::Tuple))
+    out = String[]
+    for k in 1:nfields(bindings)
+        binding = getfield(bindings, k)
+        leaf_paths!(out, getfield(binding, 2), string("input ", getfield(binding, 1)))
+    end
+    out
+end
 
 # The addresses the elements of array `x` span, its first byte to its last,
 # along its strides from `at`, its first element's: none for an array with
@@ -1012,9 +1027,10 @@ function point_each!(ex::Executable, b::Passed)
 end
 
 # Bind input `x`, whose first element is at `at`, to argument `k`, as
-# `point!` binds each: one call a leaf, specialized on the leaf's type, a
-# model's hundreds of arrays each checked in a few hundred nanoseconds.
-function point_leaf!(ex::Executable, k::Int, x, at::UInt, moves::Moves)
+# `point!` binds each: one call a leaf, a model's hundreds of arrays each
+# checked in a few hundred nanoseconds, by one body whatever the leaf's type
+# (see `locate!`).
+function point_leaf!(ex::Executable, k::Int, @nospecialize(x), at::UInt, moves::Moves)
     if ex.pointable[k] !== nothing && pointable(ex.target, x, at)
         again = at == ex.seen[k]
         ex.seen[k] = at

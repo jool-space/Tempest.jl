@@ -105,7 +105,7 @@ that does not plan so, its arrays and the target are on one device at
 most, beside the host, and a call that brings arrays of another device
 than its target's throws (see `point!`).
 """
-device_of(x) = nothing
+device_of(@nospecialize(x)) = nothing
 device_of(target::CUDATarget) = target.device
 
 """
@@ -402,7 +402,7 @@ array's address here, which that package counts as the calling task's use
 of it from then on, until another stream's. The CPU's run in order, and it
 does nothing.
 """
-taken(::Target, x) = nothing
+taken(::Target, @nospecialize(x)) = nothing
 
 """
     crossing(target, to, from, values, offset) -> run

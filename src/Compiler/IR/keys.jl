@@ -57,3 +57,24 @@ Base.@nospecializeinfer function map_elements(f, @nospecialize(t::Tuple))
     end
     Tuple(out)
 end
+
+"""
+    all_elements(p, t::Tuple) -> Bool
+    any_element(p, t::Tuple) -> Bool
+
+`all(p, t)` and `any(p, t)`, by code compiled once for every type of `t`, as
+`map_elements` maps.
+"""
+Base.@nospecializeinfer function all_elements(p, @nospecialize(t::Tuple))
+    for i in 1:nfields(t)
+        p(getfield(t, i))::Bool || return false
+    end
+    true
+end
+
+Base.@nospecializeinfer function any_element(p, @nospecialize(t::Tuple))
+    for i in 1:nfields(t)
+        p(getfield(t, i))::Bool && return true
+    end
+    false
+end
