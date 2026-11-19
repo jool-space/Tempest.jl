@@ -123,33 +123,99 @@ held(p::Plan, a::Around, v) =
     filter!(!=(0), [p.owner[v]; [p.owner[r] for r in loaded(p, v)]])
 
 """
-A proposal's place in a plan, by the values it fixes: the groups that hold
-them (`held`), in the order the planner forms them, and its values among
-them, numbered as `canonical` numbers one group's. Proposals with one key in
-the generator's plan are the same edit in identical layers, and are planned
-once. The groups that read its stored values are not among them: in a stack
-of layers those include a sum over every layer, such as an optimizer's update
-of weights every layer reads, in which each layer's term sits at a place of
-its own, and no two layers would be alike. The groups that recompute a map
-no group owns are, being where it is computed. Each group's text is written
-once into `texts`, which the keys of one plan's proposals share.
+A proposal's key: its place in a plan, by the values it fixes, the groups
+that hold them (`held`), in the order the planner forms them, and its values
+among them, numbered as `canonical` numbers one group's. Proposals with one
+key in the generator's plan are the same edit in identical layers, and are
+planned once. The groups that read its stored values are not among them: in
+a stack of layers those include a sum over every layer, such as an
+optimizer's update of weights every layer reads, in which each layer's term
+sits at a place of its own, and no two layers would be alike. The groups
+that recompute a map no group owns are, being where it is computed.
+
+The place is held by its number among the places of the cover's plans
+(`Places`), and what the proposal does there, `edit`, as text whose values
+the place names are numbered as the place numbers them, and the others after
+(see `proposal_key`). Many proposals share a place, as each step of a loop
+has many around the same groups, and a key that wrote its place out was as
+long as those groups' text: a 64-step loop's gradient wrote 3.6 GB of keys
+for 12,930 proposals in 260 places.
 """
-function proposal_key(p::Plan, a::Around, q::Proposal, texts = Dict{Int, String}())
+struct ProposalKey
+    place::Int
+    edit::String
+end
+
+Base.:(==)(a::ProposalKey, b::ProposalKey) = a.place == b.place && a.edit == b.edit
+Base.hash(k::ProposalKey, h::UInt) = hash(k.edit, hash(k.place, h))
+
+"""
+A place of proposals in a plan: its number among the cover's places, and the
+number each value it mentions has in its text.
+"""
+struct Place
+    number::Int
+    numbers::Dict{Int, Int}
+end
+
+"""
+The places of the proposals one cover weighs: each place's text, by its
+number, alike in every plan the cover weighs; each plan's places, by the
+groups around them; and each plan's groups' texts, each written once for
+every place it is in.
+"""
+struct Places
+    numbers::Dict{String, Int}
+    found::IdDict{Plan, Dict{Vector{Int}, Place}}
+    texts::IdDict{Plan, Dict{Int, String}}
+end
+
+Places() = Places(Dict{String, Int}(), IdDict{Plan, Dict{Vector{Int}, Place}}(), IdDict{Plan, Dict{Int, String}}())
+
+# `text` with each value it mentions, `%v`, written `%k` for `k = number(v)`.
+numbered_values(text, number) = replace(text, r"%\d+" => s -> string("%", number(parse(Int, SubString(s, 2)))))
+
+# Each value `numbers` numbers, in the order of its number, with its type,
+# shape and whether `p` stores it.
+value_shapes(p::Plan, numbers) = join((string("%", k, " ", p.graph.values[v].eltype, p.graph.values[v].dims, p.stored[v] ? " stored" : "")
+    for (v, k) in sort!(collect(numbers); by = last)), ", ")
+
+# The place of groups `around` of plan `p`, in the order the planner forms
+# them: their texts, each value numbered in the order they first mention it,
+# and those values' shapes.
+function proposal_place!(places::Places, p::Plan, around::Vector{Int})
+    found = get!(() -> Dict{Vector{Int}, Place}(), places.found, p)
+    get!(found, around) do
+        texts = get!(() -> Dict{Int, String}(), places.texts, p)
+        io = IOBuffer()
+        foreach(j -> print(io, get!(() -> "| " * numbered_text(p, p.groups[j]), texts, j)), around)
+        numbers = Dict{Int, Int}()
+        text = numbered_values(String(take!(io)), v -> get!(numbers, v, length(numbers) + 1))
+        Place(get!(places.numbers, string(text, "; ", value_shapes(p, numbers)), length(places.numbers) + 1), numbers)
+    end
+end
+
+"""
+    proposal_key(p, a, q, places) -> ProposalKey
+
+The key of proposal `q` in plan `p`, whose neighbourhoods are `a`: its place
+among `places`, and its edit, its values numbered as the place numbers them,
+those it alone names after, with their shapes. Two proposals have one key
+exactly where the text of their groups, edit and values' shapes, written
+out and numbered together, is one: a place's text never holds the ` || `
+each edit starts with, so where the place ends in that text is known.
+"""
+function proposal_key(p::Plan, a::Around, q::Proposal, places::Places)
     around = Set{Int}()
     foreach(v -> union!(around, held(p, a, v)), fixes(q))
+    place = proposal_place!(places, p, sort!(collect(around); by = j -> a.places[j]))
     io = IOBuffer()
-    for j in sort!(collect(around); by = j -> a.places[j])
-        print(io, get!(() -> "| " * numbered_text(p, p.groups[j]), texts, j))
-    end
     key_text(io, p, q)
     print(io, " || ", join(map(v -> "%$v", fixes(q)), " "))
-    numbers = Dict{String, Int}()
-    text = replace(String(take!(io)), r"%\d+" => s -> string("%", get!(numbers, s, length(numbers) + 1)))
-    shapes = map(sort!(collect(numbers); by = last)) do (s, k)
-        v = parse(Int, s[2:end])
-        string("%", k, " ", p.graph.values[v].eltype, p.graph.values[v].dims, p.stored[v] ? " stored" : "")
-    end
-    string(text, "; ", join(shapes, ", "))
+    added = Dict{Int, Int}()
+    number(v) = get(() -> get!(added, v, length(place.numbers) + length(added) + 1), place.numbers, v)
+    edit = numbered_values(String(take!(io)), number)
+    ProposalKey(place.number, string(edit, "; ", value_shapes(p, added)))
 end
 
 """
@@ -324,7 +390,7 @@ function cover(d::Decider)
     # A proposal's comparison with the plan it is priced in, and the
     # implementation that claims its group: by key, once, where its kind
     # can be priced (`priceable`).
-    priced = Dict{String, Union{Nothing, Tuple{Comparison, Union{Nothing, Implementation}}}}()
+    priced = Dict{ProposalKey, Union{Nothing, Tuple{Comparison, Union{Nothing, Implementation}}}}()
     known = IdDict{Plan, Tuple{Vector{GroupIdentity}, Set{GroupIdentity}}}()
     function can_price(p, q, i)
         p === nothing && return false
@@ -339,24 +405,24 @@ function cover(d::Decider)
     # Every proposal's trial against the starting plan, planned side by side
     # on the threads there are: a trial is pure, and planning is most of the
     # cover's time. Priced in order, once per key, as before.
-    texts = Dict{Int, String}()
-    keyed = [(q, i, proposal_key(base, a, q, texts)) for (q, i) in proposed]
-    firsts = Dict{String, Proposal}()
+    places = Places()
+    keyed = [(q, i, proposal_key(base, a, q, places)) for (q, i) in proposed]
+    firsts = Dict{ProposalKey, Proposal}()
     foreach(((q, _, k),) -> get!(firsts, k, q), keyed)
     clock = lap!(:cover_keys, clock)
     planned = Dict(k => Threads.@spawn(plan_of(trial(based, Proposal[], Proposal[q]))) for (k, q) in firsts)
-    trials = Dict{String, Union{Nothing, Plan}}(k => fetch_result(t) for (k, t) in planned)
+    trials = Dict{ProposalKey, Union{Nothing, Plan}}(k => fetch_result(t) for (k, t) in planned)
     # Whether each trial can be priced, by its key's first proposal as it is
     # priced below; and what the implementations offer for the groups of
     # those that can, found side by side as the starting plan's are (see
     # `offer!`), as a trial is priced by the groups it differs in.
-    pricing = Dict{String, Bool}()
+    pricing = Dict{ProposalKey, Bool}()
     foreach(((q, i, k),) -> haskey(pricing, k) || (pricing[k] = can_price(trials[k], q, i)), keyed)
-    offer!(d, [(trials[k], g) for (k, can) in pricing if can for g in trials[k].groups])
+    offer!(d, [(trials[k], g) for k in unique(k for (_, _, k) in keyed) if pricing[k] for g in trials[k].groups])
     clock = lap!(:cover_trials, clock)
     search_ahead!(d, base, keyed, trials, pricing)
     clock = lap!(:cover_search_ahead, clock)
-    ranked = Tuple{Float64, Proposal, Union{Nothing, Implementation}, String}[]
+    ranked = Tuple{Float64, Proposal, Union{Nothing, Implementation}, ProposalKey}[]
     for (q, i, k) in keyed
         x = get!(() -> priced_plan(trials[k], base, q, i, pricing[k]), priced, k)
         x === nothing || push!(ranked, (x[1].old - x[1].new, q, i, k))
@@ -364,7 +430,7 @@ function cover(d::Decider)
     sort!(ranked; by = r -> (-r[1], fixes(r[2])))
     clock = lap!(:cover_pricing, clock)
     # Each ranked proposal's edit, by which proposals alike are one class.
-    edits = Dict{String, String}()
+    edits = Dict{ProposalKey, String}()
     edit = [get!(() -> edit_key(known, base, trials[r[4]]), edits, r[4]) for r in ranked]
     clock = lap!(:cover_edits, clock)
     near(q) = Set(j for v in fixes(q) for j in neighbours(base, a, v))
@@ -385,14 +451,14 @@ function cover(d::Decider)
         push!(get!(() -> Int[], classes, get!(first_of, edit[m], m)), m)
     end
     order = sort!(collect(keys(classes)))
-    ahead, spawned = Dict{String, Task}(), Task[]
+    ahead, spawned = Dict{ProposalKey, Task}(), Task[]
     function plan_ahead!(n)
         c = searchsortedfirst(order, n)
         for later in order[c:min(end, c + Threads.nthreads() - 1)]
             part = filter(moved, classes[later])
             isempty(part) && continue
             q = ranked[first(part)][2]
-            key = proposal_key(current.plan, around(current.plan, taken), q)
+            key = proposal_key(current.plan, around(current.plan, taken), q, places)
             (haskey(priced, key) || haskey(ahead, key)) && continue
             t = let p = current, before = copy(taken)
                 Threads.@spawn plan_of(trial(p, before, Proposal[q]))
@@ -415,7 +481,7 @@ function cover(d::Decider)
         for part in (filter(!moved, class), filter(moved, class))
             isempty(part) && continue
             _, q, i, key = ranked[first(part)]
-            x = moved(first(part)) ? price_ahead(q, i, proposal_key(current.plan, around(current.plan, taken), q)) : priced[key]
+            x = moved(first(part)) ? price_ahead(q, i, proposal_key(current.plan, around(current.plan, taken), q, places)) : priced[key]
             x === nothing && continue
             c, j = x
             cs = [Considered(ranked[m][2], j, c, cheaper(c)) for m in part]
@@ -457,7 +523,7 @@ end
 function search_ahead!(d::Decider, base::Plan, keyed, trials, pricing)
     d.measure in (:close, :all) || return nothing
     shared = Set(group_identity(base, g) for g in base.groups)
-    ahead, seen, searched = Tuple{Plan, Group, Vector{Choice}}[], Set{GroupIdentity}(), Set{String}()
+    ahead, seen, searched = Tuple{Plan, Group, Vector{Choice}}[], Set{GroupIdentity}(), Set{ProposalKey}()
     for (_, _, k) in keyed
         k in searched && continue
         push!(searched, k)
