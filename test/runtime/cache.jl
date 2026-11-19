@@ -225,6 +225,18 @@ end
     @test_broken Base.invokelatest(C.method_text, method) != before
 end
 
+# A top-level anonymous function's type is named by a counter the process
+# keeps, so that one source evaluated again, or after a line making another
+# closure above it, has another key, and its kernels compile again: in a REPL,
+# a notebook, or a script that gained a closure. Time, not a wrong result.
+@testset "waiting on an anonymous function named by its code, not its number" begin
+    source = :((x -> 2x, y -> y + 1))
+    first = Core.eval(@__MODULE__, source)
+    Core.eval(@__MODULE__, :(z -> z - 1))
+    second = Core.eval(@__MODULE__, source)
+    @test_broken C.content_key(first; checked = true) == C.content_key(second; checked = true)
+end
+
 @testset "a package's function redefined in the session is checked again" begin
     # As Revise redefines a developed package's function: the session ends,
     # and what the kernel's compilation used is checked again, the method
