@@ -3,7 +3,7 @@
 # Outside this pair, since each needs another precompile of a package: an
 # edit to Tempest itself, whose kernels must still load, and a developed
 # package's file edited while loaded (reproducers in the challengers'
-# night-2026-11-19/review3, `run3.sh` and `devpkg.sh`).
+# night-2026-11-19/review3: `round2/run3.sh` and `devpkg.sh`).
 # cuda/cache.jl runs this twice on one store, `VARIANT` 1 then 2, each in a
 # process of its own, as a script edited between two runs is. A kernel of
 # code changed must not be loaded, and a kernel of code unchanged must be.
