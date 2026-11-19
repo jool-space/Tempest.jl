@@ -33,13 +33,12 @@ closure(s) = x -> s * x
     # edit anywhere in Tempest changes; the kernel is checked by what it uses.
     @test occursin("Tempest = checked by dependencies", C.canonical_text(T.logsumexp; checked = true))
     @test occursin("Base = julia", C.canonical_text(T.logsumexp, sin; checked = true))
-    # Before Julia 1.12 there are no edges to check by, and the key is whole.
-    @test (C.content_key(T.logsumexp; checked = true) == C.content_key(T.logsumexp)) == !C.EDGES
+    @test C.content_key(T.logsumexp; checked = true) != C.content_key(T.logsumexp)
 end
 
-# Code a key does not name. Each is a stale kernel and a wrong result with no
-# error: a new process loads from the store the binary of the code before the
-# change, or the session keeps the kernel it compiled before it.
+# Code a key does not name, since only inference finds it: a stored kernel
+# whose compilation reached it loads only while what it reached holds. Each
+# change here, unchecked, is a stale kernel and a wrong result with no error.
 struct Half end
 Base.:*(::Half, x::Float32) = 0.5f0 * x
 halve(x::Float32) = Half() * x
@@ -48,23 +47,73 @@ struct Unit end
 Base.Float32(::Unit) = 1.0f0
 in_units(x::Float32) = x * Float32(Unit())
 
+struct Third end
+Base.:*(::Third, x::Real) = x / 3
+thirds(x::Float32) = Third() * x
+
 doubled(x) = 2x
 
-@testset "a key names all the code its kernel is compiled from" begin
-    # A method of a package's function written outside any package, for a
-    # type of its own: the key names the function, which is the package's.
-    before = C.content_key(halve)
-    @eval Base.:*(::Half, x::Float32) = 0.25f0 * x
-    @test_broken C.content_key(halve) != before
-    before = C.content_key(in_units)
-    @eval Base.Float32(::Unit) = 2.0f0
-    @test_broken C.content_key(in_units) != before
+# What the host's compilation of `f` for `args` used, read as a kernel's is.
+function used(f, args...)
+    f(args...)
+    mi = only(Base.method_instances(f, map(typeof, args)))
+    C.dependencies(mi.cache, m -> isdefined(m, :cache) ? m.cache : nothing, nothing)
+end
+
+holding(dependencies) = all(C.holds, dependencies)
+
+@testset "a stored kernel loads only while what its compilation used holds" begin
+    if !C.EDGES
+        # Without edges there is nothing to check a kernel by: none is kept.
+        @test isempty(used(halve, 1.0f0))
+        @test C.load_kernel(C.content_key("a kernel")) === nothing
+    else
+        # A method of a package's function written outside any package, for a
+        # type of its own, redefined.
+        before = used(halve, 1.0f0)
+        @test holding(before)
+        @eval Base.:*(::Half, x::Float32) = 0.25f0 * x
+        @test !holding(before)
+        before = used(in_units, 1.0f0)
+        @eval Base.Float32(::Unit) = 2.0f0
+        @test !holding(before)
+        # A method more specific than the one a call matched, added while that
+        # one is unchanged; and deleted again.
+        before = used(thirds, 1.0f0)
+        @eval Base.:*(::Third, x::Float32) = 0.0f0
+        @test !holding(before)
+        after = used(thirds, 1.0f0)
+        Base.delete_method(which(*, (Third, Float32)))
+        @test !holding(after) && holding(before)
+        # A method a script evaluates into an installed package's module is
+        # identified by its code, not by the package.
+        Core.eval(LinearAlgebra, :(evaluated_here(x::Float32) = 2x))
+        twice(x) = LinearAlgebra.evaluated_here(x)
+        before = used(twice, 1.0f0)
+        @test !occursin("package", C.method_identity(which(LinearAlgebra.evaluated_here, (Float32,))))
+        @test occursin("package", C.method_identity(which(sin, (Float32,))))
+        Core.eval(LinearAlgebra, :(evaluated_here(x::Float32) = 3x))
+        @test !holding(before)
+        # What is read back holds as it did; what cannot be read back does not.
+        dependency = first(used(thirds, 1.0f0))
+        io = IOBuffer()
+        C.serialize(io, (dependency.kind, dependency.table, dependency.named, dependency.found))
+        @test C.read_holds(take!(io)) && !C.read_holds(UInt8[1, 2, 3])
+    end
+end
+
+@testset "waiting on the session asking again: a package's code redefined in it" begin
     # A package's function redefined in the session, as Revise does when a
-    # developed package's file is edited: a package is identified once.
+    # developed package's file is edited: a package is identified once, and
+    # what the session checked or resolved before is kept. Another process
+    # checks it by its code, as a method no image holds.
     Core.eval(LinearAlgebra, :(redefined_in_session(x) = 2x))
     before = C.content_key(LinearAlgebra.redefined_in_session)
     Core.eval(LinearAlgebra, :(redefined_in_session(x) = 3x))
     @test_broken C.content_key(LinearAlgebra.redefined_in_session) != before
+end
+
+@testset "a value among a type's parameters is named by its code" begin
     # A function outside any package as a parameter of a package's type is
     # named by its code, as a session table's key names it.
     before = C.definitions(Any[Val(doubled)])
@@ -74,28 +123,18 @@ doubled(x) = 2x
     @test isempty(C.definitions(Any[Val(sin), Val(:name), Val(2)]))
 end
 
-@testset "what a kernel depends on of Tempest's code" begin
-    # The methods of Tempest's that inference reached, from the edges it keeps:
-    # here a fold's observe, through a function outside Tempest that calls it.
+@testset "what a kernel uses of Tempest's code" begin
+    # Tempest's methods that inference reached are identified by their code,
+    # so that an edit elsewhere in Tempest leaves the kernel loading: here a
+    # fold's observe, through a function outside Tempest that calls it.
     observed(s) = IR.fold_observe(IR.SumFold(), s)
-    observed((1.0f0,))
-    mi = only(methods(observed)).specializations
-    mi = mi isa Core.MethodInstance ? mi : first(filter(!isnothing, collect(mi)))
-    bytes = C.dependencies(mi.cache, m -> isdefined(m, :cache) ? m.cache : nothing)
-    if !C.EDGES
-        @test isempty(bytes)
-    else
-        records = C.deserialize(IOBuffer(bytes))
-        @test any(r -> r[1] === :method && r[2] <: Tuple{typeof(IR.fold_observe), Vararg}, records)
-        @test all(r -> r[1] !== :method || C.own_code(which(r[2]).module), records)
-        @test C.current(bytes)
-        # Changed code, a record that cannot be read back, and none.
-        kind, sig, _ = first(filter(r -> r[1] === :method, records))
-        io = IOBuffer(); C.serialize(io, [(kind, sig, "other code")])
-        @test !C.current(take!(io))
-        @test !C.current(UInt8[1, 2, 3])
+    dependencies = used(observed, (1.0f0,))
+    if C.EDGES
+        call = only(filter(d -> d.kind === :call && d.named <: Tuple{typeof(IR.fold_observe), Vararg}, dependencies))
+        @test call.found == C.method_text(which(call.named))
+        @test holding(dependencies)
+        @test !C.holds(C.Dependency(call.kind, call.table, call.named, "other code"))
     end
-    @test C.current(UInt8[])
 end
 
 @testset "where the tuning record lives" begin

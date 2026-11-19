@@ -8,7 +8,6 @@ Tempest.Compiler.content_key
 Tempest.Compiler.cached_kernel
 Tempest.Compiler.store_kernel
 Tempest.Compiler.store_failure
-Tempest.Compiler.cached_failure
 Tempest.Compiler.dependencies
 Tempest.Compiler.uncached_kernel
 Tempest.Compiler.generated

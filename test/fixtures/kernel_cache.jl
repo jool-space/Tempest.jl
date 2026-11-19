@@ -8,7 +8,7 @@
 # emitted again and resolved by its content. The first and last passes forget
 # what the session keeps (`forget_session!`), as a new process starts without
 # it: the last reads what the first wrote (the store before Julia 1.14 commits
-# at once).
+# at once), and checks each kernel by what its compilation used.
 using Tempest, Test, NNlib, CUDACore
 import cuBLAS, cuTile
 include(joinpath(@__DIR__, "..", "setup.jl"))
@@ -39,19 +39,30 @@ programs = [
     (loaded, compiled, first, kernels), (resident, _, middle, _), (reloaded, recompiled, second, _) = results
     # The first pass may also compile the side of a close call it measures and
     # does not keep.
-    @test compiled > 0 && recompiled == 0 && 0 < reloaded <= loaded + compiled
+    # Before Julia 1.12 nothing loads from the store.
+    if C.EDGES
+        @test compiled > 0 && recompiled == 0 && 0 < reloaded <= loaded + compiled
+    else
+        @test compiled > 0 && reloaded == 0
+    end
     @test resident == 0 && isequal(first, middle)
     @test isequal(first, second)
     @test all(isapprox.(first, filter(!isnothing, C.leaves(interpret(p, args...))); rtol = 1.0e-2))
     name == "the floor" && @test all(d -> d isa C.FloorKernels, kernels)
 end
 
-# A kernel that failed to compile fails again, with the compiler's message: a
-# kernel keyed without Tempest's code looks for its failures under the whole key.
+# A kernel that failed to compile fails again, with the compiler's message,
+# while what its inference used holds; not once it does not, nor where that
+# could not be read. Before Julia 1.12 none is kept.
 @testset "a failure kept" begin
     key = C.content_key("a kernel that fails")
-    @test C.cached_failure(key) === nothing
-    C.store_failure(key, "the compiler's message")
-    @test_throws "the compiler's message" C.cached_failure(key)
-    @test_throws "failed to compile before" C.load_kernel(key)
+    @test C.load_kernel(key) === nothing
+    C.store_failure(key, "the compiler's message"; dependencies = C.Dependency[])
+    C.EDGES ? (@test_throws "the compiler's message" C.load_kernel(key)) : (@test C.load_kernel(key) === nothing)
+    changed = C.content_key("a kernel that fails with code changed since")
+    C.store_failure(changed, "the compiler's message"; dependencies = [C.Dependency(:call, nothing, Tuple{typeof(sin), Float32}, "other code")])
+    @test C.load_kernel(changed) === nothing
+    unread = C.content_key("a kernel whose inference failed")
+    C.store_failure(unread, "the compiler's message"; dependencies = nothing)
+    @test C.load_kernel(unread) === nothing
 end

@@ -34,9 +34,9 @@ end
 
 # The CUBIN of `f` for `tt` on architecture `arch`, which needs no device. A
 # kernel is keyed without Tempest's own code and stored with what its
-# compilation used of it (`Tempest.Compiler.dependencies`), so that an edit to
-# Tempest compiles again only the kernels whose code it changed. A failure has
-# no inference to read that from, and is kept under the whole key.
+# compilation used (`Tempest.Compiler.dependencies`), so that it loads only
+# while that holds, and an edit to Tempest compiles again only the kernels
+# whose code it changed.
 function compiled_binary(@nospecialize(f), @nospecialize(tt), occupancy, groups, arch)
     parts = Any["cuTile kernel", f, tt, occupancy, groups, arch, ct.tileiras_version(), ct.bytecode_version(), ENTRY]
     key = Tempest.Compiler.content_key(parts...; checked = true)
@@ -53,25 +53,27 @@ end
 
 function (c::Compilation)()
     _, f, tt, occupancy, groups, arch = c.parts
-    # A kernel cuTile cannot express fails the same way next time.
-    failed = Tempest.Compiler.content_key(c.parts...)
-    Tempest.Compiler.cached_failure(failed)
-    cubin, dependencies = try
-        compile_binary(f, tt, occupancy, groups, arch)
-    catch err
-        err isa Union{ct.CodegenErrors, ct.IRError} && Tempest.Compiler.store_failure(failed, sprint(showerror, err))
-        rethrow()
-    end
-    Tempest.Compiler.store_kernel(c.key, ENTRY, cubin; dependencies)
-end
-
-# The CUBIN of `f` for `tt` compiled through cuTile, and what its compilation
-# used of Tempest's code.
-function compile_binary(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy), @nospecialize(groups), arch)
     Base.invokelatest(f, tt) do f, tt
         job = tile_job(f, tt, occupancy, groups, arch)
-        (ct.invoke_frozen(ct.compile_or_lookup, job).cubin, job_dependencies(job))
+        cubin = try
+            ct.invoke_frozen(ct.compile_or_lookup, job).cubin
+        catch err
+            err isa Union{ct.CodegenErrors, ct.IRError} && keep_failure(c.key, err, job)
+            rethrow()
+        end
+        Tempest.Compiler.store_kernel(c.key, ENTRY, cubin; dependencies = job_dependencies(job))
     end
+end
+
+# A kernel cuTile cannot express fails the same way next time, while what its
+# inference used holds; one whose inference failed is not kept.
+function keep_failure(key, err, job)
+    dependencies = try
+        job_dependencies(job)
+    catch
+        nothing
+    end
+    Tempest.Compiler.store_failure(key, sprint(showerror, err); dependencies)
 end
 
 # cuTile's compilation of `f` for `tt`, which its code runs in cuTile's own world.
@@ -80,12 +82,13 @@ function tile_job(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy),
     ct.invoke_frozen(ct.launch_job, f, argtypes, constants, (; sm_arch = arch, occupancy, name = ENTRY, alias_groups = groups))
 end
 
-# What a job's compilation used of Tempest's code: the dependencies of the
-# kernel's generic inference, whose edges cover any constant-seeded one's.
+# What a job's compilation used: the dependencies of the kernel's generic
+# inference, whose edges cover any constant-seeded one's, its calls dispatched
+# in cuTile's method table over Julia's.
 function job_dependencies(job)
     cache = ct.inference_cache(job)
     code = ct.invoke_frozen(ct.infer, cache, job.source)
-    Tempest.Compiler.dependencies(code, mi -> get(cache, mi, nothing))
+    Tempest.Compiler.dependencies(code, mi -> get(cache, mi, nothing), ct.cuTileMethodTable)
 end
 
 # A kernel's function, loaded once per context for the kernel, its argument

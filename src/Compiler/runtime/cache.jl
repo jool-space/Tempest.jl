@@ -10,97 +10,119 @@
 # code. The binary's parameters follow from the argument types, so a cached
 # kernel is its entry name and its binary.
 #
-# Tempest's own code may be left out of a key (`content_key`'s `checked`), so
-# that an edit to Tempest does not make every kernel compile again: the kernel
-# is stored with what its compilation used of Tempest's code instead, found
-# from the edges inference keeps (`dependencies`), and loads only while that
-# is unchanged (`current`). A kernel uses a handful of Tempest's methods, the
-# folds' functions and the generator's helpers, of the hundreds it has. A
-# kernel that failed to compile has no inference to read that from: its failure
-# is kept under the whole key (`cached_failure`).
+# A key names the code a kernel is compiled from only as far as its source
+# names it: what the compilation reached beyond, by inference, the key cannot
+# name, since naming it would be inferring the kernel, which a load is there
+# to save. A method a script writes for a package's function, for a type of
+# its own, a method more specific than the one a call matched, added since, or
+# one deleted, change the kernel and not its key. So a kernel is stored with
+# what its compilation used, read from the edges inference keeps
+# (`dependencies`): each call's signature with the methods it matched in the
+# method table it was dispatched in, each `invoke`, each global and each type,
+# with what identifies each then; and it loads only while each of them still
+# holds in this process (`holds`), as Julia checks a package image's code
+# against the session that loads it. Each is stored once, under its digest,
+# and checked once a session, as kernels share most of what they reach.
+#
+# A method is identified by its package where an installed package's image
+# holds it, and otherwise by its lowered code as loaded: code outside packages,
+# a method a script evaluated into a package's module, a developed package's,
+# whose files may have changed since they were loaded, Tempest's own. A
+# developed package is named in a key by its files all the same, for the code
+# of it a compilation runs that inference does not reach, as a compiler's
+# own. Tempest's own code is left
+# out of a key (`content_key`'s `checked`), so that an edit to Tempest
+# compiles again only the kernels whose code it changed. A kernel that failed
+# to compile is kept the same way, with what its inference used, and fails
+# again only while that holds; one whose inference cannot be read is not
+# kept. Before Julia 1.12 inference keeps no edges, there is nothing to check
+# a kernel by, and nothing is loaded from the store: kernels compile in every
+# process, once a session.
 #
 # The binaries are kept in Julia's object cache, through CompilerCaching, with
 # cuTile's: the runtime's store from Julia 1.14, a store of CompilerCaching's
 # before. The store is shared and bounded (`JULIA_OBJCACHE_CAPACITY`, by default
 # 512 MiB), removes the entries used least recently, and may lose a write, so a
-# kernel can compile again; `JULIA_OBJCACHE=0` turns it off.
+# kernel can compile again; `JULIA_OBJCACHE=0` turns it off. A kernel whose
+# dependencies were lost with it compiles again. Entries of an earlier layout
+# are under other keys (`KERNEL_SCHEMA`), never read, and removed as the
+# store fills.
 
 using SHA
 using Serialization
 using CompilerCaching: ObjCache
 
-public content_key, cached_kernel, store_kernel, store_failure, cached_failure, uncached_kernel, generated, dependencies, definitions
+public content_key, cached_kernel, store_kernel, store_failure, uncached_kernel, generated, dependencies, definitions
 
 "Kernels loaded from the cache and kernels compiled (or failed to), in this session."
 const CACHE_COUNTS = (loaded = Threads.Atomic{Int}(0), compiled = Threads.Atomic{Int}(0))
 
 cache_counts() = (loaded = CACHE_COUNTS.loaded[], compiled = CACHE_COUNTS.compiled[])
 
-# Tempest's kernels in the object cache, and the version of an entry's layout:
-# the length of the entry name, the name, the length of what the kernel depends
-# on of Tempest's code, that, and the binary; or a length of zero and the
-# compiler's message for a kernel that failed to compile.
+# Tempest's kernels in the object cache, what they depend on, each under its
+# digest, and the version of an entry's layout: the number of a kernel's
+# dependencies, their digests, the length of the entry name, the name, and
+# the binary; or a length of zero and the compiler's message for a kernel that
+# failed to compile.
 const KERNELS = "Tempest/kernel"
-const KERNEL_SCHEMA = 2
+const DEPENDENCIES = "Tempest/dependency"
+const KERNEL_SCHEMA = 3
 
 store_key(key) = ObjCache.keyhash(KERNEL_SCHEMA, key)
 
 """
     load_kernel(key) -> (entry, binary) or nothing
 
-The cached kernel under `key`, if there is one and what it depends on of
-Tempest's code is unchanged (`current`). A kernel that failed to compile fails
-again, with the compiler's message.
+The cached kernel under `key`, if there is one and what its compilation used
+still holds (`holds`). A kernel that failed to compile fails again, with the
+compiler's message.
 """
 function load_kernel(key)
+    EDGES || return nothing
     bytes = ObjCache.get(KERNELS, store_key(key))
     bytes === nothing && return nothing
-    fail_again(bytes)
-    n = Int(only(reinterpret(UInt32, bytes[1:4])))
-    d = Int(only(reinterpret(UInt32, bytes[(5 + n):(8 + n)])))
-    current(bytes[(9 + n):(8 + n + d)]) || return nothing
+    d = Int(only(reinterpret(UInt32, bytes[1:4])))
+    all(held, reinterpret(UInt128, bytes[5:(4 + 16d)])) || return nothing
+    at = 5 + 16d
+    n = Int(only(reinterpret(UInt32, bytes[at:(at + 3)])))
     Threads.atomic_add!(CACHE_COUNTS.loaded, 1)
-    (String(bytes[5:(4 + n)]), bytes[(9 + n + d):end])
+    n == 0 && error("this kernel failed to compile before:\n", String(bytes[(at + 4):end]))
+    (String(bytes[(at + 4):(at + 3 + n)]), bytes[(at + 4 + n):end])
 end
 
 """
     store_kernel(key, entry, binary; dependencies) -> (entry, binary)
 
-Count a compiled kernel and keep it under `key`, with what it depends on of
-Tempest's code (see `dependencies`), which a key that leaves that code out
-needs. A failure to write only loses the entry.
+Count a compiled kernel and keep it under `key`, with what its compilation
+used (see `dependencies`); not where that could not be read (`nothing`).
+A failure to write only loses the entry.
 """
-function store_kernel(key, entry::String, binary::Vector{UInt8}; dependencies = UInt8[])
+function store_kernel(key, entry::String, binary::Vector{UInt8}; dependencies)
     Threads.atomic_add!(CACHE_COUNTS.compiled, 1)
-    put_entry(key, [reinterpret(UInt8, [UInt32(ncodeunits(entry))]); codeunits(entry);
-        reinterpret(UInt8, [UInt32(length(dependencies))]); dependencies; binary])
+    put_entry(key, dependencies, [reinterpret(UInt8, [UInt32(ncodeunits(entry))]); codeunits(entry); binary])
     (entry, binary)
 end
 
-"Count a kernel that failed to compile and keep the compiler's message under `key`."
-function store_failure(key, message::String)
+"""
+    store_failure(key, message; dependencies)
+
+Count a kernel that failed to compile and keep the compiler's message under
+`key`, with what its inference used, so that it fails again while that holds.
+"""
+function store_failure(key, message::String; dependencies)
     Threads.atomic_add!(CACHE_COUNTS.compiled, 1)
-    put_entry(key, [reinterpret(UInt8, [UInt32(0)]); codeunits(message)])
+    put_entry(key, dependencies, [reinterpret(UInt8, [UInt32(0)]); codeunits(message)])
 end
 
-"""
-    cached_failure(key)
+# An entry whose dependencies could not be read is not kept, nor any before
+# Julia 1.12, which nothing would load.
+put_entry(key, ::Nothing, rest) = nothing
 
-Fail again, with the compiler's message, if the kernel under `key` failed to
-compile before (`store_failure`); otherwise do nothing. A kernel keyed without
-Tempest's code checks its failures under the whole key.
-"""
-function cached_failure(key)
-    bytes = ObjCache.get(KERNELS, store_key(key))
-    bytes === nothing || fail_again(bytes)
+function put_entry(key, dependencies, rest)
+    EDGES || return nothing
+    digests = UInt128[kept(d) for d in dependencies]
+    ObjCache.put!(KERNELS, store_key(key), [reinterpret(UInt8, [UInt32(length(digests))]); reinterpret(UInt8, digests); rest])
     nothing
-end
-
-function fail_again(bytes)
-    if only(reinterpret(UInt32, bytes[1:4])) == 0
-        Threads.atomic_add!(CACHE_COUNTS.loaded, 1)
-        error("this kernel failed to compile before:\n", String(bytes[5:end]))
-    end
 end
 
 """
@@ -110,11 +132,6 @@ Count a kernel compiled in this session that the cache cannot keep, one that
 refers to values of the session, and return it as `cached_kernel` expects.
 """
 uncached_kernel(entry, binary) = (Threads.atomic_add!(CACHE_COUNTS.compiled, 1); (entry, binary))
-
-function put_entry(key, bytes)
-    ObjCache.put!(KERNELS, store_key(key), bytes)
-    nothing
-end
 
 # Within a session a key is resolved once. Programs stack identical layers, whose
 # groups build their kernels at the same time and so have the same key in flight
@@ -184,10 +201,10 @@ generated_source(T) = @lock GENERATED_LOCK get(GENERATED_SOURCES, T, nothing)
 
 A hash of `parts` that is the same in every session for the same content: of
 their `canonical_text`. With `checked`, Tempest's own code is named without its
-identity, for a kernel stored with what it depends on of that code
-(`dependencies`), from Julia 1.12, whose inference keeps the edges to find it.
+identity, for a kernel stored with what its compilation used of that code
+(`dependencies`).
 """
-content_key(@nospecialize(parts...); checked = false) = bytes2hex(sha256(canonical_text(parts...; checked = checked && EDGES)))
+content_key(@nospecialize(parts...); checked = false) = bytes2hex(sha256(canonical_text(parts...; checked)))
 
 "The content of `parts` written out, with the identities of the packages they name."
 function canonical_text(@nospecialize(parts...); checked = false)
@@ -431,13 +448,12 @@ function find_identity(m::Module)
     string("sources ", bytes2hex(digest!(ctx)))
 end
 
-## What a kernel depends on of Tempest's own code
+## What a kernel's compilation used
 
 # Tempest and its extensions, whose code a checked key leaves out; not the
 # kernels Tempest generates, whose source the key holds. Asked of every
-# method, global and type a kernel's inference reached, so the answer is
-# kept per module: `pkgdir` takes the loading lock, on which kernels compiled
-# side by side waited.
+# module a key names, so the answer is kept per module: `pkgdir` takes the
+# loading lock, on which kernels compiled side by side waited.
 own_code(m::Module) = m !== Generated && (r = Base.moduleroot(m); r === ROOT || own_root(r))
 
 const OWN = SessionTable{Module, Bool}()
@@ -447,104 +463,247 @@ own_root(r::Module) = get!(() -> pkgdir(r) == pkgdir(ROOT), OWN, r)
 const ROOT = Base.moduleroot(@__MODULE__)
 
 # Inference keeps a code instance's edges from Julia 1.12. Before, a kernel has
-# nothing to be checked by, and its key keeps Tempest's identity.
+# nothing to be checked by, and none is loaded from the store.
 const EDGES = hasfield(Core.CodeInstance, :edges)
 
 """
-    dependencies(code, lookup) -> Vector{UInt8}
-
-What a kernel compiled from the code instance `code` depends on of Tempest's
-own code, written out: each method of Tempest or its extensions its inference
-reached, with its lowered code; each such global it read, with its value; and
-the fields of each such type its methods were specialized on. They are found
-through the edges inference keeps, `lookup(mi)` giving the code instance of a
-method instance an edge names, as the compiler that inferred them caches it.
+What a kernel's compilation used, and what it found then, as `dependencies`
+reads it: a call (`:call`) of a signature, and the methods it matched in the
+method table the compilation dispatched in (`table`: the global holding an
+overlay table, or `nothing` for Julia's own); an `invoke` (`:invoke`) of a
+signature, and the method it named; a global (`:global`) and what it held;
+or a type (`:type`) a method was specialized on, and its fields. What it
+found is written by what identifies it (`method_identity`, `global_identity`,
+`type_text`).
 """
-function dependencies(code, lookup)
-    EDGES || return UInt8[]
-    records = Set{Tuple}()
+struct Dependency
+    kind::Symbol
+    table::Union{Nothing, GlobalRef}
+    named::Any
+    found::String
+end
+
+"""
+    dependencies(code, lookup, table) -> Vector{Dependency}
+
+What a kernel compiled from the code instance `code` used, as inference's
+edges record it: each call its inference made, from the kernel down, with the
+methods it matched in `table`, the method table the compilation dispatched
+in; each `invoke` and global; and each type its methods were specialized on
+that no package's image holds. `lookup(mi)` gives the code instance of a
+method instance an edge names, as the compiler that inferred them caches it.
+What names a function Tempest generated is left out, since the key holds its
+source and no other session can name it.
+"""
+function dependencies(code, lookup, table::Union{Nothing, Core.MethodTable})
+    EDGES || return Dependency[]
+    at = table_name(table)
+    found = Set{Dependency}()
     seen = Base.IdSet{Any}()
+    keep!(kind, named, text) = nameable(named) && push!(found, Dependency(kind, at, named, text))
     function visit(x)
         x in seen && return
         push!(seen, x)
         if x isa Core.CodeInstance
-            visit(x.def)
-            foreach(visit, x.edges)
+            visit(instance(x))
+            read_edges(x.edges) do kind, named, callees
+                foreach(visit, callees)
+                if kind === :global
+                    keep!(kind, named.globalref, global_identity(named))
+                else
+                    keep!(kind, named, identities(callee_method(c) for c in callees))
+                end
+            end
         elseif x isa Core.MethodInstance
-            x.def isa Method && visit(x.def)
-            own_types!(records, x.specTypes)
+            specialized_types!(keep!, x.specTypes)
             c = lookup(x)
             c === nothing || visit(c)
-        elseif x isa Method
-            own_code(x.module) && push!(records, (:method, x.sig, method_text(x)))
-        elseif x isa Core.Binding
-            g = x.globalref
-            own_code(g.mod) && push!(records, (:global, g, global_text(g)))
         end
     end
     visit(code)
-    io = IOBuffer()
-    serialize(io, sort!(collect(records); by = string))
-    take!(io)
+    collect(found)
 end
 
-# The types of Tempest's own code among `T`'s parameters, with their fields.
-function own_types!(records, @nospecialize(T))
+# The calls, invokes and globals among a code instance's edges, as inference
+# writes them and Julia's `verify_method` reads them: a method instance or a
+# code instance alone is a call of its signature that matched its method; a
+# count, a signature and that many callees, a call that matched those; a
+# binding, a global; a signature and a callee, an `invoke` of the callee, or
+# nothing to check where the callee is a method table.
+function read_edges(f, edges)
+    j = 1
+    while j <= length(edges)
+        e = edges[j]
+        if e isa Union{Core.CodeInstance, Core.MethodInstance}
+            f(:call, instance(e).specTypes, Any[e])
+            j += 1
+        elseif e isa Int
+            f(:call, edges[j + 1], Any[edges[k] for k in (j + 2):(j + 1 + abs(e))])
+            j += 2 + abs(e)
+        elseif e isa Core.Binding
+            f(:global, e, Any[])
+            j += 1
+        else
+            edges[j + 1] isa Core.MethodTable || f(:invoke, e, Any[edges[j + 1]])
+            j += 2
+        end
+    end
+end
+
+# The method instance of a code instance, through the override of its ABI
+# where it has one.
+instance(x) = x isa Core.MethodInstance ? x : instance(x.def)
+
+callee_method(x) = x isa Method ? x : instance(x).def
+
+identities(methods) = join(sort!([method_identity(m) for m in methods]), "\n")
+
+# The types among `T`'s parameters that no package's image holds, with their
+# fields: a struct a script defined, or Tempest's own.
+function specialized_types!(keep!, @nospecialize(T))
     T = Base.unwrap_unionall(T)
     if T isa Union
-        foreach(S -> own_types!(records, S), Base.uniontypes(T))
+        foreach(S -> specialized_types!(keep!, S), Base.uniontypes(T))
     elseif T isa DataType
-        own_code(T.name.module) && isstructtype(T) && push!(records, (:type, T.name.wrapper, type_text(T.name.wrapper)))
-        foreach(p -> p isa Type && own_types!(records, p), T.parameters)
+        isstructtype(T) && !by_package(T.name, T.name.module) && keep!(:type, T.name.wrapper, type_text(T.name.wrapper))
+        foreach(p -> p isa Type && specialized_types!(keep!, p), T.parameters)
     end
 end
 
-"""
-What a kernel depends on of Tempest's code, as `dependencies` writes it: its
-kind (`:method`, `:global` or `:type`), what it names, and its text then.
-"""
-struct Dependency
-    kind::Symbol
-    named::Any
-    text::String
+# A method table by the global that holds it; Julia's own as `nothing`.
+table_name(::Nothing) = nothing
+table_name(t::Core.MethodTable) = t.module === Core && t.name === :methodtable ? nothing : GlobalRef(t.module, t.name)
+
+# The view of a method table that inference dispatches through in `world`.
+method_view(::Nothing, world) = Core.Compiler.InternalMethodTable(world)
+method_view(g::GlobalRef, world) = Core.Compiler.OverlayMethodTable(world, getglobal(g.mod, g.name))
+
+# Whether another session can read `x` back: not where it names a function
+# Tempest generated, whose name is its session's.
+nameable(g::GlobalRef) = g.mod !== Generated
+function nameable(@nospecialize(T))
+    T isa TypeVar && return nameable(T.ub)
+    T isa Type || return nameable(typeof(T))
+    T = Base.unwrap_unionall(T)
+    T isa Union && return all(nameable, Base.uniontypes(T))
+    T isa DataType || return true
+    T.name.module !== Generated && all(nameable, T.parameters)
 end
 
-const CHECKED = SessionTable{Dependency, Bool}()
+# Whether `x`, a method, a binding's partition or a type's name of module `m`,
+# is what its package's identity names: held by the image of an installed
+# package, whose version names its code. Not a script's code, nor a method a
+# script evaluated into the package's module since, which no image holds; nor
+# the code of a developed package, Tempest among them, whose files can differ
+# from the code loaded from them.
+by_package(@nospecialize(x), m::Module) = installed(Base.moduleroot(m)) && in_image(x)
 
-"""
-    current(bytes) -> Bool
+in_image(@nospecialize(x)) = ccall(:jl_object_in_image, Cint, (Any,), x) != 0
 
-Whether what a kernel depends on of Tempest's code, as `dependencies` wrote it,
-is unchanged in this session: each method is still the one its signature
-dispatches to, with the same lowered code; each global has the same value; each
-type the same fields. What cannot be read back, as a type gone, is changed.
-Each is checked once a session, by code compiled once whatever it names: a
-record's tuple is a type of its own for each kind of thing it names.
-"""
-function current(bytes)
-    isempty(bytes) && return true
-    found = try
-        [Dependency(getfield(r, 1), getfield(r, 2), getfield(r, 3)) for r in deserialize(IOBuffer(bytes))]
-    catch
-        return false
-    end
-    all(checked, found)
+# Core, Base, the standard library and packages installed in a depot. Asked of
+# every method a kernel's inference reached, so the answer is kept per module:
+# `pkgdir` takes the loading lock.
+installed(r::Module) = get!(() -> find_installed(r), INSTALLED, r)
+
+const INSTALLED = SessionTable{Module, Bool}()
+
+function find_installed(r::Module)
+    (r === Core || r === Base) && return true
+    dir = pkgdir(r)
+    dir !== nothing && (startswith(dir, Sys.STDLIB) || any(depot -> startswith(dir, joinpath(depot, "packages")), DEPOT_PATH))
 end
 
-function checked(d::Dependency)
-    asked = session()
-    known = get(CHECKED, d, nothing)
-    known === nothing ? get!(CHECKED, d, unchanged(d), asked) : known
+"""
+    method_identity(m) -> String
+
+What identifies the code of method `m` in any session: its package's identity
+and its signature, where its package's image holds it; its lowered code
+otherwise. Kept per method, a method's code being fixed.
+"""
+method_identity(m::Method) = get!(() -> find_method_identity(m), METHOD_IDENTITIES, m)
+
+const METHOD_IDENTITIES = SessionTable{Method, String}()
+
+function find_method_identity(m::Method)
+    by_package(m, m.module) || return method_text(m)
+    string("package ", package_identity(Base.moduleroot(m.module)), " ", m.module, ".", m.name, " ", m.sig)
 end
 
-function unchanged(d::Dependency)
+# What identifies a global: its package's, where the package's image holds its
+# definition; the value it holds where it is constant, and the type it is
+# declared to hold where not, which is what code compiled from it can depend on.
+function global_identity(b::Core.Binding)
+    g = b.globalref
+    isdefined(b, :partitions) && by_package(b.partitions, g.mod) &&
+        return string("package ", package_identity(Base.moduleroot(g.mod)), " ", g)
+    isconst(g.mod, g.name) ? global_text(g) : string("variable of ", Core.get_binding_type(g.mod, g.name))
+end
+
+"""
+    holds(d::Dependency) -> Bool
+
+Whether what a kernel's compilation used is as it was, in this session: a
+call matches the same methods, an `invoke` names the same method, a global
+and a type are identified alike. What cannot be read back, as a type gone,
+has changed.
+"""
+function holds(d::Dependency)
     try
-        d.kind === :method && return method_text(which(d.named)) == d.text
-        d.kind === :global && return global_text(d.named) == d.text
-        d.kind === :type && return type_text(d.named) == d.text
+        world = Base.get_world_counter()
+        d.kind === :call && return matched(d.named, method_view(d.table, world)) == d.found
+        d.kind === :invoke && return invoked(d.named, method_view(d.table, world)) == d.found
+        d.kind === :global && return global_identity(convert(Core.Binding, d.named)) == d.found
+        d.kind === :type && return type_text(d.named) == d.found
     catch
     end
     false
+end
+
+function matched(@nospecialize(sig), view)
+    found = Core.Compiler.findall(sig, view)
+    found === nothing ? "no methods" : identities(m.method for m in found)
+end
+
+function invoked(@nospecialize(sig), view)
+    match = first(Core.Compiler.findsup(sig, view))
+    match === nothing ? "no method" : method_identity(match.method)
+end
+
+# Each dependency is kept once under its digest, which a kernel's entry lists,
+# and checked once a session: kernels share most of what they reach. Those
+# this session wrote to the store are not written again.
+const CHECKED = SessionTable{UInt128, Bool}()
+const STORED = SessionTable{UInt128, Bool}()
+
+function kept(d::Dependency)
+    io = IOBuffer()
+    serialize(io, (d.kind, d.table, d.named, d.found))
+    bytes = take!(io)
+    digest = first(reinterpret(UInt128, sha256(bytes)[1:16]))
+    asked = session()
+    if get(STORED, digest, false) !== true
+        ObjCache.put!(DEPENDENCIES, ObjCache.keyhash(KERNEL_SCHEMA, digest), bytes)
+        get!(STORED, digest, true, asked)
+    end
+    digest
+end
+
+# Whether the dependency under `digest` holds: false where the store lost it.
+function held(digest::UInt128)
+    asked = session()
+    known = get(CHECKED, digest, nothing)
+    known === nothing || return known
+    bytes = ObjCache.get(DEPENDENCIES, ObjCache.keyhash(KERNEL_SCHEMA, digest))
+    get!(CHECKED, digest, bytes !== nothing && read_holds(bytes), asked)
+end
+
+function read_holds(bytes)
+    d = try
+        Dependency(deserialize(IOBuffer(bytes))...)
+    catch
+        return false
+    end
+    holds(d)
 end
 
 function method_text(m::Method)

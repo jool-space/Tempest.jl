@@ -1033,7 +1033,7 @@ function floor_function(@nospecialize(f), @nospecialize(arguments::Tuple))
             job = CUDACore.CompilerJob(CUDACore.methodinstance(typeof(f), tt), CUDACore.compiler_config(device))
             Base.@lock CUDACore.cufunction_lock (CUDACore.compile_or_lookup(job), floor_dependencies(job))
         end
-        isempty(compiled.relocations.records) && dependencies !== nothing &&
+        isempty(compiled.relocations.records) &&
             return Tempest.Compiler.store_kernel(key, compiled.entry, compiled.image; dependencies)
         Tempest.Compiler.uncached_kernel(compiled.entry, compiled)
     end
@@ -1043,15 +1043,16 @@ function floor_function(@nospecialize(f), @nospecialize(arguments::Tuple))
     fun, CUDACore.create_exceptions!(fun.mod)
 end
 
-# What a floor kernel's compilation used of Tempest's code, as a tile kernel's
-# (see `Tempest.Compiler.dependencies`): read from the code instances the
+# What a floor kernel's compilation used, as a tile kernel's (see
+# `Tempest.Compiler.dependencies`): read from the code instances the
 # compiler's inference left under its job's owner, the kernel's own and those
-# its edges name. Nothing where inference left none, and the kernel is not kept.
+# its edges name, its calls dispatched in the job's method table. Nothing
+# where inference left none, and the kernel is not kept.
 function floor_dependencies(job)
     cache = Core.Compiler.WorldView(Core.Compiler.InternalCodeCache(CUDACore.GPUCompiler.cache_owner(job)), job.world)
     lookup(mi) = Core.Compiler.get(cache, mi, nothing)
     code = lookup(job.source)
-    code === nothing ? nothing : Tempest.Compiler.dependencies(code, lookup)
+    code === nothing ? nothing : Tempest.Compiler.dependencies(code, lookup, CUDACore.GPUCompiler.method_table(job))
 end
 
 """
