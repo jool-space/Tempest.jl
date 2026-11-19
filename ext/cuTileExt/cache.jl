@@ -21,9 +21,10 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     # what follows takes the function and its types without specializing, so
     # that no Julia code compiles per kernel.
     key = Any[CUDACore.context(), f, tt, occupancy, groups]
+    asked = Tempest.Compiler.session()
     fun = get(FUNCTIONS, key, nothing)
     fun === nothing || return fun
-    get!(FUNCTIONS, key, compiled_function(f, tt, occupancy, groups))
+    get!(FUNCTIONS, key, compiled_function(f, tt, occupancy, groups), asked)
 end
 
 function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, groups)

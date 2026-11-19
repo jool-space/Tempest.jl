@@ -531,8 +531,9 @@ function current(bytes)
 end
 
 function checked(d::Dependency)
+    asked = session()
     known = get(CHECKED, d, nothing)
-    known === nothing ? get!(CHECKED, d, unchanged(d)) : known
+    known === nothing ? get!(CHECKED, d, unchanged(d), asked) : known
 end
 
 function unchanged(d::Dependency)

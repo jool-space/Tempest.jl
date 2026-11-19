@@ -75,7 +75,7 @@ end
     @test isempty(split(output))
     # A table of another session holds none of its answers here.
     t = C.SessionTable{Int, Int}()
-    get!(t, 1, 2)
+    get!(() -> 2, t, 1)
     t.session[] = C.SESSION[] + 1
     @test get(t, 1, nothing) === nothing && length(t) == 0
 end
@@ -118,13 +118,25 @@ end
 # The definitions the keys of answers about a plan's groups hold.
 named_code(views) = unique!(reduce(vcat, [C.definitions(C.Implement.code(C.Implement.structure(g))) for g in views]))
 
+@testset "an answer found while the session ended is not kept" begin
+    # Found as code is defined, as on another thread: returned to the
+    # question asked before, and not kept for those asked after.
+    t = C.SessionTable{Int, Int}()
+    found = get!(t, 1) do
+        Core.eval(@__MODULE__, :(defined_while_asked(x) = x))
+        2
+    end
+    @test found == 2 && get(t, 1, nothing) === nothing
+    @test get!(() -> 3, t, 1) == 3 && get(t, 1, nothing) == 3
+end
+
 # A global code reads, assigned in the session.
 divisor = 6
 
 @testset "a session ends where code is defined that is not Tempest's own" begin
-    before = C.session()
     t = C.SessionTable{Int, Int}()
-    get!(t, 1, 2)
+    get!(() -> 2, t, 1)
+    before = C.session()
     # A kernel's function, which every build defines, leaves it standing.
     C.generated(:(function (x) x + 1 end))
     @test C.session() == before && get(t, 1, nothing) == 2

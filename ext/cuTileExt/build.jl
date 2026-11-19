@@ -899,11 +899,12 @@ function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buff
     order = numbering(g)
     numbers = Dict(v => k for (k, v) in enumerate(order))
     key = (derived(g), schedule_key(claim), sort!([numbers[r] for r in held]))
+    asked = Tempest.Compiler.session()
     e = get(EMITTED, key, nothing)
     if e === nothing
         workspaces = Dict{Any, Workspace}()
         kernels = schedule_kernels(c, workspaces; held)
-        e = get!(EMITTED, key, Emitted(kernels, workspaces, Any[Tempest.Compiler.generated(source(k)) for k in kernels], numbers))
+        e = get!(EMITTED, key, Emitted(kernels, workspaces, Any[Tempest.Compiler.generated(source(k)) for k in kernels], numbers), asked)
     end
     launch_kernels(e, order, buffers, claim.schedule, target)
 end

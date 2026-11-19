@@ -78,17 +78,19 @@ const MATCHES_LOCK = ReentrantLock()
 # apart before any is matched.
 function probe_group(t::Template, rewrites)
     key = (objectid(t), definitions((t,)), rewrites)
+    asked = session()
     found = get(PROBE_GROUPS, key, missing)
     found === missing || return found
     probe = NamedTuple{axis_names(t)}(PROBE_EXTENTS[1:length(axis_names(t))])
-    get!(PROBE_GROUPS, key, cached_template_group(t, rewrites, ntuple(_ -> Float32, length(t.inputs)), probe))
+    get!(PROBE_GROUPS, key, cached_template_group(t, rewrites, ntuple(_ -> Float32, length(t.inputs)), probe), asked)
 end
 
 function cached_template_group(t::Template, rewrites, types, extents)
     key = Key((objectid(t), definitions((t,)), rewrites, types, extents))
+    asked = session()
     found = get(TEMPLATE_GROUPS, key, missing)
     found === missing || return found
-    get!(TEMPLATE_GROUPS, key, template_group(t, rewrites, types, extents))
+    get!(TEMPLATE_GROUPS, key, template_group(t, rewrites, types, extents), asked)
 end
 
 # What the terms of a template's group (`a`) and a group (`b`) unify to: the

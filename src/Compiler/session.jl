@@ -42,11 +42,15 @@ standing (`own_definition`).
 
 
 An answer missing is found outside the lock and kept with
-`get!(table, key, answer)`, the first kept winning where two tasks found one
-at once: the same answer found twice. `get!(f, table, key)` does both,
-finding it by `f()`; a caller whose `f` would be a closure over a value of
-its own type each time, a kernel's function say, looks up with `get` and
-keeps with `get!`, so as not to compile a closure for each. Where finding an
+`get!(table, key, answer, asked)`, `asked` the session read as the question
+was asked (`session`), the first kept winning where two tasks found one at
+once: the same answer found twice. An answer is its session's: one found
+while the session ended, by a definition on another thread, is of the code
+before and is returned to its caller but not kept. `get!(f, table, key)`
+does all three, finding it by `f()`; a caller whose `f` would be a closure
+over a value of its own type each time, a kernel's function say, reads the
+session, looks up with `get` and keeps with `get!`, so as not to compile a
+closure for each. Where finding an
 answer twice is more than waste, as a kernel's compilation is, making it
 once is the table's own business: its value is what makes it, created under
 the lock (`cached_kernel`).
@@ -141,11 +145,17 @@ end
 struct Absent end
 
 Base.get(t::SessionTable, key, default) = @lock t.lock get(answers(t), key, default)
-Base.get!(t::SessionTable, key, x) = @lock t.lock get!(answers(t), key, x)
+function Base.get!(t::SessionTable, key, x, asked::UInt)
+    @lock t.lock begin
+        table = answers(t)
+        t.session[] == asked ? get!(table, key, x) : x
+    end
+end
 
 function Base.get!(f, t::SessionTable, key)
+    asked = session()
     found = get(t, key, Absent())
-    found isa Absent ? get!(t, key, f()) : found
+    found isa Absent ? get!(t, key, f(), asked) : found
 end
 
 Base.empty!(t::SessionTable) = (@lock t.lock empty!(answers(t)); t)
