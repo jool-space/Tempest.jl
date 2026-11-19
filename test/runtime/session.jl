@@ -134,4 +134,30 @@ if CUDA_FUNCTIONAL
         @test sprint(T.explain, ex) == fresh
     end
 
+    @testset "groups alike but numbered in different orders share their kernels, each computing its own" begin
+        # Layers alike but for the numbers of their values, which the program
+        # numbers in different orders: arguments permuted, and operands of a
+        # commutative product read on either side.
+        X = Base.get_extension(Tempest, :cuTileExt)
+        layer_a(w, s, t, h) = tanh.((w * h) .* s .+ t)
+        layer_b(w, s, t, h) = tanh.(s .* (w * h) .+ t)
+        function layers(s2, w1, t3, x, w3, s1, t2, w2, s3, t1)
+            h = layer_a(w1, s1, t1, x)
+            h = layer_b(w2, s2, t2, h)
+            h = layer_a(w3, s3, t3, h)
+            sum(abs2, h)
+        end
+        n, m = 64, 48
+        args = map(((rows, scale),) -> single(data(n, rows == :n ? n : m; scale)) ./ 4,
+            ((:m, 2), (:n, 3), (:m, 5), (:m, 7), (:n, 11), (:m, 13), (:m, 17), (:n, 19), (:m, 23), (:m, 29)))
+        for p in (trace(layers, args...), differentiate(trace(layers, args...)))
+            C.forget_session!()
+            ex = prepare(p, map(CuArray, args)...; target = T.CUDATarget())
+            got = map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex)))))
+            expected = filter(!isnothing, C.leaves(interpret(p, args...)))
+            @test all(isapprox.(got, expected; rtol = 1.0e-4))
+            tiled = count(d -> d !== nothing && d.choice.implementation isa X.cuTileGenerator, ex.decisions)
+            @test 0 < length(X.EMITTED) < tiled
+        end
+    end
 end

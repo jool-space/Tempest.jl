@@ -3,12 +3,16 @@
 # opens its object cache once. Each program compiles its kernels when first
 # prepared and loads them all when prepared again, with the same results.
 # Prepared again in the same session it loads nothing, since the session keeps
-# what it resolved. The first and last passes forget what the session keeps
-# (`forget_session!`), as a new process starts without it: the last reads what
-# the first wrote (the store before Julia 1.14 commits at once).
+# what it resolved: the second pass forgets the kernels the generator emitted
+# and the functions it loaded (`EMITTED`, `FUNCTIONS`), so that each kernel is
+# emitted again and resolved by its content. The first and last passes forget
+# what the session keeps (`forget_session!`), as a new process starts without
+# it: the last reads what the first wrote (the store before Julia 1.14 commits
+# at once).
 using Tempest, Test, NNlib, CUDACore
 import cuBLAS, cuTile
 include(joinpath(@__DIR__, "..", "setup.jl"))
+X = Base.get_extension(Tempest, :cuTileExt)
 
 w, x, b = single(data(96, 80; scale = 0.1)), single(data(80, 112)), single(data(96))
 q, k, v = single(data(16, 4, 64, 2; scale = 0.1)), single(data(16, 2, 64, 2; scale = 0.2)), single(data(16, 2, 64, 2; scale = 0.3))
@@ -25,6 +29,7 @@ programs = [
 @testset "$name" for (name, p, args, target) in programs
     results = map(1:3) do pass
         pass in (1, 3) && C.forget_session!()
+        pass == 2 && (empty!(X.EMITTED); empty!(X.FUNCTIONS))
         before = C.cache_counts()
         ex = prepare(p, map(CuArray, args)...; target)
         after = C.cache_counts()
