@@ -7,7 +7,9 @@
 #     julia compiled.jl BASELINE [CANDIDATE]
 #     julia compiled.jl --census TRACE [FROM:TO]
 #
-# BASELINE and CANDIDATE are sessions' OUT directories. `--census` lists what
+# BASELINE and CANDIDATE are sessions' OUT directories, or several joined by
+# commas where a session's programs ran in more than one, the 4B's under a
+# longer timeout say. `--census` lists what
 # a trace's window compiled that names none of the program's code: by
 # function, with its copies, their milliseconds and the kinds of type its
 # copies differ by.
@@ -186,12 +188,14 @@ end
 const DEVELOPMENT = ["gpt", "lstm", "qwen-gradient"]
 const HELD_OUT = ["heat", "node", "qwen-decode"]
 
+# A record's rows, each with the directory it is in, which its trace's path
+# is relative to.
 function record_rows(directory)
     header, out = String[], Dict{String, String}[]
     for line in readlines(joinpath(directory, "corpus.tsv"))
         fields = split(line, '\t')
         first(fields) == "when" && (header = String.(fields); continue)
-        push!(out, Dict(zip(header, String.(fields))))
+        push!(out, Dict(zip([header; "directory"], [String.(fields); directory])))
     end
     out
 end
@@ -209,15 +213,15 @@ the sets' counts, a named set's the sum over its programs and the unseen
 set's the median; and the copies per function of the 4B gradient's `first`
 run.
 """
-function counts(directory)
-    rows = filter(r -> get(r, "side", "") == "tempest", record_rows(directory))
+function counts(directories)
+    rows = filter(r -> get(r, "side", "") == "tempest", reduce(vcat, map(record_rows, split(directories, ','))))
     of(scenario) = Dict(r["program"] => count_of(r) for r in rows if r["scenario"] == scenario)
     kept, second = of("kept"), of("second")
     named(set) = all(p -> haskey(kept, p), set) ? sum(p -> kept[p], set) : missing
     unseen_kept = [v for (p, v) in kept if unseen(p) && v !== missing]
     unseen_second = [v for (p, v) in second if unseen(p) && v !== missing]
     gradient = [r for r in rows if r["program"] == "qwen-gradient" && r["scenario"] == "first"]
-    per_function = isempty(gradient) ? missing : copies(counted(joinpath(directory, only(gradient)["trace"]), only(gradient)["window"]))
+    per_function = isempty(gradient) ? missing : copies(counted(joinpath(only(gradient)["directory"], only(gradient)["trace"]), only(gradient)["window"]))
     (; kept, second, second_program = median_of(unseen_second), new_process = (development = named(DEVELOPMENT),
         held_out = named(HELD_OUT), unseen = median_of(unseen_kept)), per_function, unseen_programs = length(unseen_second))
 end
