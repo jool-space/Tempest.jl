@@ -381,8 +381,9 @@ Sorted, so that code named in any order is named alike.
 definitions(code) = sort!(unique!(String[content_key(x) for x in code if !of_packages(x)]))
 
 # Whether all the code `x` is, its type, its type's parameters and what its
-# fields hold, is of packages. An array is its type: its elements are data.
-# A mutable value is walked once.
+# fields hold, is of packages. A parameter is a type or a value, as a function
+# in `Val{f}`, whose code is as much the type's as a type's would be. An array
+# is its type: its elements are data. A mutable value is walked once.
 function of_packages(@nospecialize(x), seen = Base.IdSet{Any}())
     x isa Type && return type_of_packages(x)
     x isa Module && return identified(x)
@@ -396,7 +397,7 @@ function type_of_packages(@nospecialize(T))
     T = Base.unwrap_unionall(T)
     T isa Union && return all(type_of_packages, Base.uniontypes(T))
     T isa DataType || return true
-    identified(T.name.module) && all(p -> !(p isa Type) || type_of_packages(p), T.parameters)
+    identified(T.name.module) && all(of_packages, T.parameters)
 end
 
 const IDENTITIES = SessionTable{Module, String}()

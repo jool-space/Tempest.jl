@@ -65,11 +65,13 @@ doubled(x) = 2x
     before = C.content_key(LinearAlgebra.redefined_in_session)
     Core.eval(LinearAlgebra, :(redefined_in_session(x) = 3x))
     @test_broken C.content_key(LinearAlgebra.redefined_in_session) != before
-    # A function outside any package as a parameter of a package's type: a
-    # session table's key takes the value for a package's.
+    # A function outside any package as a parameter of a package's type is
+    # named by its code, as a session table's key names it.
     before = C.definitions(Any[Val(doubled)])
+    @test !isempty(before)
     @eval doubled(x) = 3x
-    @test_broken C.definitions(Any[Val(doubled)]) != before
+    @test C.definitions(Any[Val(doubled)]) != before
+    @test isempty(C.definitions(Any[Val(sin), Val(:name), Val(2)]))
 end
 
 @testset "what a kernel depends on of Tempest's code" begin
