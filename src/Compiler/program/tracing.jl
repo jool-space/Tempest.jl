@@ -1296,40 +1296,48 @@ function sliced_loop(f, arrays, shape)
 end
 
 """
-    traced_loop(f, scanned, init, zipped; reverse = false) -> (; stacked, scalar, result, steps)
+    traced_loop(f, scanned, init, zipped; reverse = false) -> TracedLoop
 
 The recurrence `accumulate(f, slices; init)` traced as a loop, run from its
 last slice to its first where `reverse`: its step traced once into a
-`LoopBody`, and a `Loop` node for each of the step's results, the result at
-every step stacked along a last axis, at the step's position: `stacked`, one
-for each leaf of the step's `result` in order, `nothing` where the result
-is, and whether each is a number at each step (`scalar`).
+`LoopBody`, and a `Loop` node for each of the step's results (see
+`TracedLoop`). Its arrays, slices, states and results are walked in vectors
+of `Any`, by code compiled once whatever the program's loop carries and
+slices, where the tuples and the vectors made of them were typed by each.
 """
-function traced_loop(f, scanned, init, zipped; reverse = false)
-    arrays = map(parent, scanned)
-    tape = first(arrays).tape
-    all(a -> a.tape === tape, arrays) || throw(ArgumentError("accumulate's arrays were traced by different programs"))
-    sliced = map(scanned) do xs
-        along = findall(i -> !(i isa Colon), xs.slicemap)
-        length(along) == 1 || throw(ArgumentError("accumulate over slices takes them along one axis, got $(xs.slicemap)"))
-        only(along)
+function traced_loop(@nospecialize(f), @nospecialize(scanned), @nospecialize(init), zipped; reverse = false)
+    arrays = Any[]
+    sliced = Int[]
+    for xs in scanned
+        push!(arrays, parent(xs))
+        slicemap = getproperty(xs, :slicemap)
+        along = Int[i for i in 1:length(slicemap) if !(slicemap[i] isa Colon)]
+        length(along) == 1 || throw(ArgumentError("accumulate over slices takes them along one axis, got $(slicemap)"))
+        push!(sliced, only(along))
     end
-    steps = size(first(arrays), first(sliced))
+    tape = first(arrays).tape::Tape
+    all(a -> a.tape === tape, arrays) || throw(ArgumentError("accumulate's arrays were traced by different programs"))
+    steps = size(first(arrays), first(sliced))::Int
     all(k -> size(arrays[k], sliced[k]) == steps, eachindex(arrays)) ||
         throw(DimensionMismatch("accumulate zips slices of different counts: $(map(size, arrays, sliced))"))
     stand_in(dims, T; scalar = false) = record!(tape, Placeholder(), (), dims, T; scalar)
     # The state's arrays and numbers; a plain one is a constant.
-    states = map(leaves(init)) do leaf
-        leaf === nothing && return nothing
+    states = Any[]
+    for leaf in leaves(init)
+        leaf === nothing && (push!(states, nothing); continue)
         x = leaf isa Union{TracedArray, Traced} ? leaf : leaf isa Union{Number, AbstractArray{<:Number}} ?
             constant_handle(tape, leaf) : throw(ArgumentError("accumulate's `init` holds arrays and numbers, got $(typeof(leaf))"))
         x.tape === tape || throw(ArgumentError("accumulate's `init` was traced by another program"))
-        x
+        push!(states, x)
     end
     start = length(tape.nodes)
-    held = map(x -> x === nothing ? nothing : x isa Traced ? Traced(tape, stand_in((), node(x).eltype; scalar = true)) :
-        TracedArray(tape, stand_in(size(x), eltype(x))), states)
-    slices = map((a, k) -> TracedArray(tape, stand_in(Tuple(size(a, i) for i in 1:ndims(a) if i != k), eltype(a))), arrays, sliced)
+    held = Any[x === nothing ? nothing : x isa Traced ? Traced(tape, stand_in((), node(x).eltype; scalar = true)) :
+        TracedArray(tape, stand_in(size(x), eltype(x))) for x in states]
+    slices = Any[]
+    for (a, k) in zip(arrays, sliced)
+        dims = Int[size(a, i) for i in 1:ndims(a) if i != k]
+        push!(slices, TracedArray(tape, stand_in(Tuple(dims), eltype(a))))
+    end
     count = Ref(0)
     state = rebuild(_ -> held[count[] += 1], init)
     push!(tape.steps, start)
@@ -1349,7 +1357,7 @@ function traced_loop(f, scanned, init, zipped; reverse = false)
     # The step: what reads a stand-in; the rest stays outside, its values
     # the step's captures.
     reads = falses(length(tape.nodes))
-    stand_ins = Set(x.id for x in (filter(!isnothing, held)..., slices...))
+    stand_ins = Set{Int}(x.id for x in [held; slices] if x !== nothing)
     for id in (start + 1):length(tape.nodes)
         reads[id] = id in stand_ins || any(i -> reads[i], tape.nodes[id].inputs)
     end
@@ -1385,12 +1393,26 @@ function traced_loop(f, scanned, init, zipped; reverse = false)
     program = Program(nodes, collect(eachindex(arguments)), [results; 1:length(carried)], Tuple(eachindex(arguments)), output_structure)
     loop = LoopBody(program, steps, [output_structure[k] for k in carried], collect(sliced), reverse)
     inputs = [Int[x.id for x in states if x !== nothing]; Int[a.id for a in arrays]; captured]
-    stacked = map(eachindex(results)) do k
+    stacked = Any[]
+    for k in eachindex(results)
         n = nodes[results[k]]
-        TracedArray(tape, record!(tape, Loop(loop, k), inputs, n.scalar ? (steps,) : (n.dims..., steps), n.eltype))
+        push!(stacked, TracedArray(tape, record!(tape, Loop(loop, k), inputs, n.scalar ? (steps,) : (n.dims..., steps), n.eltype)))
     end
-    (; stacked = map(r -> r === nothing ? nothing : stacked[r], collect(output_structure)),
-        scalar = map(r -> r !== nothing && nodes[results[r]].scalar, collect(output_structure)), result, steps)
+    TracedLoop(Any[r === nothing ? nothing : stacked[r] for r in output_structure],
+        Bool[r !== nothing && nodes[results[r]].scalar for r in output_structure], result, steps)
+end
+
+"""
+A loop `traced_loop` traced: the result at every step stacked along a last
+axis, at the step's position, one for each leaf of the step's `result` in
+order, `nothing` where the result is (`stacked`), whether each is a number at
+each step (`scalar`), the step's result as traced, and the number of steps.
+"""
+struct TracedLoop
+    stacked::Vector{Any}
+    scalar::Vector{Bool}
+    result::Any
+    steps::Int
 end
 
 constant_handle(tape, x::Number) = Traced(tape, constant!(tape, x))

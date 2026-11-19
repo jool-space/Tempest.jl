@@ -330,18 +330,22 @@ function loop_pullback(n, cotangents, tape)
     captured = filter(differentiates, (nstate + nscanned + 1):length(inputs))
     array(x) = TracedArray(tape, x.id)
     # The state where each step starts, and each scanned array with its steps
-    # last.
-    starts = map(1:nstate) do j
+    # last. Tracers of the program's element types and ranks, kept in vectors
+    # of `Any`, so that what walks them compiles once.
+    along = Any[]
+    for j in 1:nstate
         a = argument(j)
-        TracedArray(tape, record!(tape, Loop(body, results + j), inputs, a.scalar ? (steps,) : (a.dims..., steps), a.eltype))
+        push!(along, TracedArray(tape, record!(tape, Loop(body, results + j), inputs, a.scalar ? (steps,) : (a.dims..., steps), a.eltype)))
     end
-    lasts = map(1:nscanned) do i
+    for i in 1:nscanned
         x, k = TracedArray(tape, inputs[nstate + i]), body.sliced[i]
-        k == ndims(x) ? x : permutedims(x, (1:(k - 1)..., (k + 1):ndims(x)..., k))
+        push!(along, k == ndims(x) ? x : permutedims(x, (1:(k - 1)..., (k + 1):ndims(x)..., k)))
     end
     seeded = sort!(collect(keys(cotangents)))
-    along = [starts; lasts; [array(cotangents[r]) for r in seeded]]
-    captures = map(k -> h(tape, inputs[k]), (nstate + nscanned + 1):length(inputs))
+    for r in seeded
+        push!(along, array(cotangents[r]))
+    end
+    captures = Any[h(tape, inputs[k]) for k in (nstate + nscanned + 1):length(inputs)]
     function zeros_of(id)
         a = tape.nodes[id]
         z = constant!(tape, zero(a.eltype))
@@ -351,20 +355,30 @@ function loop_pullback(n, cotangents, tape)
     function back(carried, xs)
         k = 0
         slice(scalar) = (x = xs[k += 1]; scalar ? x[] : x)
-        forward = [map(j -> slice(argument(j).scalar), 1:nstate); map(i -> slice(false), 1:nscanned)]
-        given = Dict(r => slice(step.nodes[step.results[r]].scalar) for r in seeded)
-        seeds = map(1:results) do r
+        forward = Any[]
+        for j in 1:nstate
+            push!(forward, slice(argument(j).scalar))
+        end
+        for _ in 1:nscanned
+            push!(forward, slice(false))
+        end
+        given = Dict{Int, Any}()
+        for r in seeded
+            given[r] = slice(step.nodes[step.results[r]].scalar)
+        end
+        seeds = Any[]
+        for r in 1:results
             c = get(given, r, nothing)
             j = findfirst(==(r), body.carried)
-            j !== nothing && j in states ? plus(h(tape, carried[findfirst(==(j), states)].id), c === nothing ? nothing : h(tape, c.id)) :
-                c === nothing ? nothing : h(tape, c.id)
+            push!(seeds, j !== nothing && j in states ? plus(h(tape, carried[findfirst(==(j), states)].id), c === nothing ? nothing : h(tape, c.id)) :
+                c === nothing ? nothing : h(tape, c.id))
         end
-        arguments = Any[map(x -> h(tape, x.id), forward); captures]
+        arguments = Any[Any[h(tape, x.id) for x in forward]; captures]
         found = vjp!(tape, (a...) -> Tuple(replay!(tape, step, a)[1:results]), arguments, Tuple(seeds))
         Tuple(handle_of(found[k], k <= nstate + nscanned ? forward[k] : captures[k - nstate - nscanned]) for k in [states; scanned; captured])
     end
-    start = Tuple([map(j -> zeros_of(inputs[j]), states); fill(nothing, length(scanned) + length(captured))])
-    (; stacked) = traced_loop(back, Tuple(map(x -> eachslice(x; dims = ndims(x)), along)), start, true; reverse = !body.reverse)
+    start = Tuple(Any[Any[zeros_of(inputs[j]) for j in states]; fill(nothing, length(scanned) + length(captured))])
+    (; stacked) = traced_loop(back, Tuple(Any[eachslice(x; dims = ndims(x)) for x in along]), start, true; reverse = !body.reverse)
     contributions = Any[nothing for _ in inputs]
     # The cotangent of the state the loop starts from, at the step it runs first.
     first_step = body.reverse ? steps : 1
