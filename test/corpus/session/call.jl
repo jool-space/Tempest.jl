@@ -71,19 +71,24 @@ phase_text(phases) = join(("$(first(p))=$(round(first(last(p)); digits = 2))" fo
 plan_word(ex) = first(string(hash((sprint(Tempest.Compiler.explain, ex.plan), map(string, ex.kernels))); base = 16, pad = 16), 8)
 
 """
-    called(case; reference, started, using_s) -> result
+    called(case; reference, started, using_s, instance_s) -> result
 
 `compile(case.step, args...)` with its defaults but the case's target, its
 arguments on the device, then two calls, each waited for, and the second's
-outputs checked against the reference kept at `reference`. `seconds` runs
-from `started`, the moment the process was started, to the check's end.
+outputs checked against the reference kept at `reference`, unless that is
+`nothing`. `seconds` runs from `started`, the moment the process was
+started, to the check's end; `window` is the bytes of the trace written from
+the moment `compile` was called to the second call's end, what Julia
+compiled to prepare the program and call it (`traced`, of compiled.jl, which
+run.jl's worker loads).
 """
 function called(case; reference, started, using_s, instance_s)
     C = Tempest.Compiler
-    expected = deserialize(reference)
+    expected = reference === nothing ? nothing : deserialize(reference)
     args = map(device, case.args)
     Base.cumulative_compile_timing(true)
     compiling, kernels, decided = first(Base.cumulative_compile_time_ns()), C.cache_counts(), C.reached_counts()
+    from = Main.traced()
     t = time()
     c, _, phases = C.tallied(() -> compile(case.step, args...; target = case.target))
     compile_s = time() - t
@@ -93,9 +98,10 @@ function called(case; reference, started, using_s, instance_s)
     result = c(args...)
     CUDACore.synchronize()
     calls_s = time() - t
+    to = Main.traced()
     julia_s = 1.0e-9 * (first(Base.cumulative_compile_time_ns()) - compiling)
     t = time()
-    agrees, worst = agreement(compared_of(case, result, args), expected)
+    agrees, worst = expected === nothing ? (missing, 0) : agreement(compared_of(case, result, args), expected)
     check_s = time() - t
     seconds = time() - started
     Base.cumulative_compile_timing(false)
@@ -106,5 +112,5 @@ function called(case; reference, started, using_s, instance_s)
         "instance $(round(instance_s; digits = 1)) s", "check $(round(check_s; digits = 1)) s"]), "; ")
     (; seconds, checkpoint_s = get(case, :checkpoint_s, 0.0), compile_s, calls_s, first_s = compile_s + calls_s, julia_s,
         kernels = length(ex.kernels), built, loaded, stored_bytes = C.structure(ex.plan).bytes, replayed, covered, plan = plan_word(ex),
-        agreement = agrees, precision = case.precision, phases = phase_text(phases), note)
+        agreement = agrees, precision = case.precision, phases = phase_text(phases), note, window = "$from:$to")
 end

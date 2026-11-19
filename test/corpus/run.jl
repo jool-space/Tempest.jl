@@ -112,21 +112,36 @@
 #                     at its doubled shape (`instance(:doubled)`), twice its
 #                     tokens or its batch.
 #
+#   second            The program after others: a process that prepares the
+#                     corpus's gpt, lstm, heat and node at their small shapes,
+#                     but the program itself where it is one of them, then
+#                     the program, each called and the program checked, on
+#                     stores of the scenario's own that a process preparing
+#                     the same before it left.
+#
 # Each is clocked from outside: `seconds` runs from the moment the process
 # is started (session/outside.sh) to the end of its check, and of them
 # `checkpoint_s` read a checkpoint from disk; `compile_s` is `compile`'s,
 # `calls_s` the two calls', `phases` the compiler's work by phase as
-# `Compiler.tallied` tallies it.
+# `Compiler.tallied` tallies it. Each process writes what Julia compiles as it
+# compiles it (`--trace-compile`), in `traces/` beside the logs: `compiled`
+# counts the signatures compiled from the moment `compile` was called to the
+# second call's end that name none of the program's code, and
+# `compiled_process` those of the whole process (session/compiled.jl).
 
 const HERE = @__DIR__
 const PROJECT = dirname(HERE)
 const COLUMNS = ("when", "pass", "host", "program", "shape", "scenario", "side", "commit", "device", "sm_mhz", "precision",
     "first_s", "julia_s", "step_ms", "kernels", "built", "loaded", "stored_bytes", "replayed", "covered", "plan", "agreement", "note",
-    "seconds", "checkpoint_s", "compile_s", "calls_s", "phases")
-const SESSION = ("first", "kept", "doubled")
+    "seconds", "checkpoint_s", "compile_s", "calls_s", "phases", "compiled", "compiled_process", "trace", "window")
+const SESSION = ("first", "kept", "doubled", "second")
+
+# The programs the session's `second` scenario prepares before its program.
+const BEFORE = ("gpt", "lstm", "heat", "node")
 const SCENARIOS = ("cold", "cold-unmeasured", "cold-known", "warm", "again", "after", "after-unmeasured", SESSION...)
 
 include(joinpath(HERE, "challengers", "challengers.jl"))
+include(joinpath(HERE, "session", "compiled.jl"))
 
 option(args, name, default) = (i = findfirst(==(name), args); i === nothing ? default : args[i + 1])
 
@@ -217,7 +232,9 @@ of the stores it starts on, the stores whose tuning directory it is given
 before it starts unless that is empty, and what it measures, the
 environment's TEMPEST_MEASURE: `close` where its scenarios measure, which
 preparing does only when asked, and `none` where they do not, so that a row
-means one thing whatever the caller's environment says.
+means one thing whatever the caller's environment says. A process of the
+preparation session measures nothing and is given nothing of Tempest's but
+where its stores are (`measure` empty).
 """
 struct Session
     preparations::Vector{Preparation}
@@ -225,6 +242,8 @@ struct Session
     tuning_of::String
     measure::String
 end
+
+Session(preparations, stores) = Session(preparations, stores, "", "")
 
 scenarios(s::Session) = filter(!isempty, map(p -> p.scenario, s.preparations))
 
@@ -237,7 +256,7 @@ function session_env(s::Session)
     in_session(s) ? [stores; "CUDA_CACHE_PATH" => joinpath(s.stores, "nv")] : [stores; "TEMPEST_MEASURE" => s.measure]
 end
 
-in_session(s::Session) = any(in(SESSION), scenarios(s))
+in_session(s::Session) = isempty(s.measure)
 
 # The processes of a round for the scenarios wanted, in the order they run:
 # cold-known starts on the tuning directory the cold process left, before the
@@ -246,7 +265,11 @@ function sessions(program, shape, wanted, other, round)
     if any(in(SESSION), wanted)
         issubset(wanted, SESSION) || error("the session's scenarios run apart from the others")
         stores = joinpath(round, "stores")
-        return [Session([Preparation(program, s == "doubled" ? "doubled" : shape, s, "")], stores, "", "") for s in SESSION if s in wanted]
+        alone = [Session([Preparation(program, s == "doubled" ? "doubled" : shape, s, "")], stores) for s in ("first", "kept", "doubled") if s in wanted]
+        "second" in wanted || return alone
+        before = [Preparation(p, "small", "", "") for p in BEFORE if p != program_name(program)]
+        after = joinpath(round, "second")
+        return [alone; Session([before; Preparation(program, shape, "", "")], after); Session([before; Preparation(program, shape, "second", "")], after)]
     end
     any(in(wanted), ("cold-known", "warm", "again")) && !("cold" in wanted) &&
         error("cold-known, warm and again start on what cold leaves: run them with it")
@@ -269,7 +292,8 @@ end
 function session(s::Session, run, reference, directory)
     program, shape = program_name(s.preparations[end].program), s.preparations[end].shape
     names = join(scenarios(s), " and ")
-    log = joinpath(directory, "logs", "$program-$shape-tempest-$(replace(names, " and " => "+"))-$run-$(stamp()).log")
+    label = isempty(names) ? "filling" : replace(names, " and " => "+")
+    log = joinpath(directory, "logs", "$program-$shape-tempest-$label-$run-$(stamp()).log")
     mkpath(s.stores)
     if !isempty(s.tuning_of)
         given = joinpath(s.tuning_of, "tuning")
@@ -279,13 +303,17 @@ function session(s::Session, run, reference, directory)
     check = get(ENV, "TEMPEST_CORPUS_CHECK", "1") != "0" || in_session(s) ? ["--check", reference] : String[]
     preparations = reduce(vcat, [[p.program, p.shape, dash(p.scenario), dash(p.tuning)] for p in s.preparations])
     project = in_session(s) ? joinpath(HERE, "session") : PROJECT
-    cmd = `$(Base.julia_cmd()) --startup-file=no --project=$project $(joinpath(HERE, "run.jl")) --worker $check $preparations`
-    println("tempest $program $shape, $names, run $run: ", log)
+    trace = joinpath("traces", replace(basename(log), r"\.log$" => ".trace"))
+    traced = in_session(s) ? ["--trace-compile=$(joinpath(directory, trace))", "--trace-compile-timing"] : String[]
+    in_session(s) && mkpath(joinpath(directory, "traces"))
+    worker = in_session(s) ? ["--worker", "--session"] : ["--worker"]
+    cmd = `$(Base.julia_cmd()) --startup-file=no $traced --project=$project $(joinpath(HERE, "run.jl")) $worker $check $preparations`
+    println("tempest $program $shape, $(isempty(names) ? "filling the stores" : names), run $run: ", log)
     status, clock = gpu_job(cmd, log; env = session_env(s), clocked = !in_session(s))
     results = Dict{String, Any}()
     for line in filter(l -> startswith(l, "corpus result "), readlines(log))
         r = eval(Meta.parse(line[(length("corpus result ") + 1):end]))
-        results[r.scenario] = r
+        results[r.scenario] = in_session(s) ? merge(r, compiled_counts(joinpath(directory, trace), r.window), (; trace)) : r
     end
     map(scenarios(s)) do scenario
         r = get(results, scenario, nothing)
@@ -293,6 +321,11 @@ function session(s::Session, run, reference, directory)
         merge(r, (; side = "tempest", sm_mhz = clock))
     end
 end
+
+# What a run of the session compiled that names none of its program's code:
+# in its window and in its whole process.
+compiled_counts(trace, window) = isfile(trace * ".modules") ?
+    (; compiled = length(counted(trace, window)), compiled_process = length(counted(trace))) : (;)
 
 # An empty argument to the worker, and back.
 dash(x) = isempty(x) ? "-" : x
@@ -349,15 +382,17 @@ end
 
 ## The worker: preparations and their measurements, in a process of its own.
 
-# The worker's arguments: `--check` and the directory its references are kept
-# in, then each preparation as its program, shape, scenario and tuning
-# directory, `-` for one empty, in the order it makes them. A program's file
-# is included once a process, and its instance at a shape made once.
+# The worker's arguments: `--session` for a process of the preparation
+# session, `--check` and the directory its references are kept in, then each
+# preparation as its program, shape, scenario and tuning directory, `-` for
+# one empty, in the order it makes them. A program's file is included once a
+# process, and its instance at a shape made once.
 function worker(args)
+    in_session = "--session" in args
+    args = filter(!=("--session"), args)
     i = findfirst(==("--check"), args)
     reference = i === nothing ? nothing : args[i + 1]
     rest = i === nothing ? args : args[[1:(i - 1); (i + 2):end]]
-    in_session = any(in(SESSION), rest[3:4:end])
     in_session && return session_worker(rest, reference)
     @eval Main begin
         import cuBLAS, cuTile
@@ -380,17 +415,37 @@ function worker(args)
     end
 end
 
-# A run of the session: its one preparation, the kernel packages loaded as a
-# user loads them, then `called` (session/call.jl).
+# A process of the session: the kernel packages loaded as a user loads them,
+# then each of its preparations by `called` (session/call.jl), checked where
+# it is a scenario's. Beside the process's trace, how far it was written once
+# the packages were loaded and the packages foreign to its programs
+# (session/compiled.jl): those loaded but by a program, Tempest's extensions
+# whoever loaded them.
 function session_worker(args, reference)
     started = parse(Float64, ENV["TEMPEST_CORPUS_STARTED"])
     using_s = @elapsed @eval Main using Tempest, CUDACore, cuTile, cuBLAS, cuDNN
-    program, shape, scenario, _ = args
-    m = session_module(program)
-    instance_s = @elapsed case = Base.invokelatest(() -> m.instance(Symbol(shape)))
-    kept = joinpath(reference, "$(program_name(program))-$shape.jls")
-    result = Base.invokelatest(() -> m.called(case; reference = kept, started, using_s, instance_s))
-    println("corpus result ", repr(merge((; scenario), result)))
+    loaded = traced()
+    programs = Set{Base.PkgId}()
+    for (program, shape, scenario, _) in Iterators.partition(args, 4)
+        scenario = undash(scenario)
+        before = Set(keys(Base.loaded_modules))
+        m = session_module(program)
+        instance_s = @elapsed case = Base.invokelatest(() -> m.instance(Symbol(shape)))
+        union!(programs, setdiff(keys(Base.loaded_modules), before))
+        kept = isempty(scenario) ? nothing : joinpath(reference, "$(program_name(program))-$shape.jls")
+        result = Base.invokelatest(() -> m.called(case; reference = kept, started, using_s, instance_s))
+        isempty(scenario) || println("corpus result ", repr(merge((; scenario), result)))
+    end
+    trace = Base.JLOptions().trace_compile
+    trace == C_NULL && return
+    toml = Base.require(Base.PkgId(Base.UUID("fa267f1f-6049-4f14-aa54-33bafae1ed76"), "TOML"))
+    tempest = Base.invokelatest(() -> pkgdir(Main.Tempest))
+    extensions = keys(get(Base.invokelatest(toml.parsefile, joinpath(tempest, "Project.toml")), "extensions", Dict()))
+    foreign = [string(id.name) for id in keys(Base.loaded_modules) if !(id in programs) || id.name in extensions]
+    open(unsafe_string(trace) * ".modules", "w") do io
+        println(io, "loaded\t", loaded)
+        foreach(name -> name == "Main" || println(io, "foreign\t", name), sort!(unique!(foreign)))
+    end
 end
 
 function session_module(program)
