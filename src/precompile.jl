@@ -2,12 +2,13 @@
 # rather than in every session: small programs of each kind traced,
 # differentiated, lowered, planned, explained and prepared for the CPU, and
 # prepared again, replaying the decisions the first preparation kept, in a
-# store of the workload's own. Development sessions skip it, so a test runs
-# `workload` too.
+# store of the workload's own; and compiled by the way in, `compile`, and
+# called twice, binding and running, as a session's program is. Development
+# sessions skip it, so a test runs `workload` too.
 
 using PrecompileTools: @compile_workload
 
-"Trace, differentiate, interpret, prepare, run and explain small programs of each kind on the CPU, a recurrence among them, and prepare each again, replaying."
+"Trace, differentiate, interpret, prepare, run and explain small programs of each kind on the CPU, a recurrence among them, prepare each again, replaying, and compile each and its gradient by `compile` and call them twice."
 workload() = Compiler.in_own_store(programs_prepared)
 
 function programs_prepared()
@@ -76,6 +77,11 @@ function programs_prepared()
             Compiler.execute!(ex)
             explain(devnull, ex)
             Compiler.prepare(program, args...)
+        end
+        for g in (f, (xs...) -> withgradient(f, xs...))
+            c = compile(g, args...)
+            c(args...)
+            c(args...)
         end
     end
     nothing
