@@ -45,6 +45,28 @@ Base.@nospecializeinfer function parts_isequal(@nospecialize(a), @nospecialize(b
 end
 
 """
+    parts_cmp(a, b) -> Int
+
+`cmp` of two values or tuples of them nested to any depth, as Base orders
+tuples, element by element and the shorter first where one begins the
+other, by code compiled once for every shape: the keys a program's parts
+are ordered by, indices and operands, are tuples whose shape follows the
+program, and Base's `cmp` and `isless` on them compile for each.
+"""
+Base.@nospecializeinfer function parts_cmp(@nospecialize(a), @nospecialize(b))
+    a isa Tuple && b isa Tuple || return cmp(a, b)::Int
+    n, m = nfields(a), nfields(b)
+    for i in 1:min(n, m)
+        c = parts_cmp(getfield(a, i), getfield(b, i))
+        c == 0 || return c
+    end
+    cmp(n, m)
+end
+
+"Whether `a` comes before `b` in the order `parts_cmp` gives."
+parts_isless(@nospecialize(a), @nospecialize(b)) = parts_cmp(a, b) < 0
+
+"""
     map_elements(f, t::Tuple) -> Tuple
 
 `map(f, t)`, by code compiled once for every length of `t`: the walkers of a

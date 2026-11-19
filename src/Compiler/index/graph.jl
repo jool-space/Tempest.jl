@@ -47,13 +47,13 @@ struct Pointwise <: Definition
     f::Any
     operands::Tuple{Vararg{Operand}}
     Base.@nospecializeinfer function Pointwise(@nospecialize(f), @nospecialize(operands::Tuple{Vararg{Operand}}))
-        commutative(f) && (operands = Tuple(sort(collect(Operand, operands); by = operand_key)))
+        commutative(f) && (operands = Tuple(sort(collect(Operand, operands); by = operand_key, lt = parts_isless)))
         new(f, operands)
     end
 end
 
 # A total order on operands by content: reads, then positions, then constants.
-operand_key(o::Read) = (0, o.value, map(affine_key, o.index))
+operand_key(o::Read) = (0, o.value, map_elements(affine_key, o.index))
 operand_key(o::IndexOperand) = (1, affine_key(o.expr))
 operand_key(o::Literal) = (2, string(nameof(typeof(o.value))), o.value)
 

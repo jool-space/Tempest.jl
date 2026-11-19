@@ -916,7 +916,8 @@ function launch_kernels(e::Emitted, order, buffers, schedule, target)
     scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in e.workspaces)
     built = Tempest.Compiler.concurrently(eachindex(e.kernels), target) do i
         k, f = e.kernels[i], e.functions[i]
-        arrays = map(spec -> tile_array(spec.buffer isa Int ? buffers[value(spec.buffer)] : scratch[spec.buffer], spec), k.args)
+        # Of whatever type each one's spec makes it (see `field_at`).
+        arrays = Any[tile_array(spec.buffer isa Int ? buffers[value(spec.buffer)] : scratch[spec.buffer], spec) for spec in k.args]
         launch = tile_launch(f, arrays, k.grid; k.occupancy)
         # Where each value's array starts among the parameters: after the
         # kernel function's captured values and the arrays before it.
@@ -925,7 +926,8 @@ function launch_kernels(e::Emitted, order, buffers, schedule, target)
         for (spec, a) in zip(k.args, arrays)
             if spec.buffer isa Int
                 v = value(spec.buffer)
-                push!(places, Place(at + 1, v, UInt(a.ptr) - reinterpret(UInt, pointer(buffers[v])), UInt(1) << min(7, trailing_zeros(UInt(a.ptr)))))
+                ptr = UInt(getfield(a, :ptr))
+                push!(places, Place(at + 1, v, ptr - reinterpret(UInt, pointer(buffers[v])), UInt(1) << min(7, trailing_zeros(ptr))))
             end
             at += length(flatten!(Any[], a))
         end

@@ -81,7 +81,7 @@ call(f, args...) = f(args...)
 # throws, since the program would keep them as they were when traced, as a
 # model in a global would be; `passed` are the arguments' arrays, to tell one
 # passed too. What a function `f` calls reads is `refuse_held`'s.
-function read_globals(f, args, passed)
+function read_globals(f, @nospecialize(args), passed)
     values = Pair{GlobalRef, Any}[]
     for g in named_globals(f, args)
         value = getglobal(g.mod, g.name)
@@ -94,20 +94,26 @@ end
 
 # The bindings `f`'s own code reads by name, other than Base's and Core's. A
 # closure's code names a global where it would name a variable it captures.
-function named_globals(f, args)
+function named_globals(f, @nospecialize(args))
     refs = GlobalRef[]
     f isa Core.Builtin && return refs
-    for code in code_lowered(f, map(Core.Typeof, args))
-        foreach(s -> named!(refs, s), code.code)
+    for code in code_lowered(f, map_elements(Core.Typeof, args))
+        for s in code.code
+            named!(refs, s)
+        end
     end
     filter(g -> isdefined(g.mod, g.name) && !(Base.moduleroot(Base.binding_module(g.mod, g.name)) in (Base, Core)), unique(refs))
 end
 
 named!(refs, x::GlobalRef) = push!(refs, x)
-named!(refs, x::Expr) = foreach(a -> named!(refs, a), x.args)
+function named!(refs, x::Expr)
+    for a in x.args
+        named!(refs, a)
+    end
+end
 named!(refs, x::Core.ReturnNode) = isdefined(x, :val) && named!(refs, x.val)
 named!(refs, x::Core.GotoIfNot) = named!(refs, x.cond)
-named!(refs, x) = nothing
+named!(refs, @nospecialize(x)) = nothing
 
 holds_arrays(name, passed) = string("the function reads the global ", name, ", which holds arrays: compiled, it would ",
     "keep them as they were when traced. ", passed ? string(name, " is an argument too: read the argument rather than ",

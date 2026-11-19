@@ -47,19 +47,20 @@ instead, its atoms sorted again.
 """
 function revalued(e::Affine, number)
     all(t -> first(t) isa Var, e.terms) && return e
-    Affine(e.constant, Tuple(sort!(Pair{Atom, Int}[revalued(a, number) => c for (a, c) in e.terms]; by = t -> atom_key(first(t)))))
+    Affine(e.constant, Tuple(sort!(Pair{Atom, Int}[revalued(a, number) => c for (a, c) in e.terms]; by = t -> atom_key(first(t)), lt = parts_isless)))
 end
 revalued(a::Var, number) = a
 revalued(a::Div, number) = Div(revalued(a.e, number), a.d)
 revalued(a::Mod, number) = Mod(revalued(a.e, number), a.d)
 revalued(a::Indirect, number) = Indirect(number(a.value), map(e -> revalued(e, number), a.index), a.lo, a.hi)
 
-# A total order on atoms, so sorted terms are canonical.
+# A total order on atoms, so sorted terms are canonical: keys ordered by
+# `parts_cmp`, whose tuples have the shape of the expression.
 atom_key(a::Var) = (0, a.n)
 atom_key(a::Div) = (1, affine_key(a.e), a.d)
 atom_key(a::Mod) = (2, affine_key(a.e), a.d)
-atom_key(a::Indirect) = (3, a.value, map(affine_key, a.index), a.lo, a.hi)
-affine_key(a::Affine) = (a.constant, map(t -> (atom_key(t.first), t.second), a.terms))
+atom_key(a::Indirect) = (3, a.value, map_elements(affine_key, a.index), a.lo, a.hi)
+affine_key(a::Affine) = (a.constant, map_elements(t -> (atom_key(t.first), t.second), a.terms))
 
 constant(c::Int) = Affine(c, ())
 var(n::Int) = Affine(0, (Var(n) => 1,))
@@ -136,7 +137,7 @@ function normalize(constant::Int, terms, d::Domain)
             break
         end
     end
-    sorted = sort!(collect(collected); by = p -> atom_key(p.first))
+    sorted = sort!(collect(collected); by = p -> atom_key(p.first), lt = parts_isless)
     Affine(constant, Tuple(sorted))
 end
 

@@ -104,9 +104,9 @@ term_rank(::Term) = 4
 term_rank(::Ix) = 5
 term_rank(::Lit) = 6
 
-index_order(a, b) = cmp(map(affine_key, a), map(affine_key, b))
+index_order(@nospecialize(a), @nospecialize(b)) = parts_cmp(map_elements(affine_key, a), map_elements(affine_key, b))
 same_rank_order(a::Load, b::Load) = index_order(a.index, b.index)
-same_rank_order(a::Ix{S}, b::Ix{T}) where {S, T} = (r = cmp(string(S), string(T))) != 0 ? r : cmp(affine_key(a.expr), affine_key(b.expr))
+same_rank_order(a::Ix{S}, b::Ix{T}) where {S, T} = (r = cmp(string(S), string(T))) != 0 ? r : parts_cmp(affine_key(a.expr), affine_key(b.expr))
 same_rank_order(a::Lit, b::Lit) = cmp(string(typeof(a.value), " ", repr(a.value)), string(typeof(b.value), " ", repr(b.value)))
 function same_rank_order(a::Apply, b::Apply)
     r = cmp(string(a.f), string(b.f))

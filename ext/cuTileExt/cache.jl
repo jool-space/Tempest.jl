@@ -104,7 +104,7 @@ const FUNCTIONS = Tempest.Compiler.SessionTable{Vector{Any}, CuFunction}()
 # kernel's argument types.
 function alias_groups(@nospecialize(args))
     leaves = ct.array_leaves(map(Core.Typeof, args))
-    ranges = map(((n, path),) -> memory_range(foldl(getfield, path; init = args[n - 1])), leaves)
+    ranges = map(((n, path),) -> memory_range(field_at(args[n - 1], path)), leaves)
     labels = collect(eachindex(ranges))
     changed = true
     while changed
@@ -119,16 +119,31 @@ function alias_groups(@nospecialize(args))
     ct.labels_to_groups(Tuple(map(l -> count(==(l), labels) > 1 ? l : 0, labels)), leaves)
 end
 
+# The field of `x` that `path` names, field within field. A kernel's
+# arguments are cuTile's arrays, whose types hold what each array's spec
+# says of it (its alignment, which strides divide what): they are read by
+# their fields, with code compiled once whatever the spec, where Base's
+# `foldl`, `getproperty` and the collection of them into a vector compiled
+# for each spec a program's kernels take.
+function field_at(@nospecialize(x), path)
+    for name in path
+        x = getfield(x, name)
+    end
+    x
+end
+
 # The bytes an array can reach, `[lo, hi)`; empty for an empty array.
 function memory_range(@nospecialize(a))
-    lo = hi = reinterpret(Int, a.ptr)
-    for d in eachindex(a.sizes)
-        n = Int(a.sizes[d])
+    ptr, sizes, strides = getfield(a, :ptr), getfield(a, :sizes), getfield(a, :strides)
+    bytes = sizeof(eltype(typeof(ptr)))
+    lo = hi = reinterpret(Int, ptr)
+    for d in 1:nfields(sizes)
+        n = Int(getfield(sizes, d))
         n == 0 && return (0, 0)
-        extent = (n - 1) * Int(a.strides[d]) * sizeof(eltype(typeof(a.ptr)))
+        extent = (n - 1) * Int(getfield(strides, d)) * bytes
         extent < 0 ? (lo += extent) : (hi += extent)
     end
-    (lo, hi + sizeof(eltype(typeof(a.ptr))))
+    (lo, hi + bytes)
 end
 
 # The parameters of a value, in the order of cuTile's code generation: an
@@ -137,12 +152,21 @@ end
 function flatten!(out, @nospecialize(x))
     T = typeof(x)
     if x isa ct.TileArray
-        push!(out, x.ptr, x.sizes..., x.strides...)
+        push!(out, getfield(x, :ptr))
+        sizes, strides = getfield(x, :sizes), getfield(x, :strides)
+        for d in 1:nfields(sizes)
+            push!(out, getfield(sizes, d))
+        end
+        for d in 1:nfields(strides)
+            push!(out, getfield(strides, d))
+        end
     elseif ct.is_ghost_type(T)
     elseif isprimitivetype(T)
         push!(out, x)
     else
-        foreach(i -> flatten!(out, getfield(x, i)), 1:fieldcount(T))
+        for i in 1:fieldcount(T)
+            flatten!(out, getfield(x, i))
+        end
     end
     out
 end
@@ -166,7 +190,9 @@ function TileLaunch(fun::CuFunction, @nospecialize(f), @nospecialize(args), grid
     # and a launch whose seed differed each time would differ in each graph
     # recorded of it, which `retarget!` reads as a change it cannot make.
     values = flatten!(Any[], f)
-    foreach(a -> flatten!(values, a), args)
+    for a in args
+        flatten!(values, a)
+    end
     boxes = Any[Base.RefValue{typeof(v)}(v) for v in values]
     seed = Base.RefValue{UInt32}(rand(CUDACore.launch_rng(), UInt32))
     push!(boxes, seed)
