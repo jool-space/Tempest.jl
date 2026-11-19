@@ -15,9 +15,10 @@ own(f) = f === tuple || f isa Weight || f isa Cast
 # The length of a trial's tiles.
 const TRIAL = 16
 
-# Answers by function, the kinds of its arguments, its result's type and the
-# architecture the trial compiled for: a function one architecture's
-# assembler takes, another's may not.
+# Answers by function, with its definition where no package's (see
+# `Tempest.Compiler.definitions`), the kinds of its arguments, its result's
+# type and the architecture the trial compiled for: a function one
+# architecture's assembler takes, another's may not.
 const LOWERED = Tempest.Compiler.SessionTable{Any, Bool}()
 
 Implement.lowers(::cuTileGenerator, ::CUDATarget, t, g) = lowered(t, g)
@@ -33,7 +34,7 @@ function lowered(t::Apply, g)
     kinds = map(a -> a isa Lit ? (:literal, placeholder(a.value)) : (:tile, term_eltype(a, g)), t.args)
     all(((kind, x),) -> kind === :literal || x <: TILE_TYPES, kinds) && t.eltype <: TILE_TYPES || return true
     Implement.compiling() || return true
-    get!(() -> trial(t.f, kinds, t.eltype), LOWERED, (t.f, kinds, t.eltype, ct.device_sm_arch()))
+    get!(() -> trial(t.f, kinds, t.eltype), LOWERED, (t.f, Tempest.Compiler.definitions((t.f,)), kinds, t.eltype, ct.device_sm_arch()))
 end
 
 # A literal argument enters the trial as a two of its type, so that a

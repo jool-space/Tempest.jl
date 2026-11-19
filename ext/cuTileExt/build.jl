@@ -882,13 +882,14 @@ struct Emitted
 end
 
 """
-The kernels of each claim emitted, by the group's structure, the claim, the
-folds by key that start where their contents are, and the environment's
-settings (`settings`): what emitting reads.
-Groups alike, as a model's layers are, emit and define their kernels once,
-each launching them on its own values.
+The kernels of each claim emitted, by what emitting reads: what the group's
+are derived from (`derived`), the claim, and the folds by key that start
+where their contents are. Groups alike, as a model's layers are, emit and
+define their kernels once, each launching them on its own values. A kernel's
+function is defined once, for its key: its compiled kernel (`FUNCTIONS`) is
+kept by it, the code it calls named in the key it was emitted for.
 """
-const EMITTED = Tempest.Compiler.SessionTable{Tuple{Structure, Vector{Any}, Vector{Int}, NTuple{3, String}}, Emitted}()
+const EMITTED = Tempest.Compiler.SessionTable{Tuple{Vector{Any}, Vector{Any}, Vector{Int}}, Emitted}()
 
 # A fold by key in the storage of the contents it starts from (see
 # `Tempest.Compiler.storage`) starts from them there.
@@ -897,7 +898,7 @@ function build_claim(::cuTileGenerator, claim::Claim, target, g::GroupView, buff
     held = filter(r -> g.values[r].into isa Load && Tempest.Compiler.same_storage(buffers[g.values[r].into.value], buffers[r]), keyed_folds(c))
     order = numbering(g)
     numbers = Dict(v => k for (k, v) in enumerate(order))
-    key = (structure(g), schedule_key(claim), sort!([numbers[r] for r in held]), settings())
+    key = (derived(g), schedule_key(claim), sort!([numbers[r] for r in held]))
     e = get(EMITTED, key, nothing)
     if e === nothing
         workspaces = Dict{Any, Workspace}()

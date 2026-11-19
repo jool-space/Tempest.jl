@@ -62,8 +62,10 @@ function template_group(t::Template, rewrites::Symbol, types, extents)
     (; group = g, inputs, outputs)
 end
 
+# A template's group, traced: by the template, with its code's definitions
+# where no package's (see `definitions`).
 const TEMPLATE_GROUPS = SessionTable{Key, Any}()
-const PROBE_GROUPS = SessionTable{Tuple{UInt, Symbol}, Any}()
+const PROBE_GROUPS = SessionTable{Tuple{UInt, Vector{String}, Symbol}, Any}()
 
 # The matches of the preparation running, a table each preparation makes as
 # it is set up and holds, as it does its interned terms: matches are keyed by
@@ -75,7 +77,7 @@ const MATCHES_LOCK = ReentrantLock()
 # The template traced in Float32 at the probe's extents: what tells groups
 # apart before any is matched.
 function probe_group(t::Template, rewrites)
-    key = (objectid(t), rewrites)
+    key = (objectid(t), definitions((t,)), rewrites)
     found = get(PROBE_GROUPS, key, missing)
     found === missing || return found
     probe = NamedTuple{axis_names(t)}(PROBE_EXTENTS[1:length(axis_names(t))])
@@ -83,7 +85,7 @@ function probe_group(t::Template, rewrites)
 end
 
 function cached_template_group(t::Template, rewrites, types, extents)
-    key = Key((objectid(t), rewrites, types, extents))
+    key = Key((objectid(t), definitions((t,)), rewrites, types, extents))
     found = get(TEMPLATE_GROUPS, key, missing)
     found === missing || return found
     get!(TEMPLATE_GROUPS, key, template_group(t, rewrites, types, extents))

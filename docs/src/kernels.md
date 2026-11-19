@@ -15,4 +15,5 @@ Tempest.Compiler.generated
 Tempest.Compiler.concurrently
 Tempest.Compiler.same_storage
 Tempest.Compiler.SessionTable
+Tempest.Compiler.definitions
 ```

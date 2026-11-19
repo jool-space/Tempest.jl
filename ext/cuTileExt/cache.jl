@@ -89,7 +89,10 @@ end
 
 # A kernel's function, loaded once per context for the kernel, its argument
 # types, its occupancy and the aliasing among its arguments: a body launches
-# the same kernel at every execution, and identical groups share theirs.
+# the same kernel at every execution, and identical groups share theirs. The
+# kernel is a function Tempest generated, defined once and never again, from
+# a key that names the code it calls (`EMITTED`'s) or for one trial: the
+# function stands for that code.
 const FUNCTIONS = Tempest.Compiler.SessionTable{Vector{Any}, CuFunction}()
 
 # The groups of arrays among `args` whose memory overlaps, as cuTile's

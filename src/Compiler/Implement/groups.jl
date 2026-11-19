@@ -3,7 +3,7 @@
 # as data. The plan stays the compiler's: a view holds what claims, their
 # estimates and their builds read, and nothing an implementation could change.
 
-public GroupView, ValueView, members, own_domain, product_axes, structure, Structure, numbering
+public GroupView, ValueView, members, own_domain, product_axes, structure, Structure, numbering, code
 
 """
 What a view holds of a value: its element type and dims, whether it is a
@@ -50,17 +50,29 @@ end
     Structure
 
 A group in its own numbering (see `structure`): equal to another only where
-the two are one group but for the numbers of their values.
+the two are one group but for the numbers of their values. Its functions,
+folds and element types are objects, which a function redefined stays: what
+they are as code is `code(structure)`, which a table kept longer than one
+preparation names too (see `Tempest.Compiler.definitions`).
 """
 struct Structure
     parts::Vector{Any}
     hash::UInt
+    code::Vector{Any}
 end
 
 # Its parts in arrays rather than tuples, a group's many members of many
 # kinds: a tuple of them would be a type of its own, whose hash and equality
 # Julia would compile for each group.
-Structure(parts::Vector{Any}) = Structure(parts, hash(parts))
+Structure(parts::Vector{Any}, code::Vector{Any}) = Structure(parts, hash(parts), code)
+
+"""
+    code(s::Structure) -> Vector{Any}
+
+The code the parts of `s` name, each once: the functions its terms apply, its
+folds and its values' element types. Structures equal name the same.
+"""
+code(s::Structure) = s.code
 Base.:(==)(a::Structure, b::Structure) = a.hash == b.hash && isequal(a.parts, b.parts)
 Base.hash(s::Structure, h::UInt) = hash(s.hash, h)
 
@@ -171,7 +183,12 @@ function structure_of(g::GroupView)
         x = get(g.values, order[k], nothing)
         push!(vs, x === nothing ? nothing : value_parts(x))
     end
-    (Structure(Any[g.kind, g.domain, g.primary_axes, g.bytes, length(g.reductions), ms, vs]), order)
+    code = Base.IdSet{Any}(t.f for t in values(renamed) if t isa Apply)
+    for x in values(g.values)
+        push!(code, x.eltype)
+        x.fold === nothing || push!(code, x.fold)
+    end
+    (Structure(Any[g.kind, g.domain, g.primary_axes, g.bytes, length(g.reductions), ms, vs], collect(code)), order)
 end
 
 "A group of no members over `domain`, reading `values`: where a recomputed fold's body runs."

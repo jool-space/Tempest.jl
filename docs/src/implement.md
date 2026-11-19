@@ -13,6 +13,7 @@ Tempest.Compiler.Implement.product_axes
 Tempest.Compiler.Implement.structure
 Tempest.Compiler.Implement.Structure
 Tempest.Compiler.Implement.numbering
+Tempest.Compiler.Implement.code
 Tempest.Compiler.Implement.recurrence_axes
 Tempest.Compiler.Implement.claims
 Tempest.Compiler.Implement.variants

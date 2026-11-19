@@ -79,3 +79,59 @@ end
     t.session[] = C.SESSION[] + 1
     @test get(t, 1, nothing) === nothing && length(t) == 0
 end
+
+# A scalar function the tracer records whole, its method taking only Float32,
+# which cuTile lowers.
+act(x::Float32) = 2.0f0 * x
+scaled(x) = sum(act.(x) .* x; dims = 1)
+
+function scaled_run(x, target)
+    p = trace(scaled, x)
+    ex = prepare(p, target isa T.CUDATarget ? CuArray(x) : x; target)
+    got = only(map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex))))))
+    (; got, expected = only(filter(!isnothing, C.leaves(interpret(p, x)))), views = C.group_views(ex))
+end
+
+# The definitions the keys of answers about a plan's groups hold.
+named_code(views) = unique!(reduce(vcat, [C.definitions(C.Implement.code(C.Implement.structure(g))) for g in views]))
+
+@testset "a function redefined in the session is other code" begin
+    x = single(data(256, 64)) ./ 4
+    if CUDA_FUNCTIONAL
+        first = Base.invokelatest(scaled_run, x, T.CUDATarget())
+        @test first.got ≈ first.expected
+        @eval act(x::Float32) = 3.0f0 * x
+        # Prepared again in the session, its kernels are not those of the
+        # definition before.
+        second = Base.invokelatest(scaled_run, x, T.CUDATarget())
+        @test second.got ≈ second.expected
+        @test !(second.got ≈ first.got)
+        @eval act(x::Float32) = 2.0f0 * x
+    end
+    before = Base.invokelatest(scaled_run, x, T.CPUTarget())
+    named = named_code(before.views)
+    @test length(named) == 1
+    # Code of packages is named by its object alone.
+    @test C.definitions(Any[sin, +, Float32, IR.SumFold()]) == String[]
+    @eval act(x::Float32) = 3.0f0 * x
+    after = Base.invokelatest(scaled_run, x, T.CPUTarget())
+    @test after.got ≈ after.expected
+    @test length(named_code(after.views)) == 1 && named_code(after.views) != named
+end
+
+if CUDA_FUNCTIONAL
+    @testset "a preparation that compiles is not handed what one that compiles nothing found" begin
+        # cuTile has no lowering of Base's `exp10`, which only a preparation
+        # that compiles finds out (`Implement.compiling`).
+        x = CuArray(single(data(256, 64)) ./ 4)
+        p = trace(x -> sum(exp10.(x) .* x; dims = 1), x)
+        target = T.CUDATarget()
+        C.forget_session!()
+        fresh = sprint(T.explain, prepare(p, x; target))
+        C.forget_session!()
+        prepare(p, x; target, build = false)
+        ex = @test_logs min_level = Base.CoreLogging.Warn prepare(p, x; target)
+        @test sprint(T.explain, ex) == fresh
+    end
+
+end

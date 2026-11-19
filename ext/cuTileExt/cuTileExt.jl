@@ -848,17 +848,34 @@ function recurrence_claims(target, g::GroupView)
 end
 
 """
-What the generator says of a group, kept by the group's `structure` (see
-`Tempest.Compiler.Implement.structure`): its claims, and each claim's variants
-and estimate. A claim names the domain's axes and no value, so groups alike,
-as a model's layers are, ask once.
+What the generator says of a group, kept by what it was derived from of the
+group (`derived`): its claims, and each claim's variants and estimate. A
+claim names the domain's axes and no value, so groups alike, as a model's
+layers are, ask once.
 """
-const SAID = Tempest.Compiler.SessionTable{Tuple{Symbol, cuTileGenerator, Any, NTuple{3, String}, Structure, Union{Nothing, Vector{Any}}}, Any}()
+const SAID = Tempest.Compiler.SessionTable{Tuple{Symbol, cuTileGenerator, Any, Vector{Any}, Union{Nothing, Vector{Any}}}, Any}()
 
 # The settings of the environment the generator reads as it claims, estimates
 # and emits: a product's tile and options forced, and whether a sweep skips
-# the tiles its masks rule out. What it keeps is kept by them too.
+# the tiles its masks rule out.
 settings() = (get(ENV, "TEMPEST_PRODUCT_TILE", ""), get(ENV, "TEMPEST_PRODUCT_OPTIONS", ""), get(ENV, "TEMPEST_SKIP_MASKED", "1"))
+
+"""
+What the generator's answers of `g` are derived from, beyond the claim asked
+of and the target, as the keys of the tables it keeps them in hold it (see
+`Tempest.Compiler.SessionTable`): the group but for the numbers of its values
+(`structure`); the code its functions, folds and element types are where no
+package's (`Tempest.Compiler.definitions`), which a redefinition changes; and
+whether the preparation compiles, the architecture of the device it compiles
+for where it does, and the environment's `settings`, which `lowered`, asked
+as the generator claims and emits, reads. One type whatever the group, so
+that what looks a key up compiles once.
+"""
+function derived(g::GroupView)
+    s = structure(g)
+    compiling = Implement.compiling()
+    Any[s, Tempest.Compiler.definitions(Implement.code(s)), compiling, compiling ? ct.device_sm_arch() : nothing, settings()]
+end
 
 # A claim's every field, as a key: its schedule's tiling is an array, which is
 # equal to another only by identity. A key is of one type whatever the
@@ -870,7 +887,7 @@ schedule_key(s::TileSchedule) = Any[s.sketch, Any[(Tuple(ax.axes), ax.extent, ax
 # What the generator says of `g` (and of `claim`, unless nothing), found by
 # `f` where `SAID` holds none.
 answered(f, what, generator, target, g, claim) =
-    get!(f, SAID, (what, generator, target, settings(), structure(g), claim === nothing ? nothing : schedule_key(claim)))
+    get!(f, SAID, (what, generator, target, derived(g), claim === nothing ? nothing : schedule_key(claim)))
 
 claims(generator::cuTileGenerator, target::CUDATarget, g::GroupView) =
     Claim[c for c in answered(() -> claimed(generator, target, g), :claims, generator, target, g, nothing)]

@@ -29,7 +29,7 @@ using SHA
 using Serialization
 using CompilerCaching: ObjCache
 
-public content_key, cached_kernel, store_kernel, store_failure, cached_failure, uncached_kernel, generated, dependencies
+public content_key, cached_kernel, store_kernel, store_failure, cached_failure, uncached_kernel, generated, dependencies, definitions
 
 "Kernels loaded from the cache and kernels compiled (or failed to), in this session."
 const CACHE_COUNTS = (loaded = Threads.Atomic{Int}(0), compiled = Threads.Atomic{Int}(0))
@@ -365,6 +365,38 @@ identified(m::Module) = get!(() -> find_identified(Base.moduleroot(m)), IDENTIFI
 find_identified(r::Module) = r === Core || r === Base || pkgdir(r) !== nothing
 
 const IDENTIFIED = SessionTable{Module, Bool}()
+
+"""
+    definitions(code) -> Vector{String}
+
+What a session table's key holds of `code`, functions, folds and types an
+answer was derived from, beside the objects themselves (see `SessionTable`):
+the content key of each no package identifies (see `content_key`), which
+writes it by its definition, as a store's key does, so that a function
+redefined in the session, the same object, is another key. A package's code
+is named by the object alone, since its package is the same all session.
+Sorted, so that code named in any order is named alike.
+"""
+definitions(code) = sort!(unique!(String[content_key(x) for x in code if !of_packages(x)]))
+
+# Whether all the code `x` is, its type, its type's parameters and what its
+# fields hold, is of packages. An array is its type: its elements are data.
+# A mutable value is walked once.
+function of_packages(@nospecialize(x), seen = Base.IdSet{Any}())
+    x isa Type && return type_of_packages(x)
+    x isa Module && return identified(x)
+    type_of_packages(typeof(x)) || return false
+    (isbits(x) || x isa AbstractArray || x in seen) && return true
+    ismutable(x) && push!(seen, x)
+    all(i -> !isdefined(x, i) || of_packages(getfield(x, i), seen), 1:nfields(x))
+end
+
+function type_of_packages(@nospecialize(T))
+    T = Base.unwrap_unionall(T)
+    T isa Union && return all(type_of_packages, Base.uniontypes(T))
+    T isa DataType || return true
+    identified(T.name.module) && all(p -> !(p isa Type) || type_of_packages(p), T.parameters)
+end
 
 const IDENTITIES = SessionTable{Module, String}()
 
