@@ -724,17 +724,21 @@ end
 # `key`, if any: each generated function's source written once a session.
 function generated_type(key::String)
     found = get(GENERATED_BY_CONTENT, key, nothing)
-    found === nothing || return found
+    found === nothing || return something(found)
     asked = session()
     for (T, source) in @lock GENERATED_LOCK collect(GENERATED_SOURCES)
         get(INDEXED, objectid(T), false) && continue
-        get!(GENERATED_BY_CONTENT, content_key(source; checked = true), T, asked)
+        get!(GENERATED_BY_CONTENT, content_key(source; checked = true), Some{Any}(T), asked)
         get!(INDEXED, objectid(T), true, asked)
     end
-    get(GENERATED_BY_CONTENT, key, nothing)
+    found = get(GENERATED_BY_CONTENT, key, nothing)
+    found === nothing ? nothing : something(found)
 end
 
-const GENERATED_BY_CONTENT = SessionTable{String, Any}()
+# Each function held in `Some`: a type handed bare to a dictionary's `get!` is
+# specialized on, and native code was compiled for each function generated, a
+# session's new ones at each lookup after a definition.
+const GENERATED_BY_CONTENT = SessionTable{String, Some{Any}}()
 # By identity: a dictionary of types compares them by subtyping.
 const INDEXED = SessionTable{UInt64, Bool}()
 
