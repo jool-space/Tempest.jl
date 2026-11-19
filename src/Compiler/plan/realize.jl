@@ -553,7 +553,7 @@ function arrive!(pieced::Pieced, crossed, p::Realizing, u, here, o, d)
 end
 
 # Operand `x` of an elementwise value read at `index` over `d`: read over `d`.
-composed(x::Read, index, d) = Read(x.value, map(e -> substitute(e, index, d), x.index))
+composed(x::Read, index, d) = Read(x.value, substituted(x.index, index, d))
 composed(x::IndexOperand{T}, index, d) where {T} = IndexOperand{T}(substitute(x.expr, index, d))
 composed(x::Literal, index, d) = x
 

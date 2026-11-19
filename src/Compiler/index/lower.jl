@@ -21,32 +21,36 @@ end
 
 # Each variable of a domain, read as itself; an axis of extent one reads zero,
 # the canonical form of its only index.
-identity_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
+identity_index(@nospecialize(dims)) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
 
 # A value ranges over the axes of its node wider than one, so programs that
 # differ by axes of extent one have the same values; the node reads its value
 # at the variables of those axes.
-wide_index(dims) = map(var, wide_axes(dims))
+wide_index(@nospecialize(dims)) = map_elements(var, wide_axes(dims))
 
 # Expressions over a shape as expressions over its axes `keep`: each kept axis
 # its variable among them, any other (of extent one) zero; and their domain.
-function narrowing(dims, keep)
+#
+# The functions of this file take shapes, indices and operands as the tuples
+# a program makes them, of its ranks and kinds, and are compiled once for
+# all of them: those arguments unspecialized, mapped by `map_elements`.
+function narrowing(@nospecialize(dims), @nospecialize(keep))
     index = ntuple(k -> (j = findfirst(==(k), keep)) === nothing ? constant(0) : var(j), length(dims))
-    (index, Domain(map(k -> dims[k], keep)))
+    (index, Domain(map_elements(k -> dims[k], keep)))
 end
 
-narrow(o::Read, (index, d)) = Read(o.value, map(e -> substitute(e, index, d), o.index))
-narrow(o::Literal, _) = o
-narrow(o::IndexOperand{T}, (index, d)) where {T} = IndexOperand(substitute(o.expr, index, d), T)
+narrow(o::Read, @nospecialize(n)) = Read(o.value, substituted(o.index, n[1], n[2]))
+narrow(o::Literal, @nospecialize(_)) = o
+narrow(o::IndexOperand{T}, @nospecialize(n)) where {T} = IndexOperand(substitute(o.expr, n[1], n[2]), T)
 
 # A definition over a node of shape `dims` as one over its value's domain.
-narrow(d::Input, dims) = d
-narrow(d::ConstantArray, dims) = ConstantArray(reshape(d.data, map(k -> dims[k], wide_axes(dims))))
-narrow(d::Pointwise, dims) = (n = narrowing(dims, wide_axes(dims)); Pointwise(d.f, map(o -> narrow(o, n), d.operands)))
+narrow(d::Input, @nospecialize(dims)) = d
+narrow(d::ConstantArray, @nospecialize(dims)) = ConstantArray(reshape(d.data, map_elements(k -> dims[k], wide_axes(dims))))
+narrow(d::Pointwise, @nospecialize(dims)) = (n = narrowing(dims, wide_axes(dims)); Pointwise(d.f, map_elements(@nospecialize(o) -> narrow(o, n), d.operands)))
 
 # A fold ranges over the axes of its iteration wider than one, and over its
 # reduced axes even of extent one when all of them are.
-function narrow(d::Reduction, dims)
+function narrow(d::Reduction, @nospecialize(dims))
     s = d.iteration
     keep = all(k -> s[k] == 1, d.reduced) ? Tuple(k for k in eachindex(s) if s[k] != 1 || k in d.reduced) : wide_axes(s)
     n = narrowing(s, keep)
@@ -56,34 +60,34 @@ end
 # A fold by key keeps the key's formulas for its value's wide axes, and reads
 # the contents it starts from over them; its iteration is narrowed where it is
 # formed.
-narrow(d::Keyed, dims) = Keyed(d.fold, d.operand, d.iteration, map(k -> d.key[k], wide_axes(dims)),
+narrow(d::Keyed, @nospecialize(dims)) = Keyed(d.fold, d.operand, d.iteration, map_elements(k -> d.key[k], wide_axes(dims)),
     d.into === nothing ? nothing : narrow(d.into, narrowing(dims, wide_axes(dims))))
 
 # A scan ranges over its node's wide axes, as a map does; along an axis of
 # extent one, each position is its own prefix.
-function narrow(d::Scan, dims)
+function narrow(d::Scan, @nospecialize(dims))
     keep = wide_axes(dims)
     n = narrowing(dims, keep)
     Scan(d.fold, narrow(d.operand, n), Tuple(j for (j, k) in enumerate(keep) if k in d.axes), d.reverse, d.exclusive)
 end
 
 # A recurrence's state keeps its axis among the wide ones: its steps are more than one.
-function narrow(d::Carried, dims)
+function narrow(d::Carried, @nospecialize(dims))
     n = narrowing(dims, wide_axes(dims))
     Carried(narrow(d.init, n), narrow(d.from, n), findfirst(==(d.axis), wide_axes(dims)), d.reverse)
 end
 
 # Read a node of shape `dims` from a reader whose domain is `reader`, as Julia
 # broadcasts: axes of extent one, and missing trailing axes, read index zero.
-broadcast_index(dims) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
+broadcast_index(@nospecialize(dims)) = ntuple(k -> dims[k] == 1 ? constant(0) : var(k), length(dims))
 
-operand(a::ValueAccess, dims, reader::Domain) =
-    Read(a.value, map(e -> substitute(e, broadcast_index(dims), reader), a.index))
-operand(a::LiteralAccess, dims, ::Domain) = Literal(a.value)
-operand(a::IndexAccess, dims, reader::Domain) =
+operand(a::ValueAccess, @nospecialize(dims), reader::Domain) =
+    Read(a.value, substituted(a.index, broadcast_index(dims), reader))
+operand(a::LiteralAccess, @nospecialize(dims), ::Domain) = Literal(a.value)
+operand(a::IndexAccess, @nospecialize(dims), reader::Domain) =
     IndexOperand(substitute(a.expr, broadcast_index(dims), reader), a.eltype)
 
-function linear_index(dims, d::Domain)
+function linear_index(@nospecialize(dims), d::Domain)
     linear = constant(0)
     stride = 1
     for (k, n) in enumerate(dims)
@@ -93,7 +97,7 @@ function linear_index(dims, d::Domain)
     linear
 end
 
-delinearize(linear, dims, d::Domain) = map((n, stride) -> fmod(fdiv(linear, stride, d), n, d), dims, dense_strides(dims))
+delinearize(linear, @nospecialize(dims), d::Domain) = map_elements((n, stride) -> fmod(fdiv(linear, stride, d), n, d), dims, dense_strides(dims))
 
 # The index of a layout node's input, for each index of the node, as
 # expressions over the node's domain. `held(i, axis, extent)` is the index
@@ -133,8 +137,8 @@ end
 # array's extremes); an index computed from the position is a formula, and
 # so is one a map computes from others by sums, differences and products by
 # constants (see `formula`).
-function held_index(a::ValueAccess, at, d, values, extent)
-    index = map(e -> substitute(e, at, d), a.index)
+function held_index(a::ValueAccess, @nospecialize(at), d, values, extent)
+    index = substituted(a.index, at, d)
     computed = formula(ValueAccess(a.value, index), values, d)
     computed === nothing || return add(computed, -1, d)
     data = values[a.value].definition
@@ -160,8 +164,8 @@ function formula(a::ValueAccess, values, d)
     v = values[a.value]
     def = v.definition
     def isa Pointwise && v.eltype <: Integer || return nothing
-    terms = map(o -> formula_term(access(o, a.index, d), values, d), def.operands)
-    any(isnothing, terms) && return nothing
+    terms = map_elements(@nospecialize(o) -> formula_term(access(o, a.index, d), values, d), def.operands)
+    any_element(isnothing, terms) && return nothing
     combined(def.f, terms, d)
 end
 
@@ -188,12 +192,12 @@ combined(::typeof(*), (x, y)::Tuple{Affine, Affine}, d) = isconstant(x) ? mul(y,
 combined(::Cast{T}, (x,)::Tuple{Affine}, d) where {T <: Integer} = x
 combined(::typeof(identity), (x,)::Tuple{Affine}, d) = x
 combined(f, terms, d) = nothing
-held_index(a::IndexAccess, at, d, values, extent) = add(substitute(a.expr, at, d), -1, d)
-held_index(a::LiteralAccess, at, d, values, extent) = constant(Int(a.value) - 1)
+held_index(a::IndexAccess, @nospecialize(at), d, values, extent) = add(substitute(a.expr, at, d), -1, d)
+held_index(a::LiteralAccess, @nospecialize(at), d, values, extent) = constant(Int(a.value) - 1)
 
-compose(a::ValueAccess, index, d) = ValueAccess(a.value, map(e -> substitute(e, index, d), a.index))
-compose(a::LiteralAccess, index, d) = a
-compose(a::IndexAccess, index, d) = IndexAccess(substitute(a.expr, index, d), a.eltype)
+compose(a::ValueAccess, @nospecialize(index), d) = ValueAccess(a.value, substituted(a.index, index, d))
+compose(a::LiteralAccess, @nospecialize(index), d) = a
+compose(a::IndexAccess, @nospecialize(index), d) = IndexAccess(substitute(a.expr, index, d), a.eltype)
 
 # A read of a select by positions, where its condition is decided at every
 # position the read reaches, is a read of the branch taken there: a slice of
@@ -213,31 +217,31 @@ function taken(a::ValueAccess, values, d::Domain)
 end
 taken(a::Access, values, d::Domain) = a
 
-access(o::Read, index, d) = ValueAccess(o.value, map(e -> substitute(e, index, d), o.index))
-access(o::Literal, index, d) = LiteralAccess(o.value)
-access(o::IndexOperand{T}, index, d) where {T} = IndexAccess(substitute(o.expr, index, d), T)
+access(o::Read, @nospecialize(index), d) = ValueAccess(o.value, substituted(o.index, index, d))
+access(o::Literal, @nospecialize(index), d) = LiteralAccess(o.value)
+access(o::IndexOperand{T}, @nospecialize(index), d) where {T} = IndexAccess(substitute(o.expr, index, d), T)
 
 # Whether a condition read at `index` holds at every position of `d`, at
 # none, or neither (nothing): comparisons of positions, by the ranges of
 # their formulas, and conjunctions, disjunctions and negations of those.
-decided(values, o::Literal{Bool}, index, d::Domain) = o.value
-decided(values, o::Operand, index, d::Domain) = nothing
-function decided(values, o::Read, index, d::Domain)
+decided(values, o::Literal{Bool}, @nospecialize(index), d::Domain) = o.value
+decided(values, o::Operand, @nospecialize(index), d::Domain) = nothing
+function decided(values, o::Read, @nospecialize(index), d::Domain)
     def = values[o.value].definition
     def isa Pointwise || return nothing
-    at = map(e -> substitute(e, index, d), o.index)
+    at = substituted(o.index, index, d)
     xs = def.operands
     if def.f === (&) || def.f === (|)
-        cs = map(x -> decided(values, x, at, d), xs)
+        cs = map_elements(@nospecialize(x) -> decided(values, x, at, d), xs)
         all = def.f === (&)
-        any(==(!all), cs) && return !all
-        Base.all(==(all), cs) ? all : nothing
+        any_element(==(!all), cs) && return !all
+        all_elements(==(all), cs) ? all : nothing
     elseif def.f === (!)
         c = decided(values, only(xs), at, d)
         c === nothing ? nothing : !c
     elseif def.f in (<, <=, >, >=, ==, !=) && length(xs) == 2
-        es = map(x -> position_formula(x, at, d), xs)
-        any(isnothing, es) && return nothing
+        es = map_elements(@nospecialize(x) -> position_formula(x, at, d), xs)
+        any_element(isnothing, es) && return nothing
         lo, hi = affine_range(add(es[1], scale(es[2], -1), d), d)
         f = def.f
         holds = f === (<) ? hi < 0 : f === (<=) ? hi <= 0 : f === (>) ? lo > 0 : f === (>=) ? lo >= 0 : lo == hi == 0
@@ -251,14 +255,14 @@ end
 
 # A position compared, as a formula over `d`: one of an integer type its
 # range fits, so that the comparison in that type is the formulas'.
-function position_formula(o::IndexOperand{T}, at, d::Domain) where {T}
+function position_formula(o::IndexOperand{T}, @nospecialize(at), d::Domain) where {T}
     T <: Integer || return nothing
     e = substitute(o.expr, at, d)
     lo, hi = affine_range(e, d)
     typemin(T) <= lo && hi <= typemax(T) ? e : nothing
 end
-position_formula(o::Literal{<:Integer}, at, d::Domain) = o.value isa Bool ? nothing : constant(Int(o.value))
-position_formula(o::Operand, at, d::Domain) = nothing
+position_formula(o::Literal{<:Integer}, @nospecialize(at), d::Domain) = o.value isa Bool ? nothing : constant(Int(o.value))
+position_formula(o::Operand, @nospecialize(at), d::Domain) = nothing
 
 # Pieces that cover a value together are a formula, as a scatter that covers
 # its result is: a select between reads of one value, or a sum of such reads
@@ -290,13 +294,13 @@ function covering(values, def::Pointwise, d::Domain, T, found)
     end
     blocks[order[end]][2] == hi || return nothing
     base, next = ps[order[1]].read.index, ps[order[2]].read.index
-    steps = map((x, y) -> add(y, scale(x, -1), d), base, next)
-    all(isconstant, steps) || return nothing
+    steps = map_elements((x, y) -> add(y, scale(x, -1), d), base, next)
+    all_elements(isconstant, steps) || return nothing
     for (j, k) in enumerate(order)
-        ps[k].read.index == map((x, s) -> add(x, (j - 1) * s.constant, d), base, steps) || return nothing
+        ps[k].read.index == map_elements((x, s) -> add(x, (j - 1) * s.constant, d), base, steps) || return nothing
     end
     block = fdiv(add(e, -lo, d), width, d)
-    Read(ps[1].read.value, map((x, s) -> add(x, mul(block, s.constant, d), d), base, steps))
+    Read(ps[1].read.value, map_elements((x, s) -> add(x, mul(block, s.constant, d), d), base, steps))
 end
 
 """
@@ -366,8 +370,8 @@ listed(set::Pieces) = foldl((out, s) -> append!(out, listed(s)), set.below; init
 # and the domain: a concatenation's every write is a select over the write
 # before, and each sought its pieces through all the writes before it, T²/2
 # selects for T slices.
-function pieces(values, def::Pointwise, at, d::Domain, found)
-    through(o::Read) = Read(o.value, map(e -> substitute(e, at, d), o.index))
+function pieces(values, def::Pointwise, @nospecialize(at), d::Domain, found)
+    through(o::Read) = Read(o.value, substituted(o.index, at, d))
     through(o) = o
     function inner(o)
         o isa Read && values[o.value].definition isa Pointwise || return nothing
@@ -395,26 +399,26 @@ end
 
 # A condition read at `at` as a mask: comparisons of positions and their
 # conjunctions.
-function block_mask(values, o::Read, at, d::Domain)
+function block_mask(values, o::Read, @nospecialize(at), d::Domain)
     def = values[o.value].definition
     def isa Pointwise || return nothing
-    at = map(e -> substitute(e, at, d), o.index)
+    at = substituted(o.index, at, d)
     if def.f === (&)
-        parts = map(x -> block_mask(values, x, at, d), def.operands)
-        return any(isnothing, parts) ? nothing : reduce(vcat, parts)
+        parts = map_elements(@nospecialize(x) -> block_mask(values, x, at, d), def.operands)
+        return any_element(isnothing, parts) ? nothing : reduce(vcat, parts)
     end
     def.f in (<, <=, >, >=, ==) && length(def.operands) == 2 || return nothing
-    a, b = map(x -> position_formula(x, at, d), def.operands)
+    a, b = map_elements(@nospecialize(x) -> position_formula(x, at, d), def.operands)
     a === nothing || b === nothing ? nothing : def.f === (==) ?
         [comparison_mask(<=, a, b, d); comparison_mask(>=, a, b, d)] : comparison_mask(def.f, a, b, d)
 end
-block_mask(values, o::Literal{Bool}, at, d::Domain) = o.value ? Affine[] : nothing
-block_mask(values, o::Operand, at, d::Domain) = nothing
+block_mask(values, o::Literal{Bool}, @nospecialize(at), d::Domain) = o.value ? Affine[] : nothing
+block_mask(values, o::Operand, @nospecialize(at), d::Domain) = nothing
 
 # A node of shape `dims` filled out to a larger shape, as Julia broadcasts.
-fill_out(a::ValueAccess, dims, d) = ValueAccess(a.value, map(e -> substitute(e, broadcast_index(dims), d), a.index))
-fill_out(a::LiteralAccess, dims, d) = a
-fill_out(a::IndexAccess, dims, d) = IndexAccess(substitute(a.expr, broadcast_index(dims), d), a.eltype)
+fill_out(a::ValueAccess, @nospecialize(dims), d) = ValueAccess(a.value, substituted(a.index, broadcast_index(dims), d))
+fill_out(a::LiteralAccess, @nospecialize(dims), d) = a
+fill_out(a::IndexAccess, @nospecialize(dims), d) = IndexAccess(substitute(a.expr, broadcast_index(dims), d), a.eltype)
 
 # A scatter or a write by integers and ranges places its input: each element
 # lands at one position, and every other position is `otherwise`, zero or the
@@ -465,13 +469,13 @@ function keyed_elements(indices, k, inputs, input_dims, n, values)
         (held_index(inputs[i.input], ntuple(j -> var(axis + j), rank), d, values, extent), rank)
     end
     index, iteration = narrowing(dims, wide_axes(dims))
-    key = map(e -> substitute(e, index, iteration), layout_index(Select(indices), dims, n.dims, d, held))
+    key = substituted(layout_index(Select(indices), dims, n.dims, d, held), index, iteration)
     elements = narrow(operand(inputs[k], dims, d), (index, iteration))
     if elements isa Read && values[elements.value].dims != iteration.extents &&
        reads_storage(values[elements.value], elements.index, iteration.extents)
         own = Domain(values[elements.value].dims)
         at = delinearize(linear_index(own.extents, own), iteration.extents, own)
-        key = map(e -> substitute(e, at, own), key)
+        key = substituted(key, at, own)
         elements = Read(elements.value, identity_index(own.extents))
         iteration = own
     end

@@ -92,18 +92,20 @@ function rebuild(f, graph::IndexGraph, keep = trues(length(graph.values)))
     g, b.ids
 end
 
-remap(e::Affine, ids) = Affine(e.constant, map(t -> remap(t.first, ids) => t.second, e.terms))
+# Indices, terms and operands are the program's tuples, of its ranks and
+# kinds, mapped by `map_elements`, so that each method compiles once.
+remap(e::Affine, ids) = Affine(e.constant, map_elements(t -> remap(t.first, ids) => t.second, e.terms))
 remap(a::Var, ids) = a
 remap(a::Div, ids) = Div(remap(a.e, ids), a.d)
 remap(a::Mod, ids) = Mod(remap(a.e, ids), a.d)
-remap(a::Indirect, ids) = Indirect(ids[a.value], map(e -> remap(e, ids), a.index), a.lo, a.hi)
-remap(o::Read, ids) = Read(ids[o.value], map(e -> remap(e, ids), o.index))
+remap(a::Indirect, ids) = Indirect(ids[a.value], map_elements(e -> remap(e, ids), a.index), a.lo, a.hi)
+remap(o::Read, ids) = Read(ids[o.value], map_elements(e -> remap(e, ids), o.index))
 remap(o::Literal, ids) = o
 remap(o::IndexOperand{T}, ids) where {T} = IndexOperand{T}(remap(o.expr, ids))
-remap(d::Pointwise, ids) = Pointwise(d.f, map(o -> remap(o, ids), d.operands))
+remap(d::Pointwise, ids) = Pointwise(d.f, map_elements(@nospecialize(o) -> remap(o, ids), d.operands))
 remap(d::Reduction, ids) = Reduction(d.fold, remap(d.operand, ids), d.iteration, d.reduced)
 remap(d::Scan, ids) = Scan(d.fold, remap(d.operand, ids), d.axes, d.reverse, d.exclusive)
-remap(d::Keyed, ids) = Keyed(d.fold, remap(d.operand, ids), d.iteration, map(e -> remap(e, ids), d.key),
+remap(d::Keyed, ids) = Keyed(d.fold, remap(d.operand, ids), d.iteration, map_elements(e -> remap(e, ids), d.key),
     d.into === nothing ? nothing : remap(d.into, ids))
 remap(d::Union{Input, ConstantArray}, ids) = d
 remap(d::Crossed, ids) = Crossed(remap(d.operand, ids))
@@ -137,16 +139,16 @@ compact(graph::IndexGraph) = first(rebuild((b, id) -> nothing, graph, live_value
 ## Products of operands, seen through the values they read.
 
 # An operand of a value read at `index`, as read from the reader's domain.
-through(x::Read, index, d::Domain) = Read(x.value, map(e -> substitute(e, index, d), x.index))
-through(x::Literal, index, d::Domain) = x
-through(x::IndexOperand{T}, index, d::Domain) where {T} = IndexOperand{T}(substitute(x.expr, index, d))
+through(x::Read, @nospecialize(index), d::Domain) = Read(x.value, substituted(x.index, index, d))
+through(x::Literal, @nospecialize(index), d::Domain) = x
+through(x::IndexOperand{T}, @nospecialize(index), d::Domain) where {T} = IndexOperand{T}(substitute(x.expr, index, d))
 
 applies(graph, o, f) = o isa Read && (d = graph.values[o.value].definition) isa Pointwise && d.f === f
 
 "The operands of the pointwise value `o` reads, as read from the reader's domain."
-inner(graph, o::Read, d::Domain) = map(x -> through(x, o.index, d), graph.values[o.value].definition.operands)
+inner(graph, o::Read, d::Domain) = map_elements(@nospecialize(x) -> through(x, o.index, d), graph.values[o.value].definition.operands)
 
-mentions(o::Read, k) = any(e -> mentions(e, k), o.index)
+mentions(o::Read, k) = any_element(e -> mentions(e, k), o.index)
 mentions(o::IndexOperand, k) = mentions(o.expr, k)
 mentions(::Literal, k) = false
 
@@ -753,7 +755,7 @@ function compose_observes(graph::IndexGraph)
         args = Any[]
         for (o, r) in zip(d.operands, reads)
             o isa Literal && (push!(args, o.value); continue)
-            index = aligned(graph, r.value, map(e -> substitute(e, kept, domain), r.index), a.reduced, domain)
+            index = aligned(graph, r.value, substituted(r.index, kept, domain), a.reduced, domain)
             index === nothing && return nothing
             operand = through(r.operand, index, domain)
             element_y(graph, operand, domain) == ya || return nothing

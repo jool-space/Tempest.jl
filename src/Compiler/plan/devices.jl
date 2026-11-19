@@ -102,7 +102,7 @@ function narrowed_crossings(graph::IndexGraph)
         haskey(spans, v) || return Value(remap(val.definition, narrowed), val.dims, val.eltype, val.scalar)
         dims, at = range_positions(val.dims, spans[v])
         source = val.definition.operand
-        Value(Crossed(Read(source.value, map(e -> substitute(e, at, Domain(dims)), source.index))), dims, val.eltype, val.scalar)
+        Value(Crossed(Read(source.value, substituted(source.index, at, Domain(dims)))), dims, val.eltype, val.scalar)
     end
     IndexGraph(values, graph.arguments, Operand[remap(o, narrowed) for o in graph.results], graph.result_dims, graph.result_scalar,
         graph.result_eltype, graph.rewrites, graph.backward, graph.devices)

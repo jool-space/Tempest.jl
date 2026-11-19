@@ -162,7 +162,7 @@ function recomputable_folds(graph, kept = Set{Int}(); pinned = Set{Int}())
             domain = iteration_domain(values[u])
             for o in reads(du)
                 o.value == w || continue
-                at = map(e -> substitute(e, o.index, domain), index)
+                at = substituted(index, o.index, domain)
                 if du isa Reduction
                     push!(consumers, (u, at))
                 elseif du isa Pointwise && !(u in results) && !materialized[u]

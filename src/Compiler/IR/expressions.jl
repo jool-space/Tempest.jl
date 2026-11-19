@@ -4,7 +4,7 @@
 # built from tuples, so `==` and `hash` are structural.
 
 public Affine, Var, Div, Mod, Indirect, Domain, affine_range, coefficient, is_affine, var,
-    indirect_values, substitute, fdiv, fmod, revalued
+    indirect_values, substitute, substituted, fdiv, fmod, revalued
 
 abstract type Atom end
 
@@ -256,7 +256,7 @@ end
 Replace variable `n` of `e` by `arguments[n]`, an expression over `domain`,
 and simplify there.
 """
-function substitute(e::Affine, arguments, d::Domain)
+function substitute(e::Affine, @nospecialize(arguments), d::Domain)
     result = constant(e.constant)
     for (atom, c) in e.terms
         result = add(result, scale(substitute(atom, arguments, d), c), d)
@@ -264,14 +264,26 @@ function substitute(e::Affine, arguments, d::Domain)
     result
 end
 
-substitute(a::Var, arguments, ::Domain) = arguments[a.n]
-substitute(a::Div, arguments, d::Domain) = fdiv(substitute(a.e, arguments, d), a.d, d)
-substitute(a::Mod, arguments, d::Domain) = fmod(substitute(a.e, arguments, d), a.d, d)
-substitute(a::Indirect, arguments, d::Domain) = normalize(
-    0,
-    (Indirect(a.value, map(x -> substitute(x, arguments, d), a.index), a.lo, a.hi) => 1,),
-    d,
-)
+substitute(a::Var, @nospecialize(arguments), ::Domain) = arguments[a.n]::Affine
+substitute(a::Div, @nospecialize(arguments), d::Domain) = fdiv(substitute(a.e, arguments, d), a.d, d)
+substitute(a::Mod, @nospecialize(arguments), d::Domain) = fmod(substitute(a.e, arguments, d), a.d, d)
+substitute(a::Indirect, @nospecialize(arguments), d::Domain) = normalize(0, (Indirect(a.value, substituted(a.index, arguments, d), a.lo, a.hi) => 1,), d)
+
+"""
+    substituted(index, arguments, domain)
+
+Each expression of `index`, a tuple of them, with variable `n` replaced by
+`arguments[n]`, as `substitute` replaces it: by code compiled once whatever
+the ranks of the two, which are a program's (the index of a value of any
+rank, read by a domain of any).
+"""
+function substituted(@nospecialize(index::Tuple), @nospecialize(arguments), d::Domain)
+    out = Vector{Affine}(undef, nfields(index))
+    for k in eachindex(out)
+        out[k] = substitute(getfield(index, k)::Affine, arguments, d)
+    end
+    Tuple(out)
+end
 
 # Evaluation, for interpreters and tests. `indirect(value, index)` reads a gather.
 evaluate_index(a::Affine, x, indirect = nothing) =

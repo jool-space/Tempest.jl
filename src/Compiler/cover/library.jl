@@ -130,7 +130,7 @@ function side_index(u::Unifier, i, index)
     vars = u.vars[i]
     vars == eachindex(vars) && return index
     d = Domain(side_domain(u, i))
-    map(e -> substitute(e, map(var, vars), d), index)
+    substituted(index, map(var, vars), d)
 end
 
 function same_value!(u::Unifier, x, y)

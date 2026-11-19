@@ -80,6 +80,16 @@ Base.@nospecializeinfer function map_elements(f, @nospecialize(t::Tuple))
     Tuple(out)
 end
 
+# Of two tuples, element by element, as many as the shorter has, as `map`
+# over two does.
+Base.@nospecializeinfer function map_elements(f, @nospecialize(a::Tuple), @nospecialize(b::Tuple))
+    out = Vector{Any}(undef, min(nfields(a), nfields(b)))
+    for i in eachindex(out)
+        out[i] = f(getfield(a, i), getfield(b, i))
+    end
+    Tuple(out)
+end
+
 """
     all_elements(p, t::Tuple) -> Bool
     any_element(p, t::Tuple) -> Bool

@@ -235,7 +235,15 @@ operands(d::Carried) = (d.init,)
 operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempty(indirect_values(e)))...,
     (d.into === nothing ? () : (d.into,))...)
 
-reads(d::Definition) = (o for o in operands(d) if o isa Read)
+# A vector, which every loop over it compiles once for, where a filter of
+# the operands' tuple compiled for each mix of operands a program has.
+function reads(d::Definition)
+    out = Read[]
+    for o in operands(d)
+        o isa Read && push!(out, o)
+    end
+    out
+end
 
 # The domain each operand of value `v` is read over, as `operands` lists them:
 # a fold's operand, and a fold by key's with its key's positions, over the

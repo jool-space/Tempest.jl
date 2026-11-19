@@ -49,7 +49,7 @@ function reading(graph, cx::Forming, g::Group, v)
     d isa Pointwise ? as_inlined : as_load
 end
 
-function built_term(graph, cx::Forming, g::Group, v, index, domain, memo)
+function built_term(graph, cx::Forming, g::Group, v, @nospecialize(index), domain, memo)
     tally!(:terms)
     how = reading(graph, cx, g, v)
     how === as_load && return Load(v, index)
@@ -64,23 +64,23 @@ function built_term(graph, cx::Forming, g::Group, v, index, domain, memo)
     definition_term(graph, cx, g, val.definition, val, index, domain, memo)
 end
 
-function definition_term(graph, cx::Forming, g, d::Pointwise, val, index, domain, memo = Dict{Any, Term}())
-    args = map(d.operands) do o
-        operand_term(graph, cx, g, o, index, domain, memo)
-    end
+# Compiled once whatever the kinds of the operands and the rank of the index,
+# which are the program's (see `map_elements`).
+function definition_term(graph, cx::Forming, g, d::Pointwise, val, @nospecialize(index), domain, memo = Dict{Any, Term}())
+    args = map_elements(@nospecialize(o) -> operand_term(graph, cx, g, o, index, domain, memo), d.operands)
     Apply(d.f, args, val.eltype)
 end
 
 # A crossing copies what it reads, which is stored on the device it crosses from.
-definition_term(graph, cx::Forming, g, d::Crossed, val, index, domain, memo = Dict{Any, Term}()) =
+definition_term(graph, cx::Forming, g, d::Crossed, val, @nospecialize(index), domain, memo = Dict{Any, Term}()) =
     Apply(identity, (operand_term(graph, cx, g, d.operand, index, domain, memo),), val.eltype)
 
 # A fold recomputed where it is read: its operand over the domain extended by
 # its reduced axes.
-function fold_term(graph, cx::Forming, g, v, index, domain, memo = Dict{Any, Term}())
+function fold_term(graph, cx::Forming, g, v, @nospecialize(index), domain, memo = Dict{Any, Term}())
     d = graph.values[v].definition::Reduction
     base = length(domain)
-    extents = Tuple(d.iteration[k] for k in d.reduced)
+    extents = map_elements(k -> d.iteration[k], d.reduced)
     iteration = iteration_index(d, index, ntuple(j -> var(base + j), length(d.reduced)))
     extended = Domain((domain.extents..., extents...))
     Recomputed(v, index, extents, operand_term(graph, cx, g, d.operand, iteration, extended, memo))
@@ -98,20 +98,22 @@ function value_reads!(reads, seen, graph, cx::Forming, g::Group, v)
     how === as_load && return push!(reads, v)
     d = graph.values[v].definition
     how === as_recomputed && return operand_reads!(reads, seen, graph, cx, g, d.operand)
-    foreach(o -> operand_reads!(reads, seen, graph, cx, g, o), operands(d))
+    for o in operands(d)
+        operand_reads!(reads, seen, graph, cx, g, o)
+    end
     reads
 end
 
-function operand_reads!(reads, seen, graph, cx::Forming, g, o)
+function operand_reads!(reads, seen, graph, cx::Forming, g, @nospecialize(o))
     union!(reads, gathered_values(o))
     o isa Read && value_reads!(reads, seen, graph, cx, g, o.value)
     reads
 end
 
-operand_term(graph, cx::Forming, g, o::Read, index, domain, memo = Dict{Any, Term}()) =
-    value_term(graph, cx, g, o.value, map(e -> substitute(e, index, domain), o.index), domain, memo)
-operand_term(graph, cx::Forming, g, o::Literal, index, domain, memo = nothing) = Lit(o.value)
-operand_term(graph, cx::Forming, g, o::IndexOperand{T}, index, domain, memo = nothing) where {T} =
+operand_term(graph, cx::Forming, g, o::Read, @nospecialize(index), domain, memo = Dict{Any, Term}()) =
+    value_term(graph, cx, g, o.value, substituted(o.index, index, domain), domain, memo)
+operand_term(graph, cx::Forming, g, o::Literal, @nospecialize(index), domain, memo = nothing) = Lit(o.value)
+operand_term(graph, cx::Forming, g, o::IndexOperand{T}, @nospecialize(index), domain, memo = nothing) where {T} =
     Ix{T}(substitute(o.expr, index, domain))
 
 # An operand read from storage, as a term over its reader's domain: the
