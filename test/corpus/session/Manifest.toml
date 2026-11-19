@@ -1319,7 +1319,7 @@ version = "6.5.1"
 
 [[deps.cuTile]]
 deps = ["Adapt", "BFloat16s", "CUDACore", "CUDA_Compiler_jll", "CUDA_Tile_jll", "CompilerCaching", "EnumX", "GPUArrays", "GPUCompiler", "GPUToolbox", "IRStructurizer", "ObjectFile", "PrecompileTools", "Preferences", "REPL", "Random"]
-git-tree-sha1 = "cf7be5b36bce09e7797cbcb5a2c0a8d105af6c10"
+git-tree-sha1 = "52457c744beaec039084f5856f1ec7334945c3ab"
 repo-rev = "main"
 repo-url = "https://github.com/JuliaGPU/cuTile.jl"
 uuid = "0dea8319-8c4a-4662-a73d-20234d115b9a"
