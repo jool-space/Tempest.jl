@@ -37,6 +37,41 @@ closure(s) = x -> s * x
     @test (C.content_key(T.logsumexp; checked = true) == C.content_key(T.logsumexp)) == !C.EDGES
 end
 
+# Code a key does not name. Each is a stale kernel and a wrong result with no
+# error: a new process loads from the store the binary of the code before the
+# change, or the session keeps the kernel it compiled before it.
+struct Half end
+Base.:*(::Half, x::Float32) = 0.5f0 * x
+halve(x::Float32) = Half() * x
+
+struct Unit end
+Base.Float32(::Unit) = 1.0f0
+in_units(x::Float32) = x * Float32(Unit())
+
+doubled(x) = 2x
+
+@testset "a key names all the code its kernel is compiled from" begin
+    # A method of a package's function written outside any package, for a
+    # type of its own: the key names the function, which is the package's.
+    before = C.content_key(halve)
+    @eval Base.:*(::Half, x::Float32) = 0.25f0 * x
+    @test_broken C.content_key(halve) != before
+    before = C.content_key(in_units)
+    @eval Base.Float32(::Unit) = 2.0f0
+    @test_broken C.content_key(in_units) != before
+    # A package's function redefined in the session, as Revise does when a
+    # developed package's file is edited: a package is identified once.
+    Core.eval(LinearAlgebra, :(redefined_in_session(x) = 2x))
+    before = C.content_key(LinearAlgebra.redefined_in_session)
+    Core.eval(LinearAlgebra, :(redefined_in_session(x) = 3x))
+    @test_broken C.content_key(LinearAlgebra.redefined_in_session) != before
+    # A function outside any package as a parameter of a package's type: a
+    # session table's key takes the value for a package's.
+    before = C.definitions(Any[Val(doubled)])
+    @eval doubled(x) = 3x
+    @test_broken C.definitions(Any[Val(doubled)]) != before
+end
+
 @testset "what a kernel depends on of Tempest's code" begin
     # The methods of Tempest's that inference reached, from the edges it keeps:
     # here a fold's observe, through a function outside Tempest that calls it.
