@@ -37,6 +37,10 @@ picked(x::Float32) = MODE == fast ? 2.0f0 * x : 3.0f0 * x
 # A generated function, its generator's code changed.
 @eval @generated generated_scale(x::Float32) = :($$factor * x)
 
+# A script's scalar function that makes a closure, the same in both: its
+# kernels load.
+twice_by_closure(x::Float32) = sum(ntuple(i -> x * i, 2))
+
 # A fold of closures, the same in both: its kernels load.
 sums = T.GenericFold(init = T -> (zero(T),), combine = (a, b) -> (a[1] + b[1],))
 
@@ -48,7 +52,8 @@ changed = [
     ("a constant an image held, redefined", x -> sum(ImageConstant.act.(x) .* x; dims = 1), x),
     ("a generated function", x -> sum(generated_scale.(x) .* x; dims = 1), x),
 ]
-unchanged = [("a fold of closures", x -> reduce(sums, x; dims = 1), data(80, 112))]
+unchanged = [("a fold of closures", x -> reduce(sums, x; dims = 1), data(80, 112)),
+    ("a script's function that makes a closure", x -> sum(twice_by_closure.(x) .* x; dims = 1), x)]
 @testset "$name, variant $VARIANT" for (name, f, a) in [changed; unchanged]
     p = trace(f, a)
     before = C.cache_counts()

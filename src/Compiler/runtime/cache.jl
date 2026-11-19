@@ -65,7 +65,7 @@ cache_counts() = (loaded = CACHE_COUNTS.loaded[], compiled = CACHE_COUNTS.compil
 # failed to compile.
 const KERNELS = "Tempest/kernel"
 const DEPENDENCIES = "Tempest/dependency"
-const KERNEL_SCHEMA = 4
+const KERNEL_SCHEMA = 5
 
 store_key(key) = ObjCache.keyhash(KERNEL_SCHEMA, key)
 
@@ -642,11 +642,17 @@ method_view(g::GlobalRef, world) = isdefined(g.mod, g.name) ? Core.Compiler.Over
 # source's function in the reading session, where its definition is the same,
 # and the dependency does not hold where there is none. A type neither names
 # makes the kernel unstorable (`nothing`).
-# The module and the name, not a `GlobalRef`, which serialization writes as
-# the anonymous function it names, whole.
-struct Anonymous
+# A global, as a dependency names it and an anonymous function's type is
+# defined by, written by its module and its name: not as a `GlobalRef`, which
+# serialization writes as the anonymous function's type of `Main` it names,
+# whole, defining it again where it is read.
+struct Named
     mod::Module
     name::Symbol
+end
+
+struct Anonymous
+    named::Named
     parameters::Vector{Any}
     definition::String
 end
@@ -678,6 +684,7 @@ function written(d::Dependency)
 end
 
 function portable(@nospecialize(x))
+    x isa GlobalRef && return Named(x.mod, x.name)
     x isa Type || return x
     T = Base.unwrap_unionall(x)
     if T isa Union
@@ -690,9 +697,10 @@ function portable(@nospecialize(x))
     T.name.module === Generated && throw(Unportable())
     parameters = Any[p isa Type ? portable(p) : p isa TypeVar ? p : portable_value(p) for p in T.parameters]
     if Serialization.should_send_whole_type(nothing, T)
-        x === T.name.wrapper && return Anonymous(T.name.module, T.name.name, Any[], definition_text(x))
+        named = Named(T.name.module, T.name.name)
+        x === T.name.wrapper && return Anonymous(named, Any[], definition_text(x))
         x isa UnionAll && throw(Unportable())
-        return Anonymous(T.name.module, T.name.name, parameters, definition_text(T))
+        return Anonymous(named, parameters, definition_text(T))
     end
     all(((p, q),) -> p === q, zip(T.parameters, parameters)) && return x
     x isa UnionAll && throw(Unportable())
@@ -710,9 +718,10 @@ function restored(@nospecialize(x))
         found === nothing && throw(Unportable())
         return found
     end
+    x isa Named && return GlobalRef(x.mod, x.name)
     if x isa Anonymous
-        isdefined(x.mod, x.name) || throw(Unportable())
-        wrapper = getglobal(x.mod, x.name)
+        isdefined(x.named.mod, x.named.name) || throw(Unportable())
+        wrapper = getglobal(x.named.mod, x.named.name)
         T = isempty(x.parameters) ? wrapper : wrapper{map(restored, x.parameters)...}
         definition_text(T) == x.definition || throw(Unportable())
         return T
