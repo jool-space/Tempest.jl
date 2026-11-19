@@ -56,7 +56,7 @@ doubled(x) = 2x
 # What the host's compilation of `f` for `args` used, read as a kernel's is.
 function used(f, args...)
     f(args...)
-    mi = only(Base.method_instances(f, map(typeof, args)))
+    mi = only(Base.method_instances(f, map(typeof, args), Base.get_world_counter()))
     C.dependencies(mi.cache, m -> isdefined(m, :cache) ? m.cache : nothing, nothing)
 end
 
@@ -102,15 +102,17 @@ holding(dependencies) = all(C.holds, dependencies)
     end
 end
 
-@testset "waiting on the session asking again: a package's code redefined in it" begin
-    # A package's function redefined in the session, as Revise does when a
-    # developed package's file is edited: a package is identified once, and
-    # what the session checked or resolved before is kept. Another process
-    # checks it by its code, as a method no image holds.
-    Core.eval(LinearAlgebra, :(redefined_in_session(x) = 2x))
-    before = C.content_key(LinearAlgebra.redefined_in_session)
-    Core.eval(LinearAlgebra, :(redefined_in_session(x) = 3x))
-    @test_broken C.content_key(LinearAlgebra.redefined_in_session) != before
+@testset "a package's function redefined in the session is checked again" begin
+    # As Revise redefines a developed package's function: the session ends,
+    # and what the kernel's compilation used is checked again, the method
+    # redefined being no image's and identified by its code.
+    Core.eval(LinearAlgebra, :(redefined_in_session(x::Float32) = 2x))
+    through(x) = LinearAlgebra.redefined_in_session(x)
+    during = C.session()
+    before = used(through, 1.0f0)
+    Core.eval(LinearAlgebra, :(redefined_in_session(x::Float32) = 3x))
+    @test C.session() != during
+    @test !C.EDGES || !holding(before)
 end
 
 @testset "a value among a type's parameters is named by its code" begin

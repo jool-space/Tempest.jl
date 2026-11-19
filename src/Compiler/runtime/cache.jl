@@ -82,7 +82,7 @@ function load_kernel(key)
     bytes = ObjCache.get(KERNELS, store_key(key))
     bytes === nothing && return nothing
     d = Int(only(reinterpret(UInt32, bytes[1:4])))
-    all(held, reinterpret(UInt128, bytes[5:(4 + 16d)])) || return nothing
+    held(reinterpret(UInt128, bytes[5:(4 + 16d)])) || return nothing
     at = 5 + 16d
     n = Int(only(reinterpret(UInt32, bytes[at:(at + 3)])))
     Threads.atomic_add!(CACHE_COUNTS.loaded, 1)
@@ -431,12 +431,11 @@ with coverage writes beside them as its processes exit.
 package_identity(m::Module) = get!(() -> find_identity(m), IDENTITIES, m)
 
 function find_identity(m::Module)
-    julia = string("julia ", VERSION, " ", Base.GIT_VERSION_INFO.commit)
-    (m === Core || m === Base) && return julia
     dir = pkgdir(m)
+    if installed(m)
+        return dir === nothing || startswith(dir, Sys.STDLIB) ? string("julia ", VERSION, " ", Base.GIT_VERSION_INFO.commit) : dir
+    end
     dir === nothing && return "unidentified"
-    startswith(dir, Sys.STDLIB) && return julia
-    any(depot -> startswith(dir, joinpath(depot, "packages")), DEPOT_PATH) && return dir
     ctx = SHA2_256_CTX()
     for sub in filter(sub -> isdir(joinpath(dir, sub)), ["src", "ext"]), (root, _, files) in walkdir(joinpath(dir, sub))
         for file in sort(filter(endswith(".jl"), files))
@@ -579,7 +578,9 @@ method_view(::Nothing, world) = Core.Compiler.InternalMethodTable(world)
 method_view(g::GlobalRef, world) = Core.Compiler.OverlayMethodTable(world, getglobal(g.mod, g.name))
 
 # Whether another session can read `x` back: not where it names a function
-# Tempest generated, whose name is its session's.
+# Tempest generated, whose name is its session's, nor an anonymous function
+# of `Main`, which serialization writes out whole and reads back as a type of
+# its own. The key holds the code of either, from the source that defined it.
 nameable(g::GlobalRef) = g.mod !== Generated
 function nameable(@nospecialize(T))
     T isa TypeVar && return nameable(T.ub)
@@ -587,7 +588,7 @@ function nameable(@nospecialize(T))
     T = Base.unwrap_unionall(T)
     T isa Union && return all(nameable, Base.uniontypes(T))
     T isa DataType || return true
-    T.name.module !== Generated && all(nameable, T.parameters)
+    T.name.module !== Generated && !Serialization.should_send_whole_type(nothing, T) && all(nameable, T.parameters)
 end
 
 # Whether `x`, a method, a binding's partition or a type's name of module `m`,
@@ -626,7 +627,10 @@ const METHOD_IDENTITIES = SessionTable{Method, String}()
 
 function find_method_identity(m::Method)
     by_package(m, m.module) || return method_text(m)
-    string("package ", package_identity(Base.moduleroot(m.module)), " ", m.module, ".", m.name, " ", m.sig)
+    c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
+    print(c.io, "package ", package_identity(Base.moduleroot(m.module)), " ", m.module, ".", m.name, " ")
+    canonical_type(c, m.sig)
+    String(take!(c.io))
 end
 
 # What identifies a global: its package's, where the package's image holds its
@@ -686,6 +690,21 @@ function kept(d::Dependency)
         get!(STORED, digest, true, asked)
     end
     digest
+end
+
+# Whether every dependency under `digests` holds: those the session checked
+# read under one lock, a kernel listing hundreds, and the others checked.
+function held(digests::AbstractVector{UInt128})
+    unchecked = UInt128[]
+    @lock CHECKED.lock begin
+        known = answers(CHECKED)
+        for digest in digests
+            holding = get(known, digest, nothing)
+            holding === false && return false
+            holding === nothing && push!(unchecked, digest)
+        end
+    end
+    all(held, unchecked)
 end
 
 # Whether the dependency under `digest` holds: false where the store lost it.

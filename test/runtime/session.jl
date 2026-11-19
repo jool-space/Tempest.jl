@@ -85,6 +85,13 @@ end
 act(x::Float32) = 2.0f0 * x
 scaled(x) = sum(act.(x) .* x; dims = 1)
 
+# A method a script writes for a package's function, for a type of its own,
+# which no key names: only inference finds it.
+struct Part end
+Base.:*(::Part, x::Float32) = 0.5f0 * x
+parted(x::Float32) = Part() * x
+scaled_by_part(x) = sum(parted.(x) .* x; dims = 1)
+
 # A developed package of the test's own, loaded from its source, whose scalar
 # function a program applies: as a user's model package is, under Revise.
 const PACKAGE = joinpath(mktempdir(), "Redefined")
@@ -211,14 +218,30 @@ end
     end
 end
 
+@testset "a method a script wrote for a package's function, redefined in the session, runs as redefined" begin
+    # The session ends at the definition, and the kernel stored before is
+    # checked again by what its compilation used, which no longer holds.
+    x = single(data(256, 64)) ./ 4
+    for target in (CUDA_FUNCTIONAL ? (T.CUDATarget(), T.CPUTarget()) : (T.CPUTarget(),))
+        first = Base.invokelatest(scaled_run, scaled_by_part, x, target)
+        @eval Base.:*(::Part, x::Float32) = 0.25f0 * x
+        second = Base.invokelatest(scaled_run, scaled_by_part, x, target)
+        @test first.got ≈ first.expected && second.got ≈ second.expected && !(second.got ≈ first.got)
+        @eval Base.:*(::Part, x::Float32) = 0.5f0 * x
+    end
+end
+
 # A developed package's identity is a hash of its files as they are when a
 # session first names it, which need not be the code the process loaded: a
 # file edited and not evaluated, without Revise or before it revises, is
-# read as the package's code once any definition ends the session, and the
-# kernels of the code loaded are stored under the edited files' identity,
-# which a later process loading those files is handed. Closed by the
-# store's key naming the code the process has loaded.
-@testset "a package's identity is of the code loaded, its file edited and not evaluated, once the store's key names the code loaded" begin
+# read as the package's code once any definition ends the session. A kernel
+# stored then is checked in a later process by the code its compilation
+# reached as it was loaded, a developed package's methods being no installed
+# image's, which the edit changes; what the key's identity still stands for
+# alone is code of a developed package that a compilation runs and inference
+# does not reach, as a developed compiler's own. Closed by identifying a
+# developed package by the image it was loaded from.
+@testset "a package's identity is of the code loaded, its file edited and not evaluated, once a developed package is identified by the image it was loaded from" begin
     loaded = C.package_identity(Redefined)
     write_package(5)
     Core.eval(@__MODULE__, :(defined_elsewhere(x) = x))
@@ -226,18 +249,19 @@ end
     write_package(2)
 end
 
-# The session asks again once a package's code is defined anew, but the
-# kernel store answers by the package's identity, the hash of its files,
-# which an `@eval` leaves as it was: the kernel compiled before is loaded
-# again. Closed by the store's key naming the code the process has loaded.
+# The session asks again once a package's code is defined anew, and the
+# kernel store, whose key names the package by its files, which an `@eval`
+# leaves as they were, hands back the kernel compiled before only while what
+# its compilation used holds: the method redefined is no image's, and is
+# identified by its code.
 if CUDA_FUNCTIONAL
-    @testset "a package's function redefined, its files unchanged, runs as redefined once the store's key names the code loaded" begin
+    @testset "a package's function redefined, its files unchanged, runs as redefined" begin
         x = single(data(256, 64)) ./ 4
         first = Base.invokelatest(scaled_run, scaled_by_package, x, T.CUDATarget())
         @test first.got ≈ first.expected
         redefine(3; file = false)
         second = Base.invokelatest(scaled_run, scaled_by_package, x, T.CUDATarget())
-        @test_broken second.got ≈ second.expected
+        @test second.got ≈ second.expected && !(second.got ≈ first.got)
         redefine(2; file = false)
     end
 end
