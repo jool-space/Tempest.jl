@@ -72,8 +72,15 @@ end
 
 # What a term is where `mask` fails, when the mask's literal decides it: a
 # number; `:finite` for an index, a statistic, a fold or an unmasked load;
-# nothing when unknown.
-function masked_value(c::Context, t, mask, d::Domain)
+# nothing when unknown. Each subterm is asked once (`known`), as a term
+# reaches one along many paths, a loop's gradient along a number of them
+# that multiplies with each step (see `view_addresses`).
+function masked_value(c::Context, t, mask, d::Domain, known = Dict{Term, Any}())
+    haskey(known, t) && return known[t]
+    known[t] = masked_value_of(c, t, mask, d, known)
+end
+
+function masked_value_of(c::Context, t, mask, d::Domain, known)
     t isa Lit && return t.value
     t isa Union{Ix, Stat, Recomputed} && return :finite
     if t isa Load
@@ -81,8 +88,8 @@ function masked_value(c::Context, t, mask, d::Domain)
         return m !== nothing && m[1] == mask ? m[2] : :finite
     end
     t isa Apply || return nothing
-    t.f === ifelse && length(t.args) == 3 && mask_of(c, t.args[1], d) == mask && return masked_value(c, t.args[3], mask, d)
-    IR.masked_result(t.f, t.eltype, map(a -> masked_value(c, a, mask, d), t.args))
+    t.f === ifelse && length(t.args) == 3 && mask_of(c, t.args[1], d) == mask && return masked_value(c, t.args[3], mask, d, known)
+    IR.masked_result(t.f, t.eltype, map(a -> masked_value(c, a, mask, d, known), t.args))
 end
 
 """

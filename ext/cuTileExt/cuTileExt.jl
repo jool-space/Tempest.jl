@@ -469,20 +469,24 @@ function default_schedule(g::GroupView, A, B, C, reduced)
 end
 
 # The addresses of the group's views: every load that does not gather, also in
-# the folds it recomputes, and every value it stores.
+# the folds it recomputes, and every value it stores. Each subterm is visited
+# once (`subterms`), as a term reaches one along many paths: a loop's gradient
+# of 64 steps reaches its loads along 10^39 paths through 1153 subterms, and
+# a walk of each path did not end. Callers ask whether every address has a
+# property, which an address found once answers as one found on every path.
 function view_addresses(g::GroupView)
     found = Affine[]
-    function visit(t, extents)
-        if t isa Load
-            gathers(t) || push!(found, address(g.values[t.value], t.index, Domain(extents)))
-        elseif t isa Apply
-            foreach(a -> visit(a, extents), t.args)
-        elseif t isa Recomputed
-            visit(t.body, (extents..., t.extents...))
+    function visit(roots, extents)
+        for t in subterms(roots)
+            if t isa Load
+                gathers(t) || push!(found, address(g.values[t.value], t.index, Domain(extents)))
+            elseif t isa Recomputed
+                visit((t.body,), (extents..., t.extents...))
+            end
         end
     end
+    visit([g.terms[m] for m in members(g)], g.domain)
     for m in members(g)
-        visit(g.terms[m], g.domain)
         g.values[m].stored && !g.values[m].keyed && push!(found, address(g.values[m], g.placement[m], Domain(g.domain)))
     end
     found

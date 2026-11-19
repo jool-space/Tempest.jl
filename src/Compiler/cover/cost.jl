@@ -167,16 +167,22 @@ end
 # multiply their extents, six products of 1024 columns past what an Int
 # holds, and a count wrapped below zero priced the kernel under any other.
 function recurrence_floor_estimate(p::Plan, g::Group)
-    bytes(t::Load) = Float64(sizeof(p.graph.values[t.value].eltype))
-    bytes(t::Recomputed) = prod(Float64, t.extents; init = 1.0) * bytes(t.body)
-    bytes(t::Apply) = sum(bytes, t.args; init = 0.0)
-    bytes(t::Term) = 0.0
     (; axis, parallel) = recurrence_axes(p.graph, g)
     places = recurrence_places(p.graph, g.outputs).places
     points(m) = prod(k -> k == axis || any(e -> mentions(e, k), places[m]) ? g.domain[k] : 1, eachindex(g.domain); init = 1)
     items = prod(k -> g.domain[k], parallel; init = 1)
-    [Work(sum(m -> points(m) * bytes(g.terms[m]), g.outputs; init = 0.0) + group_bytes(p, g); blocks = items / 256)]
+    known = Dict{Term, Float64}()
+    [Work(sum(m -> points(m) * loaded_bytes(g.terms[m], p.graph, known), g.outputs; init = 0.0) + group_bytes(p, g); blocks = items / 256)]
 end
+
+# The bytes a term loads, a load counted on each path that reaches it. Each
+# subterm's are found once (`known`), as a term reaches one along many paths
+# (see `IR.revalued`).
+loaded_bytes(t::Term, graph, known) = get!(() -> loaded_bytes_parts(t, graph, known), known, t)
+loaded_bytes_parts(t::Load, graph, known) = Float64(sizeof(graph.values[t.value].eltype))
+loaded_bytes_parts(t::Recomputed, graph, known) = prod(Float64, t.extents; init = 1.0) * loaded_bytes(t.body, graph, known)
+loaded_bytes_parts(t::Apply, graph, known) = sum(a -> loaded_bytes(a, graph, known), t.args; init = 0.0)
+loaded_bytes_parts(t::Term, graph, known) = 0.0
 
 "Bytes a group moves: what it reads from storage once, and what it writes."
 function group_bytes(p::Plan, g::Group)

@@ -115,16 +115,24 @@ end
 # Term `t` over domain `d` with its variables renamed by `σ`, an index over
 # `d`, a fold it recomputes keeping its own variables after the domain's;
 # nothing when it reads a fold of the group, which a block holds at its own
-# position only.
-renamed(t::Lit, σ, d) = t
-renamed(t::Stat, σ, d) = nothing
-renamed(t::Load, σ, d) = Load(t.value, map(e -> IR.substitute(e, σ, d), t.index))
-renamed(t::Ix, σ, d) = typeof(t)(IR.substitute(t.expr, σ, d))
-function renamed(t::Apply, σ, d)
-    args = map(a -> renamed(a, σ, d), t.args)
+# position only. Each subterm is renamed once (`known`), as a term reaches
+# one along many paths (see `view_addresses`); a fold's body, over a longer
+# domain and renamed by a longer index, in a table of its own.
+renamed(t::Term, σ, d) = renamed(t, σ, d, Dict{Term, Union{Nothing, Term}}())
+function renamed(t::Term, σ, d, known)
+    haskey(known, t) && return known[t]
+    known[t] = renamed_parts(t, σ, d, known)
+end
+
+renamed_parts(t::Lit, σ, d, known) = t
+renamed_parts(t::Stat, σ, d, known) = nothing
+renamed_parts(t::Load, σ, d, known) = Load(t.value, map(e -> IR.substitute(e, σ, d), t.index))
+renamed_parts(t::Ix, σ, d, known) = typeof(t)(IR.substitute(t.expr, σ, d))
+function renamed_parts(t::Apply, σ, d, known)
+    args = map(a -> renamed(a, σ, d, known), t.args)
     any(isnothing, args) ? nothing : Apply(t.f, args, t.eltype)
 end
-function renamed(t::Recomputed, σ, d)
+function renamed_parts(t::Recomputed, σ, d, known)
     n = length(d.extents)
     inner = (σ..., ntuple(j -> Affine(0, (Var(n + j) => 1,)), length(t.extents))...)
     body = renamed(t.body, inner, Domain((d.extents..., t.extents...)))

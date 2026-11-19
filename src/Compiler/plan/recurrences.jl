@@ -443,14 +443,19 @@ value of the last step alone: one along none of the steps (the domain's
 last_step(place, axis) = !any(e -> mentions(e, axis), place)
 
 # Term `t` with each load of a member at `from` along the steps, the member
-# lying along them at its axis `at[member]`, made a load at `to`.
-at_the_step(t::Term, at, from, to) = t
-function at_the_step(t::Load, at, from, to)
+# lying along them at its axis `at[member]`, made a load at `to`. Each
+# subterm is rewritten once (`known`), as a term reaches one along many paths
+# (see `IR.revalued`).
+at_the_step(t::Term, at, from, to) = at_the_step(t, at, from, to, Dict{Term, Term}())
+at_the_step(t::Term, at, from, to, known) = get!(() -> at_the_step_parts(t, at, from, to, known), known, t)
+
+at_the_step_parts(t::Term, at, from, to, known) = t
+function at_the_step_parts(t::Load, at, from, to, known)
     a = get(at, t.value, nothing)
     a === nothing || t.index[a] != from ? t : Load(t.value, Base.setindex(t.index, to, a))
 end
-at_the_step(t::Apply, at, from, to) = Apply(t.f, map(x -> at_the_step(x, at, from, to), t.args), t.eltype)
-at_the_step(t::Recomputed, at, from, to) = Recomputed(t.value, t.index, t.extents, at_the_step(t.body, at, from, to))
+at_the_step_parts(t::Apply, at, from, to, known) = Apply(t.f, map(x -> at_the_step(x, at, from, to, known), t.args), t.eltype)
+at_the_step_parts(t::Recomputed, at, from, to, known) = Recomputed(t.value, t.index, t.extents, at_the_step(t.body, at, from, to, known))
 
 "A recurrence group's axes (see `Tempest.Compiler.Implement.recurrence_axes`)."
 function recurrence_axes(graph, g::Group)
