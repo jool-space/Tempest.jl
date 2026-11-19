@@ -27,7 +27,7 @@ function tile_function(@nospecialize(f), @nospecialize(args); occupancy = nothin
     get!(FUNCTIONS, key, compiled_function(f, tt, occupancy, groups), asked)
 end
 
-function compiled_function(@nospecialize(f), @nospecialize(tt), occupancy, groups)
+function compiled_function(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy), @nospecialize(groups))
     entry, cubin = compiled_binary(f, tt, occupancy, groups, ct.device_sm_arch())
     CuFunction(CuModule(cubin), entry)
 end
@@ -37,7 +37,7 @@ end
 # compilation used (`Tempest.Compiler.dependencies`), so that it loads only
 # while that holds, and an edit to Tempest compiles again only the kernels
 # whose code it changed.
-function compiled_binary(@nospecialize(f), @nospecialize(tt), occupancy, groups, arch)
+function compiled_binary(@nospecialize(f), @nospecialize(tt), @nospecialize(occupancy), @nospecialize(groups), arch)
     parts = Any["cuTile kernel", f, tt, occupancy, groups, arch, ct.tileiras_version(), ct.bytecode_version(), ENTRY]
     key = Tempest.Compiler.content_key(parts...; checked = true)
     Tempest.Compiler.cached_kernel(Compilation(parts, key), key)
@@ -180,9 +180,12 @@ struct TileLaunch
     grid::NTuple{3, Int}
 end
 
-function TileLaunch(fun::CuFunction, @nospecialize(f), @nospecialize(args), grid)
-    any(>(ct.MAX_GRID_DIM), grid) && error("grid $grid exceeds Tile IR's 24-bit limit")
-    any(>(GRID_SIDE), grid[2:end]) && error("grid $grid exceeds the driver's $GRID_SIDE blocks along the second and third axes")
+# A grid is a tuple of a kernel's rank, read by its elements, so that a launch
+# is made by code compiled once whatever the rank.
+function TileLaunch(fun::CuFunction, @nospecialize(f), @nospecialize(args), @nospecialize(grid::Tuple))
+    sides = Int[getfield(grid, k) for k in 1:nfields(grid)]
+    any(>(ct.MAX_GRID_DIM), sides) && error("grid $grid exceeds Tile IR's 24-bit limit")
+    any(>(GRID_SIDE), sides[2:end]) && error("grid $grid exceeds the driver's $GRID_SIDE blocks along the second and third axes")
     # The kernel function's captured values come first, the seed of cuTile's
     # kernel state last. The seed is drawn once, not at each launch as
     # cuTile's own launches draw it: Tempest's kernels draw none of cuTile's
@@ -197,7 +200,7 @@ function TileLaunch(fun::CuFunction, @nospecialize(f), @nospecialize(args), grid
     seed = Base.RefValue{UInt32}(rand(CUDACore.launch_rng(), UInt32))
     push!(boxes, seed)
     pointers = Ptr{Cvoid}[pointer_from_objref(b) for b in boxes]
-    TileLaunch(fun, boxes, pointers, seed, ntuple(i -> get(grid, i, 1), 3))
+    TileLaunch(fun, boxes, pointers, seed, (get(sides, 1, 1), get(sides, 2, 1), get(sides, 3, 1)))
 end
 
 # One thread per block lets the driver take the thread count from the CUBIN.
@@ -209,4 +212,4 @@ function (l::TileLaunch)()
 end
 
 "Compile (or load) `f` for `args` and return its launch on `grid`."
-tile_launch(@nospecialize(f), @nospecialize(args), grid; occupancy = nothing) = TileLaunch(tile_function(f, args; occupancy), f, args, grid)
+tile_launch(@nospecialize(f), @nospecialize(args), @nospecialize(grid); occupancy = nothing) = TileLaunch(tile_function(f, args; occupancy), f, args, grid)

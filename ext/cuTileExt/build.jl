@@ -913,7 +913,12 @@ end
 # `order`.
 function launch_kernels(e::Emitted, order, buffers, schedule, target)
     value(v) = order[e.numbers[v]]
-    scratch = Dict(key => CuArray{w.eltype}(undef, w.length) for (key, w) in e.workspaces)
+    # Of each workspace's element type: a table of `Any`, filled by a loop, so
+    # that it is made by code compiled once whatever the types.
+    scratch = Dict{Any, Any}()
+    for (key, w) in e.workspaces
+        scratch[key] = CuArray{w.eltype}(undef, w.length)
+    end
     built = Tempest.Compiler.concurrently(eachindex(e.kernels), target) do i
         k, f = e.kernels[i], e.functions[i]
         # Of whatever type each one's spec makes it (see `field_at`).
