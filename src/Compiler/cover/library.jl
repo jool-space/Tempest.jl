@@ -158,7 +158,7 @@ function unify!(@nospecialize(then), u::Unifier, a::Term, b::Term)
     elseif a isa Apply
         b isa Apply && isequal(a.f, b.f) && a.eltype === b.eltype && length(a.args) == length(b.args) &&
             (unify_all!(then, u, a.args, b.args) ||
-             length(a.args) == 2 && any(f -> f === a.f, COMMUTATIVE) && (restore!(u, s); unify_all!(then, u, a.args, reverse(b.args))))
+             length(a.args) == 2 && any(f -> f === a.f, COMMUTATIVE) && (restore!(u, s); unify_all!(then, u, a.args, (b.args[2], b.args[1]))))
     elseif a isa Load
         b isa Load && same_value!(u, a.value, b.value) &&
             (push!(u.reads, (a.value, side_index(u, 1, a.index), b.value, side_index(u, 2, b.index))); then())
@@ -215,8 +215,8 @@ same_kind(u::Unifier, x, y) = x.eltype === y.eltype && x.stored == y.stored && x
 same_fold(a, b, exact) = exact ? isequal(a, b) : isequal(numbers_aside(a), numbers_aside(b))
 numbers_aside(f::Relative) = Relative(f.law, numbers_aside(f.observe))
 numbers_aside(f::GenericFold) = GenericFold(f.init, f.lift, f.combine, numbers_aside(f.observe), f.pullback)
-numbers_aside(o::Composed) = Composed(o.f === (/) && any(a -> a isa Number, o.args) ? (*) : o.f,
-    map(a -> a isa Number ? typeof(a) : numbers_aside(a), o.args))
+numbers_aside(o::Composed) = Composed(o.f === (/) && any_element(a -> a isa Number, o.args) ? (*) : o.f,
+    map_elements(a -> a isa Number ? typeof(a) : numbers_aside(a), o.args))
 numbers_aside(x) = x
 
 # The term a term scales by a literal, as a product or a quotient; or nothing.
@@ -676,7 +676,7 @@ function factors_stored!(found, t::Term, graph, stored, o::Operand)
     d = graph.values[o.value].definition
     d isa Pointwise && isequal(d.f, t.f) && length(d.operands) == length(t.args) || return false
     n = length(found)
-    all(((x, y),) -> factors_stored!(found, x, graph, stored, y), zip(t.args, d.operands)) && return true
+    all(k -> factors_stored!(found, t.args[k], graph, stored, d.operands[k]), eachindex(t.args)) && return true
     resize!(found, n)
     length(t.args) == 2 && any(f -> f === t.f, COMMUTATIVE) || return false
     all(((x, y),) -> factors_stored!(found, x, graph, stored, y), zip(t.args, reverse(d.operands))) && return true

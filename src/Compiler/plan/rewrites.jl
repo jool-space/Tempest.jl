@@ -726,7 +726,7 @@ end
 
 # An observe with its sums numbered from `offset` on.
 shift(o::Sum, offset) = Sum(o.i + offset)
-shift(o::Composed, offset) = Composed(o.f, map(a -> a isa Number ? a : shift(a, offset), o.args))
+shift(o::Composed, offset) = Composed(o.f, map_elements(a -> a isa Number ? a : shift(a, offset), o.args))
 shift(o, offset) = o
 
 # `f` of relative folds over the same `y` and axes under one law, and of the
@@ -749,7 +749,7 @@ function compose_observes(graph::IndexGraph)
     first(rebuild(graph) do b, id
         v = graph.values[id]
         d = v.definition
-        d isa Pointwise && d.f !== tuple && all(o -> o isa Literal || o isa Read, d.operands) || return nothing
+        d isa Pointwise && d.f !== tuple && all_elements(o -> o isa Literal || o isa Read, d.operands) || return nothing
         live[id] && (observed = observed_fold!(b, graph, id, users, live, results, known)) !== nothing && return observed
         reads = Union{Nothing, RelativeRead}[]
         for o in d.operands
@@ -830,7 +830,7 @@ end
 
 # `d` as an observe of the state of fold `F`: the fold's own observe where it
 # reads `F`.
-observing(graph, d::Pointwise, F) = Composed(d.f, map(d.operands) do o
+observing(graph, d::Pointwise, F) = Composed(d.f, map_elements(d.operands) do o
     o isa Literal && return o.value
     o.value == F ? graph.values[F].definition.fold.observe : observing(graph, graph.values[o.value].definition, F)
 end)
@@ -854,6 +854,6 @@ end
 # An observe with its `i`th sum the `places[i]`th of a larger element; nothing
 # for an observe that does not renumber.
 renumbered(o::Sum, places) = Sum(places[o.i])
-renumbered(o::Composed, places) = (args = map(a -> a isa Number ? a : renumbered(a, places), o.args); any(isnothing, args) ? nothing : Composed(o.f, args))
+renumbered(o::Composed, places) = (args = map_elements(a -> a isa Number ? a : renumbered(a, places), o.args); any_element(isnothing, args) ? nothing : Composed(o.f, args))
 renumbered(o::Statistic, places) = o
 renumbered(o, places) = nothing

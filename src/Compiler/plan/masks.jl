@@ -130,17 +130,22 @@ end
 # The mask a value read at `index` is a condition for, when its definition
 # conjoins comparisons of index formulas: those of its comparisons that are,
 # when others are not, since the conjunction fails wherever one of them does.
-function mask_of(graph::IndexGraph, v, index, d::Domain, depth = 0)
+function mask_of(graph::IndexGraph, v, @nospecialize(index), d::Domain, depth = 0)
     depth < 32 || return nothing
     def = graph.values[v].definition
     def isa Pointwise || return nothing
     through(e) = substitute(e, index, d)
     if def.f === (&)
-        parts = filter(!isnothing, map(o -> o isa Read ? mask_of(graph, o.value, map(through, o.index), d, depth + 1) : nothing, def.operands))
+        parts = Any[]
+        for o in def.operands
+            o isa Read || continue
+            m = mask_of(graph, o.value, map_elements(through, o.index), d, depth + 1)
+            m === nothing || push!(parts, m)
+        end
         return isempty(parts) ? nothing : reduce(vcat, parts)
     end
-    def.f in (<=, <, >=, >) && length(def.operands) == 2 && any(o -> o isa IndexOperand, def.operands) || return nothing
-    a, b = map(o -> compared(graph, o, through, d), def.operands)
+    def.f in (<=, <, >=, >) && length(def.operands) == 2 && any_element(o -> o isa IndexOperand, def.operands) || return nothing
+    a, b = compared(graph, def.operands[1], through, d), compared(graph, def.operands[2], through, d)
     a === nothing || b === nothing ? nothing : comparison_mask(def.f, a, b, d)
 end
 
@@ -162,14 +167,14 @@ compared(graph, o, through, d) = nothing
 # (`shifted` once it has), and no second: a stencil reads the step before at
 # shifted positions, and following every shift meets each value of the steps
 # before at a cone of positions that grows with the steps.
-function value_masks(graph::IndexGraph, v, index, d::Domain, shifted)
+function value_masks(graph::IndexGraph, v, @nospecialize(index), d::Domain, shifted)
     found = graph.masks[].found
-    key = (v, index, d, shifted)
+    key = Key((v, index, d, shifted))
     haskey(found, key) && return found[key]
     found[key] = masks_of(graph, v, index, d, shifted)
 end
 
-function masks_of(graph::IndexGraph, v, index, d::Domain, shifted)
+function masks_of(graph::IndexGraph, v, @nospecialize(index), d::Domain, shifted)
     masks = Vector{Affine}[]
     def = graph.values[v].definition
     def isa Pointwise || return masks
@@ -178,7 +183,8 @@ function masks_of(graph::IndexGraph, v, index, d::Domain, shifted)
     own === nothing || push!(masks, own)
     w = walked(graph, v, index, d)
     w.condition !== nothing && def.operands[3] isa Literal && push!(masks, w.condition)
-    for (o, at) in zip(def.operands, w.indices)
+    for k in eachindex(w.indices)
+        o, at = def.operands[k], w.indices[k]
         o isa Read || continue
         shift = shifts(o.index)
         shifted && shift && continue
@@ -187,22 +193,29 @@ function masks_of(graph::IndexGraph, v, index, d::Domain, shifted)
     masks
 end
 
-# What a walk meets at a map read at `index`: the mask its `ifelse`'s
-# condition is, when it is one, and the index each operand is read at, the
-# same whatever mask is asked of it (`walks`).
-function walked(graph::IndexGraph, v, index, d::Domain)
+"""
+What a walk meets at a map read at an index: the mask its `ifelse`'s
+condition is, when it is one, and the index each operand is read at, nothing
+for an operand that reads no value, the same whatever mask is asked of it
+(`walks`).
+"""
+struct MapWalk
+    condition::Any
+    indices::Vector{Any}
+end
+
+function walked(graph::IndexGraph, v, @nospecialize(index), d::Domain)
     walks = graph.masks[].walks
-    key = (v, index, d)
-    haskey(walks, key) && return walks[key]
+    key = Key((v, index, d))
+    haskey(walks, key) && return walks[key]::MapWalk
     walks[key] = walk_of(graph, v, index, d)
 end
 
-function walk_of(graph::IndexGraph, v, index, d::Domain)
+function walk_of(graph::IndexGraph, v, @nospecialize(index), d::Domain)
     def = graph.values[v].definition
-    through(e) = substitute(e, index, d)
-    indices = map(o -> o isa Read ? map(through, o.index) : nothing, def.operands)
+    indices = Any[o isa Read ? substituted(o.index, index, d) : nothing for o in operands(def)]
     condition = def.f === ifelse && length(def.operands) == 3 && def.operands[1] isa Read ? mask_of(graph, def.operands[1].value, indices[1], d) : nothing
-    (; condition, indices)
+    MapWalk(condition, indices)
 end
 
 # Whether an index reads at positions shifted from the reader's: a formula of
@@ -223,14 +236,14 @@ shifts(a::Indirect) = shifts(a.index)
 # converts those; nothing when unknown, as a map read through a second shift
 # is (see `value_masks`). Each value at each index is asked once a mask in a
 # graph (`known`).
-function masked_value(graph::IndexGraph, v, index, mask, d::Domain, shifted)
+function masked_value(graph::IndexGraph, v, @nospecialize(index), mask, d::Domain, shifted)
     known = graph.masks[].known
-    key = (v, index, mask, d, shifted)
+    key = Key((v, index, mask, d, shifted))
     haskey(known, key) && return known[key]
     known[key] = masked_value_of(graph, v, index, mask, d, shifted)
 end
 
-function masked_value_of(graph::IndexGraph, v, index, mask, d::Domain, shifted)
+function masked_value_of(graph::IndexGraph, v, @nospecialize(index), mask, d::Domain, shifted)
     val = graph.values[v]
     def = val.definition
     def isa Pointwise || return :finite
@@ -243,5 +256,5 @@ function masked_value_of(graph::IndexGraph, v, index, mask, d::Domain, shifted)
     operand(o, at) = o isa Literal ? o.value : o isa IndexOperand ? :finite : o isa Read ? read_value(o, at) : nothing
     mask_of(graph, v, index, d) == mask && return false
     w.condition == mask && return operand(def.operands[3], w.indices[3])
-    masked_result(def.f, val.eltype, map(operand, def.operands, w.indices))
+    masked_result(def.f, val.eltype, Tuple(Any[operand(def.operands[k], w.indices[k]) for k in eachindex(w.indices)]))
 end

@@ -235,17 +235,31 @@ eltype_of(values::Vector{Value}, o::Literal) = typeof(o.value)
 eltype_of(values::Vector{Value}, ::IndexOperand{T}) where {T} = T
 eltype_of(graph::IndexGraph, o::Operand) = eltype_of(graph.values, o)
 
-operands(d::Definition) = ()
-operands(d::Pointwise) = d.operands
-operands(d::Union{Reduction, Scan, Crossed}) = (d.operand,)
-operands(d::Carried) = (d.init,)
+# The operands a definition reads, in a vector, which every loop over it and
+# every function it is passed to compiles once for, where the tuple a
+# pointwise value holds was compiled for each mix of operand kinds a program
+# has.
+operands(d::Definition) = Operand[]
+function operands(d::Pointwise)
+    out = Vector{Operand}(undef, length(d.operands))
+    for k in eachindex(out)
+        out[k] = d.operands[k]
+    end
+    out
+end
+operands(d::Union{Reduction, Scan, Crossed}) = Operand[d.operand]
+operands(d::Carried) = Operand[d.init]
 # A fold by key reads its key's positions, as a gather reads its indices, and
 # the contents it starts from.
-operands(d::Keyed) = (d.operand, (IndexOperand{Int}(e) for e in d.key if !isempty(indirect_values(e)))...,
-    (d.into === nothing ? () : (d.into,))...)
+function operands(d::Keyed)
+    out = Operand[d.operand]
+    for e in d.key
+        isempty(indirect_values(e)) || push!(out, IndexOperand{Int}(e))
+    end
+    d.into === nothing || push!(out, d.into)
+    out
+end
 
-# A vector, which every loop over it compiles once for, where a filter of
-# the operands' tuple compiled for each mix of operands a program has.
 function reads(d::Definition)
     out = Read[]
     for o in operands(d)
@@ -258,12 +272,16 @@ end
 # a fold's operand, and a fold by key's with its key's positions, over the
 # iteration, and every other over the value's own domain.
 operand_domains(v::Value) = operand_domains(v.definition, v)
-operand_domains(d::Definition, v::Value) = map(o -> domain(v), operands(d))
-operand_domains(d::Reduction, v::Value) = (Domain(d.iteration),)
+operand_domains(d::Definition, v::Value) = Domain[domain(v) for _ in operands(d)]
+operand_domains(d::Reduction, v::Value) = Domain[Domain(d.iteration)]
 function operand_domains(d::Keyed, v::Value)
     over = Domain(d.iteration)
-    keys = count(e -> !isempty(indirect_values(e)), d.key)
-    (over, ntuple(_ -> over, keys)..., (d.into === nothing ? () : (domain(v),))...)
+    out = Domain[over]
+    for e in d.key
+        isempty(indirect_values(e)) || push!(out, over)
+    end
+    d.into === nothing || push!(out, domain(v))
+    out
 end
 
 # The values an operand reads: its own, and those its formulas gather from.

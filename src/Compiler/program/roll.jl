@@ -89,11 +89,12 @@ shifts(nodes, k, p) = nodes[k].op isa Select && nodes[k].inputs != nodes[k - p].
 # elements, and a selection's integers, of which one may slide.
 op_class(@nospecialize(op)) = op
 op_class(::Constant) = nothing
-op_class(op::Union{Select, Update}) = (typeof(op), map(i -> i isa Integer ? nothing : i isa AbstractRange ? length(i) : i, op.indices))
+op_class(op::Union{Select, Update}) = (typeof(op), map_elements(i -> i isa Integer ? nothing : i isa AbstractRange ? length(i) : i, op.indices))
 
 # Nodes alike may be: of one operation's type, shape and element type, their
-# operations of one class.
-signature(n::Node) = hash((typeof(n.op), op_class(n.op), n.dims, n.eltype, n.scalar, length(n.inputs)))
+# operations of one class. Hashed as a `Key`, by code compiled once whatever
+# the shape and class.
+signature(n::Node) = Key((typeof(n.op), op_class(n.op), n.dims, n.eltype, n.scalar, length(n.inputs))).hash
 
 # Operations a step of a loop may not hold: a loop's own, or a stand-in's.
 rollable(n::Node) = !(n.op isa Union{Loop, Placeholder, Argument, Carry})

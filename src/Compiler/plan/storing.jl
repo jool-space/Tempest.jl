@@ -163,7 +163,7 @@ function storing(graph::IndexGraph; recompute = (), store = (), ride = ())
     for id in eachindex(values)
         d = values[id].definition
         d isa Pointwise || continue
-        of_positions[id] = all(o -> o isa Literal || o isa IndexOperand || o isa Read && of_positions[o.value], d.operands)
+        of_positions[id] = all_elements(o -> o isa Literal || o isa IndexOperand || o isa Read && of_positions[o.value], d.operands)
         of_positions[id] && !(id in results) && !materialized[id] && (stored[id] = false)
     end
     # A stored half-precision value widened to Float32 is widened where it is
@@ -188,7 +188,7 @@ end
 # Whether value `v` sums two operands, a fold among them: a step of an accumulation.
 function accumulates(values, v)
     d = values[v].definition
-    d isa Pointwise && d.f === (+) && length(d.operands) == 2 && any(o -> o isa Read && values[o.value].definition isa Reduction, d.operands)
+    d isa Pointwise && d.f === (+) && length(d.operands) == 2 && any_element(o -> o isa Read && values[o.value].definition isa Reduction, d.operands)
 end
 
 # Whether `d` widens a half-precision value to Float32, as `Float32.(k)` does
