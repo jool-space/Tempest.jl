@@ -406,8 +406,8 @@ const IDENTITIES = SessionTable{Module, String}()
 What identifies the code of the package `m`: the Julia build for Core, Base and
 the standard library, the installation path (which names the version's content)
 for an installed package, and a hash of its sources for a developed one: the
-.jl files under src/ and ext/, not the .cov files a run with coverage writes
-beside them as its processes exit.
+.jl files under src/ and ext/, where it has them, not the .cov files a run
+with coverage writes beside them as its processes exit.
 """
 package_identity(m::Module) = get!(() -> find_identity(m), IDENTITIES, m)
 
@@ -419,7 +419,7 @@ function find_identity(m::Module)
     startswith(dir, Sys.STDLIB) && return julia
     any(depot -> startswith(dir, joinpath(depot, "packages")), DEPOT_PATH) && return dir
     ctx = SHA2_256_CTX()
-    for sub in ("src", "ext"), (root, _, files) in walkdir(joinpath(dir, sub))
+    for sub in filter(sub -> isdir(joinpath(dir, sub)), ["src", "ext"]), (root, _, files) in walkdir(joinpath(dir, sub))
         for file in sort(filter(endswith(".jl"), files))
             path = joinpath(root, file)
             update!(ctx, codeunits(relpath(path, dir)))
