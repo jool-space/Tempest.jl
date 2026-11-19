@@ -207,11 +207,16 @@ end
 end
 
 @testset "waiting on a generator's callees" begin
-    # Julia keeps no edge to what a generator calls and does not generate a
-    # function again in a session when that changes: the kernel and the host
-    # are stale alike there. Across processes a package's rebuilt image names
-    # the change, but not Tempest's own code, which a checked key leaves out.
-    # Closed by writing a generated function with the code its generator calls.
+    # A generated function is written by its generator's own code, not by the
+    # code that generator calls. Within a session Julia does not generate the
+    # function again when a callee changes, so the kernel and the host are
+    # stale alike there. A new process does generate it again, and its stored
+    # kernel still holds where a callee changed in code a key leaves out:
+    # Tempest's own, which a checked key leaves to the dependencies (its one
+    # generated function, `built`, calls no helper today), and a method
+    # evaluated into a module an image identifies. Open there, not closed by
+    # Julia's behaviour; closed by writing a generated function with the code
+    # its generator calls.
     Core.eval(IR, :(generator_helper() = :(2x)))
     Core.eval(IR, :(@generated generated_by_helper(x) = generator_helper()))
     method = only(methods(IR.generated_by_helper))
