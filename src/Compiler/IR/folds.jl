@@ -213,7 +213,7 @@ end
 
 Base.show(io::IO, ::Statistic) = print(io, "statistic")
 Base.show(io::IO, o::Sum) = print(io, "sum ", o.i)
-Base.show(io::IO, o::Composed) = print(io, o.f, "(", join(map(repr, o.args), ", "), ")")
+Base.show(io::IO, o::Composed) = print(io, o.f, "(", join(map_elements(repr, o.args), ", "), ")")
 
 "The log-sum-exp: the maximum plus the log of the sum of exponentials relative to it."
 const LOGSUMEXP = Composed(+, (Statistic(), Composed(log, (Sum(1),))))

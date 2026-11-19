@@ -117,8 +117,8 @@ function same_rank_order(a::Apply, b::Apply)
     r != 0 && return r
     r = cmp(length(a.args), length(b.args))
     r != 0 && return r
-    for (x, y) in zip(a.args, b.args)
-        r = term_order(x, y)
+    for k in 1:length(a.args)
+        r = term_order(a.args[k], b.args[k])
         r != 0 && return r
     end
     0
@@ -186,7 +186,7 @@ revalued_parts(t::Load, number, renamed) = Load(number(t.value), map(e -> revalu
 revalued_parts(t::Lit, number, renamed) = t
 revalued_parts(t::Ix{T}, number, renamed) where {T} = Ix{T}(revalued(t.expr, number))
 revalued_parts(t::Stat, number, renamed) = Stat(number(t.value))
-revalued_parts(t::Apply, number, renamed) = Apply(t.f, map(a -> revalued(a, number, renamed), t.args), t.eltype)
+revalued_parts(t::Apply, number, renamed) = Apply(t.f, map_elements(a -> revalued(a, number, renamed), t.args), t.eltype)
 revalued_parts(t::Recomputed, number, renamed) =
     Recomputed(number(t.value), map(e -> revalued(e, number), t.index), t.extents, revalued(t.body, number, renamed))
 
@@ -206,7 +206,11 @@ function subterms(roots; nested = false, known = t -> false)
     order = Term[]
     function visit(t)
         (haskey(seen, t) || known(t)) && return
-        t isa Apply && foreach(visit, t.args)
+        if t isa Apply
+            for a in t.args
+                visit(a)
+            end
+        end
         nested && t isa Recomputed && visit(t.body)
         seen[t] = length(order) + 1
         push!(order, t)
@@ -302,7 +306,7 @@ variables(::Union{Lit, Stat}) = UInt64(0)
 mentions(t::Load, n) = any(e -> mentions(e, n), t.index)
 mentions(t::Ix, n) = mentions(t.expr, n)
 mentions(t::Union{Apply, Recomputed}, n) = n < 64 ? t.variables & variable_bit(n) != 0 :
-    t.variables & variable_bit(n) != 0 && (t isa Apply ? any(a -> mentions(a, n), t.args) : mentions(t.body, n))
+    t.variables & variable_bit(n) != 0 && (t isa Apply ? any_element(a -> mentions(a, n), t.args) : mentions(t.body, n))
 mentions(::Union{Lit, Stat}, n) = false
 stats(t::Term) = [s.value for s in subterms((t,); nested = true) if s isa Stat]
 
@@ -354,9 +358,9 @@ function show_parts(io, t::Recomputed, n)
 end
 function show_parts(io, t::Apply, n)
     print(io, t.f, "(")
-    for (k, a) in enumerate(t.args)
+    for k in 1:length(t.args)
         k > 1 && print(io, ", ")
-        show_term(io, a, n)
+        show_term(io, t.args[k], n)
     end
     print(io, ")")
 end

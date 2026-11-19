@@ -30,8 +30,8 @@ arguments or results it has no tiles for, which `expressible` rejects, and
 while a preparation compiles nothing (`compiling`).
 """
 function lowered(t::Apply, g)
-    (own(t.f) || all(a -> a isa Lit, t.args)) && return true
-    kinds = map(a -> a isa Lit ? (:literal, placeholder(a.value)) : (:tile, term_eltype(a, g)), t.args)
+    (own(t.f) || all_elements(a -> a isa Lit, t.args)) && return true
+    kinds = map_elements(a -> a isa Lit ? (:literal, placeholder(a.value)) : (:tile, term_eltype(a, g)), t.args)
     all(((kind, x),) -> kind === :literal || x <: TILE_TYPES, kinds) && t.eltype <: TILE_TYPES || return true
     Implement.compiling() || return true
     get!(() -> trial(t.f, kinds, t.eltype), LOWERED, (t.f, Tempest.Compiler.definitions((t.f,)), kinds, t.eltype, ct.device_sm_arch()))

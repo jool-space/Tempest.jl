@@ -129,7 +129,7 @@ renamed_parts(t::Stat, σ, d, known) = nothing
 renamed_parts(t::Load, σ, d, known) = Load(t.value, map(e -> IR.substitute(e, σ, d), t.index))
 renamed_parts(t::Ix, σ, d, known) = typeof(t)(IR.substitute(t.expr, σ, d))
 function renamed_parts(t::Apply, σ, d, known)
-    args = map(a -> renamed(a, σ, d, known), t.args)
+    args = map_elements(a -> renamed(a, σ, d, known), t.args)
     any(isnothing, args) ? nothing : Apply(t.f, args, t.eltype)
 end
 function renamed_parts(t::Recomputed, σ, d, known)

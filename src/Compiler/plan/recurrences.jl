@@ -454,7 +454,7 @@ function at_the_step_parts(t::Load, at, from, to, known)
     a = get(at, t.value, nothing)
     a === nothing || t.index[a] != from ? t : Load(t.value, Base.setindex(t.index, to, a))
 end
-at_the_step_parts(t::Apply, at, from, to, known) = Apply(t.f, map(x -> at_the_step(x, at, from, to, known), t.args), t.eltype)
+at_the_step_parts(t::Apply, at, from, to, known) = Apply(t.f, map_elements(x -> at_the_step(x, at, from, to, known), t.args), t.eltype)
 at_the_step_parts(t::Recomputed, at, from, to, known) = Recomputed(t.value, t.index, t.extents, at_the_step(t.body, at, from, to, known))
 
 "A recurrence group's axes (see `Tempest.Compiler.Implement.recurrence_axes`)."

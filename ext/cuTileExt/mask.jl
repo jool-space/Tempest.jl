@@ -19,11 +19,15 @@
 function mask_of(c::Context, t, d::Domain)
     t isa Apply || return nothing
     if t.f === (&)
-        parts = filter(!isnothing, map(a -> mask_of(c, a, d), t.args))
+        parts = Any[]
+        for a in t.args
+            m = mask_of(c, a, d)
+            m === nothing || push!(parts, m)
+        end
         return isempty(parts) ? nothing : reduce(vcat, parts)
     end
-    t.f in (<=, <, >=, >) && length(t.args) == 2 && any(a -> a isa Ix, t.args) || return nothing
-    a, b = map(a -> compared(c, a, d), t.args)
+    t.f in (<=, <, >=, >) && length(t.args) == 2 && any_element(a -> a isa Ix, t.args) || return nothing
+    a, b = compared(c, t.args[1], d), compared(c, t.args[2], d)
     a === nothing || b === nothing ? nothing : IR.comparison_mask(t.f, a, b, d)
 end
 
@@ -89,7 +93,7 @@ function masked_value_of(c::Context, t, mask, d::Domain, known)
     end
     t isa Apply || return nothing
     t.f === ifelse && length(t.args) == 3 && mask_of(c, t.args[1], d) == mask && return masked_value(c, t.args[3], mask, d, known)
-    IR.masked_result(t.f, t.eltype, map(a -> masked_value(c, a, mask, d, known), t.args))
+    IR.masked_result(t.f, t.eltype, map_elements(a -> masked_value(c, a, mask, d, known), t.args))
 end
 
 """

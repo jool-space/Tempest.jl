@@ -380,8 +380,8 @@ Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Conte
             # A tuple is a fold's element, a tile for each component.
             names[t] = Any[names[a] for a in t.args]
             continue
-        elseif t isa Apply && all(a -> names[a] isa Number, t.args)
-            names[t] = convert(t.eltype, t.f(map(a -> names[a], t.args)...))
+        elseif t isa Apply && all_elements(a -> names[a] isa Number, t.args)
+            names[t] = convert(t.eltype, t.f(map_elements(a -> names[a], t.args)...))
             continue
         end
         name = gensym(:t)
@@ -395,7 +395,7 @@ Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Conte
             T = term_eltype(t, c.g)
             T === Int32 ? x : :(convert($(ct.Tile){$T}, $x))
         elseif t isa Apply
-            args = map(a -> names[a], t.args)
+            args = map_elements(a -> names[a], t.args)
             t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : over_tiles(t.f, args)
         else
             error("no tile lowering for $(typeof(t))")
@@ -404,8 +404,8 @@ Base.@nospecializeinfer function emit_tiles!(k::TileKernel, statements, c::Conte
         names[t] = name
         P = plane(c, t)
         P === nothing && continue
-        if t isa Apply && !any(a -> names[a] isa Vector, t.args)
-            args = map(a -> in_plane(c, names, a, P), t.args)
+        if t isa Apply && !any_element(a -> names[a] isa Vector, t.args)
+            args = map_elements(a -> in_plane(c, names, a, P), t.args)
             matrix[] = t.f isa Cast ? :(convert($(ct.Tile){$(t.eltype)}, $(only(args)))) : over_tiles(t.f, args)
         end
         matrix[] === nothing && continue

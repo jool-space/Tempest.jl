@@ -86,7 +86,7 @@ term_expr(t::Load, names, c) =
 term_expr(t::Lit, names, c) = t.value
 term_expr(t::Ix{T}, names, c) where {T} = :($T($(affine_expr(t.expr, c))))
 term_expr(t::Stat, names, c) = stat_name(c, t.value)
-term_expr(t::Apply, names, c) = :(convert($(t.eltype), $(t.f)($(map(a -> names[a], t.args)...))))
+term_expr(t::Apply, names, c) = :(convert($(t.eltype), $(t.f)($(map_elements(a -> names[a], t.args)...))))
 
 # A recomputed fold: a loop over its reduced axes, the variables after the
 # domain's own, computing its body at each.
@@ -445,7 +445,7 @@ end
 # once, as a term reaches one along many paths.
 stored_statistics(t::Term, graph, g, memo = Dict{Term, Term}()) = get!(() -> restored(t, graph, g, memo), memo, t)
 restored(t::Stat, graph, g, memo) = Load(t.value, placement(graph, g, t.value))
-restored(t::Apply, graph, g, memo) = Apply(t.f, map(a -> stored_statistics(a, graph, g, memo), t.args), t.eltype)
+restored(t::Apply, graph, g, memo) = Apply(t.f, map_elements(a -> stored_statistics(a, graph, g, memo), t.args), t.eltype)
 restored(t::Recomputed, graph, g, memo) = Recomputed(t.value, t.index, t.extents, stored_statistics(t.body, graph, g, memo))
 restored(t::Term, graph, g, memo) = t
 

@@ -1015,7 +1015,7 @@ function applied!(counts, c, @nospecialize(roots); inner = counts)
             e = fold_context(c, t)
             body = t.body
             bilinear = c.g.values[t.value].fold isa SumFold && body isa Apply && body.f === (*) && length(body.args) == 2
-            applied!(inner, e, bilinear ? map(x -> product_factor(e, x), body.args) : (body,); inner)
+            applied!(inner, e, bilinear ? map_elements(x -> product_factor(e, x), body.args) : (body,); inner)
         elseif t isa Apply && t.f !== tuple && !(t.f isa Weight)
             counts[t.f] = get(counts, t.f, 0.0) + positions(c.s, t)
         end
