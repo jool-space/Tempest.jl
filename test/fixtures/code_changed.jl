@@ -29,6 +29,10 @@ push!(LOAD_PATH, joinpath(@__DIR__, "packages"))
 const ImageConstant = Base.require(@__MODULE__, :ImageConstant)
 VARIANT == 2 && Core.eval(ImageConstant, :(const SLOPE = 3.0f0))
 
+# Mutable state of that package a kernel's code reads, set once at startup,
+# as a script configuring a package does, or the package's own `__init__`.
+VARIANT == 2 && (ImageConstant.CONFIG.slope = 3.0f0)
+
 # A constant of an enumeration, which selects the arithmetic.
 @enum Mode fast slow
 @eval const MODE = $(VARIANT == 1 ? fast : slow)
@@ -67,5 +71,22 @@ unchanged = [("a fold of closures", x -> reduce(sums, x; dims = 1), data(80, 112
         else
             @test after.compiled > before.compiled
         end
+    end
+end
+
+# The stored kernel read the field as the first process had it, and the image
+# vouches for the binding, which setting a field leaves as it was: the second
+# process is handed it. Closed by one of two rules, the user's to choose: a
+# kernel's code may not read mutable state (refused, as a constant array and a
+# variable already are), or the state is known by its content.
+@testset "waiting on a rule for mutable state a kernel's code reads, set at startup, variant $VARIANT" begin
+    p = trace(x -> sum(ImageConstant.configured.(x) .* x; dims = 1), x)
+    ex = prepare(p, CuArray(x); target = T.CUDATarget())
+    got = only(map(on_host, filter(!isnothing, C.leaves(outputs(execute!(ex))))))
+    right = isapprox(got, only(filter(!isnothing, C.leaves(interpret(p, x)))); rtol = 1.0e-4)
+    if VARIANT == 2 && C.EDGES
+        @test_broken right
+    else
+        @test right
     end
 end

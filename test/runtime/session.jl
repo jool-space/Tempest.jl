@@ -280,6 +280,29 @@ if CUDA_FUNCTIONAL
     end
 end
 
+# Mutable state a kernel's code reads, of a package loaded from its image,
+# changed in place: nothing is defined, so the session stands and the image
+# vouches for the binding as before. cuTile reads the field where it generates
+# the kernel (`emit_getfield!`), and the kernel kept answers with the value it
+# read. Closed by one of two rules, the user's to choose: a kernel's code may
+# not read mutable state (refused, as a constant array and a variable already
+# are), or the state is known by its content.
+push!(LOAD_PATH, joinpath(@__DIR__, "..", "fixtures", "packages"))
+const ImageConstant = Base.require(@__MODULE__, :ImageConstant)
+scaled_by_config(x) = sum(ImageConstant.configured.(x) .* x; dims = 1)
+
+if CUDA_FUNCTIONAL
+    @testset "waiting on a rule for mutable state a kernel's code reads, changed in a session" begin
+        x = single(data(256, 64)) ./ 4
+        first = Base.invokelatest(scaled_run, scaled_by_config, x, T.CUDATarget())
+        @test first.got ≈ first.expected
+        ImageConstant.CONFIG.slope = 3.0f0
+        second = Base.invokelatest(scaled_run, scaled_by_config, x, T.CUDATarget())
+        @test_broken second.got ≈ second.expected
+        ImageConstant.CONFIG.slope = 2.0f0
+    end
+end
+
 if CUDA_FUNCTIONAL
     @testset "a preparation that compiles is not handed what one that compiles nothing found" begin
         # cuTile has no lowering of Base's `exp10`, which only a preparation
