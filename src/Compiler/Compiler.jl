@@ -59,7 +59,7 @@ include("work.jl")
 
 # The tables of answers a session keeps, the extensions' among them, and
 # forgetting them.
-public SessionTable, forget_session!
+public SessionTable, forget_session!, session
 include("session.jl")
 
 # The program level.
