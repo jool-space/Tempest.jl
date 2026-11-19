@@ -68,3 +68,11 @@ Tempest.Compiler.IR.comparison_mask
 Tempest.Compiler.IR.held_formula
 Tempest.Compiler.IR.masked_result
 ```
+
+## Tuples a program makes
+
+```@docs
+Tempest.Compiler.IR.map_elements
+Tempest.Compiler.IR.all_elements
+Tempest.Compiler.IR.any_element
+```

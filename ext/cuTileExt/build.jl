@@ -292,7 +292,7 @@ end
 # key and the query gradients over the keys before each query in one sweep,
 # every step in one of them. Nothing when one class has every fold, or a fold
 # has no mask.
-function mask_classes(k, c::Context, phase, p, indices, n)
+function mask_classes(k, c::Context, phase, p, @nospecialize(indices), n)
     length(phase) > 1 || return nothing
     bounds = [live_steps(k, c, [r], p, indices, n) for r in phase]
     any(isnothing, bounds) && return nothing
@@ -304,7 +304,7 @@ end
 # Step `t` of each class's folds, in the steps the class takes alone: its
 # tiles computed in the step, apart from the other classes'. A fold the sweep
 # adds into its value (see `added_folds`) has no sums of the phase.
-function class_steps!(k, loop, c::Context, classes, sums, accumulators, scope, valid, indices, t)
+function class_steps!(k, loop, c::Context, classes, sums, accumulators, scope, valid, @nospecialize(indices), t)
     for (rs, (lo, hi)) in classes
         step, inner = Any[], merge(Dict{Term, Any}(), scope)
         summed = filter(r -> haskey(sums, r), rs)
@@ -540,7 +540,7 @@ function fold_accumulators!(st, c::Context, r, sums)
     acc
 end
 
-function fold_step!(k, st, c::Context, r, sums, acc, scope, valid, indices)
+function fold_step!(k, st, c::Context, r, sums, acc, scope, valid, @nospecialize(indices))
     f, A, term = fold_of(c, r), accumulator(c, r), c.g.terms[r]
     sums === nothing || return sum_step!(k, st, c, f, term, sums, acc, scope, valid, indices, sweep_axis(c.s))
     x = as_accumulator(st, scope[term], A, term_eltype(term, c.g), tile(c))

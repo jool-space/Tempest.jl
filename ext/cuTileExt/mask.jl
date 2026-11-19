@@ -102,7 +102,7 @@ live at, each the intersection of what its mask's comparisons allow. Nothing
 when a fold of the phase has no mask the generator can bound. An integer a
 formula reads is an argument of kernel `k`.
 """
-function live_steps(k, c::Context, phase, p, indices, n)
+function live_steps(k, c::Context, phase, p, @nospecialize(indices), n)
     # `TEMPEST_SKIP_MASKED=0` runs every step, for telling a wrong answer's cause.
     get(ENV, "TEMPEST_SKIP_MASKED", "1") == "0" && return nothing
     los, his = Any[], Any[]
@@ -234,7 +234,7 @@ statistic, as a mask's literal takes a fold to be
 Nothing when a stored value has no such formulas, or the kernel keeps
 partial states.
 """
-function ruled_out(k, c::Context, stored, indices)
+function ruled_out(k, c::Context, stored, @nospecialize(indices))
     isempty(partial_folds(c)) && isempty(keyed_folds(c)) || return nothing
     all(r -> fold_of(c, r) isa SumFold, c.g.reductions) || return nothing
     get(ENV, "TEMPEST_SKIP_MASKED", "1") == "0" && return nothing
@@ -264,7 +264,7 @@ end
 # block's indices. Nothing when a variable of `e` is not alone on its tile
 # axis, or lies on another swept axis, or an integer it reads differs between
 # the block's lanes.
-function step_bounds(k, c::Context, e::Affine, p, indices)
+function step_bounds(k, c::Context, e::Affine, p, @nospecialize(indices))
     α = 0
     β = Any[:(Int32($(e.constant)))]
     for (atom, coefficient) in e.terms
@@ -301,7 +301,7 @@ end
 # kernel finds it for every tile and the block reads its own (see
 # `lanes_extreme`). Nothing otherwise, when the integer is not stored, or
 # when it may not fit an Int32.
-function block_read(k, c::Context, a::Indirect, indices, coefficient)
+function block_read(k, c::Context, a::Indirect, @nospecialize(indices), coefficient)
     c.g.values[a.value].stored || return nothing
     T = c.g.values[a.value].eltype
     typemin(Int32) <= typemin(T) && typemax(T) <= typemax(Int32) || return nothing

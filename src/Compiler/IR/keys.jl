@@ -8,6 +8,8 @@
 # methods compiled once, whatever their shape, so a table keyed by it
 # compiles its lookups once.
 
+public map_elements, all_elements, any_element
+
 """
     Key(parts)
 
@@ -68,9 +70,12 @@ parts_isless(@nospecialize(a), @nospecialize(b)) = parts_cmp(a, b) < 0
 
 """
     map_elements(f, t::Tuple) -> Tuple
+    map_elements(f, a::Tuple, b::Tuple) -> Tuple
 
-`map(f, t)`, by code compiled once for every length of `t`: the walkers of a
-program's nested arguments meet tuples as long as the user makes them.
+`map(f, t)`, by code compiled once for every type of `t`: the walkers of a
+program's nested arguments meet tuples as long as the user makes them, and
+the planner indices, shapes and operands of a program's every rank and mix
+of kinds. Of two tuples, element by element, as many as the shorter has.
 """
 Base.@nospecializeinfer function map_elements(f, @nospecialize(t::Tuple))
     out = Vector{Any}(undef, nfields(t))
@@ -80,8 +85,6 @@ Base.@nospecializeinfer function map_elements(f, @nospecialize(t::Tuple))
     Tuple(out)
 end
 
-# Of two tuples, element by element, as many as the shorter has, as `map`
-# over two does.
 Base.@nospecializeinfer function map_elements(f, @nospecialize(a::Tuple), @nospecialize(b::Tuple))
     out = Vector{Any}(undef, min(nfields(a), nfields(b)))
     for i in eachindex(out)
@@ -92,10 +95,9 @@ end
 
 """
     all_elements(p, t::Tuple) -> Bool
-    any_element(p, t::Tuple) -> Bool
 
-`all(p, t)` and `any(p, t)`, by code compiled once for every type of `t`, as
-`map_elements` maps.
+`all(p, t)`, by code compiled once for every type of `t`, as `map_elements`
+maps.
 """
 Base.@nospecializeinfer function all_elements(p, @nospecialize(t::Tuple))
     for i in 1:nfields(t)
@@ -104,6 +106,12 @@ Base.@nospecializeinfer function all_elements(p, @nospecialize(t::Tuple))
     true
 end
 
+"""
+    any_element(p, t::Tuple) -> Bool
+
+`any(p, t)`, by code compiled once for every type of `t`, as `map_elements`
+maps.
+"""
 Base.@nospecializeinfer function any_element(p, @nospecialize(t::Tuple))
     for i in 1:nfields(t)
         p(getfield(t, i))::Bool && return true

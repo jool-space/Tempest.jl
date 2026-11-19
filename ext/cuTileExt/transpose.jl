@@ -174,7 +174,7 @@ end
 # The step of an added fold at the tile of block indices `indices`, in the
 # step's `scope`: its product over the block's tile, added into the value at
 # the step's tile.
-function add_step!(k, st, c::Context, r, scope, indices)
+function add_step!(k, st, c::Context, r, scope, @nospecialize(indices))
     m = only(fold_tiles(c, r))
     product = bilinear_over(c, SumFold(), c.g.terms[r], m)
     x, y, i, j = product

@@ -118,7 +118,7 @@ sweeps(s::TileSchedule) = (r = swept(s); length(r) == length(s.tiling) ? 1 :
 The block indices at step `t` of the sweep, an Int32 expression from one: the
 swept axis the schedule tiles moves fastest, then each other swept axis.
 """
-function step_indices(s::TileSchedule, indices, t)
+function step_indices(s::TileSchedule, @nospecialize(indices), t)
     ix = Any[indices...]
     p = sweep_axis(s)
     others = filter(!=(p), swept(s))

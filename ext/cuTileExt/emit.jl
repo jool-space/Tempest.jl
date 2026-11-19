@@ -68,7 +68,7 @@ function spec(v, extents)
 end
 
 # The block indices of a view's groups, those it counts from the end counted so.
-counted(v, indices) = map((n, i) -> n == 0 ? i : :(Int32($(n + 1)) - $i), v.reversed, Tuple(indices))
+counted(v, @nospecialize(indices)) = map_elements((n, i) -> n == 0 ? i : :(Int32($(n + 1)) - $i), v.reversed, Tuple(indices))
 
 # `at` is the one-based offset per block of a view that has one.
 Base.@nospecializeinfer function load_nd(sym, v, @nospecialize(tiles), @nospecialize(indices), @nospecialize(at = nothing))
@@ -88,7 +88,7 @@ end
 # A tile-at-a-time view's tile: its lanes loaded in storage order at the
 # block's offset, put back in the groups' order, each group's lanes merged
 # into its tile axis, those of a group it extends along filled out first.
-function load_nd(sym, v::LocalView, tiles, indices, at)
+function load_nd(sym, v::LocalView, tiles, @nospecialize(indices), at)
     full = map((s, t) -> s ? t : 1, v.spans, tiles)
     spanned = [l for l in v.lanes if l[3] != 0]
     isempty(spanned) && return :(reshape($(tile_load)($sym; index = (Int32(1), $at), shape = (1, 1)), $full))
@@ -216,7 +216,7 @@ end
 # Positions. Domain variable `n` at the tile of block indices `indices`: the
 # lanes of its tile axis, their collapsed index decoded into the axes of the
 # axis's group; an Int32 tile over the tile axes, zero outside the tiling.
-function variable_tile(c::Context, n, indices)
+function variable_tile(c::Context, n, @nospecialize(indices))
     ones = ntuple(_ -> 1, length(c.s.tiling))
     i = findfirst(ax -> n in ax.axes, c.s.tiling)
     i === nothing && return :($(ct.broadcast_to)($(ct.Tile)(Int32(0)), $ones))
@@ -240,14 +240,14 @@ end
 
 # A formula as an Int32 tile; an index it reads from a value is loaded by
 # kernel `k`.
-index_tile(k, c::Context, e::Affine, indices) =
+index_tile(k, c::Context, e::Affine, @nospecialize(indices)) =
     foldl(e.terms; init = :($(ct.broadcast_to)($(ct.Tile)(Int32($(e.constant))), $(ntuple(_ -> 1, length(c.s.tiling)))))) do x, (atom, n)
         :($x .+ Int32($n) .* $(index_tile(k, c, atom, indices)))
     end
-index_tile(k, c::Context, a::Var, indices) = variable_tile(c, a.n, indices)
-index_tile(k, c::Context, a::Div, indices) = :(fld.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
-index_tile(k, c::Context, a::Mod, indices) = :(mod.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
-index_tile(k, c::Context, a::Indirect, indices) =
+index_tile(k, c::Context, a::Var, @nospecialize(indices)) = variable_tile(c, a.n, indices)
+index_tile(k, c::Context, a::Div, @nospecialize(indices)) = :(fld.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
+index_tile(k, c::Context, a::Mod, @nospecialize(indices)) = :(mod.($(index_tile(k, c, a.e, indices)), Int32($(a.d))))
+index_tile(k, c::Context, a::Indirect, @nospecialize(indices)) =
     :(convert($(ct.Tile){Int32}, $(load_tile(k, c, Load(a.value, a.index), indices))))
 
 # A load as a tile: a view of its buffer or, when its formula reads an index
@@ -275,7 +275,7 @@ end
 # axis the held tile lies along, else a piece of its lanes along it at a step
 # known when the kernel is generated (an unrolled fold's, see `emit_fold!`);
 # or nothing.
-function held_tile(c::Context, t::Load, indices)
+function held_tile(c::Context, t::Load, @nospecialize(indices))
     x, along, shape = c.held[t.value]
     n = length(c.s.tiling)
     at = map(eachindex(t.index)) do q
@@ -334,30 +334,30 @@ function loadable(c::Context, t::Load; index = false)
 end
 
 # A formula of axes bound by the grid, as a scalar per block.
-block_scalar(c::Context, e::Affine, indices) =
+block_scalar(c::Context, e::Affine, @nospecialize(indices)) =
     foldl(e.terms; init = :(Int32($(e.constant)))) do x, (atom, k)
         :($x + Int32($k) * $(block_scalar(c, atom, indices)))
     end
-function block_scalar(c::Context, a::Var, indices)
+function block_scalar(c::Context, a::Var, @nospecialize(indices))
     i = findfirst(ax -> a.n in ax.axes, c.s.tiling)
     i === nothing && return :(Int32(0))
     decode(c, c.s.tiling[i], a.n, :($(indices[i]) - Int32(1)); tile = false)
 end
-block_scalar(c::Context, a::Div, indices) = :(fld($(block_scalar(c, a.e, indices)), Int32($(a.d))))
-block_scalar(c::Context, a::Mod, indices) = :(mod($(block_scalar(c, a.e, indices)), Int32($(a.d))))
+block_scalar(c::Context, a::Div, @nospecialize(indices)) = :(fld($(block_scalar(c, a.e, indices)), Int32($(a.d))))
+block_scalar(c::Context, a::Mod, @nospecialize(indices)) = :(mod($(block_scalar(c, a.e, indices)), Int32($(a.d))))
 
-offset_at(c::Context, v::View, indices) = v.dynamic === nothing ? nothing : :(Int32(1) + $(block_scalar(c, v.dynamic, indices)))
-offset_at(c::Context, v::LocalView, indices) = :(Int32(1) + $(block_number(IR.Affine(v.dynamic.constant ÷ v.align,
+offset_at(c::Context, v::View, @nospecialize(indices)) = v.dynamic === nothing ? nothing : :(Int32(1) + $(block_scalar(c, v.dynamic, indices)))
+offset_at(c::Context, v::LocalView, @nospecialize(indices)) = :(Int32(1) + $(block_number(IR.Affine(v.dynamic.constant ÷ v.align,
     Tuple(a => k ÷ v.align for (a, k) in v.dynamic.terms)), indices)))
 
 # A formula of the groups' blocks, counted from zero, as a scalar per block.
-block_number(e::Affine, indices) =
+block_number(e::Affine, @nospecialize(indices)) =
     foldl(e.terms; init = :(Int32($(e.constant)))) do x, (atom, k)
         :($x + Int32($k) * $(block_number(atom, indices)))
     end
-block_number(a::Var, indices) = :($(indices[a.n]) - Int32(1))
-block_number(a::Div, indices) = :(fld($(block_number(a.e, indices)), Int32($(a.d))))
-block_number(a::Mod, indices) = :(mod($(block_number(a.e, indices)), Int32($(a.d))))
+block_number(a::Var, @nospecialize(indices)) = :($(indices[a.n]) - Int32(1))
+block_number(a::Div, @nospecialize(indices)) = :(fld($(block_number(a.e, indices)), Int32($(a.d))))
+block_number(a::Mod, @nospecialize(indices)) = :(mod($(block_number(a.e, indices)), Int32($(a.d))))
 
 # A function over tiles and numbers, as an expression of cuTile's broadcast.
 # A bare number there takes the element type of a tile of its kind, so that a
@@ -575,7 +575,7 @@ end
 
 # Whether each lane of the tile at block indices `indices` lies inside the
 # domain along tile axes `axes`.
-function inside(c::Context, axes, indices)
+function inside(c::Context, axes, @nospecialize(indices))
     n = length(c.s.tiling)
     terms = map(axes) do i
         T, E = c.s.tiling[i].tile, c.s.tiling[i].extent
@@ -586,7 +586,7 @@ function inside(c::Context, axes, indices)
 end
 
 # A mask of the tile's lanes inside the domain, along every tile axis.
-function tile_mask!(st, c::Context, indices)
+function tile_mask!(st, c::Context, @nospecialize(indices))
     name = gensym(:valid)
     push!(st, :($name = $(inside(c, 1:length(c.s.tiling), indices))))
     name
@@ -653,7 +653,7 @@ end
 # slice adds zeros below 256 bytes in tileiras 13.4. A key outside the value
 # drops its elements and is clamped into it, since a box at a negative
 # position traps; lanes outside the domain add zeros.
-function add_boxes!(k, st, c::Context, r, x, valid, dense, indices)
+function add_boxes!(k, st, c::Context, r, x, valid, dense, @nospecialize(indices))
     val = c.g.values[r]
     shape = tile(c)
     n = length(shape)
@@ -741,7 +741,7 @@ end
 
 # Store fold `r`'s partial state (a tile with its reduced tile axes at one) at
 # block indices `indices` along the axes it keeps, in `slot`.
-function store_partial!(k, st, c::Context, r, state, indices, slot, slots, workspaces)
+function store_partial!(k, st, c::Context, r, state, @nospecialize(indices), slot, slots, workspaces)
     kept = kept_tiles_of(c, r)
     shape = (Tuple(tile(c)[q] for q in kept)..., 1)
     index = (Tuple(indices[q] for q in kept)..., slot)
@@ -768,7 +768,7 @@ end
 
 # A linear slot from block indices along tile axes `axes`, whose counts are
 # `counts`; the number of slots.
-function slot_expr(indices, axes, counts)
+function slot_expr(@nospecialize(indices), axes, counts)
     isempty(axes) && return (:(Int32(1)), 1)
     expr = :(Int32(0))
     stride = 1
@@ -891,7 +891,8 @@ function from_matrix(c::Context, m, u, w)
 end
 
 # Accumulate step `t` of a product over tile axis `p` into `acc`.
-function accumulate_product!(st, c::Context, names, (a, b, i, j), acc, t, p = sweep_axis(c.s))
+function accumulate_product!(st, c::Context, names, @nospecialize(product), acc, t, p = sweep_axis(c.s))
+    a, b, i, j = product
     tk = tile(c)[p]
     fa, fb = product_factor(c, a), product_factor(c, b)
     xa, xb = gensym(:a), gensym(:b)
