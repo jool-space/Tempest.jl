@@ -139,7 +139,7 @@ the last of them had asked for its kernel, as the GPT step's first stage of
 """
 function cached_kernel(@nospecialize(compile), key)
     observe(:kernel, key)
-    task = @lock RESOLVED_KERNELS.lock get!(RESOLVED_KERNELS.table, key) do
+    task = @lock RESOLVED_KERNELS.lock get!(answers(RESOLVED_KERNELS), key) do
         Threads.@spawn resolved_kernel(compile, key)
     end
     fetch_result(task)

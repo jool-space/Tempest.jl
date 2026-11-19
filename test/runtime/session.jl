@@ -58,3 +58,24 @@ end
         @test all(==(before), fetch(preparing))
     end
 end
+
+# A session table's key holds everything its answer was derived from that can
+# differ between two questions in one session (see `SessionTable`), and its
+# answers are of its session alone.
+
+@testset "a package image holds no answers for the session that loads it" begin
+    # A process of its own, freshly loaded: what the precompile workloads
+    # found as they precompiled, in another process, is none of its answers.
+    script = """
+        using Tempest, CUDACore, cuTile, cuBLAS, NNlib
+        C = Tempest.Compiler
+        print(join([name for (name, t) in C.tempest_globals() if t isa C.SessionTable && length(t) > 0], " "))
+        """
+    output = readchomp(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`)
+    @test isempty(split(output))
+    # A table of another session holds none of its answers here.
+    t = C.SessionTable{Int, Int}()
+    get!(t, 1, 2)
+    t.session[] = C.SESSION[] + 1
+    @test get(t, 1, nothing) === nothing && length(t) == 0
+end

@@ -9,7 +9,7 @@ using Scratch: @get_scratch!
 # variable names a directory.
 const TUNING = Ref{Union{Nothing, String}}(nothing)
 
-__init__() = (TUNING[] = @get_scratch!("tuning"); nothing)
+find_tuning!() = (TUNING[] = @get_scratch!("tuning"); nothing)
 
 """
     Tempest.Compiler.tuning_directory() -> directory or nothing

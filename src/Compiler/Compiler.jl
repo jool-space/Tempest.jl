@@ -118,4 +118,11 @@ include("runtime/cache.jl")
 include("runtime/search.jl")
 include("runtime/compile.jl")
 
+# As Tempest loads: the process's session begins, which no table a package
+# image holds is of, and the tuning record's scratch space is found.
+function __init__()
+    start_session!()
+    find_tuning!()
+end
+
 end

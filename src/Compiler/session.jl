@@ -1,13 +1,12 @@
 # The tables a session keeps: answers to questions whose key holds everything
-# the answer reads (a device, a context, a kernel's content, a package's
-# identity, a function and the kinds of its arguments). Such a table only
-# saves time: emptied at any moment, even while a preparation on another task
-# reads it, it costs that time again and never gives another answer. What a
-# preparation keeps of its own program (interned terms, matches) is not one of
-# them: `prepare` empties those as it starts, which keeps them its own while
-# one preparation runs at a time. Nor is a device resource, released rather
-# than forgotten, nor a store on disk, which `TEMPEST_CACHE` and
-# `JULIA_OBJCACHE_PATH` point elsewhere.
+# the answer was derived from that can differ between two questions in one
+# session (see `SessionTable`). Such a table only saves time: emptied at any
+# moment, even while a preparation on another task reads it, it costs that
+# time again and never gives another answer. What a preparation keeps of its
+# own program (interned terms, matches) is not one of them: `prepare` empties
+# those as it starts, which keeps them its own while one preparation runs at a
+# time. Nor is a device resource, released rather than forgotten, nor a store
+# on disk, which `TEMPEST_CACHE` and `JULIA_OBJCACHE_PATH` point elsewhere.
 
 """
     SessionTable{K, V}()
@@ -15,10 +14,33 @@
 A table of answers kept for the session, read and filled under its own lock:
 how the compiler and the packages that implement its targets keep what they
 find once a session. A table is one only if its key holds everything its
-answer reads (a device, a context, a kernel's content, a function and the
-kinds of its arguments), so that emptying it (`forget_session!`) costs time
-and never a wrong plan; any other table of theirs is named, with why, in
-`NOT_SESSION_TABLES`.
+answer was derived from that can differ between two questions in one
+session, so that emptying it (`forget_session!`) costs time and never a wrong
+plan; any other table of theirs is named, with why, in `NOT_SESSION_TABLES`.
+A key holds, of what can differ:
+
+  - code, named as the stores' content keys name it (`definitions`): a package's
+    by the package, which is the same all session (its identity is found
+    once, `package_identity`), so by the function itself; any other, a
+    function of `Main` or a closure over one, by its definition, which a
+    redefinition changes and the function object keeps;
+  - the device, by what the answer read of it: its architecture, its context;
+  - the environment's settings the answer read, and what the preparation that
+    asked was asked, as whether it compiles (`Implement.compiling`);
+  - content, as a kernel's, by its content key.
+
+Answers are their session's: a table filled in another process, as a
+package's precompile workload fills its tables in the package's image,
+compiled on another machine perhaps and compiling nothing, holds none in the
+session that loads it (`SESSION`).
+
+Code is named by content rather than by the world it was found in, Julia's
+rule for its own compiled code: every build defines its kernels' functions
+(`generated`), so a world in the key would never be met again by a later
+preparation, and Julia's validity for a range of worlds rests on the edges
+only its own compiler keeps. Content is how the stores already name code; a
+session table keys as a store does, with the session's one difference that a
+package's code is fixed.
 
 An answer missing is found outside the lock and kept with
 `get!(table, key, answer)`, the first kept winning where two tasks found one
@@ -33,22 +55,44 @@ the lock (`cached_kernel`).
 struct SessionTable{K, V}
     table::Dict{K, V}
     lock::ReentrantLock
+    # The session its answers are of.
+    session::Threads.Atomic{UInt}
 end
 
-SessionTable{K, V}() where {K, V} = SessionTable{K, V}(Dict{K, V}(), ReentrantLock())
+SessionTable{K, V}() where {K, V} = SessionTable{K, V}(Dict{K, V}(), ReentrantLock(), Threads.Atomic{UInt}(SESSION[]))
+
+"""
+The session this process is: set as Tempest loads, other in every process. A
+table whose answers are of another session, as those a package image holds
+are, holds none in this one.
+"""
+const SESSION = Threads.Atomic{UInt}(0)
+
+# A process's session differs from that of any process before it, the one
+# that wrote the package images it loads among them.
+start_session!() = (SESSION[] = hash((getpid(), time_ns(), Base.get_world_counter())); nothing)
+
+# The table's answers, under its lock: none if they are of another session.
+function answers(t::SessionTable)
+    if t.session[] != SESSION[]
+        empty!(t.table)
+        t.session[] = SESSION[]
+    end
+    t.table
+end
 
 struct Absent end
 
-Base.get(t::SessionTable, key, default) = @lock t.lock get(t.table, key, default)
-Base.get!(t::SessionTable, key, x) = @lock t.lock get!(t.table, key, x)
+Base.get(t::SessionTable, key, default) = @lock t.lock get(answers(t), key, default)
+Base.get!(t::SessionTable, key, x) = @lock t.lock get!(answers(t), key, x)
 
 function Base.get!(f, t::SessionTable, key)
     found = get(t, key, Absent())
     found isa Absent ? get!(t, key, f()) : found
 end
 
-Base.empty!(t::SessionTable) = (@lock t.lock empty!(t.table); t)
-Base.length(t::SessionTable) = @lock t.lock length(t.table)
+Base.empty!(t::SessionTable) = (@lock t.lock empty!(answers(t)); t)
+Base.length(t::SessionTable) = @lock t.lock length(answers(t))
 
 # The table-like globals of Tempest's modules that are not session tables,
 # each with why. test/runtime/session.jl holds every one `tempest_globals`
