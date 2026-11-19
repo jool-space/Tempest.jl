@@ -65,7 +65,7 @@ cache_counts() = (loaded = CACHE_COUNTS.loaded[], compiled = CACHE_COUNTS.compil
 # failed to compile.
 const KERNELS = "Tempest/kernel"
 const DEPENDENCIES = "Tempest/dependency"
-const KERNEL_SCHEMA = 3
+const KERNEL_SCHEMA = 4
 
 store_key(key) = ObjCache.keyhash(KERNEL_SCHEMA, key)
 
@@ -210,7 +210,7 @@ content_key(@nospecialize(parts...); checked = false) = bytes2hex(sha256(canonic
 
 "The content of `parts` written out, with the identities of the packages they name."
 function canonical_text(@nospecialize(parts...); checked = false)
-    c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
+    c = Canonical()
     print(c.io, "julia ", VERSION, " ", Base.GIT_VERSION_INFO.commit, " options ", compiler_options(), "\n")
     for p in parts
         canonical(c, p)
@@ -234,6 +234,8 @@ struct Canonical
     seen::Base.IdSet{Any}
     gensyms::Dict{Symbol, Int}
 end
+
+Canonical() = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
 
 function canonical(c::Canonical, e::Expr)
     print(c.io, "(", e.head)
@@ -266,28 +268,23 @@ function canonical(c::Canonical, g::GlobalRef)
     canonical(c, g.mod)
     print(c.io, ".", g.name)
     # Code no image holds is identified by what its names refer to; and so is
-    # a constant whose value no image's identity names, which inference may
-    # fold into code compiled from it.
-    if isdefined(g.mod, g.name) && !(g in c.seen) && (!identified(g.mod) || unnamed_constant(g))
+    # a constant no image vouches for, which inference may fold into code
+    # compiled from it.
+    if isdefined(g.mod, g.name) && !(g in c.seen) && (!identified(g.mod) || unvouched_constant(g))
         push!(c.seen, g)
         print(c.io, " = ")
         canonical(c, getglobal(g.mod, g.name))
     end
 end
 
-# A constant inference folds into code compiled from it, plain data, whose
-# value its package's identity does not name: Tempest's own, whose identity a
-# checked key leaves out, or one defined since the image was loaded. A
-# function, type or module is named by its name, its code checked where it is
-# called; a constant holding mutable state, a table, by its name, as code
-# compiled from it reads that state where it runs.
-function unnamed_constant(g::GlobalRef)
-    isconst(g.mod, g.name) || return false
-    value = getglobal(g.mod, g.name)
-    value isa Function && return false
-    isbits(value) || value isa Union{String, Symbol} || return false
-    own_code(g.mod) || !defined_in_image(convert(Core.Binding, g))
-end
+# A constant whose value its package's identity does not name: Tempest's own,
+# whose identity a checked key leaves out, or one whose binding no image holds
+# as it is now, defined since the image was loaded, a redefinition making a
+# new partition of the binding. Its value is written by its content, as any
+# value is, through its structure to its leaves; a mutable one's too, a
+# table, which inference folds into code where a reader of it is declared
+# foldable (`Base.@assume_effects`).
+unvouched_constant(g::GlobalRef) = isconst(g.mod, g.name) && (own_code(g.mod) || !defined_in_image(convert(Core.Binding, g)))
 
 defined_in_image(b::Core.Binding) = isdefined(b, :partitions) && in_image(b.partitions)
 
@@ -507,13 +504,15 @@ struct Dependency
 end
 
 """
-    dependencies(code, lookup, table) -> Vector{Dependency}
+    dependencies(code, lookup, table) -> Vector{Dependency} or nothing
 
 What a kernel compiled from the code instance `code` used, as inference's
 edges record it: each call its inference made, from the kernel down, with the
 methods it matched in `table`, the method table the compilation dispatched
-in; each `invoke`, and each global its edges name; and each type its methods
-were specialized on that no package's image holds. `lookup(mi)` gives the code instance of a
+in; each `invoke`; each global its edges name or a method it reached names
+in its code; and each type its methods were specialized on that no package's
+image holds. Nothing where a method's code to read its globals from is not
+kept: the kernel is not stored. `lookup(mi)` gives the code instance of a
 method instance an edge names, as the compiler that inferred them caches it.
 """
 function dependencies(code, lookup, table::Union{Nothing, Core.MethodTable})
@@ -521,6 +520,7 @@ function dependencies(code, lookup, table::Union{Nothing, Core.MethodTable})
     at = table_name(table)
     found = Set{Dependency}()
     seen = Base.IdSet{Any}()
+    unread = Ref(false)
     keep!(kind, named, text) = push!(found, Dependency(kind, at, named, text))
     function visit(x)
         x in seen && return
@@ -536,13 +536,48 @@ function dependencies(code, lookup, table::Union{Nothing, Core.MethodTable})
                 end
             end
         elseif x isa Core.MethodInstance
+            x.def isa Method && visit(x.def)
             specialized_types!(keep!, x.specTypes)
             c = lookup(x)
             c === nothing || visit(c)
+        elseif x isa Method
+            read = globals_read(x)
+            read === nothing && return (unread[] = true)
+            foreach(g -> keep!(:global, g, global_identity(convert(Core.Binding, g))), read)
         end
     end
     visit(code)
-    collect(found)
+    unread[] ? nothing : collect(found)
+end
+
+"""
+    globals_read(m) -> Vector{GlobalRef} or nothing
+
+The globals method `m`'s code names, to which inference keeps no edge where
+they are of the method's own module: Julia finds them in a precompiled
+method's source as it checks it. Nothing where its code is not kept, and a
+kernel that reached it is not stored. Kept per method.
+"""
+globals_read(m::Method) = get!(() -> find_globals(m), GLOBALS_READ, m)
+
+const GLOBALS_READ = SessionTable{Method, Union{Nothing, Vector{GlobalRef}}}()
+
+function find_globals(m::Method)
+    isdefined(m, :generator) || isdefined(m, :source) || return nothing
+    found = GlobalRef[]
+    globals_named!(found, lowered_code(m))
+    unique!(found)
+end
+
+function globals_named!(found, @nospecialize(x))
+    if x isa GlobalRef
+        push!(found, x)
+    elseif x isa Expr
+        foreach(a -> globals_named!(found, a), x.args)
+    elseif x isa AbstractVector
+        foreach(a -> globals_named!(found, a), x)
+    end
+    found
 end
 
 # The calls, invokes and globals among a code instance's edges, as inference
@@ -703,7 +738,7 @@ const GENERATED_BY_CONTENT = SessionTable{String, Any}()
 # By identity: a dictionary of types compares them by subtyping.
 const INDEXED = SessionTable{UInt64, Bool}()
 
-definition_text(@nospecialize(T)) = (c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}()); canonical_type(c, T); bytes2hex(sha256(take!(c.io))))
+definition_text(@nospecialize(T)) = (c = Canonical(); canonical_type(c, T); bytes2hex(sha256(take!(c.io))))
 
 # Whether `x`, a method, a binding's partition or a type's name of module `m`,
 # is what its package's identity names: held by the image of a package other
@@ -729,20 +764,42 @@ const METHOD_IDENTITIES = SessionTable{Method, String}()
 
 function find_method_identity(m::Method)
     by_package(m, m.module) || return method_text(m)
-    c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
+    c = Canonical()
     print(c.io, "package ", package_identity(Base.moduleroot(m.module)), " ", m.module, ".", m.name, " ")
     canonical_type(c, m.sig)
     String(take!(c.io))
 end
 
 # What identifies a global: its package's, where the package's image holds its
-# definition; the value it holds where it is constant, and the type it is
-# declared to hold where not, which is what code compiled from it can depend on.
+# binding as it is now; the value it holds where it is constant, and the type
+# it is declared to hold where not, which is what code compiled from it can
+# depend on.
 function global_identity(b::Core.Binding)
+    owner = imported(b)
+    owner === b || return string("imports ", owner.globalref, " ", global_identity(owner))
     g = b.globalref
     isdefined(b, :partitions) && by_package(b.partitions, g.mod) &&
         return string("package ", package_identity(Base.moduleroot(g.mod)), " ", g)
     isconst(g.mod, g.name) ? global_text(g) : string("variable of ", Core.get_binding_type(g.mod, g.name))
+end
+
+# The binding a name is bound to by `using` or `import`: a name imported is
+# known by what it imports, whose image is its own module's, not the importing
+# module's (as Tempest's generated code imports Base's functions).
+function imported(b::Core.Binding)
+    world = Base.get_world_counter()
+    while true
+        partition = Base.lookup_binding_partition(world, b)
+        Base.is_some_imported(Base.binding_kind(partition)) || return b
+        to = Base.partition_restriction(partition)
+        if !(to isa Core.Binding)
+            g = b.globalref
+            owner = Base.binding_module(g.mod, g.name)
+            owner === g.mod && return b
+            to = convert(Core.Binding, GlobalRef(owner, g.name))
+        end
+        b = to
+    end
 end
 
 """
@@ -826,7 +883,7 @@ function read_holds(bytes)
 end
 
 function method_text(m::Method)
-    c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
+    c = Canonical()
     canonical_type(c, m.sig)
     foreach(s -> (print(c.io, "; "); canonical(c, s)), lowered_code(m))
     bytes2hex(sha256(take!(c.io)))
@@ -846,7 +903,7 @@ end
 
 function global_text(g::GlobalRef)
     isdefined(g.mod, g.name) || return "undefined"
-    c = Canonical(IOBuffer(), Set{Module}(), Base.IdSet{Any}(), Dict{Symbol, Int}())
+    c = Canonical()
     canonical(c, getglobal(g.mod, g.name))
     bytes2hex(sha256(take!(c.io)))
 end

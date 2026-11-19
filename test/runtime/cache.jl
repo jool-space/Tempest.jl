@@ -163,6 +163,63 @@ end
     @test C.content_key(-NaN32) != C.content_key(NaN32)
 end
 
+@testset "a global is known by its image only while the image holds it" begin
+    # A method an image holds, reading a constant of its own module, to which
+    # inference keeps no edge: the constant redefined, the image no longer
+    # holds the binding as it is.
+    push!(LOAD_PATH, joinpath(@__DIR__, "..", "fixtures", "packages"))
+    ImageConstant = Base.require(@__MODULE__, :ImageConstant)
+    through_image = Core.eval(@__MODULE__, :(x::Float32 -> $ImageConstant.act(x)))
+    before = Base.invokelatest(used, through_image, 1.0f0)
+    @test !C.EDGES || any(d -> d.kind === :global && d.named == GlobalRef(ImageConstant, :SLOPE), before)
+    Core.eval(ImageConstant, :(const SLOPE = 3.0f0))
+    @test !C.EDGES || !holding(before)
+end
+
+# Constants of Tempest's own code, which a checked key leaves out, read by its
+# methods: each changed changes the key or the dependencies, through immutable
+# structure to its leaves, a function or a type named by a constant too.
+@testset "a constant is known by its content" begin
+    cases = [(:((:a, 2.0f0)), :((:a, 3.0f0)), name -> :($name[2] * x)),
+        (:((kind = :a, k = 2.0f0)), :((kind = :a, k = 3.0f0)), name -> :($name.k * x)),
+        (:((Float32, 2.0f0)), :((Float32, 3.0f0)), name -> :($name[2] * x)),
+        (:sin, :cos, name -> :($name(x))),
+        (:Float32, :Float16, name -> :(Float32($name(x) / 3)))]
+    for (i, (before, after, body)) in enumerate(cases)
+        name, reader = Symbol(:OWN_CONSTANT_, i), Symbol(:reads_own_constant_, i)
+        Core.eval(IR, :(const $name = $before))
+        Core.eval(IR, :($reader(x::Float32) = $(body(name))))
+        through = Core.eval(@__MODULE__, :(x::Float32 -> IR.$reader(x)))
+        key = Base.invokelatest(C.content_key, through; checked = true)
+        found = Base.invokelatest(used, through, 1.0f0)
+        Core.eval(IR, :(const $name = $after))
+        @test Base.invokelatest(C.content_key, through; checked = true) != key || (C.EDGES && !holding(found))
+    end
+    # A table, read through an accessor declared foldable, which inference
+    # folds into code as it would a constant's value.
+    Core.eval(IR, :(const OWN_TABLE = Dict(:k => 2.0f0)))
+    Core.eval(IR, :(Base.@assume_effects :foldable reads_own_table(k::Symbol) = OWN_TABLE[k]))
+    through = Core.eval(@__MODULE__, :(x::Float32 -> IR.reads_own_table(:k) * x))
+    key = Base.invokelatest(C.content_key, through; checked = true)
+    found = Base.invokelatest(used, through, 1.0f0)
+    Core.eval(IR, :(const OWN_TABLE = Dict(:k => 3.0f0)))
+    @test Base.invokelatest(C.content_key, through; checked = true) != key || (C.EDGES && !holding(found))
+end
+
+@testset "waiting on a generator's callees" begin
+    # Julia keeps no edge to what a generator calls and does not generate a
+    # function again in a session when that changes: the kernel and the host
+    # are stale alike there. Across processes a package's rebuilt image names
+    # the change, but not Tempest's own code, which a checked key leaves out.
+    # Closed by writing a generated function with the code its generator calls.
+    Core.eval(IR, :(generator_helper() = :(2x)))
+    Core.eval(IR, :(@generated generated_by_helper(x) = generator_helper()))
+    method = only(methods(IR.generated_by_helper))
+    before = C.method_text(method)
+    Core.eval(IR, :(generator_helper() = :(3x)))
+    @test_broken Base.invokelatest(C.method_text, method) != before
+end
+
 @testset "a package's function redefined in the session is checked again" begin
     # As Revise redefines a developed package's function: the session ends,
     # and what the kernel's compilation used is checked again, the method
