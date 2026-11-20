@@ -1,0 +1,6 @@
+name = "PreparesPrecompiling"
+uuid = "a3f4a093-940d-4c6b-9312-c958ffb35270"
+version = "0.1.0"
+
+[deps]
+Tempest = "aba8ef0c-1387-4c24-84ad-a51c8dc32f50"

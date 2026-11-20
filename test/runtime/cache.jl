@@ -311,6 +311,16 @@ end
         wait(beside)
         @test !ispath(dirname(own)) && C.tuning_directory() == joinpath(elsewhere, "tuning")
     end
+    # Nowhere while a package precompiles but in a workload's own store: a
+    # package preparing a program as it precompiles, twice, keeps nothing in
+    # the store its environment names, neither decisions nor a record.
+    packages = joinpath(@__DIR__, "..", "fixtures", "packages")
+    packages in LOAD_PATH || push!(LOAD_PATH, packages)
+    store = mktempdir()
+    withenv("TEMPEST_CACHE" => store) do
+        Base.compilecache(Base.identify_package("PreparesPrecompiling"))
+    end
+    @test isempty(readdir(store))
     # The path is found when Tempest loads, not baked in when it precompiles:
     # a process with another first depot keeps its record there.
     depot = mktempdir()

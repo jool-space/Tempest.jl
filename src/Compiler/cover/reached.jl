@@ -109,10 +109,12 @@ target in every session, and another for any change in what it holds. A
 function is written out with what it captures, and one outside any package
 with its code, so two closures of one method over different values are two
 programs. Nothing where decisions are not kept: where no store is named,
-as while a package precompiles but in a store of its own (see
-`in_own_store`), where the environment's `TEMPEST_REPLAY=false` asks for the
-cover every time (see `keeping`), or for an implementation outside any
-package, whose claims are methods the key cannot name.
+as while a package precompiles, whose decisions are kept only in a
+workload's own store (see `in_own_store` and `tuning_directory`), never in
+the store of the environment it precompiles in; where the environment's
+`TEMPEST_REPLAY=false` asks for the cover every time (see `keeping`); or for
+an implementation outside any package, whose claims are methods the key
+cannot name.
 """
 function decisions_key(d::Decider; measure = d.measure)
     parts = key_parts(d; measure)

@@ -20,11 +20,15 @@ const OWN_STORE = Base.ScopedValues.ScopedValue{Union{Nothing, String}}(nothing)
 
 Where Tempest keeps what it measures: `tuning` in the store of `in_own_store`
 within it, otherwise `tuning` in `ENV["TEMPEST_CACHE"]` when set, otherwise
-Tempest's `tuning` scratch space.
+Tempest's `tuning` scratch space. Nowhere while a package precompiles but in
+a workload's own store: what a package's image compiles follows from its
+programs alone, and a process writing an image keeps nothing in the store of
+the environment it runs in.
 """
 function tuning_directory()
     own = OWN_STORE[]
     own === nothing || return joinpath(own, "tuning")
+    ccall(:jl_generating_output, Cint, ()) == 1 && return nothing
     dir = get(ENV, "TEMPEST_CACHE", nothing)
     dir === nothing ? TUNING[] : joinpath(dir, "tuning")
 end
