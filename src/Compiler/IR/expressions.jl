@@ -69,6 +69,11 @@ constant(c::Int) = Affine(c, ())
 var(n::Int) = Affine(0, (Var(n) => 1,))
 isconstant(a::Affine) = isempty(a.terms)
 
+# A tuple of integers as `Int`s, as a default constructor converts one, by
+# code compiled once whatever its length: one of `Int`s is kept as it is, and
+# the conversion compiles for a tuple of other integers alone.
+int_tuple(@nospecialize(t)) = t isa Tuple{Vararg{Int}} ? t : convert(Tuple{Vararg{Int}}, t)::Tuple{Vararg{Int}}
+
 """
     Domain(extents)
 
@@ -77,7 +82,7 @@ The variables an expression ranges over: variable `n` takes the values
 """
 struct Domain
     extents::Tuple{Vararg{Int}}
-    Domain(@nospecialize(extents::Tuple)) = new(extents::Tuple{Vararg{Int}})
+    Domain(@nospecialize(extents::Tuple)) = new(int_tuple(extents))
 end
 
 Domain(extents::AbstractVector) = Domain(Tuple(extents))

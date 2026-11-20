@@ -20,6 +20,25 @@ end
     @test all(isconcretetype, (C.Pointwise, C.Reduction, C.Scan, C.Keyed))
 end
 
+@testset "records built by one body convert their integers as the default constructors did" begin
+    # A tuple of other integers becomes one of `Int`s, and one of `Int`s is
+    # kept as it is: a domain, a group's, a value's dims and the axes each
+    # fold of a program's gradient iterates, reduces, scans and keys over.
+    narrow(t) = Int32.(t)
+    @test IR.Domain(narrow((3, 4))) === IR.Domain((3, 4))
+    @test C.Group(C.PointwiseKind(), narrow((2, 3))).domain === (2, 3)
+    x, i = ones(Float32, 3, 4), [1, 3, 1]
+    graph = C.lower(differentiate(trace((x, i) -> sum(abs2, cumsum(x; dims = 2)[i, :]), x, i)))
+    @test all(d -> any(v -> v.definition isa d, graph.values), (C.Reduction, C.Scan, C.Keyed))
+    for v in graph.values
+        @test C.Value(v.definition, narrow(v.dims), v.eltype, v.scalar) === v
+        d = v.definition
+        d isa C.Reduction && @test C.Reduction(d.fold, d.operand, narrow(d.iteration), narrow(d.reduced)) === d
+        d isa C.Scan && @test C.Scan(d.fold, d.operand, narrow(d.axes), d.reverse, d.exclusive) === d
+        d isa C.Keyed && @test C.Keyed(d.fold, d.operand, narrow(d.iteration), d.key, d.into) === d
+    end
+end
+
 # From Julia 1.12 every method's instances are in one table.
 if isdefined(Core, :methodtable)
     @testset "a second program compiles none of the compiler's methods again" begin

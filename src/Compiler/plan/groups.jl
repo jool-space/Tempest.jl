@@ -113,7 +113,7 @@ struct Group
     phase::Dict{Int, Int}
     # Compiled once, whatever the rank of the domain.
     Group(@nospecialize(kind), @nospecialize(domain), reductions, outputs, terms, phase) =
-        new(kind, domain::Tuple{Vararg{Int}}, reductions, outputs, terms, phase)
+        new(kind, int_tuple(domain), reductions, outputs, terms, phase)
 end
 
 Group(@nospecialize(kind), @nospecialize(domain)) = Group(kind, domain, Int[], Int[], Dict{Int, Term}(), Dict{Int, Int}())
