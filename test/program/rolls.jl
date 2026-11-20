@@ -105,6 +105,17 @@ end
     @test interpret(trace(viewed, y), copy(y)) ≈ viewed(copy(y))
 end
 
+# The derivative of `f` at `x` along its `i`th element, by central differences.
+slope(f, x, i; e = 1.0e-6) = (f(setindex!(copy(x), x[i] + e, i)) - f(setindex!(copy(x), x[i] - e, i))) / 2e
+compiled_on_host(f, x) = T.compile(f, x; target = T.CPUTarget(), measure = :none, capture = false)(x)
+
+# Traced, compiled and with its gradient, `f` computes what it does untraced.
+function as_untraced(f, x)
+    @test interpret(trace(f, x), x) ≈ f(x)
+    @test compiled_on_host(f, x) ≈ f(x)
+    @test isapprox(only(compiled_on_host(y -> T.gradient(f, y), x)), map(i -> slope(f, x, i), CartesianIndices(x)); rtol = 1.0e-6)
+end
+
 # Two states, each stepped from the other's value before the step: over
 # numbers, over columns, and written out with no loop, traced, compiled and
 # with their gradients they compute what the code does untraced.
@@ -131,11 +142,47 @@ end
         a2 = tanh(b1 - x[3]); b2 = a1 * x[3]
         a2 + b2^2
     end
-    slope(f, x, i; e = 1.0e-6) = (f(setindex!(copy(x), x[i] + e, i)) - f(setindex!(copy(x), x[i] - e, i))) / 2e
     for (f, x) in ((numbers, data(5; scale = 0.5)), (columns, data(3, 4; scale = 0.5)), (written, data(5; scale = 0.5)))
-        compiled(g) = T.compile(g, x; target = T.CPUTarget(), measure = :none, capture = false)(x)
-        @test_broken interpret(trace(f, x), x) ≈ f(x)
-        @test_broken compiled(f) ≈ f(x)
-        @test_broken isapprox(only(compiled(y -> T.gradient(f, y))), map(i -> slope(f, x, i), CartesianIndices(x)); rtol = 1.0e-6)
+        as_untraced(f, x)
+    end
+end
+
+# A value of the steps two steps read at one place is read at two ages, the
+# first step's own and the second's of the step before, which no loop's step
+# can: `a * a`, then `a * x[2]`, of `a = x[1]`. Such steps are no loop's and
+# stay as traced, where states that cycle, swap, are read at two ages or
+# squared are a loop's, which rolls where its steps fold.
+@testset "a value two steps read at one place is no loop's" begin
+    x, m = data(6; scale = 0.5), data(3, 5; scale = 0.5)
+    unrolled_programs = [
+        (x -> (a = x[1]; a * a + a * x[2]), x),
+        (x -> (a = x[:, 1]; sum(a .* a) * sum(a .* x[:, 2]) * sum(a .* x[:, 3])), m),
+        (x -> (a = x[1]; b = a * a; for t in 2:5; a, b = tanh(b - x[t]), a * x[t]; end; a + b^2), x),
+        (x -> (a = x[:, 1]; b = a .* a; for t in 2:5; a, b = tanh.(b .- x[:, t]), a .* x[:, t]; end; sum(a) + sum(abs2, b)), m),
+    ]
+    for (f, x) in unrolled_programs
+        @test isempty(loops(trace(f, x)))
+        as_untraced(f, x)
+        if CUDA_FUNCTIONAL
+            @test agree(on_host(T.compile(f, CuArray(x))(CuArray(x))), f(x))
+            @test agree(on_host(only(T.compile(y -> T.gradient(f, y), CuArray(x))(CuArray(x)))), map(i -> slope(f, x, i), CartesianIndices(x)); rtol = 1.0e-6)
+        end
+    end
+    rolled_programs = [
+        (x -> (a = x[:, 1]; b = a .* a; for t in 2:5; a, b = tanh.(b .- sum(x[:, t])), a .* x[:, t]; end; sum(a) + sum(abs2, b)), m),
+        (x -> (a = x[:, 1]; b = 2 .* a; c = a .* a; for t in 2:5; a, b, c = tanh.(c .+ sum(x[:, t])), a .* x[:, t], b .- x[:, t]; end; sum(a) + sum(b) + sum(c)), m),
+        (x -> (a = x[:, 1]; b = x[:, 2]; for t in 2:5; a, b = b .* sum(x[:, t]), a .+ x[:, t]; end; sum(a .* b)), m),
+        (x -> begin p, q = x[:, 1], x[:, 2]; for t in 2:5; p, q = q, tanh.(q .+ p .* sum(x[:, t])); end; sum(p) + sum(q) end, m),
+        (x -> (a = x[:, 1]; s = a .* a; for t in 2:5; a, s = tanh.(s .- sum(x[:, t])), a .* a; end; sum(a) + sum(s)), m),
+    ]
+    for (f, x) in rolled_programs
+        @test !isempty(loops(trace(f, x)))
+        as_untraced(f, x)
+    end
+    # Numbers cycled, swapped and read at two ages.
+    for f in (x -> (a = x[1]; b = 2a; c = a * a; for t in 2:5; a, b, c = tanh(c + x[t]), a * x[t], b - x[t]; end; a + b + c),
+            x -> (a = x[1]; b = x[2]; for t in 2:5; a, b = b * x[t], a + x[t]; end; a * b),
+            x -> begin p, q = x[1], x[2]; for t in 2:5; p, q = q, tanh(q + p * x[t]); end; p + q end)
+        as_untraced(f, x)
     end
 end

@@ -338,6 +338,14 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
     # at every step, where one that slides slides evenly (see below).
     all(id -> slid(nodes[id].op, nodes[id + p].op) !== nothing || all(k -> same_ops(nodes[id + k * p].op, nodes[id].op), 1:(periods - 1)), step) ||
         return nothing
+    # And each step reads what the step before read: a value of the steps a
+    # period on, and one from before the window the same, but where the
+    # first step starts a state. A value of the steps two steps read at one
+    # place is one each reads at another age, as `a * a` and then `a * x[2]`
+    # read `a = x[1]`, the first step's own and the second's step before,
+    # which is no loop's: its step reads the one age.
+    all(id -> all(((x, y),) -> x >= w0 ? y == x + p : id < w0 + p || y == x, zip(nodes[id].inputs, nodes[id + p].inputs)), w0:(stop - p)) ||
+        return nothing
     # Each step's selection of an array from before the window, by its
     # offset in the step: the index `j` that slides, `i` at the first step
     # and `d` further at each next, one `d` for every selection.
