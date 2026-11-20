@@ -34,6 +34,8 @@ session's do.
 """
 in_own_store(f) = mktempdir(store -> withenv(f, "TEMPEST_CACHE" => store))
 
+public in_own_store
+
 # A file of the device `target` runs on and of the toolchain that builds its
 # kernels (see `toolchain`): the times it holds are of kernels built so on
 # that device, and those another toolchain builds are timed into a file of

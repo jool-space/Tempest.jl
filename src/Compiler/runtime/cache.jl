@@ -51,7 +51,7 @@ using SHA
 using Serialization
 using CompilerCaching: ObjCache
 
-public content_key, cached_kernel, store_kernel, store_failure, uncached_kernel, generated, dependencies, definitions
+public content_key, cached_kernel, store_kernel, store_failure, uncached_kernel, generated, dependencies, holds_as_stored, definitions
 
 "Kernels loaded from the cache and kernels compiled (or failed to), in this session."
 const CACHE_COUNTS = (loaded = Threads.Atomic{Int}(0), compiled = Threads.Atomic{Int}(0))
