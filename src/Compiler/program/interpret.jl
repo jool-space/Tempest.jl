@@ -124,8 +124,11 @@ function run_loop(body::LoopBody, xs)
     state = collect(Any, xs[1:nstate])
     scanned, captured = xs[(nstate + 1):(nstate + nscanned)], xs[(nstate + nscanned + 1):end]
     order = body.reverse ? (body.steps:-1:1) : (1:body.steps)
+    # A slice the step takes as a number, as a loop rolled from `x[t]` does,
+    # is the number.
+    numbers = map(k -> body.program.nodes[body.program.arguments[nstate + k]].scalar, 1:nscanned)
     steps = map(order) do t
-        slices = map((x, k) -> copy(selectdim(x, k, t)), scanned, body.sliced)
+        slices = map((x, k, number) -> number ? only(selectdim(x, k, t)) : copy(selectdim(x, k, t)), scanned, body.sliced, numbers)
         out = interpret(body.program, state..., slices..., captured...)
         ys = Vector{Any}(undef, length(body.program.results))
         foreach((y, r) -> r === nothing || (ys[r] = y), out, body.program.output_structure)

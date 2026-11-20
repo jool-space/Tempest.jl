@@ -356,11 +356,8 @@ function loop_pullback(n, cotangents, tape)
         k = 0
         slice(scalar) = (x = xs[k += 1]; scalar ? x[] : x)
         forward = Any[]
-        for j in 1:nstate
+        for j in 1:(nstate + nscanned)
             push!(forward, slice(argument(j).scalar))
-        end
-        for _ in 1:nscanned
-            push!(forward, slice(false))
         end
         given = Dict{Int, Any}()
         for r in seeded

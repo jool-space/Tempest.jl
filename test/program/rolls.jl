@@ -186,3 +186,16 @@ end
         as_untraced(f, x)
     end
 end
+
+# A loop rolled from a vector's elements, `x[t]`, takes each as the number its
+# step's nodes read: a map over them, and a state stepped from a number each
+# step computes once, its interpretation, its gradient's too, as the code.
+@testset "a loop rolled over a vector's elements takes numbers" begin
+    x = data(6; scale = 0.5)
+    for f in (x -> tanh(x[1]) * tanh(x[2]),
+            x -> (a = x[1]; s = a * a; for t in 2:5; a, s = tanh(s - x[t]), a * a; end; a + s))
+        @test !isempty(loops(trace(f, x)))
+        as_untraced(f, x)
+        @test only(interpret(trace(y -> T.gradient(f, y), x), x)) ≈ only(compiled_on_host(y -> T.gradient(f, y), x))
+    end
+end

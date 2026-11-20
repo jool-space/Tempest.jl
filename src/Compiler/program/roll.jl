@@ -473,9 +473,11 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
         push!(body, Node(Argument(), (), nodes[x].dims, nodes[x].eltype, nodes[x].scalar))
         held[(x, y)] = length(body)
     end
+    # Each scanned slice is what the step's selection was, a number where it
+    # selected one, `x[t]` of a vector, as the step's nodes that read it are.
     for o in sort!(collect(keys(scans)))
         n = nodes[w0 + o - 1]
-        push!(body, Node(Argument(), (), n.dims, n.eltype, false))
+        push!(body, Node(Argument(), (), n.dims, n.eltype, n.scalar))
         renumbered[w0 + o - 1] = length(body)
     end
     for x in captured
