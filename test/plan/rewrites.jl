@@ -198,6 +198,19 @@ end
     @test agree(C.execute(recomputing(g), x), [f(x)])
 end
 
+# The law moves a sum by `exp(m_part - m)`, a float's arithmetic: a maximum of
+# integers, whose differences wrap and which hold no `-Inf`, frames no
+# relative fold, and a log-sum-exp written over them is its two folds, in
+# Float64 as Julia computes it.
+@testset "a maximum of integers is no statistic of a relative fold" begin
+    by_hand(x) = (m = maximum(x; dims = 1); m .+ log.(sum(exp.(x .- m); dims = 1)))
+    x = Int8.(reshape(mod.(3 .* (1:12), 7) .- 3, 3, 4))
+    g = C.rewrite(C.lower(trace(by_hand, x)))
+    @test isempty(relative_folds(g))
+    @test agree(C.execute(recomputing(g), x), [by_hand(x)])
+    @test T.compile(by_hand, x; target = T.CPUTarget(), capture = false)(x) ≈ by_hand(x)
+end
+
 # A fold whose state is a tuple, as Base spells it: `mapreduce` with a lift to
 # the state, a merge and a tuple `init`, then what the state means, which reads
 # its components. It is one fold, with no tuple stored or left in the graph:

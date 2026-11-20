@@ -429,7 +429,12 @@ end
 function frame(graph, F)
     v = graph.values[F]
     d = v.definition
+    # A maximum frames sums relative to it where it is a float's: the law
+    # moves a sum by `exp(m_part - m)`, a float's arithmetic, where an
+    # integer's differences wrap, and no integer is the `-Inf` a maximum of
+    # nothing starts from.
     if d isa Reduction && d.fold isa MaxFold
+        v.eltype <: AbstractFloat || return nothing
         return Frame(Exponential(), F, Statistic(), d.iteration, d.reduced, d.operand)
     elseif d isa Reduction && d.fold isa Relative
         return Frame(d.fold.law, F, d.fold.observe, d.iteration, d.reduced, element_y(graph, d.operand, Domain(d.iteration)))
