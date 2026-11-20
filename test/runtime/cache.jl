@@ -116,11 +116,14 @@ through_constant(x::Float32) = read_constant(x)
 
 @testset "each kind of dependency holds until what it names changes" begin
     if C.EDGES
-        # An `invoke`, the method it names redefined.
+        # An `invoke`, the method it names redefined. Written as the store
+        # keeps them and read back, the dependencies answer as they do in
+        # place (`holds_as_stored`, which the generator's workload checks).
         before = used(invoked_third, 1.0f0)
         @test any(d -> d.kind === :invoke, before) && holding(before)
+        @test Base.invokelatest(C.holds_as_stored, before) && !C.holds_as_stored(nothing)
         @eval Base.:*(::Third, x::Real) = x / 4
-        @test !holding(before)
+        @test !holding(before) && !Base.invokelatest(C.holds_as_stored, before)
         # A global of another module, a constant redefined: read by a method
         # the kernel calls, written with that method's code.
         before = used(through_constant, 1.0f0)

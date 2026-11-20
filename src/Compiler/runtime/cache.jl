@@ -901,15 +901,37 @@ end
 
 # A dependency that cannot be read back in this session, as one naming a type
 # gone or an anonymous function defined otherwise, or bytes the store holds
-# damaged, does not hold. Checking one read back raises what it raises.
+# damaged, does not hold. Checking one read back raises what it raises. The
+# record is a tuple whose type follows the method, global or type it names:
+# it is read by its fields, by code compiled once, where taking it apart by
+# iteration compiled that for each type of record.
 function read_holds(bytes)
     d = try
-        kind, table, named, found = deserialize(IOBuffer(bytes))
-        Dependency(kind, table, restored(named), found)
+        r = deserialize(IOBuffer(bytes))
+        Dependency(getfield(r, 1), getfield(r, 2), restored(getfield(r, 3)), getfield(r, 4))
     catch
         return false
     end
     holds(d)
+end
+
+"""
+    holds_as_stored(dependencies) -> Bool
+
+Whether each of a kernel's `dependencies` (see `dependencies`) holds as
+loading the kernel from the store checks it: written as the store keeps it,
+read back and checked (`read_holds`), without the store. A kernel package's
+precompile workload checks its kernels' so, so that the code reading and
+checking the records of each kind its kernels reach is in its image, where a
+session's tasks loading kernels side by side each compiled it at once.
+"""
+function holds_as_stored(dependencies)
+    dependencies === nothing && return false
+    for d in dependencies
+        bytes = written(d)
+        bytes !== nothing && read_holds(bytes) || return false
+    end
+    true
 end
 
 function method_text(m::Method)

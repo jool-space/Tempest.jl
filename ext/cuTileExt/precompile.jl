@@ -7,10 +7,13 @@
 # compiled code: without it a session's first kernels spent 13 s compiling
 # Julia. It takes every chosen kernel, since cuTile compiles its emitter again
 # for each intrinsic signature and tile type, which one kernel of each kind
-# leaves to the session (1.6 s of attention's). Not tileiras, which compiles
-# no Julia and would keep its CUBINs in the object cache. Loading and
-# launching need a device, so they compile in the session. Its targets name
-# device 0, as cuBLASExt's do.
+# leaves to the session (1.6 s of attention's). What each kernel's
+# compilation used is checked as loading it from the store checks it
+# (`holds_as_stored`), which a session's tasks loading kernels side by side
+# would each compile at once. Not tileiras, which compiles no Julia and would
+# keep its CUBINs in the object cache. Loading and launching need a device,
+# so they compile in the session. Its targets name device 0, as cuBLASExt's
+# do.
 
 using PrecompileTools: PrecompileTools, @setup_workload, @compile_workload
 
@@ -102,11 +105,12 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
                     for k in schedule_kernels(Context(g, d.choice.claim.schedule), workspaces)
                         arrays = unbacked_arguments(g, k, workspaces)
                         f = Tempest.Compiler.generated(source(k), Workload)
-                        Base.invokelatest(f, Tuple{map(Core.Typeof, arrays)...}) do f, tt
+                        dependencies = Base.invokelatest(f, Tuple{map(Core.Typeof, arrays)...}) do f, tt
                             job = tile_job(f, tt, k.occupancy, alias_groups(arrays), WORKLOAD_ARCH)
                             ct.invoke_frozen(ct.emit_tile, job)
                             job_dependencies(job)
                         end
+                        Tempest.Compiler.holds_as_stored(dependencies)
                     end
                 end
             end
