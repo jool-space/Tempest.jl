@@ -505,3 +505,18 @@ end
     over_steps = count(v -> ex.plan.stored[v] && prod(graph.values[v].dims; init = 1) >= D * D * H * B * (steps - 2), eachindex(graph.values))
     @test_broken over_steps == 1
 end
+
+# A loop whose step reads its state whole and a number folded from it, and the
+# gradient of one whose state is the step's slice times such a number: Julia
+# runs both, and the planner refuses their recurrences.
+@testset "gap: a recurrence whose step reads its state and a sum of it compiles, its gradient too; closed by a recurrence planned with states of different shapes, a vector and a number folded from it" begin
+    m = data(3, 9; scale = 0.5)
+    read_twice(m) = (h = m[:, 1]; for t in 2:6; h = tanh.(h .* sum(h) .+ m[:, t]); end; sum(h))
+    from_slice(m) = (h = m[:, 1]; for t in 2:6; h = m[:, t] .* sum(h); end; sum(h))
+    on_cpu(f) = T.compile(f, m; target = T.CPUTarget(), measure = :none, capture = false)(m)
+    gradient_of(f) = m -> T.gradient(f, m)
+    @test_broken on_cpu(read_twice) ≈ read_twice(m)
+    @test_broken only(on_cpu(gradient_of(read_twice))) ≈ only(interpret(trace(gradient_of(read_twice), m), m))
+    @test on_cpu(from_slice) ≈ from_slice(m)
+    @test_broken only(on_cpu(gradient_of(from_slice))) ≈ only(interpret(trace(gradient_of(from_slice), m), m))
+end
