@@ -264,7 +264,8 @@ function setup(program::Program; target, placement = Placement(target, program),
         # lives, and a gradient of one returned there.
         pins = [k => placement.labels[a] for (k, a) in [pairs; program.gradients]]
         graph = phase(() -> with_devices(rewritten, placement.labels; pins), :place)
-        input = Dict(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
+        # Typed, since a program of numbers alone, every one a constant, has none.
+        input = Dict{Int, Int}(v.definition.argument => id for (id, v) in enumerate(graph.values) if v.definition isa Input)
         pinned = Set{Int}(recompute)
         # A value reading an argument a result replaces is not recomputed:
         # recomputed in the kernel that writes the result, it would read the

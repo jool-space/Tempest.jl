@@ -103,6 +103,8 @@ end
     # array of no dimensions.
     @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], 2.0)[2] === nothing
     @test T.gradient((x, a) -> sum(a .* x), [1.0, 2.0], fill(2.0))[2] == fill(3.0)
+    # A call of numbers alone is a program of no arguments.
+    @test compile((a, b) -> a + b, 1.5f0, 2.0f0)(1.5f0, 2.0f0) === 3.5f0
 end
 
 @testset "structs among the arguments" begin
