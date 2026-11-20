@@ -271,22 +271,42 @@ function drawn_loop(rng)
 end
 
 # Gradients equal where both are of an argument, or neither is.
-same_gradient(a, b) = a === nothing ? b === nothing : isapprox(a, b; rtol = 1.0e-10)
+same_gradient(a, b; rtol = 1.0e-10) = a === nothing ? b === nothing : isapprox(a, b; rtol)
+
+# A program the planner refuses to compile, naming what it does not support
+# yet, as against one it compiles wrong.
+refused(err) = err isa ArgumentError && occursin("is not supported yet", err.msg)
 
 # Every loop of the family rolls, where it rolls, into the program its trace
-# as it ran is (see `unrolled`): interpreted, compiled, and with its gradient.
+# as it ran is (see `unrolled`): interpreted, compiled, and with its gradient
+# interpreted and compiled. A gradient the planner refuses is a gap, the one
+# `runtime/recurrences.jl` records of a state carried from a value of
+# another shape.
 @testset "a loop drawn from the family rolls into the program it traced as" begin
     rng = Random.Xoshiro(20261120)
     rolled = 0
+    compiled(f, args) = T.compile(f, args...; target = T.CPUTarget(), measure = :none, capture = false)(args...)
     for _ in 1:64
         f, args = drawn_loop(rng)
         expected = interpret(unrolled(f, args...), args...)
         p = trace(f, args...)
         rolled += !isempty(loops(p))
         @test interpret(p, args...) ≈ expected
-        @test T.compile(f, args...; target = T.CPUTarget(), measure = :none, capture = false)(args...) ≈ expected
+        @test compiled(f, args) ≈ expected
         g = (xs...) -> T.gradient(f, xs...)
-        @test all(map(same_gradient, C.leaves(interpret(trace(g, args...), args...)), C.leaves(interpret(unrolled(g, args...), args...))))
+        gradient = C.leaves(interpret(unrolled(g, args...), args...))
+        @test all(map(same_gradient, C.leaves(interpret(trace(g, args...), args...)), gradient))
+        planned = try
+            C.leaves(compiled(g, args))
+        catch err
+            refused(err) || rethrow()
+            nothing
+        end
+        if planned === nothing
+            @test_broken planned !== nothing
+        else
+            @test all(map((a, b) -> same_gradient(a, b; rtol = 1.0e-8), planned, gradient))
+        end
     end
     # The family reaches the roller.
     @test rolled >= 12
