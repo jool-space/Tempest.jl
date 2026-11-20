@@ -299,6 +299,66 @@ function written(nodes, w0, p, periods, x, y, wanted, varies)
 end
 
 """
+What a loop's step reads at one input of one of its nodes, the same at every
+step: a value of its own step, at an offset in it (`OwnRead`); a value from
+before the loop, the same at every step (`CaptureRead`); or a state
+(`StateRead`), a value from before the loop at the first step and at every
+next the value at an offset of the step before.
+"""
+abstract type StepRead end
+struct OwnRead <: StepRead
+    offset::Int
+end
+struct CaptureRead <: StepRead
+    value::Int
+end
+struct StateRead <: StepRead
+    start::Int
+    offset::Int
+end
+
+# The node read at step `s` of the window of period `p` from `w0`.
+read_at(r::OwnRead, w0, p, s) = w0 + (s - 1) * p + r.offset - 1
+read_at(r::CaptureRead, w0, p, s) = r.value
+read_at(r::StateRead, w0, p, s) = s == 1 ? r.start : w0 + (s - 2) * p + r.offset - 1
+
+# What the window's first step reads where it reads `x` and its second `y`,
+# or nothing where no loop's step reads so.
+function step_read(nodes, w0, p, x, y)
+    x >= w0 && y == x + p && return OwnRead(x - w0 + 1)
+    x < w0 && y == x && return CaptureRead(x)
+    x < w0 && w0 <= y < w0 + p && same_type(nodes[x], nodes[y]) && return StateRead(x, y - w0 + 1)
+    nothing
+end
+
+"""
+    step_reads(nodes, w0, p, periods) -> reads or nothing
+
+What each node of the step of the window of `periods` steps of `p` nodes from
+`w0` reads at each input, as its first two steps read it (see `step_read`),
+by offset in the step; nothing where a step reads otherwise. A value of the
+steps two steps read at one place, `a * a` and then `a * x[2]` reading
+`a = x[1]`, is read at two ages, which no step can; so is a selection that
+slides over one array at the first step and another at the second.
+"""
+function step_reads(nodes, w0, p, periods)
+    reads = Vector{StepRead}[]
+    for id in w0:(w0 + p - 1)
+        rs = StepRead[]
+        for (x, y) in zip(nodes[id].inputs, nodes[id + p].inputs)
+            r = step_read(nodes, w0, p, x, y)
+            r === nothing && return nothing
+            push!(rs, r)
+        end
+        push!(reads, rs)
+    end
+    every_step = all(eachindex(reads)) do o
+        all(s -> nodes[w0 + (s - 1) * p + o - 1].inputs == Tuple(map(r -> read_at(r, w0, p, s), reads[o])), 3:periods)
+    end
+    every_step ? reads : nothing
+end
+
+"""
     roll_window(nodes, backward, lo, hi, required) -> (nodes, at, first) or nothing
 
 The last window of `nodes[lo:hi]` that repeats, rewritten as a loop: the
@@ -324,6 +384,16 @@ function roll_window(nodes::Vector{Node}, backward, lo, hi, required)
     nothing
 end
 
+# What the step's program reads in place of read `r`: a value of the step
+# by its place in the program, or computed once by its new place; a capture
+# or a state by its argument.
+function body_input(r::OwnRead, w0, varies, renumbered, once, place, held)
+    x = w0 + r.offset - 1
+    varies[r.offset] ? renumbered[x] : once[place[x]]
+end
+body_input(r::CaptureRead, w0, varies, renumbered, once, place, held) = renumbered[r.value]
+body_input(r::StateRead, w0, varies, renumbered, once, place, held) = held[(r.start, w0 + r.offset - 1)]
+
 # The window `window` of `nodes` rewritten as `roll_window` says, or nothing
 # where its loop cannot be written.
 function rolled_window(nodes::Vector{Node}, backward, window, required)
@@ -338,17 +408,13 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
     # at every step, where one that slides slides evenly (see below).
     all(id -> slid(nodes[id].op, nodes[id + p].op) !== nothing || all(k -> same_ops(nodes[id + k * p].op, nodes[id].op), 1:(periods - 1)), step) ||
         return nothing
-    # And each step reads what the step before read: a value of the steps a
-    # period on, and one from before the window the same, but where the
-    # first step starts a state. A value of the steps two steps read at one
-    # place is one each reads at another age, as `a * a` and then `a * x[2]`
-    # read `a = x[1]`, the first step's own and the second's step before,
-    # which is no loop's: its step reads the one age.
-    all(id -> all(((x, y),) -> x >= w0 ? y == x + p : id < w0 + p || y == x, zip(nodes[id].inputs, nodes[id + p].inputs)), w0:(stop - p)) ||
-        return nothing
-    # Each step's selection of an array from before the window, by its
-    # offset in the step: the index `j` that slides, `i` at the first step
-    # and `d` further at each next, one `d` for every selection.
+    # And each step reads what the first does (see `step_reads`); the loop is
+    # built from what it reads.
+    reads = step_reads(nodes, w0, p, periods)
+    reads === nothing && return nothing
+    # Each step's selection of an array the loop captures, by its offset in
+    # the step: the index `j` that slides, `i` at the first step and `d`
+    # further at each next, one `d` for every selection.
     scans = Dict{Int, Tuple{Int, Any}}()
     d = 0
     for (o, id) in enumerate(step)
@@ -356,33 +422,27 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
         n.op isa Select || continue
         j = slid(n.op, nodes[id + p].op)
         j === nothing && continue
-        length(n.inputs) == 1 && only(n.inputs) < w0 || return nothing
+        length(n.inputs) == 1 && only(reads[o]) isa CaptureRead || return nothing
         selection = (n.op::Select).indices
         i = selection[j]
         d == 0 && (d = first((nodes[id + p].op::Select).indices[j]) - first(i))
         all(k -> isequal((nodes[id + k * p].op::Select).indices, Base.setindex(selection, i .+ k * d, j)), 1:(periods - 1)) || return nothing
         scans[o] = (j, i)
     end
-    # What the first step reads from before the window: a state where the
-    # second reads the node a period on, else a capture.
+    # The states, by where each starts and its next value, and the captures,
+    # of the nodes the step computes.
     states, captures = Tuple{Int, Int}[], Int[]
-    for (o, id) in enumerate(step), (k, x) in enumerate(nodes[id].inputs)
-        (x >= w0 || haskey(scans, o)) && continue
-        y = nodes[id + p].inputs[k]
-        if y == x
-            x in captures || push!(captures, x)
-        elseif w0 <= y < w0 + p && same_type(nodes[x], nodes[y])
-            (x, y) in states || push!(states, (x, y))
-        else
-            return nothing
-        end
+    for o in 1:p, r in reads[o]
+        haskey(scans, o) && continue
+        r isa StateRead && !((r.start, w0 + r.offset - 1) in states) && push!(states, (r.start, w0 + r.offset - 1))
+        r isa CaptureRead && !(r.value in captures) && push!(captures, r.value)
     end
     any(((x, _),) -> x in captures, states) && return nothing
     # A step's nodes that read neither a state nor a scanned slice are
     # computed once, before the loop.
     varies = falses(p)
-    for (o, id) in enumerate(step)
-        varies[o] = haskey(scans, o) || any(x -> any(st -> first(st) == x, states) || (x >= w0 && varies[x - w0 + 1]), nodes[id].inputs)
+    for o in 1:p
+        varies[o] = haskey(scans, o) || any(r -> r isa StateRead || r isa OwnRead && varies[r.offset], reads[o])
     end
     # What is read after the window, or required, by step and offset.
     wanted = Set{Int}(r for r in required if w0 <= r <= stop)
@@ -489,9 +549,7 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
     for (o, id) in enumerate(step)
         varies[o] && !haskey(scans, o) && !any(w -> w.offset == o, writes) || continue
         n = nodes[id]
-        inputs = map(n.inputs, nodes[id + p].inputs) do x, y
-            x >= w0 ? (varies[x - w0 + 1] ? renumbered[x] : once[place[x]]) : get(() -> renumbered[x], held, (x, y))
-        end
+        inputs = map(r -> body_input(r, w0, varies, renumbered, once, place, held), Tuple(reads[o]))
         push!(body, Node(n.op, inputs, n.dims, n.eltype, n.scalar))
         renumbered[id] = length(body)
     end

@@ -199,3 +199,17 @@ end
         @test only(interpret(trace(y -> T.gradient(f, y), x), x)) ≈ only(compiled_on_host(y -> T.gradient(f, y), x))
     end
 end
+
+# Selections that slide, as a scan's, but over a state the loop carries, or
+# over one array at the first step and another after it: no scan of an array
+# the loop captures, and so no loop's.
+@testset "a selection that slides over a state, or over two arrays, is no scan" begin
+    x, m = data(9; scale = 0.5), data(3, 9; scale = 0.5)
+    for (f, x) in ((x -> (h = x; for t in 1:3; h = h .* tanh(h[t]); end; sum(h)), x),
+            (m -> (h = m; for t in 1:3; h = h .* sum(h[:, t]); end; sum(h)), m),
+            (m -> (a = m .+ 1; b = m .* 2; sum(a[:, 1]) * sum(b[:, 2]) * sum(b[:, 3])), m),
+            (m -> (a = m .+ 1; b = m .* 2; sum(a[:, 1]) * sum(b[:, 2])), m),
+            (m -> (a = m .+ 1; z = sum(m); b = m .* 2; sum(a[:, 1]) * sum(b[:, 2]) + z), m))
+        as_untraced(f, x)
+    end
+end
