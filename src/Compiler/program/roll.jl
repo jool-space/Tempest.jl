@@ -268,33 +268,33 @@ struct Written
 end
 
 """
-    written(nodes, w0, p, periods, x, y, wanted, varies) -> Written or nothing
+    written(nodes, reads, w0, p, periods, x, y, wanted, varies) -> Written or nothing
 
 Whether the state starting at `x`, its next `y`, of the window of `periods`
-steps of `p` nodes from `w0`, is one the steps only write, apart: the step
-reads it only as the contents of a write, which is its next, whose index
-slides by as much as the slices written, so that no two steps write one
-element, and which nothing reads but the next step's write, nor after the
-window but the last; what it writes each step computes.
+steps of `p` nodes from `w0`, whose step reads as `reads` says (see
+`step_reads`), is one the steps only write, apart: the step reads it only as
+the contents of a write, which is its next, whose index slides by as much as
+the slices written, so that no two steps write one element, and which nothing
+reads but the next step's write, nor after the window but the last; what it
+writes each step computes.
 """
-function written(nodes, w0, p, periods, x, y, wanted, varies)
+function written(nodes, reads, w0, p, periods, x, y, wanted, varies)
     u = nodes[y]
-    u.op isa Update && first(u.inputs) == x && !(x in u.inputs[2:end]) || return nothing
-    step = w0:(w0 + p - 1)
-    count(id -> x in nodes[id].inputs, step) == 1 && !any(id -> y in nodes[id].inputs, step) || return nothing
+    o = y - w0 + 1
+    state = StateRead(x, o)
+    u.op isa Update && first(reads[o]) == state && !(state in reads[o][2:end]) || return nothing
+    count(rs -> state in rs, reads) == 1 && !any(rs -> OwnRead(o) in rs, reads) || return nothing
     j = slid(u.op, nodes[y + p].op)
     j === nothing && return nothing
     i = u.op.indices[j]
     d = first((nodes[y + p].op::Update).indices[j]) - first(i)
     all(k -> isequal((nodes[y + k * p].op::Update).indices, Base.setindex(u.op.indices, i .+ k * d, j)), 1:(periods - 1)) || return nothing
-    o = y - w0 + 1
     all(r -> (r - w0) % p + 1 != o || r == y + (periods - 1) * p, wanted) || return nothing
     # What it writes the step computes; each index array is the same at
     # every step, or one the step computes, as `positions[:, b]` is.
-    v = u.inputs[2]
-    v >= w0 && varies[v - w0 + 1] || return nothing
-    next = nodes[y + p].inputs
-    all(k -> u.inputs[k] == next[k] || u.inputs[k] >= w0, 3:length(u.inputs)) || return nothing
+    v = reads[o][2]
+    v isa OwnRead && varies[v.offset] || return nothing
+    all(r -> !(r isa StateRead), reads[o][3:end]) || return nothing
     Written((x, y), o, j, i, d)
 end
 
@@ -457,7 +457,7 @@ function rolled_window(nodes::Vector{Node}, backward, window, required)
     # else is no loop's.
     writes = Written[]
     for (x, y) in states
-        w = written(nodes, w0, p, periods, x, y, wanted, varies)
+        w = written(nodes, reads, w0, p, periods, x, y, wanted, varies)
         w === nothing || push!(writes, w)
     end
     all(o -> !writes_apart(nodes, w0 + p + o - 1, p) || any(w -> w.offset == o, writes), 1:p) || return nothing
