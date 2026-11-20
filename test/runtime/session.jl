@@ -65,14 +65,16 @@ end
 
 @testset "a package image holds no answers for the session that loads it" begin
     # A process of its own, freshly loaded: what the precompile workloads
-    # found as they precompiled, in another process, is none of its answers.
+    # found as they precompiled, in another process, is none of its answers,
+    # and what they loaded, compiled, replayed and covered none of its counts.
     script = """
         using Tempest, CUDACore, cuTile, cuBLAS, NNlib
         C = Tempest.Compiler
+        print(sum(C.cache_counts()) + sum(C.reached_counts()), " ")
         print(join([name for (name, t) in C.tempest_globals() if t isa C.SessionTable && length(t) > 0], " "))
         """
-    output = readchomp(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`)
-    @test isempty(split(output))
+    counted, answered... = split(readchomp(`$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`))
+    @test counted == "0" && isempty(answered)
     # A table of another session holds none of its answers here.
     t = C.SessionTable{Int, Int}()
     get!(() -> 2, t, 1)

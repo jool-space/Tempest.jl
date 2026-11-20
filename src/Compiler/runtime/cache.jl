@@ -53,7 +53,7 @@ using CompilerCaching: ObjCache
 
 public content_key, cached_kernel, store_kernel, store_failure, uncached_kernel, generated, dependencies, holds_as_stored, definitions
 
-"Kernels loaded from the cache and kernels compiled (or failed to), in this session."
+"Kernels loaded from the cache and kernels compiled (or failed to), in this process since Tempest loaded."
 const CACHE_COUNTS = (loaded = Threads.Atomic{Int}(0), compiled = Threads.Atomic{Int}(0))
 
 cache_counts() = (loaded = CACHE_COUNTS.loaded[], compiled = CACHE_COUNTS.compiled[])

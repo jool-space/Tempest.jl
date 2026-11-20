@@ -67,7 +67,7 @@ struct Reached
     calibration::Vector{Pair{String, Union{Nothing, Float64}}}
 end
 
-"Deciders whose decisions were replayed and deciders whose decisions the cover reached, in this session, a recurrence's step's among them."
+"Deciders whose decisions were replayed and deciders whose decisions the cover reached, in this process since Tempest loaded, a recurrence's step's among them."
 const REACHED_COUNTS = (replayed = Threads.Atomic{Int}(0), covered = Threads.Atomic{Int}(0))
 
 reached_counts() = (replayed = REACHED_COUNTS.replayed[], covered = REACHED_COUNTS.covered[])

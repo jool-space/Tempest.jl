@@ -118,10 +118,16 @@ include("runtime/cache.jl")
 include("runtime/search.jl")
 include("runtime/compile.jl")
 
+# The process's counts of kernels loaded and compiled and of deciders whose
+# decisions were replayed or reached (`cache_counts`, `reached_counts`).
+zero_counts!() = foreach(counts -> foreach(c -> c[] = 0, counts), (CACHE_COUNTS, REACHED_COUNTS))
+
 # As Tempest loads: the process's session begins, which no table a package
-# image holds is of, and the tuning record's scratch space is found.
+# image holds is of; its counts begin at zero, whatever the workloads that
+# wrote the image counted; and the tuning record's scratch space is found.
 function __init__()
     start_session!()
+    zero_counts!()
     find_tuning!()
 end
 

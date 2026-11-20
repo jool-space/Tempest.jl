@@ -282,7 +282,8 @@ content, the functions loaded from them, which functions cuTile lowers, what
 identifies each package's code, among others), so that a preparation after
 finds each again, as one in a new process would. Julia's compiled code, the
 device's resources and the stores on disk stay: a new `TEMPEST_CACHE` and
-`JULIA_OBJCACHE_PATH` leave those behind too. Each table's answer is keyed by
+`JULIA_OBJCACHE_PATH` leave those behind too. The process's counts
+(`cache_counts`, `reached_counts`) stay, which are read by their differences. Each table's answer is keyed by
 everything it reads, so that emptying them costs time and never gives another
 answer.
 """
