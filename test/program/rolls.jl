@@ -213,3 +213,81 @@ end
         as_untraced(f, x)
     end
 end
+
+# A loop drawn from `rng`, with its arguments: over a vector's elements or a
+# matrix's columns, forward or reversed, of two to four steps; a map writing
+# each step's value apart, or one to three states, each stepped from two
+# operands drawn from the states as the step started, those stepped already
+# in the step, the step's slice of `x`, an element of a state at the step's
+# index, or the step's slice of `y` at the first step and of `x` after; the
+# second operand summed or not, which makes a recurrence's steps fold.
+function drawn_loop(rng)
+    columns = rand(rng, Bool)
+    steps = rand(rng, 2:5)
+    # The steps' order, made where the loop runs: compile takes a range the
+    # function holds, an array, for an argument.
+    reversed = rand(rng, Bool)
+    order() = reversed ? (steps:-1:1) : (1:steps)
+    H = steps + 1
+    x, y = columns ? (data(H, steps; scale = 0.4), data(H, steps; scale = 0.7)) : (data(steps; scale = 0.4), data(steps; scale = 0.7))
+    slice(a, t) = columns ? a[:, t] : a[t]
+    # The step's slice of `x`, or of `y` at the first step.
+    entered(x, y, t) = t == first(order()) ? slice(y, t) : slice(x, t)
+    if rand(rng) < 0.25
+        from_y = rand(rng, Bool)
+        mapped(x, y) = (z = zero(x); for t in order(); columns ? (z[:, t] .= tanh.(from_y ? entered(x, y, t) : slice(x, t))) : (z[t] = tanh(from_y ? entered(x, y, t) : slice(x, t))); end; sum(abs2, z))
+        return mapped, (x, y)
+    end
+    nstates = rand(rng, 1:3)
+    kinds = columns ? (:old, :new, :slice, :element, :entered) : (:old, :new, :slice, :entered)
+    function draw(i)
+        k = rand(rng, kinds)
+        k === :new && i == 1 && (k = :old)
+        (k, rand(rng, 1:(k === :new ? i - 1 : nstates)))
+    end
+    rules = [(draw(i), draw(i), rand(rng, Bool), 0.3 + 0.2i) for i in 1:nstates]
+    function operand((kind, j), olds, news, x, y, t)
+        kind === :old && return olds[j]
+        kind === :new && return news[j]
+        kind === :slice && return slice(x, t)
+        kind === :element && return olds[j][t]
+        entered(x, y, t)
+    end
+    function looped(x, y)
+        states = ntuple(i -> columns ? x[:, 1] .* (0.5 + 0.1i) : x[1] * (0.5 + 0.1i), nstates)
+        for t in order()
+            news = ()
+            for (a, b, summed, c) in rules
+                u, v = operand(a, states, news, x, y, t), operand(b, states, news, x, y, t)
+                # A state keeps its shape: a vector where the loop is over columns.
+                s = tanh.(c .* u .+ (summed ? sum(v) : v) .* (1 - c) .+ (columns ? zero(x[:, 1]) : 0))
+                news = (news..., s)
+            end
+            states = news
+        end
+        sum(s -> sum(abs2, s), states)
+    end
+    looped, (x, y)
+end
+
+# Gradients equal where both are of an argument, or neither is.
+same_gradient(a, b) = a === nothing ? b === nothing : isapprox(a, b; rtol = 1.0e-10)
+
+# Every loop of the family rolls, where it rolls, into the program its trace
+# as it ran is (see `unrolled`): interpreted, compiled, and with its gradient.
+@testset "a loop drawn from the family rolls into the program it traced as" begin
+    rng = Random.Xoshiro(20261120)
+    rolled = 0
+    for _ in 1:64
+        f, args = drawn_loop(rng)
+        expected = interpret(unrolled(f, args...), args...)
+        p = trace(f, args...)
+        rolled += !isempty(loops(p))
+        @test interpret(p, args...) ≈ expected
+        @test T.compile(f, args...; target = T.CPUTarget(), measure = :none, capture = false)(args...) ≈ expected
+        g = (xs...) -> T.gradient(f, xs...)
+        @test all(map(same_gradient, C.leaves(interpret(trace(g, args...), args...)), C.leaves(interpret(unrolled(g, args...), args...))))
+    end
+    # The family reaches the roller.
+    @test rolled >= 12
+end

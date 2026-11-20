@@ -696,6 +696,21 @@ function loop_case(seed, rng, big)
     form === :none || push!(b.args, Arg("xs", form === :middle ? ["D", L, "B"] : matrix ? ["D", "B", L] : ["D", L]))
     scalar_input && push!(b.args, Arg("ts", [L]; scale = 0.5))
     slice = form === :none ? nothing : form === :middle ? "xs[:, t, :]" : matrix ? "xs[:, :, t]" : "xs[:, t]"
+    # Drawn apart from the case's own draws, so that a seed's case is the one
+    # it was before these two shapes joined the family, or that case with one.
+    shapes = Xoshiro(hash((seed, :entered, :indexed)))
+    # The first step's slice of another array, the steps' after it of `xs`.
+    entered = slice !== nothing && rand(shapes) < 0.2
+    notes[:entered] = entered
+    if entered
+        push!(b.args, Arg("x0s", b.args[findfirst(a -> a.name == "xs", b.args)].dims))
+        slice = "(t == first($range) ? $(replace(slice, "xs" => "x0s")) : $slice)"
+    end
+    # A state scaled at the step's end by a number selected from a state by
+    # the step's index.
+    indexed = rand(shapes) < 0.2
+    notes[:indexed] = indexed
+    scaled = (rand(shapes, 1:3), rand(shapes, 1:3))
     nstates = rand(rng, 1:3)
     scalar_state = rand(rng) < 0.25
     notes[:states] = nstates
@@ -768,6 +783,8 @@ function loop_case(seed, rng, big)
         end
         at_once && push!(lines, indent * join(("s$k" for k in 1:nstates), ", ") * " = " * join(news, ", "))
         scalar_state && push!(lines, indent * "r = {0.5} * r + {0.01} * sum(abs2, z$temps)")
+        target, source = min.(scaled, nstates)
+        indexed && push!(lines, indent * "s$target = s$target .* tanh(s$source[mod1(t, {H})])")
     end
     collected = rand(rng) < 0.3
     second = rand(rng) < 0.15
