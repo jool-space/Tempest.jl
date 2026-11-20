@@ -11,13 +11,20 @@ const TUNING = Ref{Union{Nothing, String}}(nothing)
 
 find_tuning!() = (TUNING[] = @get_scratch!("tuning"); nothing)
 
+# The store `in_own_store` made, for the code it runs and the tasks that code
+# starts; nothing outside one.
+const OWN_STORE = Base.ScopedValues.ScopedValue{Union{Nothing, String}}(nothing)
+
 """
     Tempest.Compiler.tuning_directory() -> directory or nothing
 
-Where Tempest keeps what it measures: `tuning` in `ENV["TEMPEST_CACHE"]` when
-set, otherwise Tempest's `tuning` scratch space.
+Where Tempest keeps what it measures: `tuning` in the store of `in_own_store`
+within it, otherwise `tuning` in `ENV["TEMPEST_CACHE"]` when set, otherwise
+Tempest's `tuning` scratch space.
 """
 function tuning_directory()
+    own = OWN_STORE[]
+    own === nothing || return joinpath(own, "tuning")
     dir = get(ENV, "TEMPEST_CACHE", nothing)
     dir === nothing ? TUNING[] : joinpath(dir, "tuning")
 end
@@ -30,9 +37,12 @@ directory removed after: a package's precompile workload prepares in one, so
 that what its image compiles follows from its programs alone, never from
 what the store of the environment it ran in holds, and its preparations keep
 their decisions and a preparation of a program again replays them, as a
-session's do.
+session's do. The store is that of `f` and of the tasks it starts, a scoped
+value, not the process's: the environment's `TEMPEST_CACHE` is left as it is,
+and code running beside `f` keeps the store it had. What `f` starts is to
+end before `f` returns, since the store is removed then.
 """
-in_own_store(f) = mktempdir(store -> withenv(f, "TEMPEST_CACHE" => store))
+in_own_store(f) = mktempdir(store -> Base.ScopedValues.with(f, OWN_STORE => store))
 
 public in_own_store
 

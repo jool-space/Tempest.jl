@@ -294,6 +294,23 @@ end
         @test C.tuning_directory() == joinpath(elsewhere, "tuning")
         @test dirname(C.record_path(T.CPUTarget())) == joinpath(elsewhere, "tuning")
     end
+    # In a workload's own store, for the code it runs and the tasks that code
+    # starts: the environment is left as it is, and a task running beside it
+    # keeps the store it had.
+    withenv("TEMPEST_CACHE" => elsewhere) do
+        asked, answered = Channel{Nothing}(1), Channel{Union{Nothing, String}}(1)
+        beside = Threads.@spawn (take!(asked); put!(answered, C.tuning_directory()))
+        own = C.in_own_store() do
+            dir = C.tuning_directory()
+            @test dir != joinpath(elsewhere, "tuning") && ENV["TEMPEST_CACHE"] == elsewhere
+            @test fetch(Threads.@spawn C.tuning_directory()) == dir
+            put!(asked, nothing)
+            @test take!(answered) == joinpath(elsewhere, "tuning")
+            dir
+        end
+        wait(beside)
+        @test !ispath(dirname(own)) && C.tuning_directory() == joinpath(elsewhere, "tuning")
+    end
     # The path is found when Tempest loads, not baked in when it precompiles:
     # a process with another first depot keeps its record there.
     depot = mktempdir()
