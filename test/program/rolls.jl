@@ -104,3 +104,38 @@ end
     y = data(5, 6; scale = 0.3)
     @test interpret(trace(viewed, y), copy(y)) ≈ viewed(copy(y))
 end
+
+# Two states, each stepped from the other's value before the step: over
+# numbers, over columns, and written out with no loop, traced, compiled and
+# with their gradients they compute what the code does untraced.
+@testset "two states each stepped from the other's earlier value" begin
+    function numbers(x)
+        a = x[1]
+        b = a * a
+        for t in 2:3
+            a, b = tanh(b - x[t]), a * x[t]
+        end
+        a + b^2
+    end
+    function columns(x)
+        a = x[:, 1]
+        b = a .* a
+        for t in 2:3
+            a, b = tanh.(b .- x[:, t]), a .* x[:, t]
+        end
+        sum(a) + sum(abs2, b)
+    end
+    function written(x)
+        a0 = x[1]; b0 = a0 * a0
+        a1 = tanh(b0 - x[2]); b1 = a0 * x[2]
+        a2 = tanh(b1 - x[3]); b2 = a1 * x[3]
+        a2 + b2^2
+    end
+    slope(f, x, i; e = 1.0e-6) = (f(setindex!(copy(x), x[i] + e, i)) - f(setindex!(copy(x), x[i] - e, i))) / 2e
+    for (f, x) in ((numbers, data(5; scale = 0.5)), (columns, data(3, 4; scale = 0.5)), (written, data(5; scale = 0.5)))
+        compiled(g) = T.compile(g, x; target = T.CPUTarget(), measure = :none, capture = false)(x)
+        @test_broken interpret(trace(f, x), x) ≈ f(x)
+        @test_broken compiled(f) ≈ f(x)
+        @test_broken isapprox(only(compiled(y -> T.gradient(f, y))), map(i -> slope(f, x, i), CartesianIndices(x)); rtol = 1.0e-6)
+    end
+end
