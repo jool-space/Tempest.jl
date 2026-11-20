@@ -112,7 +112,12 @@ if !isdefined(PrecompileTools, :workload_enabled) || PrecompileTools.workload_en
                         Base.invokelatest(f, Tuple{map(Core.Typeof, arrays)...}) do f, tt
                             job = tile_job(f, tt, k.occupancy, alias_groups(arrays), WORKLOAD_ARCH)
                             ct.invoke_frozen(ct.emit_tile, job)
-                            Tempest.Compiler.holds_as_stored(job_dependencies(job))
+                            # Dependencies that do not hold as stored just
+                            # after the kernel compiled would have a session
+                            # compile it again at each load.
+                            used = job_dependencies(job)
+                            used === nothing || Tempest.Compiler.holds_as_stored(used) ||
+                                @warn "What a kernel the workload compiled used does not hold as the store keeps it"
                         end
                     end
                 end

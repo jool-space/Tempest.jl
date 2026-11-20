@@ -920,18 +920,22 @@ end
 
 Whether each of a kernel's `dependencies` (see `dependencies`) holds as
 loading the kernel from the store checks it: written as the store keeps it,
-read back and checked (`read_holds`), without the store. A kernel package's
-precompile workload checks its kernels' so, so that the code reading and
-checking the records of each kind its kernels reach is in its image, where a
-session's tasks loading kernels side by side each compiled it at once.
+read back and checked (`read_holds`), without the store; false for a kernel
+not stored, whose dependencies are nothing. Each is checked, those after one
+that does not hold too. A kernel package's precompile workload checks its
+kernels' so, so that the code reading and checking the records of each kind
+its kernels reach is in its image, whatever one of them answers, where a
+session's tasks loading kernels side by side each compiled it at once. A kind
+no workload kernel reaches, an `invoke` among them, compiles in the session.
 """
 function holds_as_stored(dependencies)
     dependencies === nothing && return false
+    held = true
     for d in dependencies
         bytes = written(d)
-        bytes !== nothing && read_holds(bytes) || return false
+        held &= bytes !== nothing && read_holds(bytes)
     end
-    true
+    held
 end
 
 function method_text(m::Method)

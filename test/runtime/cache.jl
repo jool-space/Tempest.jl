@@ -124,6 +124,12 @@ through_constant(x::Float32) = read_constant(x)
         @test Base.invokelatest(C.holds_as_stored, before) && !C.holds_as_stored(nothing)
         @eval Base.:*(::Third, x::Real) = x / 4
         @test !holding(before) && !Base.invokelatest(C.holds_as_stored, before)
+        # Each is checked, those after one that does not hold too: the second
+        # here raises, as checking a record read back raises what it raises.
+        failing = C.Dependency(:type, nothing, Float32, "another type's text")
+        raising = C.Dependency(:global, nothing, 42, "a global")
+        @test !C.holds(failing) && !C.holds_as_stored([failing])
+        @test_throws MethodError C.holds_as_stored([failing, raising])
         # A global of another module, a constant redefined: read by a method
         # the kernel calls, written with that method's code.
         before = used(through_constant, 1.0f0)
