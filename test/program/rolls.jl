@@ -214,6 +214,35 @@ end
     end
 end
 
+# An array the steps write apart may start as the array whose slices they
+# read: each step reads the value from before the loop, whatever the steps
+# before it wrote, so the state is written and not carried, as where it starts
+# as zeros, and the argument is left as it was.
+@testset "a state written apart may start as the array the steps scan" begin
+    x = data(4, 5; scale = 0.5)
+    B = size(x, 2)
+    scanned = [
+        x -> (z = copy(x); for b in axes(x, 2); z[:, b] .= tanh.(x[:, b]); end; sum(abs2, z)),
+        x -> (z = copy(x); for b in axes(x, 2); z[:, b] .= tanh.(x[:, B + 1 - b]); end; sum(abs2, z .* x)),
+        x -> (z = copy(x); for b in 1:(B - 1); z[:, b] .= tanh.(x[:, b + 1]); end; sum(abs2, z .* x)),
+        x -> (z = copy(x); for b in 2:B; z[:, b] .= tanh.(x[:, b - 1]); end; sum(abs2, z .* x)),
+    ]
+    for f in scanned
+        @test only(loops(trace(f, x))).carried == []
+        as_untraced(f, x)
+        if CUDA_FUNCTIONAL
+            a = CuArray(x)
+            @test agree(on_host(T.compile(f, a)(a)), f(x))
+            @test Array(a) == x
+            @test agree(on_host(only(T.compile(y -> T.gradient(f, y), a)(a))), map(i -> slope(f, x, i), CartesianIndices(x)); rtol = 1.0e-6)
+        end
+    end
+    # A second state started from the same value is carried beside it.
+    both(x) = (z = copy(x); h = copy(x); for b in 2:B; h = tanh.(h .+ x[:, b - 1]); z[:, b] .= h[:, 1]; end; sum(abs2, z .* h))
+    @test !isempty(loops(trace(both, x)))
+    as_untraced(both, x)
+end
+
 # A loop drawn from `rng`, with its arguments: over a vector's elements or a
 # matrix's columns, forward or reversed, of two to four steps; a map writing
 # each step's value apart, or one to three states, each stepped from two
