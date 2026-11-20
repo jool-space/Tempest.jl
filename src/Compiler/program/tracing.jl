@@ -633,9 +633,11 @@ Base.all(f::Function, x::TracedArray; dims = :) = all(f.(x); dims)
 """
     Tempest.logsumexp(x; dims = :)
 
-`log.(sum(exp.(x); dims))`, computed stably in one pass.
+`log.(sum(exp.(x); dims))`, computed stably in one pass: of integers, of the
+floats `exp` takes them to, as the fold relative to the maximum holds over
+floats (see `relative_over`).
 """
-logsumexp(x::AbstractArray; dims = :) = fold(Relative(Exponential(), LOGSUMEXP), x; dims)
+logsumexp(x::AbstractArray; dims = :) = fold(Relative(Exponential(), LOGSUMEXP), relative_over(Exponential(), eltype(x)) ? x : float.(x); dims)
 
 # The fast-math operators are the operators: what they permit, a fold
 # grouping its elements in any order, every fold does (see `Fold`).

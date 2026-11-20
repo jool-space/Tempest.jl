@@ -198,17 +198,25 @@ end
     @test agree(C.execute(recomputing(g), x), [f(x)])
 end
 
-# The law moves a sum by `exp(m_part - m)`, a float's arithmetic: a maximum of
-# integers, whose differences wrap and which hold no `-Inf`, frames no
-# relative fold, and a log-sum-exp written over them is its two folds, in
-# Float64 as Julia computes it.
-@testset "a maximum of integers is no statistic of a relative fold" begin
+# The laws move a sum by real arithmetic, `exp(m_part - m)` or
+# `n (μ_part - μ)^2`, a float's (see `IR.relative_over`): over integers, whose
+# differences wrap and which hold no `-Inf`, no statistic frames a relative
+# fold, nor is a maximum read as one, and each program computes what Julia
+# does; `Tempest.logsumexp` of integers is that of their floats.
+@testset "sums relative to a statistic fold floats" begin
+    @test IR.relative_over(IR.Exponential(), Float32) && IR.relative_over(IR.Square(), BFloat16s.BFloat16)
+    @test !IR.relative_over(IR.Exponential(), Int8) && !IR.relative_over(IR.Square(), Int64)
     by_hand(x) = (m = maximum(x; dims = 1); m .+ log.(sum(exp.(x .- m); dims = 1)))
-    x = Int8.(reshape(mod.(3 .* (1:12), 7) .- 3, 3, 4))
-    g = C.rewrite(C.lower(trace(by_hand, x)))
-    @test isempty(relative_folds(g))
-    @test agree(C.execute(recomputing(g), x), [by_hand(x)])
-    @test T.compile(by_hand, x; target = T.CPUTarget(), capture = false)(x) ≈ by_hand(x)
+    for x in (Int8.(reshape(mod.(3 .* (1:12), 7) .- 3, 3, 4)), Int32.(reshape(40 .* (mod.(3 .* (1:12), 7) .- 3), 3, 4)))
+        for f in (by_hand, x -> maximum(x; dims = 1) .* 2, x -> maximum(x; dims = 1) .+ 1, x -> sum(maximum(x; dims = 1)) * 3,
+                x -> (m = maximum(x; dims = 1); e = exp.(x .- m); e ./ sum(e; dims = 1)))
+            g = C.rewrite(C.lower(trace(f, x)))
+            @test isempty(relative_folds(g))
+            @test T.compile(f, x; target = T.CPUTarget(), capture = false)(x) ≈ f(x)
+        end
+        @test T.logsumexp(x; dims = 1) ≈ T.logsumexp(float.(x); dims = 1)
+        @test T.compile(x -> T.logsumexp(x; dims = 1), x; target = T.CPUTarget(), capture = false)(x) ≈ T.logsumexp(float.(x); dims = 1)
+    end
 end
 
 # A fold whose state is a tuple, as Base spells it: `mapreduce` with a lift to

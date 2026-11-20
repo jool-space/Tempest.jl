@@ -144,6 +144,16 @@ struct Square <: Law end
 
 law_function(::Exponential) = exp
 law_function(::Square) = abs2
+
+"""
+    relative_over(law, T) -> Bool
+
+Whether sums relative to the law's statistic fold elements of type `T`: the
+law moves a sum to another statistic by real arithmetic, `exp(m_part - m)` or
+`n (μ_part - μ)^2`, a float's, where an integer's differences wrap and its
+quotients round, and the maximum of nothing is `-Inf`, which no integer holds.
+"""
+relative_over(::Law, ::Type{T}) where {T} = T <: AbstractFloat
 statistic_name(::Exponential) = "maximum"
 statistic_name(::Square) = "mean"
 

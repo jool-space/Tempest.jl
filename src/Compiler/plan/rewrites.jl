@@ -429,18 +429,15 @@ end
 function frame(graph, F)
     v = graph.values[F]
     d = v.definition
-    # A maximum frames sums relative to it where it is a float's: the law
-    # moves a sum by `exp(m_part - m)`, a float's arithmetic, where an
-    # integer's differences wrap, and no integer is the `-Inf` a maximum of
-    # nothing starts from.
     if d isa Reduction && d.fold isa MaxFold
-        v.eltype <: AbstractFloat || return nothing
+        relative_over(Exponential(), v.eltype) || return nothing
         return Frame(Exponential(), F, Statistic(), d.iteration, d.reduced, d.operand)
     elseif d isa Reduction && d.fold isa Relative
         return Frame(d.fold.law, F, d.fold.observe, d.iteration, d.reduced, element_y(graph, d.operand, Domain(d.iteration)))
     elseif d isa Pointwise
         S = mean_of(graph, F)
         S === nothing && return nothing
+        relative_over(Square(), graph.values[S].eltype) || return nothing
         r = graph.values[S].definition
         return Frame(Square(), S, Statistic(), r.iteration, r.reduced, r.operand)
     end
@@ -716,7 +713,7 @@ function relative_read(graph, @nospecialize(o))
     d = graph.values[o.value].definition
     if d isa Reduction && d.fold isa Relative
         return RelativeRead(d.fold.law, d.fold.observe, o.value, d.iteration, d.reduced, d.operand, o.index, true)
-    elseif d isa Reduction && d.fold isa MaxFold
+    elseif d isa Reduction && d.fold isa MaxFold && relative_over(Exponential(), graph.values[o.value].eltype)
         return RelativeRead(Exponential(), Statistic(), o.value, d.iteration, d.reduced, d.operand, o.index, false)
     end
     nothing
